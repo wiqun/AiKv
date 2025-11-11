@@ -1,11 +1,11 @@
 pub mod connection;
 
-use tokio::net::TcpListener;
-use tracing::{info, error};
-use crate::error::Result;
-use crate::command::CommandExecutor;
-use crate::storage::StorageAdapter;
 use self::connection::Connection;
+use crate::command::CommandExecutor;
+use crate::error::Result;
+use crate::storage::StorageAdapter;
+use tokio::net::TcpListener;
+use tracing::{error, info};
 
 /// AiKv server
 pub struct Server {
@@ -30,22 +30,22 @@ impl Server {
             match listener.accept().await {
                 Ok((stream, addr)) => {
                     info!("New connection from: {}", addr);
-                    
+
                     let executor = CommandExecutor::new(self.storage.clone());
-                    
+
                     tokio::spawn(async move {
                         let mut conn = Connection::new(stream, executor);
-                        
+
                         if let Err(e) = conn.handle().await {
                             error!("Connection error: {}", e);
                         }
-                        
+
                         info!("Connection closed: {}", addr);
                     });
-                }
+                },
                 Err(e) => {
                     error!("Failed to accept connection: {}", e);
-                }
+                },
             }
         }
     }

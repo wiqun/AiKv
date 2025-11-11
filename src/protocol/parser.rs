@@ -1,6 +1,6 @@
-use bytes::{Buf, BytesMut, Bytes};
-use crate::error::{AikvError, Result};
 use super::types::RespValue;
+use crate::error::{AikvError, Result};
+use bytes::{Buf, Bytes, BytesMut};
 
 /// RESP protocol parser
 pub struct RespParser {
@@ -37,7 +37,7 @@ impl RespParser {
                 let pos = cursor.position() as usize;
                 self.buffer.advance(pos);
                 Ok(Some(value))
-            }
+            },
             Err(AikvError::Protocol(_)) => Ok(None), // Need more data
             Err(e) => Err(e),
         }
@@ -76,14 +76,16 @@ impl RespParser {
 
     fn parse_integer(&self, cursor: &mut std::io::Cursor<&[u8]>) -> Result<RespValue> {
         let line = self.read_line(cursor)?;
-        let num = line.parse::<i64>()
+        let num = line
+            .parse::<i64>()
             .map_err(|_| AikvError::Protocol(format!("Invalid integer: {}", line)))?;
         Ok(RespValue::Integer(num))
     }
 
     fn parse_bulk_string(&self, cursor: &mut std::io::Cursor<&[u8]>) -> Result<RespValue> {
         let line = self.read_line(cursor)?;
-        let len = line.parse::<i64>()
+        let len = line
+            .parse::<i64>()
             .map_err(|_| AikvError::Protocol(format!("Invalid bulk string length: {}", line)))?;
 
         if len == -1 {
@@ -91,7 +93,10 @@ impl RespParser {
         }
 
         if len < 0 {
-            return Err(AikvError::Protocol(format!("Invalid bulk string length: {}", len)));
+            return Err(AikvError::Protocol(format!(
+                "Invalid bulk string length: {}",
+                len
+            )));
         }
 
         let len = len as usize;
@@ -110,7 +115,8 @@ impl RespParser {
 
     fn parse_array(&self, cursor: &mut std::io::Cursor<&[u8]>) -> Result<RespValue> {
         let line = self.read_line(cursor)?;
-        let len = line.parse::<i64>()
+        let len = line
+            .parse::<i64>()
             .map_err(|_| AikvError::Protocol(format!("Invalid array length: {}", line)))?;
 
         if len == -1 {
@@ -118,7 +124,10 @@ impl RespParser {
         }
 
         if len < 0 {
-            return Err(AikvError::Protocol(format!("Invalid array length: {}", len)));
+            return Err(AikvError::Protocol(format!(
+                "Invalid array length: {}",
+                len
+            )));
         }
 
         let mut array = Vec::with_capacity(len as usize);
@@ -154,7 +163,7 @@ mod tests {
     fn test_parse_simple_string() {
         let mut parser = RespParser::new(128);
         parser.feed(b"+OK\r\n");
-        
+
         let result = parser.parse().unwrap();
         assert_eq!(result, Some(RespValue::SimpleString("OK".to_string())));
     }
@@ -163,7 +172,7 @@ mod tests {
     fn test_parse_error() {
         let mut parser = RespParser::new(128);
         parser.feed(b"-Error message\r\n");
-        
+
         let result = parser.parse().unwrap();
         assert_eq!(result, Some(RespValue::Error("Error message".to_string())));
     }
@@ -172,7 +181,7 @@ mod tests {
     fn test_parse_integer() {
         let mut parser = RespParser::new(128);
         parser.feed(b":1000\r\n");
-        
+
         let result = parser.parse().unwrap();
         assert_eq!(result, Some(RespValue::Integer(1000)));
     }
@@ -181,16 +190,19 @@ mod tests {
     fn test_parse_bulk_string() {
         let mut parser = RespParser::new(128);
         parser.feed(b"$6\r\nfoobar\r\n");
-        
+
         let result = parser.parse().unwrap();
-        assert_eq!(result, Some(RespValue::BulkString(Some(Bytes::from("foobar")))));
+        assert_eq!(
+            result,
+            Some(RespValue::BulkString(Some(Bytes::from("foobar"))))
+        );
     }
 
     #[test]
     fn test_parse_null_bulk_string() {
         let mut parser = RespParser::new(128);
         parser.feed(b"$-1\r\n");
-        
+
         let result = parser.parse().unwrap();
         assert_eq!(result, Some(RespValue::BulkString(None)));
     }
@@ -199,7 +211,7 @@ mod tests {
     fn test_parse_array() {
         let mut parser = RespParser::new(128);
         parser.feed(b"*2\r\n$3\r\nfoo\r\n$3\r\nbar\r\n");
-        
+
         let result = parser.parse().unwrap();
         assert_eq!(
             result,
@@ -214,7 +226,7 @@ mod tests {
     fn test_parse_incomplete_data() {
         let mut parser = RespParser::new(128);
         parser.feed(b"+OK");
-        
+
         let result = parser.parse().unwrap();
         assert_eq!(result, None);
     }

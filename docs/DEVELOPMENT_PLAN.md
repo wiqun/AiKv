@@ -6,19 +6,23 @@ AiKv 是基于 [AiDb v0.1.0](https://github.com/Genuineh/AiDb) 单机版的 Redi
 
 ## 项目目标
 
-- 实现 Redis RESP (REdis Serialization Protocol) 协议解析器
+- 实现 Redis RESP2/RESP3 协议解析器
 - 支持 String 类型的基本操作命令
 - 支持 JSON 类型的基本操作命令
+- 支持 Redis DB 和 Key 相关基础命令
 - 通过 Git 仓库地址直接引用 AiDb 包
 - 保持代码简洁、高性能、易维护
+- 建立完善的 CI/CD 流水线和代码规范
 
 ## 技术栈
 
-- **语言**: Rust (使用 Rust 2024 edition)
+- **语言**: Rust (使用 Rust 2021 edition)
 - **依赖存储引擎**: AiDb v0.1.0
-- **协议**: Redis RESP 协议
+- **协议**: Redis RESP2/RESP3 协议
 - **网络**: Tokio 异步运行时
 - **序列化**: serde_json (用于 JSON 支持)
+- **CI/CD**: GitHub Actions
+- **代码质量**: rustfmt, clippy, cargo-audit
 
 ## 架构设计
 

@@ -1,12 +1,12 @@
-pub mod string;
 pub mod json;
+pub mod string;
 
-use bytes::Bytes;
+use self::json::JsonCommands;
+use self::string::StringCommands;
 use crate::error::{AikvError, Result};
 use crate::protocol::RespValue;
 use crate::storage::StorageAdapter;
-use self::string::StringCommands;
-use self::json::JsonCommands;
+use bytes::Bytes;
 
 /// Command executor
 pub struct CommandExecutor {
@@ -33,7 +33,7 @@ impl CommandExecutor {
             "MSET" => self.string_commands.mset(args),
             "STRLEN" => self.string_commands.strlen(args),
             "APPEND" => self.string_commands.append(args),
-            
+
             // JSON commands
             "JSON.GET" => self.json_commands.json_get(args),
             "JSON.SET" => self.json_commands.json_set(args),
@@ -42,7 +42,7 @@ impl CommandExecutor {
             "JSON.STRLEN" => self.json_commands.json_strlen(args),
             "JSON.ARRLEN" => self.json_commands.json_arrlen(args),
             "JSON.OBJLEN" => self.json_commands.json_objlen(args),
-            
+
             // Utility commands
             "PING" => Ok(RespValue::simple_string("PONG")),
             "ECHO" => {
@@ -50,9 +50,12 @@ impl CommandExecutor {
                     return Err(AikvError::WrongArgCount("ECHO".to_string()));
                 }
                 Ok(RespValue::bulk_string(args[0].clone()))
-            }
-            
-            _ => Err(AikvError::InvalidCommand(format!("Unknown command: {}", command))),
+            },
+
+            _ => Err(AikvError::InvalidCommand(format!(
+                "Unknown command: {}",
+                command
+            ))),
         }
     }
 }

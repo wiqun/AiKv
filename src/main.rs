@@ -16,7 +16,7 @@ async fn main() {
 
     // Create and run server
     let server = Server::new(addr);
-    
+
     if let Err(e) = server.run().await {
         eprintln!("Server error: {}", e);
         std::process::exit(1);

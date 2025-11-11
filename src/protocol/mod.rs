@@ -1,5 +1,5 @@
-pub mod types;
 pub mod parser;
+pub mod types;
 
-pub use types::RespValue;
 pub use parser::RespParser;
+pub use types::RespValue;

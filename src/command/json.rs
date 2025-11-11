@@ -1,8 +1,8 @@
-use bytes::Bytes;
-use serde_json::{Value as JsonValue, json};
 use crate::error::{AikvError, Result};
 use crate::protocol::RespValue;
 use crate::storage::StorageAdapter;
+use bytes::Bytes;
+use serde_json::{json, Value as JsonValue};
 
 /// JSON command handler
 pub struct JsonCommands {
@@ -11,7 +11,9 @@ pub struct JsonCommands {
 
 impl JsonCommands {
     pub fn new(storage: StorageAdapter) -> Self {
-        Self { storage }
+        Self {
+            storage,
+        }
     }
 
     /// JSON.GET key [path]
@@ -30,7 +32,7 @@ impl JsonCommands {
         match self.storage.get(&key)? {
             Some(value) => {
                 let json: JsonValue = serde_json::from_slice(&value)?;
-                
+
                 let result = if path == "$" || path == "." {
                     json
                 } else {
@@ -40,7 +42,7 @@ impl JsonCommands {
 
                 let json_string = serde_json::to_string(&result)?;
                 Ok(RespValue::bulk_string(json_string))
-            }
+            },
             None => Ok(RespValue::null_bulk_string()),
         }
     }
@@ -63,7 +65,7 @@ impl JsonCommands {
             match option.as_str() {
                 "NX" => nx = true,
                 "XX" => xx = true,
-                _ => {}
+                _ => {},
             }
         }
 
@@ -96,7 +98,7 @@ impl JsonCommands {
 
         let json_bytes = Bytes::from(serde_json::to_vec(&result_json)?);
         self.storage.set(key, json_bytes)?;
-        
+
         Ok(RespValue::ok())
     }
 
@@ -125,7 +127,7 @@ impl JsonCommands {
             match self.storage.get(&key)? {
                 Some(value) => {
                     let mut json: JsonValue = serde_json::from_slice(&value)?;
-                    
+
                     if self.delete_json_path(&mut json, &path)? {
                         let json_bytes = Bytes::from(serde_json::to_vec(&json)?);
                         self.storage.set(key, json_bytes)?;
@@ -133,7 +135,7 @@ impl JsonCommands {
                     } else {
                         Ok(RespValue::integer(0))
                     }
-                }
+                },
                 None => Ok(RespValue::integer(0)),
             }
         }
@@ -155,7 +157,7 @@ impl JsonCommands {
         match self.storage.get(&key)? {
             Some(value) => {
                 let json: JsonValue = serde_json::from_slice(&value)?;
-                
+
                 let target = if path == "$" || path == "." {
                     &json
                 } else {
@@ -172,7 +174,7 @@ impl JsonCommands {
                 };
 
                 Ok(RespValue::simple_string(type_name))
-            }
+            },
             None => Ok(RespValue::null_bulk_string()),
         }
     }
@@ -193,7 +195,7 @@ impl JsonCommands {
         match self.storage.get(&key)? {
             Some(value) => {
                 let json: JsonValue = serde_json::from_slice(&value)?;
-                
+
                 let target = if path == "$" || path == "." {
                     &json
                 } else {
@@ -205,7 +207,7 @@ impl JsonCommands {
                 } else {
                     Ok(RespValue::null_bulk_string())
                 }
-            }
+            },
             None => Ok(RespValue::null_bulk_string()),
         }
     }
@@ -226,7 +228,7 @@ impl JsonCommands {
         match self.storage.get(&key)? {
             Some(value) => {
                 let json: JsonValue = serde_json::from_slice(&value)?;
-                
+
                 let target = if path == "$" || path == "." {
                     &json
                 } else {
@@ -238,7 +240,7 @@ impl JsonCommands {
                 } else {
                     Ok(RespValue::null_bulk_string())
                 }
-            }
+            },
             None => Ok(RespValue::null_bulk_string()),
         }
     }
@@ -259,7 +261,7 @@ impl JsonCommands {
         match self.storage.get(&key)? {
             Some(value) => {
                 let json: JsonValue = serde_json::from_slice(&value)?;
-                
+
                 let target = if path == "$" || path == "." {
                     &json
                 } else {
@@ -271,17 +273,17 @@ impl JsonCommands {
                 } else {
                     Ok(RespValue::null_bulk_string())
                 }
-            }
+            },
             None => Ok(RespValue::null_bulk_string()),
         }
     }
 
     // Helper methods for path operations (simplified JSONPath)
-    
+
     fn extract_json_path(&self, json: &JsonValue, path: &str) -> Result<JsonValue> {
         // Remove leading $ or .
         let path = path.trim_start_matches('$').trim_start_matches('.');
-        
+
         if path.is_empty() {
             return Ok(json.clone());
         }
@@ -292,10 +294,14 @@ impl JsonCommands {
 
         for part in parts {
             if let JsonValue::Object(obj) = current {
-                current = obj.get(part)
-                    .ok_or_else(|| AikvError::InvalidArgument(format!("Path not found: {}", part)))?;
+                current = obj.get(part).ok_or_else(|| {
+                    AikvError::InvalidArgument(format!("Path not found: {}", part))
+                })?;
             } else {
-                return Err(AikvError::InvalidArgument(format!("Cannot traverse non-object at: {}", part)));
+                return Err(AikvError::InvalidArgument(format!(
+                    "Cannot traverse non-object at: {}",
+                    part
+                )));
             }
         }
 
@@ -305,7 +311,7 @@ impl JsonCommands {
     fn set_json_path(&self, json: &mut JsonValue, path: &str, value: JsonValue) -> Result<()> {
         // Remove leading $ or .
         let path = path.trim_start_matches('$').trim_start_matches('.');
-        
+
         if path.is_empty() {
             *json = value;
             return Ok(());
@@ -313,13 +319,13 @@ impl JsonCommands {
 
         // Simple path like "name" or "user.name"
         let parts: Vec<&str> = path.split('.').collect();
-        
+
         if !json.is_object() {
             *json = json!({}); // Convert to object if not already
         }
 
         let mut current = json;
-        
+
         for (i, part) in parts.iter().enumerate() {
             if i == parts.len() - 1 {
                 // Last part - set the value
@@ -330,8 +336,7 @@ impl JsonCommands {
             } else {
                 // Intermediate part - ensure object exists
                 if let JsonValue::Object(obj) = current {
-                    current = obj.entry(part.to_string())
-                        .or_insert_with(|| json!({}));
+                    current = obj.entry(part.to_string()).or_insert_with(|| json!({}));
                 }
             }
         }
@@ -342,7 +347,7 @@ impl JsonCommands {
     fn delete_json_path(&self, json: &mut JsonValue, path: &str) -> Result<bool> {
         // Remove leading $ or .
         let path = path.trim_start_matches('$').trim_start_matches('.');
-        
+
         if path.is_empty() {
             return Ok(false);
         }
@@ -387,14 +392,11 @@ mod tests {
     #[test]
     fn test_json_set_get() {
         let cmd = setup();
-        
+
         let json_str = r#"{"name":"John","age":30}"#;
-        cmd.json_set(&[
-            Bytes::from("user"),
-            Bytes::from("$"),
-            Bytes::from(json_str),
-        ]).unwrap();
-        
+        cmd.json_set(&[Bytes::from("user"), Bytes::from("$"), Bytes::from(json_str)])
+            .unwrap();
+
         let result = cmd.json_get(&[Bytes::from("user")]).unwrap();
         if let RespValue::BulkString(Some(data)) = result {
             let json: JsonValue = serde_json::from_slice(&data).unwrap();
@@ -408,30 +410,36 @@ mod tests {
     #[test]
     fn test_json_type() {
         let cmd = setup();
-        
+
         cmd.json_set(&[
             Bytes::from("user"),
             Bytes::from("$"),
             Bytes::from(r#"{"name":"John","age":30,"active":true}"#),
-        ]).unwrap();
-        
-        let result = cmd.json_type(&[Bytes::from("user"), Bytes::from("$.name")]).unwrap();
+        ])
+        .unwrap();
+
+        let result = cmd
+            .json_type(&[Bytes::from("user"), Bytes::from("$.name")])
+            .unwrap();
         assert_eq!(result, RespValue::simple_string("string"));
-        
-        let result = cmd.json_type(&[Bytes::from("user"), Bytes::from("$.age")]).unwrap();
+
+        let result = cmd
+            .json_type(&[Bytes::from("user"), Bytes::from("$.age")])
+            .unwrap();
         assert_eq!(result, RespValue::simple_string("number"));
     }
 
     #[test]
     fn test_json_arrlen() {
         let cmd = setup();
-        
+
         cmd.json_set(&[
             Bytes::from("arr"),
             Bytes::from("$"),
             Bytes::from("[1,2,3,4,5]"),
-        ]).unwrap();
-        
+        ])
+        .unwrap();
+
         let result = cmd.json_arrlen(&[Bytes::from("arr")]).unwrap();
         assert_eq!(result, RespValue::integer(5));
     }
@@ -439,13 +447,14 @@ mod tests {
     #[test]
     fn test_json_objlen() {
         let cmd = setup();
-        
+
         cmd.json_set(&[
             Bytes::from("user"),
             Bytes::from("$"),
             Bytes::from(r#"{"name":"John","age":30}"#),
-        ]).unwrap();
-        
+        ])
+        .unwrap();
+
         let result = cmd.json_objlen(&[Bytes::from("user")]).unwrap();
         assert_eq!(result, RespValue::integer(2));
     }

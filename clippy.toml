@@ -1,0 +1,24 @@
+# Clippy lints configuration
+# https://doc.rust-lang.org/clippy/
+
+# Deny these lints
+[lints.clippy]
+all = "deny"
+pedantic = "warn"
+nursery = "warn"
+cargo = "warn"
+
+# Allow some pedantic lints that are too noisy
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+# Warn on these specific lints
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
+
+# Deny unsafe code (can be overridden in specific modules)
+unsafe_code = "deny"

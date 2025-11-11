@@ -1,7 +1,7 @@
-use bytes::Bytes;
 use crate::error::{AikvError, Result};
 use crate::protocol::RespValue;
 use crate::storage::StorageAdapter;
+use bytes::Bytes;
 
 /// String command handler
 pub struct StringCommands {
@@ -10,7 +10,9 @@ pub struct StringCommands {
 
 impl StringCommands {
     pub fn new(storage: StorageAdapter) -> Self {
-        Self { storage }
+        Self {
+            storage,
+        }
     }
 
     /// GET key
@@ -20,7 +22,7 @@ impl StringCommands {
         }
 
         let key = String::from_utf8_lossy(&args[0]).to_string();
-        
+
         match self.storage.get(&key)? {
             Some(value) => Ok(RespValue::bulk_string(value)),
             None => Ok(RespValue::null_bulk_string()),
@@ -51,8 +53,8 @@ impl StringCommands {
                     // Skip the next argument (seconds)
                     i += 1;
                     // In a full implementation, would set TTL here
-                }
-                _ => {}
+                },
+                _ => {},
             }
             i += 1;
         }
@@ -114,12 +116,14 @@ impl StringCommands {
             return Err(AikvError::WrongArgCount("MGET".to_string()));
         }
 
-        let keys: Vec<String> = args.iter()
+        let keys: Vec<String> = args
+            .iter()
             .map(|b| String::from_utf8_lossy(b).to_string())
             .collect();
 
         let values = self.storage.mget(&keys)?;
-        let resp_values: Vec<RespValue> = values.into_iter()
+        let resp_values: Vec<RespValue> = values
+            .into_iter()
             .map(|v| match v {
                 Some(bytes) => RespValue::bulk_string(bytes),
                 None => RespValue::null_bulk_string(),
@@ -153,7 +157,7 @@ impl StringCommands {
         }
 
         let key = String::from_utf8_lossy(&args[0]).to_string();
-        
+
         match self.storage.get(&key)? {
             Some(value) => Ok(RespValue::integer(value.len() as i64)),
             None => Ok(RespValue::integer(0)),
@@ -174,13 +178,13 @@ impl StringCommands {
                 let mut combined = existing.to_vec();
                 combined.extend_from_slice(append_value);
                 Bytes::from(combined)
-            }
+            },
             None => append_value.clone(),
         };
 
         let len = new_value.len() as i64;
         self.storage.set(key, new_value)?;
-        
+
         Ok(RespValue::integer(len))
     }
 }
@@ -196,11 +200,13 @@ mod tests {
     #[test]
     fn test_get_set() {
         let cmd = setup();
-        
+
         // SET
-        let result = cmd.set(&[Bytes::from("key1"), Bytes::from("value1")]).unwrap();
+        let result = cmd
+            .set(&[Bytes::from("key1"), Bytes::from("value1")])
+            .unwrap();
         assert_eq!(result, RespValue::ok());
-        
+
         // GET
         let result = cmd.get(&[Bytes::from("key1")]).unwrap();
         assert_eq!(result, RespValue::bulk_string("value1"));
@@ -209,35 +215,55 @@ mod tests {
     #[test]
     fn test_del() {
         let cmd = setup();
-        
-        cmd.set(&[Bytes::from("key1"), Bytes::from("value1")]).unwrap();
-        cmd.set(&[Bytes::from("key2"), Bytes::from("value2")]).unwrap();
-        
-        let result = cmd.del(&[Bytes::from("key1"), Bytes::from("key2"), Bytes::from("key3")]).unwrap();
+
+        cmd.set(&[Bytes::from("key1"), Bytes::from("value1")])
+            .unwrap();
+        cmd.set(&[Bytes::from("key2"), Bytes::from("value2")])
+            .unwrap();
+
+        let result = cmd
+            .del(&[
+                Bytes::from("key1"),
+                Bytes::from("key2"),
+                Bytes::from("key3"),
+            ])
+            .unwrap();
         assert_eq!(result, RespValue::integer(2));
     }
 
     #[test]
     fn test_exists() {
         let cmd = setup();
-        
-        cmd.set(&[Bytes::from("key1"), Bytes::from("value1")]).unwrap();
-        
-        let result = cmd.exists(&[Bytes::from("key1"), Bytes::from("key2")]).unwrap();
+
+        cmd.set(&[Bytes::from("key1"), Bytes::from("value1")])
+            .unwrap();
+
+        let result = cmd
+            .exists(&[Bytes::from("key1"), Bytes::from("key2")])
+            .unwrap();
         assert_eq!(result, RespValue::integer(1));
     }
 
     #[test]
     fn test_mget_mset() {
         let cmd = setup();
-        
+
         cmd.mset(&[
-            Bytes::from("key1"), Bytes::from("value1"),
-            Bytes::from("key2"), Bytes::from("value2"),
-        ]).unwrap();
-        
-        let result = cmd.mget(&[Bytes::from("key1"), Bytes::from("key2"), Bytes::from("key3")]).unwrap();
-        
+            Bytes::from("key1"),
+            Bytes::from("value1"),
+            Bytes::from("key2"),
+            Bytes::from("value2"),
+        ])
+        .unwrap();
+
+        let result = cmd
+            .mget(&[
+                Bytes::from("key1"),
+                Bytes::from("key2"),
+                Bytes::from("key3"),
+            ])
+            .unwrap();
+
         if let RespValue::Array(Some(arr)) = result {
             assert_eq!(arr.len(), 3);
             assert_eq!(arr[0], RespValue::bulk_string("value1"));
@@ -251,9 +277,10 @@ mod tests {
     #[test]
     fn test_strlen() {
         let cmd = setup();
-        
-        cmd.set(&[Bytes::from("key1"), Bytes::from("hello")]).unwrap();
-        
+
+        cmd.set(&[Bytes::from("key1"), Bytes::from("hello")])
+            .unwrap();
+
         let result = cmd.strlen(&[Bytes::from("key1")]).unwrap();
         assert_eq!(result, RespValue::integer(5));
     }
@@ -261,13 +288,17 @@ mod tests {
     #[test]
     fn test_append() {
         let cmd = setup();
-        
-        let result = cmd.append(&[Bytes::from("key1"), Bytes::from("Hello")]).unwrap();
+
+        let result = cmd
+            .append(&[Bytes::from("key1"), Bytes::from("Hello")])
+            .unwrap();
         assert_eq!(result, RespValue::integer(5));
-        
-        let result = cmd.append(&[Bytes::from("key1"), Bytes::from(" World")]).unwrap();
+
+        let result = cmd
+            .append(&[Bytes::from("key1"), Bytes::from(" World")])
+            .unwrap();
         assert_eq!(result, RespValue::integer(11));
-        
+
         let result = cmd.get(&[Bytes::from("key1")]).unwrap();
         assert_eq!(result, RespValue::bulk_string("Hello World"));
     }

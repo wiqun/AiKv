@@ -1,9 +1,9 @@
-use tokio::net::TcpStream;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use bytes::Bytes;
+use crate::command::CommandExecutor;
 use crate::error::Result;
 use crate::protocol::{RespParser, RespValue};
-use crate::command::CommandExecutor;
+use bytes::Bytes;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 
 /// Connection handler for a single client
 pub struct Connection {
@@ -26,7 +26,7 @@ impl Connection {
         loop {
             // Read data from the client
             let n = self.stream.read_buf(self.parser.buffer_mut()).await?;
-            
+
             if n == 0 {
                 // Connection closed
                 return Ok(());
@@ -38,7 +38,7 @@ impl Connection {
                     Some(value) => {
                         let response = self.process_command(value).await;
                         self.write_response(response).await?;
-                    }
+                    },
                     None => break, // Need more data
                 }
             }
@@ -50,15 +50,14 @@ impl Connection {
             RespValue::Array(Some(arr)) if !arr.is_empty() => {
                 // Extract command and arguments
                 let command = match &arr[0] {
-                    RespValue::BulkString(Some(cmd)) => {
-                        String::from_utf8_lossy(cmd).to_string()
-                    }
+                    RespValue::BulkString(Some(cmd)) => String::from_utf8_lossy(cmd).to_string(),
                     _ => {
                         return RespValue::error("ERR invalid command format");
-                    }
+                    },
                 };
 
-                let args: Vec<Bytes> = arr[1..].iter()
+                let args: Vec<Bytes> = arr[1..]
+                    .iter()
                     .filter_map(|v| match v {
                         RespValue::BulkString(Some(b)) => Some(b.clone()),
                         _ => None,
@@ -69,7 +68,7 @@ impl Connection {
                     Ok(resp) => resp,
                     Err(e) => RespValue::error(format!("ERR {}", e)),
                 }
-            }
+            },
             _ => RespValue::error("ERR invalid command format"),
         }
     }

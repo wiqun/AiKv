@@ -5,16 +5,16 @@ use bytes::Bytes;
 pub enum RespValue {
     /// Simple String: +OK\r\n
     SimpleString(String),
-    
+
     /// Error: -Error message\r\n
     Error(String),
-    
+
     /// Integer: :1000\r\n
     Integer(i64),
-    
+
     /// Bulk String: $6\r\nfoobar\r\n or $-1\r\n for null
     BulkString(Option<Bytes>),
-    
+
     /// Array: *2\r\n$3\r\nfoo\r\n$3\r\nbar\r\n or *-1\r\n for null
     Array(Option<Vec<RespValue>>),
 }
@@ -63,34 +63,24 @@ impl RespValue {
     /// Serialize to RESP format bytes
     pub fn serialize(&self) -> Bytes {
         match self {
-            RespValue::SimpleString(s) => {
-                Bytes::from(format!("+{}\r\n", s))
-            }
-            RespValue::Error(e) => {
-                Bytes::from(format!("-{}\r\n", e))
-            }
-            RespValue::Integer(i) => {
-                Bytes::from(format!(":{}\r\n", i))
-            }
-            RespValue::BulkString(None) => {
-                Bytes::from("$-1\r\n")
-            }
+            RespValue::SimpleString(s) => Bytes::from(format!("+{}\r\n", s)),
+            RespValue::Error(e) => Bytes::from(format!("-{}\r\n", e)),
+            RespValue::Integer(i) => Bytes::from(format!(":{}\r\n", i)),
+            RespValue::BulkString(None) => Bytes::from("$-1\r\n"),
             RespValue::BulkString(Some(s)) => {
                 let mut result = format!("${}\r\n", s.len());
                 result.push_str(&String::from_utf8_lossy(s));
                 result.push_str("\r\n");
                 Bytes::from(result)
-            }
-            RespValue::Array(None) => {
-                Bytes::from("*-1\r\n")
-            }
+            },
+            RespValue::Array(None) => Bytes::from("*-1\r\n"),
             RespValue::Array(Some(arr)) => {
                 let mut result = format!("*{}\r\n", arr.len());
                 for item in arr {
                     result.push_str(&String::from_utf8_lossy(&item.serialize()));
                 }
                 Bytes::from(result)
-            }
+            },
         }
     }
 }
