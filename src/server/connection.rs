@@ -38,7 +38,7 @@ impl Connection {
                     Some(value) => {
                         let response = self.process_command(value).await;
                         self.write_response(response).await?;
-                    },
+                    }
                     None => break, // Need more data
                 }
             }
@@ -53,7 +53,7 @@ impl Connection {
                     RespValue::BulkString(Some(cmd)) => String::from_utf8_lossy(cmd).to_string(),
                     _ => {
                         return RespValue::error("ERR invalid command format");
-                    },
+                    }
                 };
 
                 let args: Vec<Bytes> = arr[1..]
@@ -68,7 +68,7 @@ impl Connection {
                     Ok(resp) => resp,
                     Err(e) => RespValue::error(format!("ERR {}", e)),
                 }
-            },
+            }
             _ => RespValue::error("ERR invalid command format"),
         }
     }

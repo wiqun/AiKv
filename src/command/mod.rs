@@ -50,7 +50,7 @@ impl CommandExecutor {
                     return Err(AikvError::WrongArgCount("ECHO".to_string()));
                 }
                 Ok(RespValue::bulk_string(args[0].clone()))
-            },
+            }
 
             _ => Err(AikvError::InvalidCommand(format!(
                 "Unknown command: {}",

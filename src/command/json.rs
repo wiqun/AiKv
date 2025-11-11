@@ -42,7 +42,7 @@ impl JsonCommands {
 
                 let json_string = serde_json::to_string(&result)?;
                 Ok(RespValue::bulk_string(json_string))
-            },
+            }
             None => Ok(RespValue::null_bulk_string()),
         }
     }
@@ -65,7 +65,7 @@ impl JsonCommands {
             match option.as_str() {
                 "NX" => nx = true,
                 "XX" => xx = true,
-                _ => {},
+                _ => {}
             }
         }
 
@@ -135,7 +135,7 @@ impl JsonCommands {
                     } else {
                         Ok(RespValue::integer(0))
                     }
-                },
+                }
                 None => Ok(RespValue::integer(0)),
             }
         }
@@ -174,7 +174,7 @@ impl JsonCommands {
                 };
 
                 Ok(RespValue::simple_string(type_name))
-            },
+            }
             None => Ok(RespValue::null_bulk_string()),
         }
     }
@@ -207,7 +207,7 @@ impl JsonCommands {
                 } else {
                     Ok(RespValue::null_bulk_string())
                 }
-            },
+            }
             None => Ok(RespValue::null_bulk_string()),
         }
     }
@@ -240,7 +240,7 @@ impl JsonCommands {
                 } else {
                     Ok(RespValue::null_bulk_string())
                 }
-            },
+            }
             None => Ok(RespValue::null_bulk_string()),
         }
     }
@@ -273,7 +273,7 @@ impl JsonCommands {
                 } else {
                     Ok(RespValue::null_bulk_string())
                 }
-            },
+            }
             None => Ok(RespValue::null_bulk_string()),
         }
     }

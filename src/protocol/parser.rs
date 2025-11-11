@@ -37,7 +37,7 @@ impl RespParser {
                 let pos = cursor.position() as usize;
                 self.buffer.advance(pos);
                 Ok(Some(value))
-            },
+            }
             Err(AikvError::Protocol(_)) => Ok(None), // Need more data
             Err(e) => Err(e),
         }

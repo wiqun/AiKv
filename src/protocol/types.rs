@@ -72,7 +72,7 @@ impl RespValue {
                 result.push_str(&String::from_utf8_lossy(s));
                 result.push_str("\r\n");
                 Bytes::from(result)
-            },
+            }
             RespValue::Array(None) => Bytes::from("*-1\r\n"),
             RespValue::Array(Some(arr)) => {
                 let mut result = format!("*{}\r\n", arr.len());
@@ -80,7 +80,7 @@ impl RespValue {
                     result.push_str(&String::from_utf8_lossy(&item.serialize()));
                 }
                 Bytes::from(result)
-            },
+            }
         }
     }
 }

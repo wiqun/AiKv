@@ -53,8 +53,8 @@ impl StringCommands {
                     // Skip the next argument (seconds)
                     i += 1;
                     // In a full implementation, would set TTL here
-                },
-                _ => {},
+                }
+                _ => {}
             }
             i += 1;
         }
@@ -178,7 +178,7 @@ impl StringCommands {
                 let mut combined = existing.to_vec();
                 combined.extend_from_slice(append_value);
                 Bytes::from(combined)
-            },
+            }
             None => append_value.clone(),
         };
 

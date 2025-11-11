@@ -42,10 +42,10 @@ impl Server {
 
                         info!("Connection closed: {}", addr);
                     });
-                },
+                }
                 Err(e) => {
                     error!("Failed to accept connection: {}", e);
-                },
+                }
             }
         }
     }
