@@ -16,7 +16,7 @@ impl JsonCommands {
         }
     }
 
-    /// JSON.GET key [path]
+    /// JSON.GET key \[path\]
     pub fn json_get(&self, args: &[Bytes]) -> Result<RespValue> {
         if args.is_empty() {
             return Err(AikvError::WrongArgCount("JSON.GET".to_string()));
@@ -102,7 +102,7 @@ impl JsonCommands {
         Ok(RespValue::ok())
     }
 
-    /// JSON.DEL key [path]
+    /// JSON.DEL key \[path\]
     pub fn json_del(&self, args: &[Bytes]) -> Result<RespValue> {
         if args.is_empty() {
             return Err(AikvError::WrongArgCount("JSON.DEL".to_string()));
@@ -141,7 +141,7 @@ impl JsonCommands {
         }
     }
 
-    /// JSON.TYPE key [path]
+    /// JSON.TYPE key \[path\]
     pub fn json_type(&self, args: &[Bytes]) -> Result<RespValue> {
         if args.is_empty() {
             return Err(AikvError::WrongArgCount("JSON.TYPE".to_string()));
@@ -179,7 +179,7 @@ impl JsonCommands {
         }
     }
 
-    /// JSON.STRLEN key [path]
+    /// JSON.STRLEN key \[path\]
     pub fn json_strlen(&self, args: &[Bytes]) -> Result<RespValue> {
         if args.is_empty() {
             return Err(AikvError::WrongArgCount("JSON.STRLEN".to_string()));
@@ -212,7 +212,7 @@ impl JsonCommands {
         }
     }
 
-    /// JSON.ARRLEN key [path]
+    /// JSON.ARRLEN key \[path\]
     pub fn json_arrlen(&self, args: &[Bytes]) -> Result<RespValue> {
         if args.is_empty() {
             return Err(AikvError::WrongArgCount("JSON.ARRLEN".to_string()));
@@ -245,7 +245,7 @@ impl JsonCommands {
         }
     }
 
-    /// JSON.OBJLEN key [path]
+    /// JSON.OBJLEN key \[path\]
     pub fn json_objlen(&self, args: &[Bytes]) -> Result<RespValue> {
         if args.is_empty() {
             return Err(AikvError::WrongArgCount("JSON.OBJLEN".to_string()));
