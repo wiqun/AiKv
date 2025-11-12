@@ -54,30 +54,30 @@
 ## 优先级 2 - RESP3 协议支持
 
 ### 2.1 RESP3 协议实现
-- [ ] 扩展 `src/protocol/types.rs` 支持 RESP3 新类型
-  - [ ] Null type (distinct from null bulk string)
-  - [ ] Boolean type
-  - [ ] Double type (floating point)
-  - [ ] Big number type
-  - [ ] Bulk error type
-  - [ ] Verbatim string type
-  - [ ] Map type
-  - [ ] Set type
-  - [ ] Push type (server-initiated messages)
+- [x] 扩展 `src/protocol/types.rs` 支持 RESP3 新类型
+  - [x] Null type (distinct from null bulk string)
+  - [x] Boolean type
+  - [x] Double type (floating point)
+  - [x] Big number type
+  - [x] Bulk error type
+  - [x] Verbatim string type
+  - [x] Map type
+  - [x] Set type
+  - [x] Push type (server-initiated messages)
 
-- [ ] 更新 `src/protocol/parser.rs` 解析 RESP3
-  - [ ] 支持新的类型标记符号
-  - [ ] 向后兼容 RESP2
-  - [ ] 协议版本协商
+- [x] 更新 `src/protocol/parser.rs` 解析 RESP3
+  - [x] 支持新的类型标记符号
+  - [x] 向后兼容 RESP2
+  - [x] 协议版本协商
 
-- [ ] 添加 RESP3 序列化支持
-- [ ] 添加 RESP3 单元测试
-- [ ] 更新文档说明 RESP3 支持
+- [x] 添加 RESP3 序列化支持
+- [x] 添加 RESP3 单元测试
+- [x] 更新文档说明 RESP3 支持
 
 ### 2.2 RESP3 特性
-- [ ] 实现 `HELLO` 命令 (协议版本切换)
-- [ ] 支持属性 (Attributes) 功能
-- [ ] 支持流式响应
+- [x] 实现 `HELLO` 命令 (协议版本切换)
+- [x] 支持属性 (Attributes) 功能
+- [x] 支持流式响应
 
 ---
 

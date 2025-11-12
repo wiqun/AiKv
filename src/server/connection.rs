@@ -5,11 +5,19 @@ use bytes::Bytes;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+/// Protocol version
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ProtocolVersion {
+    Resp2,
+    Resp3,
+}
+
 /// Connection handler for a single client
 pub struct Connection {
     stream: TcpStream,
     parser: RespParser,
     executor: CommandExecutor,
+    protocol_version: ProtocolVersion,
 }
 
 impl Connection {
@@ -18,6 +26,7 @@ impl Connection {
             stream,
             parser: RespParser::new(8192),
             executor,
+            protocol_version: ProtocolVersion::Resp2, // Default to RESP2
         }
     }
 
@@ -40,7 +49,7 @@ impl Connection {
         }
     }
 
-    async fn process_command(&self, value: RespValue) -> RespValue {
+    async fn process_command(&mut self, value: RespValue) -> RespValue {
         match value {
             RespValue::Array(Some(arr)) if !arr.is_empty() => {
                 // Extract command and arguments
@@ -50,6 +59,11 @@ impl Connection {
                         return RespValue::error("ERR invalid command format");
                     }
                 };
+
+                // Handle HELLO command for protocol version negotiation
+                if command.to_uppercase() == "HELLO" {
+                    return self.handle_hello(&arr[1..]);
+                }
 
                 let args: Vec<Bytes> = arr[1..]
                     .iter()
@@ -65,6 +79,55 @@ impl Connection {
                 }
             }
             _ => RespValue::error("ERR invalid command format"),
+        }
+    }
+
+    fn handle_hello(&mut self, args: &[RespValue]) -> RespValue {
+        if args.is_empty() {
+            return RespValue::error("ERR wrong number of arguments for 'hello' command");
+        }
+
+        // Parse protocol version
+        let version_str = match &args[0] {
+            RespValue::BulkString(Some(v)) => String::from_utf8_lossy(v).to_string(),
+            _ => return RespValue::error("ERR invalid protocol version"),
+        };
+
+        let version = match version_str.as_str() {
+            "2" => ProtocolVersion::Resp2,
+            "3" => ProtocolVersion::Resp3,
+            _ => return RespValue::error("NOPROTO unsupported protocol version"),
+        };
+
+        self.protocol_version = version;
+
+        // Build response based on protocol version
+        match self.protocol_version {
+            ProtocolVersion::Resp2 => {
+                // RESP2 response: array
+                RespValue::array(vec![
+                    RespValue::bulk_string("server"),
+                    RespValue::bulk_string("aikv"),
+                    RespValue::bulk_string("version"),
+                    RespValue::bulk_string("0.1.0"),
+                    RespValue::bulk_string("proto"),
+                    RespValue::integer(2),
+                ])
+            }
+            ProtocolVersion::Resp3 => {
+                // RESP3 response: map
+                RespValue::map(vec![
+                    (
+                        RespValue::simple_string("server"),
+                        RespValue::simple_string("aikv"),
+                    ),
+                    (
+                        RespValue::simple_string("version"),
+                        RespValue::simple_string("0.1.0"),
+                    ),
+                    (RespValue::simple_string("proto"), RespValue::integer(3)),
+                ])
+            }
         }
     }
 

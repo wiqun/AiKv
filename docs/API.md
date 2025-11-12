@@ -2,7 +2,23 @@
 
 ## 概述
 
-本文档详细描述了 AiKv Redis 协议兼容层支持的所有命令及其使用方法。
+本文档详细描述了 AiKv Redis 协议兼容层支持的所有命令及其使用方法。AiKv 支持 RESP2 和 RESP3 协议。
+
+## 协议支持
+
+AiKv 支持两种 Redis 序列化协议版本：
+
+- **RESP2** (默认): 传统的 Redis 协议，兼容所有 Redis 客户端
+- **RESP3**: 新版协议，支持更多数据类型 (Null, Boolean, Double, Map, Set, Push, Attributes, Streaming 等)
+
+### RESP3 高级特性
+
+- **Attributes**: 允许服务器在响应中附加元数据，如 TTL、流行度统计等
+- **Streaming**: 支持大型字符串的分块传输，减少内存使用
+
+### 协议切换
+
+使用 `HELLO` 命令在 RESP2 和 RESP3 之间切换。
 
 ## 连接到 AiKv
 
@@ -15,6 +31,96 @@ redis-cli -h 127.0.0.1 -p 6379
 # 使用 telnet
 telnet 127.0.0.1 6379
 ```
+
+## 协议命令
+
+### HELLO
+
+协议版本协商命令，用于切换 RESP2 和 RESP3 协议。
+
+**语法:**
+```
+HELLO protover
+```
+
+**参数:**
+- `protover`: 协议版本 (2 或 3)
+
+**返回值:**
+- RESP2 模式: 返回数组包含服务器信息
+- RESP3 模式: 返回 Map 类型包含服务器信息
+
+**示例:**
+```bash
+# 切换到 RESP3
+redis> HELLO 3
+1) "server"
+2) "aikv"
+3) "version"
+4) "0.1.0"
+5) "proto"
+6) (integer) 3
+
+# 切换回 RESP2
+redis> HELLO 2
+1) "server"
+2) "aikv"
+3) "version"
+4) "0.1.0"
+5) "proto"
+6) (integer) 2
+```
+
+**时间复杂度:** O(1)
+
+---
+
+### PING
+
+测试服务器连接是否正常。
+
+**语法:**
+```
+PING
+```
+
+**返回值:**
+- 返回 "PONG"
+
+**示例:**
+```bash
+redis> PING
+PONG
+```
+
+**时间复杂度:** O(1)
+
+---
+
+### ECHO
+
+回显给定的字符串。
+
+**语法:**
+```
+ECHO message
+```
+
+**参数:**
+- `message`: 要回显的消息
+
+**返回值:**
+- 返回给定的消息
+
+**示例:**
+```bash
+redis> ECHO "Hello World"
+"Hello World"
+```
+
+**时间复杂度:** O(1)
+
+---
 
 ## String 命令
 

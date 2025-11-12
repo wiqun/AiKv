@@ -9,13 +9,20 @@ AiKv 是一个基于 [AiDb v0.1.0](https://github.com/Genuineh/AiDb) 的高性�
 ## ✨ 特性
 
 - 🚀 **高性能**: 基于 Tokio 异步运行时，支持高并发
-- 🔌 **Redis 协议兼容**: 完全兼容 RESP 协议，支持各种 Redis 客户端
+- 🔌 **Redis 协议兼容**: 完全兼容 RESP2 和 RESP3 协议，支持各种 Redis 客户端
 - 📦 **轻量级**: 小内存占用，快速启动
 - 🔧 **易于部署**: 单一可执行文件，无需复杂配置
 - 🔒 **类型安全**: 使用 Rust 编写，保证内存安全和并发安全
 - 📊 **JSON 支持**: 原生支持 JSON 数据类型操作
+- 🔄 **RESP3 支持**: 完整支持 RESP3 协议的所有新类型 (Null, Boolean, Double, Map, Set, Push, Attributes, Streaming 等)
 
 ## 🎯 支持的命令
+
+### 协议命令
+
+- `HELLO` - 协议版本协商 (RESP2/RESP3 切换)
+- `PING` - 测试连接
+- `ECHO` - 回显消息
 
 ### String 命令
 
@@ -80,6 +87,15 @@ redis-cli -h 127.0.0.1 -p 6379
 # 测试连接
 127.0.0.1:6379> PING
 PONG
+
+# 切换到 RESP3 协议
+127.0.0.1:6379> HELLO 3
+1) "server"
+2) "aikv"
+3) "version"
+4) "0.1.0"
+5) "proto"
+6) (integer) 3
 
 # String 操作
 127.0.0.1:6379> SET mykey "Hello World"
@@ -182,10 +198,11 @@ redis-benchmark -h 127.0.0.1 -p 6379 -t set,get -n 100000 -q
 ## 🛣️ 路线图
 
 ### v0.1.0 (当前版本)
-- ✅ RESP 协议解析器
+- ✅ RESP2 协议解析器
 - ✅ String 命令支持
 - ✅ JSON 命令支持
 - ✅ 基于 AiDb 的存储引擎
+- ✅ RESP3 协议支持 (v0.1.1)
 
 ### v0.2.0 (计划中)
 - ⬜ List 数据类型支持
