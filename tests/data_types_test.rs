@@ -11,27 +11,17 @@ fn test_list_commands() {
     let client_id = 1;
 
     // RPUSH
-    let args = vec![
-        Bytes::from("mylist"),
-        Bytes::from("world"),
-    ];
+    let args = vec![Bytes::from("mylist"), Bytes::from("world")];
     let result = executor.execute("RPUSH", &args, &mut current_db, client_id);
     assert!(result.is_ok());
 
     // LPUSH
-    let args = vec![
-        Bytes::from("mylist"),
-        Bytes::from("hello"),
-    ];
+    let args = vec![Bytes::from("mylist"), Bytes::from("hello")];
     let result = executor.execute("LPUSH", &args, &mut current_db, client_id);
     assert!(result.is_ok());
 
     // LRANGE
-    let args = vec![
-        Bytes::from("mylist"),
-        Bytes::from("0"),
-        Bytes::from("-1"),
-    ];
+    let args = vec![Bytes::from("mylist"), Bytes::from("0"), Bytes::from("-1")];
     let result = executor.execute("LRANGE", &args, &mut current_db, client_id);
     assert!(result.is_ok());
     if let Ok(RespValue::Array(Some(items))) = result {
@@ -66,10 +56,7 @@ fn test_hash_commands() {
     assert!(result.is_ok());
 
     // HGET
-    let args = vec![
-        Bytes::from("myhash"),
-        Bytes::from("field1"),
-    ];
+    let args = vec![Bytes::from("myhash"), Bytes::from("field1")];
     let result = executor.execute("HGET", &args, &mut current_db, client_id);
     assert!(result.is_ok());
 
@@ -115,19 +102,13 @@ fn test_set_commands() {
     assert_eq!(result.unwrap(), RespValue::Integer(3));
 
     // SISMEMBER
-    let args = vec![
-        Bytes::from("myset"),
-        Bytes::from("member1"),
-    ];
+    let args = vec![Bytes::from("myset"), Bytes::from("member1")];
     let result = executor.execute("SISMEMBER", &args, &mut current_db, client_id);
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), RespValue::Integer(1));
 
     // SREM
-    let args = vec![
-        Bytes::from("myset"),
-        Bytes::from("member2"),
-    ];
+    let args = vec![Bytes::from("myset"), Bytes::from("member2")];
     let result = executor.execute("SREM", &args, &mut current_db, client_id);
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), RespValue::Integer(1));
@@ -167,28 +148,18 @@ fn test_zset_commands() {
     assert_eq!(result.unwrap(), RespValue::Integer(3));
 
     // ZSCORE
-    let args = vec![
-        Bytes::from("myzset"),
-        Bytes::from("two"),
-    ];
+    let args = vec![Bytes::from("myzset"), Bytes::from("two")];
     let result = executor.execute("ZSCORE", &args, &mut current_db, client_id);
     assert!(result.is_ok());
 
     // ZRANK
-    let args = vec![
-        Bytes::from("myzset"),
-        Bytes::from("two"),
-    ];
+    let args = vec![Bytes::from("myzset"), Bytes::from("two")];
     let result = executor.execute("ZRANK", &args, &mut current_db, client_id);
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), RespValue::Integer(1)); // 0-indexed
 
     // ZRANGE
-    let args = vec![
-        Bytes::from("myzset"),
-        Bytes::from("0"),
-        Bytes::from("-1"),
-    ];
+    let args = vec![Bytes::from("myzset"), Bytes::from("0"), Bytes::from("-1")];
     let result = executor.execute("ZRANGE", &args, &mut current_db, client_id);
     assert!(result.is_ok());
     if let Ok(RespValue::Array(Some(items))) = result {
@@ -212,7 +183,9 @@ fn test_set_operations() {
         Bytes::from("b"),
         Bytes::from("c"),
     ];
-    executor.execute("SADD", &args, &mut current_db, client_id).unwrap();
+    executor
+        .execute("SADD", &args, &mut current_db, client_id)
+        .unwrap();
 
     // Create set2
     let args = vec![
@@ -221,13 +194,12 @@ fn test_set_operations() {
         Bytes::from("c"),
         Bytes::from("d"),
     ];
-    executor.execute("SADD", &args, &mut current_db, client_id).unwrap();
+    executor
+        .execute("SADD", &args, &mut current_db, client_id)
+        .unwrap();
 
     // SUNION
-    let args = vec![
-        Bytes::from("set1"),
-        Bytes::from("set2"),
-    ];
+    let args = vec![Bytes::from("set1"), Bytes::from("set2")];
     let result = executor.execute("SUNION", &args, &mut current_db, client_id);
     assert!(result.is_ok());
     if let Ok(RespValue::Array(Some(items))) = result {
@@ -237,10 +209,7 @@ fn test_set_operations() {
     }
 
     // SINTER
-    let args = vec![
-        Bytes::from("set1"),
-        Bytes::from("set2"),
-    ];
+    let args = vec![Bytes::from("set1"), Bytes::from("set2")];
     let result = executor.execute("SINTER", &args, &mut current_db, client_id);
     assert!(result.is_ok());
     if let Ok(RespValue::Array(Some(items))) = result {
@@ -250,10 +219,7 @@ fn test_set_operations() {
     }
 
     // SDIFF
-    let args = vec![
-        Bytes::from("set1"),
-        Bytes::from("set2"),
-    ];
+    let args = vec![Bytes::from("set1"), Bytes::from("set2")];
     let result = executor.execute("SDIFF", &args, &mut current_db, client_id);
     assert!(result.is_ok());
     if let Ok(RespValue::Array(Some(items))) = result {

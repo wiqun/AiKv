@@ -83,7 +83,7 @@ impl SetCommands {
         Ok(RespValue::Integer(count as i64))
     }
 
-    /// SPOP key [count]
+    /// SPOP key \[count\]
     /// Remove and return one or multiple random members from the set value stored at key
     pub fn spop(&self, args: &[Bytes], db_index: usize) -> Result<RespValue> {
         if args.is_empty() {
@@ -112,7 +112,7 @@ impl SetCommands {
         }
     }
 
-    /// SRANDMEMBER key [count]
+    /// SRANDMEMBER key \[count\]
     /// Return one or multiple random members from the set value stored at key
     pub fn srandmember(&self, args: &[Bytes], db_index: usize) -> Result<RespValue> {
         if args.is_empty() {

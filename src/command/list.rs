@@ -43,7 +43,7 @@ impl ListCommands {
         Ok(RespValue::Integer(len as i64))
     }
 
-    /// LPOP key [count]
+    /// LPOP key \[count\]
     /// Remove and return the first elements of the list stored at key
     pub fn lpop(&self, args: &[Bytes], db_index: usize) -> Result<RespValue> {
         if args.is_empty() {
@@ -72,7 +72,7 @@ impl ListCommands {
         }
     }
 
-    /// RPOP key [count]
+    /// RPOP key \[count\]
     /// Remove and return the last elements of the list stored at key
     pub fn rpop(&self, args: &[Bytes], db_index: usize) -> Result<RespValue> {
         if args.is_empty() {

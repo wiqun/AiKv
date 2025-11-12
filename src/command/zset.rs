@@ -105,7 +105,7 @@ impl ZSetCommands {
         }
     }
 
-    /// ZRANGE key start stop [WITHSCORES]
+    /// ZRANGE key start stop \[WITHSCORES\]
     /// Returns the specified range of elements in the sorted set stored at key
     pub fn zrange(&self, args: &[Bytes], db_index: usize) -> Result<RespValue> {
         if args.len() < 3 {
@@ -138,7 +138,7 @@ impl ZSetCommands {
         Ok(RespValue::Array(Some(result)))
     }
 
-    /// ZREVRANGE key start stop [WITHSCORES]
+    /// ZREVRANGE key start stop \[WITHSCORES\]
     /// Returns the specified range of elements in the sorted set stored at key, with scores ordered from high to low
     pub fn zrevrange(&self, args: &[Bytes], db_index: usize) -> Result<RespValue> {
         if args.len() < 3 {
@@ -171,7 +171,7 @@ impl ZSetCommands {
         Ok(RespValue::Array(Some(result)))
     }
 
-    /// ZRANGEBYSCORE key min max [WITHSCORES]
+    /// ZRANGEBYSCORE key min max \[WITHSCORES\]
     /// Returns all the elements in the sorted set at key with a score between min and max
     pub fn zrangebyscore(&self, args: &[Bytes], db_index: usize) -> Result<RespValue> {
         if args.len() < 3 {
@@ -204,7 +204,7 @@ impl ZSetCommands {
         Ok(RespValue::Array(Some(result)))
     }
 
-    /// ZREVRANGEBYSCORE key max min [WITHSCORES]
+    /// ZREVRANGEBYSCORE key max min \[WITHSCORES\]
     /// Returns all the elements in the sorted set at key with a score between max and min (in reverse order)
     pub fn zrevrangebyscore(&self, args: &[Bytes], db_index: usize) -> Result<RespValue> {
         if args.len() < 3 {
