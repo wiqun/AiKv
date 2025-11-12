@@ -71,6 +71,7 @@ impl CommandExecutor {
 
             // Key commands
             "KEYS" => self.key_commands.keys(args, *current_db),
+            "SCAN" => self.key_commands.scan(args, *current_db),
             "RANDOMKEY" => self.key_commands.randomkey(args, *current_db),
             "RENAME" => self.key_commands.rename(args, *current_db),
             "RENAMENX" => self.key_commands.renamenx(args, *current_db),

@@ -129,6 +129,60 @@ fn test_key_commands() {
         panic!("Expected array");
     }
 
+    // Test SCAN - basic iteration
+    let result = executor
+        .execute("SCAN", &[Bytes::from("0")], &mut current_db, client_id)
+        .unwrap();
+    if let RespValue::Array(Some(scan_result)) = result {
+        assert_eq!(scan_result.len(), 2); // [cursor, keys]
+        // Check cursor (first element)
+        assert!(matches!(&scan_result[0], RespValue::BulkString(Some(_))));
+        // Check keys array (second element)
+        assert!(matches!(&scan_result[1], RespValue::Array(Some(_))));
+    } else {
+        panic!("Expected array for SCAN result");
+    }
+
+    // Test SCAN with MATCH pattern
+    let result = executor
+        .execute(
+            "SCAN",
+            &[Bytes::from("0"), Bytes::from("MATCH"), Bytes::from("user:*")],
+            &mut current_db,
+            client_id,
+        )
+        .unwrap();
+    if let RespValue::Array(Some(scan_result)) = result {
+        if let RespValue::Array(Some(keys)) = &scan_result[1] {
+            // Should only return keys matching user:* pattern
+            assert!(keys.len() <= 2);
+        } else {
+            panic!("Expected keys array");
+        }
+    } else {
+        panic!("Expected array for SCAN result");
+    }
+
+    // Test SCAN with COUNT
+    let result = executor
+        .execute(
+            "SCAN",
+            &[Bytes::from("0"), Bytes::from("COUNT"), Bytes::from("1")],
+            &mut current_db,
+            client_id,
+        )
+        .unwrap();
+    if let RespValue::Array(Some(scan_result)) = result {
+        if let RespValue::Array(Some(keys)) = &scan_result[1] {
+            // Should return at most 1 key
+            assert!(keys.len() <= 1);
+        } else {
+            panic!("Expected keys array");
+        }
+    } else {
+        panic!("Expected array for SCAN result");
+    }
+
     // Test RANDOMKEY
     let result = executor
         .execute("RANDOMKEY", &[], &mut current_db, client_id)
@@ -391,6 +445,107 @@ fn test_server_commands() {
         .execute("CLIENT", &[Bytes::from("LIST")], &mut current_db, client_id)
         .unwrap();
     assert!(matches!(result, RespValue::BulkString(Some(_))));
+}
+
+#[test]
+fn test_scan_iteration() {
+    let storage = StorageAdapter::new();
+    let executor = CommandExecutor::new(storage);
+    let mut current_db = 0;
+    let client_id = 1;
+
+    // Set up test data with many keys
+    for i in 0..25 {
+        executor
+            .execute(
+                "SET",
+                &[
+                    Bytes::from(format!("key:{}", i)),
+                    Bytes::from(format!("value:{}", i)),
+                ],
+                &mut current_db,
+                client_id,
+            )
+            .unwrap();
+    }
+
+    // Test full iteration with SCAN
+    let mut cursor = 0;
+    let mut all_keys = Vec::new();
+    let mut iterations = 0;
+
+    loop {
+        let result = executor
+            .execute(
+                "SCAN",
+                &[
+                    Bytes::from(cursor.to_string()),
+                    Bytes::from("COUNT"),
+                    Bytes::from("5"),
+                ],
+                &mut current_db,
+                client_id,
+            )
+            .unwrap();
+
+        if let RespValue::Array(Some(scan_result)) = result {
+            // Get next cursor
+            if let RespValue::BulkString(Some(cursor_bytes)) = &scan_result[0] {
+                let cursor_str = String::from_utf8_lossy(cursor_bytes);
+                cursor = cursor_str.parse::<usize>().unwrap();
+            }
+
+            // Collect keys
+            if let RespValue::Array(Some(keys)) = &scan_result[1] {
+                for key in keys {
+                    if let RespValue::BulkString(Some(key_bytes)) = key {
+                        all_keys.push(String::from_utf8_lossy(key_bytes).to_string());
+                    }
+                }
+            }
+        }
+
+        iterations += 1;
+        if cursor == 0 || iterations > 100 {
+            // Prevent infinite loop in case of bugs
+            break;
+        }
+    }
+
+    // Should have collected all 25 keys
+    assert_eq!(all_keys.len(), 25);
+    // Cursor should be 0 (iteration complete)
+    assert_eq!(cursor, 0);
+
+    // Test SCAN with MATCH
+    let result = executor
+        .execute(
+            "SCAN",
+            &[
+                Bytes::from("0"),
+                Bytes::from("MATCH"),
+                Bytes::from("key:1*"),
+                Bytes::from("COUNT"),
+                Bytes::from("20"),
+            ],
+            &mut current_db,
+            client_id,
+        )
+        .unwrap();
+
+    if let RespValue::Array(Some(scan_result)) = result {
+        if let RespValue::Array(Some(keys)) = &scan_result[1] {
+            // Should return keys matching key:1* (key:1, key:10-19)
+            assert!(keys.len() >= 1 && keys.len() <= 11);
+            // Verify all returned keys match the pattern
+            for key in keys {
+                if let RespValue::BulkString(Some(key_bytes)) = key {
+                    let key_str = String::from_utf8_lossy(key_bytes);
+                    assert!(key_str.starts_with("key:1"));
+                }
+            }
+        }
+    }
 }
 
 #[test]

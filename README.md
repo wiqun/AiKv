@@ -57,6 +57,7 @@ AiKv 是一个基于 [AiDb v0.1.0](https://github.com/Genuineh/AiDb) 的高性�
 ### Key 管理命令
 
 - `KEYS` - 查找匹配模式的键
+- `SCAN` - 游标迭代数据库键（支持 MATCH 和 COUNT 选项）
 - `RANDOMKEY` - 返回随机键
 - `RENAME` - 重命名键
 - `RENAMENX` - 仅当新键名不存在时重命名

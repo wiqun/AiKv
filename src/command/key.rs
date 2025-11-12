@@ -90,6 +90,89 @@ impl KeyCommands {
         }
     }
 
+    /// SCAN cursor [MATCH pattern] [COUNT count]
+    /// Iterate keys using cursor-based iteration
+    pub fn scan(&self, args: &[Bytes], current_db: usize) -> Result<RespValue> {
+        if args.is_empty() {
+            return Err(AikvError::WrongArgCount("SCAN".to_string()));
+        }
+
+        // Parse cursor
+        let cursor_str = String::from_utf8_lossy(&args[0]);
+        let cursor = cursor_str
+            .parse::<usize>()
+            .map_err(|_| AikvError::InvalidArgument("ERR invalid cursor".to_string()))?;
+
+        // Parse optional arguments
+        let mut pattern = String::from("*");
+        let mut count = 10_usize; // Default count
+
+        let mut i = 1;
+        while i < args.len() {
+            let option = String::from_utf8_lossy(&args[i]).to_uppercase();
+            match option.as_str() {
+                "MATCH" => {
+                    if i + 1 >= args.len() {
+                        return Err(AikvError::InvalidArgument("ERR syntax error".to_string()));
+                    }
+                    i += 1;
+                    pattern = String::from_utf8_lossy(&args[i]).to_string();
+                }
+                "COUNT" => {
+                    if i + 1 >= args.len() {
+                        return Err(AikvError::InvalidArgument("ERR syntax error".to_string()));
+                    }
+                    i += 1;
+                    let count_str = String::from_utf8_lossy(&args[i]);
+                    count = count_str.parse::<usize>().map_err(|_| {
+                        AikvError::InvalidArgument("ERR value is not an integer".to_string())
+                    })?;
+                    if count == 0 {
+                        count = 1; // Minimum count is 1
+                    }
+                }
+                _ => {
+                    return Err(AikvError::InvalidArgument(format!(
+                        "ERR unknown option '{}'",
+                        option
+                    )));
+                }
+            }
+            i += 1;
+        }
+
+        // Get all keys and filter by pattern
+        let all_keys = self.storage.get_all_keys_in_db(current_db)?;
+        let matched_keys: Vec<String> = if pattern == "*" {
+            all_keys
+        } else {
+            all_keys
+                .into_iter()
+                .filter(|k| self.match_pattern(k, &pattern))
+                .collect()
+        };
+
+        // Calculate the range to return
+        let total_keys = matched_keys.len();
+        let start = cursor;
+        let end = std::cmp::min(start + count, total_keys);
+
+        // Determine next cursor (0 means iteration complete)
+        let next_cursor = if end >= total_keys { 0 } else { end };
+
+        // Collect keys for this iteration
+        let keys_to_return: Vec<RespValue> = matched_keys[start..end]
+            .iter()
+            .map(|k| RespValue::bulk_string(k.clone()))
+            .collect();
+
+        // Return [cursor, [keys]]
+        Ok(RespValue::array(vec![
+            RespValue::bulk_string(next_cursor.to_string()),
+            RespValue::array(keys_to_return),
+        ]))
+    }
+
     /// RANDOMKEY - Return a random key
     pub fn randomkey(&self, _args: &[Bytes], current_db: usize) -> Result<RespValue> {
         match self.storage.random_key_in_db(current_db)? {
