@@ -207,7 +207,36 @@ cargo tarpaulin --out Html
 ```bash
 # 运行 benchmark
 cargo bench
+
+# 查看基准测试报告
+# 报告将生成在 target/criterion/ 目录
+open target/criterion/report/index.html
 ```
+
+### Pre-commit Hooks
+
+项目使用 pre-commit 来自动运行代码检查。安装和使用：
+
+```bash
+# 安装 pre-commit (如果未安装)
+pip install pre-commit
+# 或使用 homebrew (macOS)
+brew install pre-commit
+
+# 安装 git hooks
+pre-commit install
+
+# 手动运行所有 hooks
+pre-commit run --all-files
+```
+
+配置文件：`.pre-commit-config.yaml`
+
+Pre-commit 会在每次 commit 前自动运行：
+- 代码格式检查 (`cargo fmt`)
+- Clippy 检查 (`cargo clippy`)
+- 单元测试 (`cargo test`)
+- 文件格式检查（trailing whitespace, YAML, TOML等）
 
 ## 构建和运行
 
@@ -257,11 +286,14 @@ cargo doc --no-deps
 - [ ] 代码通过 `cargo fmt` 格式化
 - [ ] 代码通过 `cargo clippy` 检查
 - [ ] 所有测试通过 (`cargo test`)
+- [ ] 集成测试通过 (`cargo test --test '*'`)
 - [ ] 添加了新功能的测试
 - [ ] 更新了相关文档
 - [ ] 提交信息符合规范
 - [ ] PR 描述清晰，关联了相关 issue
 - [ ] 没有包含不相关的更改
+- [ ] （可选）运行了性能测试 (`cargo bench`)
+- [ ] （可选）配置了 pre-commit hooks
 
 ## Code Review 流程
 

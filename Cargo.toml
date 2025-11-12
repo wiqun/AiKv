@@ -35,7 +35,12 @@ toml = "0.8"
 
 [dev-dependencies]
 redis = "0.24"
+criterion = { version = "0.5", features = ["html_reports"] }
 
 [[bin]]
 name = "aikv"
 path = "src/main.rs"
+
+[[bench]]
+name = "aikv_benchmark"
+harness = false
