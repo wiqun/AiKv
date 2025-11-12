@@ -536,7 +536,7 @@ fn test_scan_iteration() {
     if let RespValue::Array(Some(scan_result)) = result {
         if let RespValue::Array(Some(keys)) = &scan_result[1] {
             // Should return keys matching key:1* (key:1, key:10-19)
-            assert!(keys.len() >= 1 && keys.len() <= 11);
+            assert!(!keys.is_empty() && keys.len() <= 11);
             // Verify all returned keys match the pattern
             for key in keys {
                 if let RespValue::BulkString(Some(key_bytes)) = key {

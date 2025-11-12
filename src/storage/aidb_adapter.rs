@@ -75,6 +75,8 @@ impl StorageAdapter {
     }
 
     /// Clean up expired keys in a database
+    /// Reserved for future background cleanup task
+    #[allow(dead_code)]
     fn cleanup_expired(&self, db_index: usize) -> Result<()> {
         let mut databases = self
             .databases

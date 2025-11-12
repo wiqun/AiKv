@@ -27,13 +27,13 @@ impl KeyCommands {
         let matched_keys: Vec<RespValue> = if pattern == "*" {
             all_keys
                 .into_iter()
-                .map(|k| RespValue::bulk_string(k))
+                .map(RespValue::bulk_string)
                 .collect()
         } else {
             all_keys
                 .into_iter()
                 .filter(|k| self.match_pattern(k, &pattern))
-                .map(|k| RespValue::bulk_string(k))
+                .map(RespValue::bulk_string)
                 .collect()
         };
 
@@ -51,11 +51,10 @@ impl KeyCommands {
         let pattern_chars: Vec<char> = pattern.chars().collect();
         let key_chars: Vec<char> = key.chars().collect();
 
-        self.match_pattern_recursive(&key_chars, 0, &pattern_chars, 0)
+        Self::match_pattern_recursive(&key_chars, 0, &pattern_chars, 0)
     }
 
     fn match_pattern_recursive(
-        &self,
         key: &[char],
         ki: usize,
         pattern: &[char],
@@ -68,7 +67,7 @@ impl KeyCommands {
         if pattern[pi] == '*' {
             // Try matching zero or more characters
             for i in ki..=key.len() {
-                if self.match_pattern_recursive(key, i, pattern, pi + 1) {
+                if Self::match_pattern_recursive(key, i, pattern, pi + 1) {
                     return true;
                 }
             }
@@ -76,14 +75,14 @@ impl KeyCommands {
         } else if pattern[pi] == '?' {
             // Match exactly one character
             if ki < key.len() {
-                self.match_pattern_recursive(key, ki + 1, pattern, pi + 1)
+                Self::match_pattern_recursive(key, ki + 1, pattern, pi + 1)
             } else {
                 false
             }
         } else {
             // Exact character match
             if ki < key.len() && key[ki] == pattern[pi] {
-                self.match_pattern_recursive(key, ki + 1, pattern, pi + 1)
+                Self::match_pattern_recursive(key, ki + 1, pattern, pi + 1)
             } else {
                 false
             }
@@ -380,7 +379,7 @@ impl KeyCommands {
         let ttl_ms = self.storage.get_ttl_in_db(current_db, &key)?;
 
         let ttl_seconds = if ttl_ms > 0 {
-            (ttl_ms / 1000) as i64
+            ttl_ms / 1000
         } else {
             ttl_ms
         };
@@ -422,7 +421,7 @@ impl KeyCommands {
         let expire_time_ms = self.storage.get_expire_time_in_db(current_db, &key)?;
 
         let expire_time_seconds = if expire_time_ms > 0 {
-            (expire_time_ms / 1000) as i64
+            expire_time_ms / 1000
         } else {
             expire_time_ms
         };
