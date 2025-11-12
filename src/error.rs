@@ -26,6 +26,9 @@ pub enum AikvError {
     #[error("Storage error: {0}")]
     Storage(String),
 
+    #[error("Persistence error: {0}")]
+    Persistence(String),
+
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 
