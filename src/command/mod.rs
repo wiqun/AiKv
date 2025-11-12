@@ -1,16 +1,24 @@
 pub mod database;
+pub mod hash;
 pub mod json;
 pub mod key;
+pub mod list;
 pub mod script;
 pub mod server;
+pub mod set;
 pub mod string;
+pub mod zset;
 
 use self::database::DatabaseCommands;
+use self::hash::HashCommands;
 use self::json::JsonCommands;
 use self::key::KeyCommands;
+use self::list::ListCommands;
 use self::script::ScriptCommands;
 use self::server::ServerCommands;
+use self::set::SetCommands;
 use self::string::StringCommands;
+use self::zset::ZSetCommands;
 use crate::error::{AikvError, Result};
 use crate::protocol::RespValue;
 use crate::storage::StorageAdapter;
@@ -24,6 +32,10 @@ pub struct CommandExecutor {
     key_commands: KeyCommands,
     server_commands: ServerCommands,
     script_commands: ScriptCommands,
+    list_commands: ListCommands,
+    hash_commands: HashCommands,
+    set_commands: SetCommands,
+    zset_commands: ZSetCommands,
 }
 
 impl CommandExecutor {
@@ -34,7 +46,11 @@ impl CommandExecutor {
             database_commands: DatabaseCommands::new(storage.clone()),
             key_commands: KeyCommands::new(storage.clone()),
             server_commands: ServerCommands::new(),
-            script_commands: ScriptCommands::new(storage),
+            script_commands: ScriptCommands::new(storage.clone()),
+            list_commands: ListCommands::new(storage.clone()),
+            hash_commands: HashCommands::new(storage.clone()),
+            set_commands: SetCommands::new(storage.clone()),
+            zset_commands: ZSetCommands::new(storage),
         }
     }
 
@@ -145,6 +161,61 @@ impl CommandExecutor {
                     ))),
                 }
             }
+
+            // List commands
+            "LPUSH" => self.list_commands.lpush(args, *current_db),
+            "RPUSH" => self.list_commands.rpush(args, *current_db),
+            "LPOP" => self.list_commands.lpop(args, *current_db),
+            "RPOP" => self.list_commands.rpop(args, *current_db),
+            "LLEN" => self.list_commands.llen(args, *current_db),
+            "LRANGE" => self.list_commands.lrange(args, *current_db),
+            "LINDEX" => self.list_commands.lindex(args, *current_db),
+            "LSET" => self.list_commands.lset(args, *current_db),
+            "LREM" => self.list_commands.lrem(args, *current_db),
+            "LTRIM" => self.list_commands.ltrim(args, *current_db),
+
+            // Hash commands
+            "HSET" => self.hash_commands.hset(args, *current_db),
+            "HSETNX" => self.hash_commands.hsetnx(args, *current_db),
+            "HGET" => self.hash_commands.hget(args, *current_db),
+            "HMGET" => self.hash_commands.hmget(args, *current_db),
+            "HDEL" => self.hash_commands.hdel(args, *current_db),
+            "HEXISTS" => self.hash_commands.hexists(args, *current_db),
+            "HLEN" => self.hash_commands.hlen(args, *current_db),
+            "HKEYS" => self.hash_commands.hkeys(args, *current_db),
+            "HVALS" => self.hash_commands.hvals(args, *current_db),
+            "HGETALL" => self.hash_commands.hgetall(args, *current_db),
+            "HINCRBY" => self.hash_commands.hincrby(args, *current_db),
+            "HINCRBYFLOAT" => self.hash_commands.hincrbyfloat(args, *current_db),
+
+            // Set commands
+            "SADD" => self.set_commands.sadd(args, *current_db),
+            "SREM" => self.set_commands.srem(args, *current_db),
+            "SISMEMBER" => self.set_commands.sismember(args, *current_db),
+            "SMEMBERS" => self.set_commands.smembers(args, *current_db),
+            "SCARD" => self.set_commands.scard(args, *current_db),
+            "SPOP" => self.set_commands.spop(args, *current_db),
+            "SRANDMEMBER" => self.set_commands.srandmember(args, *current_db),
+            "SUNION" => self.set_commands.sunion(args, *current_db),
+            "SINTER" => self.set_commands.sinter(args, *current_db),
+            "SDIFF" => self.set_commands.sdiff(args, *current_db),
+            "SUNIONSTORE" => self.set_commands.sunionstore(args, *current_db),
+            "SINTERSTORE" => self.set_commands.sinterstore(args, *current_db),
+            "SDIFFSTORE" => self.set_commands.sdiffstore(args, *current_db),
+
+            // Sorted Set commands
+            "ZADD" => self.zset_commands.zadd(args, *current_db),
+            "ZREM" => self.zset_commands.zrem(args, *current_db),
+            "ZSCORE" => self.zset_commands.zscore(args, *current_db),
+            "ZRANK" => self.zset_commands.zrank(args, *current_db),
+            "ZREVRANK" => self.zset_commands.zrevrank(args, *current_db),
+            "ZRANGE" => self.zset_commands.zrange(args, *current_db),
+            "ZREVRANGE" => self.zset_commands.zrevrange(args, *current_db),
+            "ZRANGEBYSCORE" => self.zset_commands.zrangebyscore(args, *current_db),
+            "ZREVRANGEBYSCORE" => self.zset_commands.zrevrangebyscore(args, *current_db),
+            "ZCARD" => self.zset_commands.zcard(args, *current_db),
+            "ZCOUNT" => self.zset_commands.zcount(args, *current_db),
+            "ZINCRBY" => self.zset_commands.zincrby(args, *current_db),
 
             // Utility commands
             "PING" => Ok(RespValue::simple_string("PONG")),
