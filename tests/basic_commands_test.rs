@@ -1,4 +1,4 @@
-use aikv::command::{CommandExecutor};
+use aikv::command::CommandExecutor;
 use aikv::protocol::RespValue;
 use aikv::storage::StorageAdapter;
 use bytes::Bytes;
@@ -135,7 +135,7 @@ fn test_key_commands() {
         .unwrap();
     if let RespValue::Array(Some(scan_result)) = result {
         assert_eq!(scan_result.len(), 2); // [cursor, keys]
-        // Check cursor (first element)
+                                          // Check cursor (first element)
         assert!(matches!(&scan_result[0], RespValue::BulkString(Some(_))));
         // Check keys array (second element)
         assert!(matches!(&scan_result[1], RespValue::Array(Some(_))));
@@ -147,7 +147,11 @@ fn test_key_commands() {
     let result = executor
         .execute(
             "SCAN",
-            &[Bytes::from("0"), Bytes::from("MATCH"), Bytes::from("user:*")],
+            &[
+                Bytes::from("0"),
+                Bytes::from("MATCH"),
+                Bytes::from("user:*"),
+            ],
             &mut current_db,
             client_id,
         )
@@ -202,7 +206,12 @@ fn test_key_commands() {
 
     // Verify old key doesn't exist
     let result = executor
-        .execute("EXISTS", &[Bytes::from("user:1")], &mut current_db, client_id)
+        .execute(
+            "EXISTS",
+            &[Bytes::from("user:1")],
+            &mut current_db,
+            client_id,
+        )
         .unwrap();
     assert_eq!(result, RespValue::integer(0));
 
@@ -307,7 +316,12 @@ fn test_expiration_commands() {
 
     // Test PERSIST
     let result = executor
-        .execute("PERSIST", &[Bytes::from("key1")], &mut current_db, client_id)
+        .execute(
+            "PERSIST",
+            &[Bytes::from("key1")],
+            &mut current_db,
+            client_id,
+        )
         .unwrap();
     assert_eq!(result, RespValue::integer(1));
 

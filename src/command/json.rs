@@ -47,7 +47,7 @@ impl JsonCommands {
         }
     }
 
-    /// JSON.SET key path value [NX|XX]
+    /// JSON.SET key path value \[NX|XX\]
     pub fn json_set(&self, args: &[Bytes], current_db: usize) -> Result<RespValue> {
         if args.len() < 3 {
             return Err(AikvError::WrongArgCount("JSON.SET".to_string()));
@@ -394,8 +394,11 @@ mod tests {
         let cmd = setup();
 
         let json_str = r#"{"name":"John","age":30}"#;
-        cmd.json_set(&[Bytes::from("user"), Bytes::from("$"), Bytes::from(json_str)], 0)
-            .unwrap();
+        cmd.json_set(
+            &[Bytes::from("user"), Bytes::from("$"), Bytes::from(json_str)],
+            0,
+        )
+        .unwrap();
 
         let result = cmd.json_get(&[Bytes::from("user")], 0).unwrap();
         if let RespValue::BulkString(Some(data)) = result {
@@ -411,11 +414,14 @@ mod tests {
     fn test_json_type() {
         let cmd = setup();
 
-        cmd.json_set(&[
-            Bytes::from("user"),
-            Bytes::from("$"),
-            Bytes::from(r#"{"name":"John","age":30,"active":true}"#),
-        ], 0)
+        cmd.json_set(
+            &[
+                Bytes::from("user"),
+                Bytes::from("$"),
+                Bytes::from(r#"{"name":"John","age":30,"active":true}"#),
+            ],
+            0,
+        )
         .unwrap();
 
         let result = cmd
@@ -433,11 +439,14 @@ mod tests {
     fn test_json_arrlen() {
         let cmd = setup();
 
-        cmd.json_set(&[
-            Bytes::from("arr"),
-            Bytes::from("$"),
-            Bytes::from("[1,2,3,4,5]"),
-        ], 0)
+        cmd.json_set(
+            &[
+                Bytes::from("arr"),
+                Bytes::from("$"),
+                Bytes::from("[1,2,3,4,5]"),
+            ],
+            0,
+        )
         .unwrap();
 
         let result = cmd.json_arrlen(&[Bytes::from("arr")], 0).unwrap();
@@ -448,11 +457,14 @@ mod tests {
     fn test_json_objlen() {
         let cmd = setup();
 
-        cmd.json_set(&[
-            Bytes::from("user"),
-            Bytes::from("$"),
-            Bytes::from(r#"{"name":"John","age":30}"#),
-        ], 0)
+        cmd.json_set(
+            &[
+                Bytes::from("user"),
+                Bytes::from("$"),
+                Bytes::from(r#"{"name":"John","age":30}"#),
+            ],
+            0,
+        )
         .unwrap();
 
         let result = cmd.json_objlen(&[Bytes::from("user")], 0).unwrap();

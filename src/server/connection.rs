@@ -2,9 +2,9 @@ use crate::command::CommandExecutor;
 use crate::error::Result;
 use crate::protocol::{RespParser, RespValue};
 use bytes::Bytes;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 static CLIENT_ID_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -34,7 +34,10 @@ impl Connection {
             .unwrap_or_else(|_| "unknown".to_string());
 
         // Register client
-        if let Err(e) = executor.server_commands().register_client(client_id, peer_addr) {
+        if let Err(e) = executor
+            .server_commands()
+            .register_client(client_id, peer_addr)
+        {
             eprintln!("Failed to register client: {}", e);
         }
 
@@ -43,7 +46,7 @@ impl Connection {
             parser: RespParser::new(8192),
             executor,
             protocol_version: ProtocolVersion::Resp2, // Default to RESP2
-            current_db: 0,                             // Default to database 0
+            current_db: 0,                            // Default to database 0
             client_id,
         }
     }
@@ -56,7 +59,11 @@ impl Connection {
 
             if n == 0 {
                 // Connection closed - unregister client
-                if let Err(e) = self.executor.server_commands().unregister_client(self.client_id) {
+                if let Err(e) = self
+                    .executor
+                    .server_commands()
+                    .unregister_client(self.client_id)
+                {
                     eprintln!("Failed to unregister client: {}", e);
                 }
                 return Ok(());

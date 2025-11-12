@@ -180,7 +180,12 @@ impl StorageAdapter {
     }
 
     /// Set expiration at absolute timestamp in milliseconds
-    pub fn set_expire_at_in_db(&self, db_index: usize, key: &str, timestamp_ms: u64) -> Result<bool> {
+    pub fn set_expire_at_in_db(
+        &self,
+        db_index: usize,
+        key: &str,
+        timestamp_ms: u64,
+    ) -> Result<bool> {
         let mut databases = self
             .databases
             .write()

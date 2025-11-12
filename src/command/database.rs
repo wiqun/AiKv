@@ -10,7 +10,9 @@ pub struct DatabaseCommands {
 
 impl DatabaseCommands {
     pub fn new(storage: StorageAdapter) -> Self {
-        Self { storage }
+        Self {
+            storage,
+        }
     }
 
     /// SELECT index - Select database by index

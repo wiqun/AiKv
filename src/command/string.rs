@@ -29,7 +29,7 @@ impl StringCommands {
         }
     }
 
-    /// SET key value [EX seconds] [PX milliseconds] [NX|XX]
+    /// SET key value \[EX seconds\] \[PX milliseconds\] \[NX|XX\]
     pub fn set(&self, args: &[Bytes], current_db: usize) -> Result<RespValue> {
         if args.len() < 2 {
             return Err(AikvError::WrongArgCount("SET".to_string()));
@@ -104,7 +104,7 @@ impl StringCommands {
         Ok(RespValue::ok())
     }
 
-    /// DEL key [key ...]
+    /// DEL key \[key ...\]
     pub fn del(&self, args: &[Bytes], current_db: usize) -> Result<RespValue> {
         if args.is_empty() {
             return Err(AikvError::WrongArgCount("DEL".to_string()));
@@ -121,7 +121,7 @@ impl StringCommands {
         Ok(RespValue::integer(count))
     }
 
-    /// EXISTS key [key ...]
+    /// EXISTS key \[key ...\]
     pub fn exists(&self, args: &[Bytes], current_db: usize) -> Result<RespValue> {
         if args.is_empty() {
             return Err(AikvError::WrongArgCount("EXISTS".to_string()));
@@ -138,7 +138,7 @@ impl StringCommands {
         Ok(RespValue::integer(count))
     }
 
-    /// MGET key [key ...]
+    /// MGET key \[key ...\]
     pub fn mget(&self, args: &[Bytes], current_db: usize) -> Result<RespValue> {
         if args.is_empty() {
             return Err(AikvError::WrongArgCount("MGET".to_string()));
@@ -161,7 +161,7 @@ impl StringCommands {
         Ok(RespValue::array(resp_values))
     }
 
-    /// MSET key value [key value ...]
+    /// MSET key value \[key value ...\]
     pub fn mset(&self, args: &[Bytes], current_db: usize) -> Result<RespValue> {
         if args.is_empty() || !args.len().is_multiple_of(2) {
             return Err(AikvError::WrongArgCount("MSET".to_string()));
@@ -250,11 +250,14 @@ mod tests {
             .unwrap();
 
         let result = cmd
-            .del(&[
-                Bytes::from("key1"),
-                Bytes::from("key2"),
-                Bytes::from("key3"),
-            ], 0)
+            .del(
+                &[
+                    Bytes::from("key1"),
+                    Bytes::from("key2"),
+                    Bytes::from("key3"),
+                ],
+                0,
+            )
             .unwrap();
         assert_eq!(result, RespValue::integer(2));
     }
@@ -276,20 +279,26 @@ mod tests {
     fn test_mget_mset() {
         let cmd = setup();
 
-        cmd.mset(&[
-            Bytes::from("key1"),
-            Bytes::from("value1"),
-            Bytes::from("key2"),
-            Bytes::from("value2"),
-        ], 0)
+        cmd.mset(
+            &[
+                Bytes::from("key1"),
+                Bytes::from("value1"),
+                Bytes::from("key2"),
+                Bytes::from("value2"),
+            ],
+            0,
+        )
         .unwrap();
 
         let result = cmd
-            .mget(&[
-                Bytes::from("key1"),
-                Bytes::from("key2"),
-                Bytes::from("key3"),
-            ], 0)
+            .mget(
+                &[
+                    Bytes::from("key1"),
+                    Bytes::from("key2"),
+                    Bytes::from("key3"),
+                ],
+                0,
+            )
             .unwrap();
 
         if let RespValue::Array(Some(arr)) = result {

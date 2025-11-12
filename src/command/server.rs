@@ -33,7 +33,7 @@ impl ServerCommands {
         }
     }
 
-    /// INFO [section] - Get server information
+    /// INFO \[section\] - Get server information
     pub fn info(&self, args: &[Bytes]) -> Result<RespValue> {
         let section = if args.is_empty() {
             "default"

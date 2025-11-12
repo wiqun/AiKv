@@ -10,7 +10,9 @@ pub struct KeyCommands {
 
 impl KeyCommands {
     pub fn new(storage: StorageAdapter) -> Self {
-        Self { storage }
+        Self {
+            storage,
+        }
     }
 
     /// KEYS pattern - Find all keys matching pattern
@@ -25,10 +27,7 @@ impl KeyCommands {
 
         // Simple pattern matching: * matches everything, otherwise exact match
         let matched_keys: Vec<RespValue> = if pattern == "*" {
-            all_keys
-                .into_iter()
-                .map(RespValue::bulk_string)
-                .collect()
+            all_keys.into_iter().map(RespValue::bulk_string).collect()
         } else {
             all_keys
                 .into_iter()
@@ -54,12 +53,7 @@ impl KeyCommands {
         Self::match_pattern_recursive(&key_chars, 0, &pattern_chars, 0)
     }
 
-    fn match_pattern_recursive(
-        key: &[char],
-        ki: usize,
-        pattern: &[char],
-        pi: usize,
-    ) -> bool {
+    fn match_pattern_recursive(key: &[char], ki: usize, pattern: &[char], pi: usize) -> bool {
         if pi == pattern.len() {
             return ki == key.len();
         }
@@ -89,7 +83,7 @@ impl KeyCommands {
         }
     }
 
-    /// SCAN cursor [MATCH pattern] [COUNT count]
+    /// SCAN cursor \[MATCH pattern\] \[COUNT count\]
     /// Iterate keys using cursor-based iteration
     pub fn scan(&self, args: &[Bytes], current_db: usize) -> Result<RespValue> {
         if args.is_empty() {
@@ -210,7 +204,9 @@ impl KeyCommands {
             return Err(AikvError::KeyNotFound);
         }
 
-        let renamed = self.storage.rename_nx_in_db(current_db, &old_key, &new_key)?;
+        let renamed = self
+            .storage
+            .rename_nx_in_db(current_db, &old_key, &new_key)?;
         Ok(RespValue::integer(if renamed { 1 } else { 0 }))
     }
 
@@ -231,7 +227,7 @@ impl KeyCommands {
         Ok(RespValue::simple_string("string"))
     }
 
-    /// COPY source destination [DB destination-db] [REPLACE]
+    /// COPY source destination \[DB destination-db\] \[REPLACE\]
     pub fn copy(&self, args: &[Bytes], current_db: usize) -> Result<RespValue> {
         if args.len() < 2 {
             return Err(AikvError::WrongArgCount("COPY".to_string()));
@@ -250,9 +246,7 @@ impl KeyCommands {
             match option.as_str() {
                 "DB" => {
                     if i + 1 >= args.len() {
-                        return Err(AikvError::InvalidArgument(
-                            "ERR syntax error".to_string(),
-                        ));
+                        return Err(AikvError::InvalidArgument("ERR syntax error".to_string()));
                     }
                     i += 1;
                     let db_str = String::from_utf8_lossy(&args[i]);
@@ -378,11 +372,7 @@ impl KeyCommands {
         let key = String::from_utf8_lossy(&args[0]).to_string();
         let ttl_ms = self.storage.get_ttl_in_db(current_db, &key)?;
 
-        let ttl_seconds = if ttl_ms > 0 {
-            ttl_ms / 1000
-        } else {
-            ttl_ms
-        };
+        let ttl_seconds = if ttl_ms > 0 { ttl_ms / 1000 } else { ttl_ms };
 
         Ok(RespValue::integer(ttl_seconds))
     }
