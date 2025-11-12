@@ -10,11 +10,13 @@ AiKv 是一个基于 [AiDb v0.1.0](https://github.com/Genuineh/AiDb) 的高性�
 
 - 🚀 **高性能**: 基于 Tokio 异步运行时，支持高并发
 - 🔌 **Redis 协议兼容**: 完全兼容 RESP2 和 RESP3 协议，支持各种 Redis 客户端
+- 💾 **双存储引擎**: 支持内存存储和 AiDb LSM-Tree 持久化存储
 - 📦 **轻量级**: 小内存占用，快速启动
 - 🔧 **易于部署**: 单一可执行文件，无需复杂配置
 - 🔒 **类型安全**: 使用 Rust 编写，保证内存安全和并发安全
 - 📊 **JSON 支持**: 原生支持 JSON 数据类型操作
 - 🔄 **RESP3 支持**: 完整支持 RESP3 协议的所有新类型 (Null, Boolean, Double, Map, Set, Push, Attributes, Streaming 等)
+- 🗄️ **数据持久化**: 基于 AiDb 的 LSM-Tree 存储引擎，支持 WAL 和数据持久化
 
 ## 🎯 支持的命令
 
@@ -195,6 +197,8 @@ port = 6379
 max_connections = 1000
 
 [storage]
+# 存储引擎选择：memory（内存）或 aidb（持久化）
+engine = "memory"  # 或 "aidb"
 data_dir = "./data"
 max_memory = "1GB"
 
@@ -202,6 +206,22 @@ max_memory = "1GB"
 level = "info"
 file = "./logs/aikv.log"
 ```
+
+### 存储引擎说明
+
+AiKv 支持两种存储引擎：
+
+1. **内存存储（Memory）**: 
+   - 纯内存存储，性能最佳
+   - 数据不持久化，重启后丢失
+   - 适合缓存场景
+
+2. **AiDb 存储（LSM-Tree）**:
+   - 基于 AiDb v0.1.0 的 LSM-Tree 存储引擎
+   - 支持数据持久化（WAL + SSTable）
+   - 支持 Bloom Filter 加速查询
+   - 支持数据压缩（Snappy）
+   - 适合需要持久化的场景
 
 启动时指定配置文件：
 
@@ -242,14 +262,17 @@ redis-benchmark -h 127.0.0.1 -p 6379 -t set,get -n 100000 -q
 - ✅ RESP2 协议解析器
 - ✅ String 命令支持
 - ✅ JSON 命令支持
-- ✅ 基于 AiDb 的存储引擎
-- ✅ RESP3 协议支持 (v0.1.1)
+- ✅ 基于 AiDb 的存储引擎（完整集成）
+- ✅ RESP3 协议支持
+- ✅ 多数据库支持（16 个数据库）
+- ✅ 键过期机制（TTL 支持）
+- ✅ 双存储引擎：内存和 AiDb LSM-Tree
 
 ### v0.2.0 (计划中)
 - ⬜ List 数据类型支持
 - ⬜ Set 数据类型支持
 - ⬜ Hash 数据类型支持
-- ⬜ 持久化支持 (AOF/RDB)
+- ✅ 持久化支持（通过 AiDb 的 WAL 和 SSTable）
 - ⬜ 主从复制
 
 ### v0.3.0 (计划中)

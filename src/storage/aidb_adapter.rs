@@ -1,69 +1,42 @@
 use crate::error::{AikvError, Result};
+use aidb::{Options, DB};
 use bytes::Bytes;
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::path::Path;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Value with optional expiration time
-#[derive(Clone, Debug)]
-struct StoredValue {
-    data: Bytes,
-    /// Expiration time in milliseconds since UNIX epoch
-    expires_at: Option<u64>,
-}
-
-impl StoredValue {
-    fn new(data: Bytes) -> Self {
-        Self {
-            data,
-            expires_at: None,
-        }
-    }
-
-    fn with_expiration(data: Bytes, expires_at: u64) -> Self {
-        Self {
-            data,
-            expires_at: Some(expires_at),
-        }
-    }
-
-    fn is_expired(&self) -> bool {
-        if let Some(expires_at) = self.expires_at {
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64;
-            now >= expires_at
-        } else {
-            false
-        }
-    }
-}
-
-/// Database containing key-value pairs
-type Database = HashMap<String, StoredValue>;
-
-/// Simple in-memory storage adapter
-/// This will be replaced with AiDb integration in the future
+/// AiDb-based storage adapter
+/// This adapter uses AiDb as the underlying storage engine
 #[derive(Clone)]
-pub struct StorageAdapter {
+pub struct AiDbStorageAdapter {
     /// Multiple databases (default: 16 databases like Redis)
-    databases: Arc<RwLock<Vec<Database>>>,
+    /// Each database is a separate AiDb instance with its own directory
+    databases: Arc<Vec<Arc<DB>>>,
 }
 
-impl StorageAdapter {
-    pub fn new() -> Self {
-        Self::with_db_count(16) // Default to 16 databases like Redis
-    }
+impl AiDbStorageAdapter {
+    /// Create a new AiDb storage adapter with the given path and database count
+    pub fn new<P: AsRef<Path>>(path: P, db_count: usize) -> Result<Self> {
+        let base_path = path.as_ref();
 
-    pub fn with_db_count(count: usize) -> Self {
-        let mut databases = Vec::with_capacity(count);
-        for _ in 0..count {
-            databases.push(HashMap::new());
+        // Create the base directory if it doesn't exist
+        if !base_path.exists() {
+            std::fs::create_dir_all(base_path)
+                .map_err(|e| AikvError::Storage(format!("Failed to create directory: {}", e)))?;
         }
-        Self {
-            databases: Arc::new(RwLock::new(databases)),
+
+        let mut databases = Vec::with_capacity(db_count);
+        for i in 0..db_count {
+            let db_path = base_path.join(format!("db{}", i));
+            let options = Options::default();
+            let db = DB::open(&db_path, options)
+                .map_err(|e| AikvError::Storage(format!("Failed to open database {}: {}", i, e)))?;
+            databases.push(Arc::new(db));
         }
+
+        Ok(Self {
+            databases: Arc::new(databases),
+        })
     }
 
     /// Get current time in milliseconds
@@ -74,37 +47,70 @@ impl StorageAdapter {
             .as_millis() as u64
     }
 
-    /// Clean up expired keys in a database
-    /// Reserved for future background cleanup task
-    #[allow(dead_code)]
-    fn cleanup_expired(&self, db_index: usize) -> Result<()> {
-        let mut databases = self
-            .databases
-            .write()
-            .map_err(|e| AikvError::Storage(format!("Lock error: {}", e)))?;
-
-        if let Some(db) = databases.get_mut(db_index) {
-            db.retain(|_, v| !v.is_expired());
+    /// Check if a key is expired based on its stored expiration metadata
+    fn is_expired(&self, db: &DB, key: &[u8]) -> Result<bool> {
+        let expire_key = Self::expiration_key(key);
+        if let Some(expire_bytes) = db
+            .get(&expire_key)
+            .map_err(|e| AikvError::Storage(format!("Failed to get expiration: {}", e)))?
+        {
+            if expire_bytes.len() == 8 {
+                let expire_at = u64::from_le_bytes([
+                    expire_bytes[0],
+                    expire_bytes[1],
+                    expire_bytes[2],
+                    expire_bytes[3],
+                    expire_bytes[4],
+                    expire_bytes[5],
+                    expire_bytes[6],
+                    expire_bytes[7],
+                ]);
+                let now = Self::current_time_ms();
+                return Ok(now >= expire_at);
+            }
         }
-        Ok(())
+        Ok(false)
+    }
+
+    /// Generate expiration metadata key for a given key
+    fn expiration_key(key: &[u8]) -> Vec<u8> {
+        let mut expire_key = Vec::with_capacity(key.len() + 8);
+        expire_key.extend_from_slice(b"__exp__:");
+        expire_key.extend_from_slice(key);
+        expire_key
     }
 
     /// Get a value by key from a specific database
     pub fn get_from_db(&self, db_index: usize, key: &str) -> Result<Option<Bytes>> {
-        let databases = self
-            .databases
-            .read()
-            .map_err(|e| AikvError::Storage(format!("Lock error: {}", e)))?;
-
-        if let Some(db) = databases.get(db_index) {
-            if let Some(stored) = db.get(key) {
-                if stored.is_expired() {
-                    return Ok(None);
-                }
-                return Ok(Some(stored.data.clone()));
-            }
+        if db_index >= self.databases.len() {
+            return Err(AikvError::Storage(format!(
+                "Invalid database index: {}",
+                db_index
+            )));
         }
-        Ok(None)
+
+        let db = &self.databases[db_index];
+        let key_bytes = key.as_bytes();
+
+        // Check if key is expired
+        if self.is_expired(db, key_bytes)? {
+            // Clean up expired key
+            db.delete(key_bytes)
+                .map_err(|e| AikvError::Storage(format!("Failed to delete expired key: {}", e)))?;
+            let expire_key = Self::expiration_key(key_bytes);
+            db.delete(&expire_key)
+                .map_err(|e| AikvError::Storage(format!("Failed to delete expiration: {}", e)))?;
+            return Ok(None);
+        }
+
+        // Get the actual value
+        match db
+            .get(key_bytes)
+            .map_err(|e| AikvError::Storage(format!("Failed to get value: {}", e)))?
+        {
+            Some(value) => Ok(Some(Bytes::from(value))),
+            None => Ok(None),
+        }
     }
 
     /// Get a value by key (from default database 0)
@@ -114,20 +120,17 @@ impl StorageAdapter {
 
     /// Set a value for a key in a specific database
     pub fn set_in_db(&self, db_index: usize, key: String, value: Bytes) -> Result<()> {
-        let mut databases = self
-            .databases
-            .write()
-            .map_err(|e| AikvError::Storage(format!("Lock error: {}", e)))?;
-
-        if let Some(db) = databases.get_mut(db_index) {
-            db.insert(key, StoredValue::new(value));
-            Ok(())
-        } else {
-            Err(AikvError::Storage(format!(
+        if db_index >= self.databases.len() {
+            return Err(AikvError::Storage(format!(
                 "Invalid database index: {}",
                 db_index
-            )))
+            )));
         }
+
+        let db = &self.databases[db_index];
+        db.put(key.as_bytes(), &value)
+            .map_err(|e| AikvError::Storage(format!("Failed to put value: {}", e)))?;
+        Ok(())
     }
 
     /// Set a value for a key (in default database 0)
@@ -143,40 +146,60 @@ impl StorageAdapter {
         value: Bytes,
         expires_at: u64,
     ) -> Result<()> {
-        let mut databases = self
-            .databases
-            .write()
-            .map_err(|e| AikvError::Storage(format!("Lock error: {}", e)))?;
-
-        if let Some(db) = databases.get_mut(db_index) {
-            db.insert(key, StoredValue::with_expiration(value, expires_at));
-            Ok(())
-        } else {
-            Err(AikvError::Storage(format!(
+        if db_index >= self.databases.len() {
+            return Err(AikvError::Storage(format!(
                 "Invalid database index: {}",
                 db_index
-            )))
+            )));
         }
+
+        let db = &self.databases[db_index];
+        let key_bytes = key.as_bytes();
+
+        // Set the value
+        db.put(key_bytes, &value)
+            .map_err(|e| AikvError::Storage(format!("Failed to put value: {}", e)))?;
+
+        // Set the expiration
+        let expire_key = Self::expiration_key(key_bytes);
+        db.put(&expire_key, &expires_at.to_le_bytes())
+            .map_err(|e| AikvError::Storage(format!("Failed to set expiration: {}", e)))?;
+
+        Ok(())
     }
 
     /// Set expiration for a key in milliseconds
     pub fn set_expire_in_db(&self, db_index: usize, key: &str, expire_ms: u64) -> Result<bool> {
-        let mut databases = self
-            .databases
-            .write()
-            .map_err(|e| AikvError::Storage(format!("Lock error: {}", e)))?;
-
-        if let Some(db) = databases.get_mut(db_index) {
-            if let Some(stored) = db.get_mut(key) {
-                if stored.is_expired() {
-                    db.remove(key);
-                    return Ok(false);
-                }
-                stored.expires_at = Some(Self::current_time_ms() + expire_ms);
-                return Ok(true);
-            }
+        if db_index >= self.databases.len() {
+            return Err(AikvError::Storage(format!(
+                "Invalid database index: {}",
+                db_index
+            )));
         }
-        Ok(false)
+
+        let db = &self.databases[db_index];
+        let key_bytes = key.as_bytes();
+
+        // Check if key exists and is not expired
+        if self.is_expired(db, key_bytes)? {
+            return Ok(false);
+        }
+
+        if db
+            .get(key_bytes)
+            .map_err(|e| AikvError::Storage(format!("Failed to check key existence: {}", e)))?
+            .is_none()
+        {
+            return Ok(false);
+        }
+
+        // Set expiration
+        let expire_at = Self::current_time_ms() + expire_ms;
+        let expire_key = Self::expiration_key(key_bytes);
+        db.put(&expire_key, &expire_at.to_le_bytes())
+            .map_err(|e| AikvError::Storage(format!("Failed to set expiration: {}", e)))?;
+
+        Ok(true)
     }
 
     /// Set expiration at absolute timestamp in milliseconds
@@ -186,104 +209,212 @@ impl StorageAdapter {
         key: &str,
         timestamp_ms: u64,
     ) -> Result<bool> {
-        let mut databases = self
-            .databases
-            .write()
-            .map_err(|e| AikvError::Storage(format!("Lock error: {}", e)))?;
-
-        if let Some(db) = databases.get_mut(db_index) {
-            if let Some(stored) = db.get_mut(key) {
-                if stored.is_expired() {
-                    db.remove(key);
-                    return Ok(false);
-                }
-                stored.expires_at = Some(timestamp_ms);
-                return Ok(true);
-            }
+        if db_index >= self.databases.len() {
+            return Err(AikvError::Storage(format!(
+                "Invalid database index: {}",
+                db_index
+            )));
         }
-        Ok(false)
+
+        let db = &self.databases[db_index];
+        let key_bytes = key.as_bytes();
+
+        // Check if key exists and is not expired
+        if self.is_expired(db, key_bytes)? {
+            return Ok(false);
+        }
+
+        if db
+            .get(key_bytes)
+            .map_err(|e| AikvError::Storage(format!("Failed to check key existence: {}", e)))?
+            .is_none()
+        {
+            return Ok(false);
+        }
+
+        // Set expiration
+        let expire_key = Self::expiration_key(key_bytes);
+        db.put(&expire_key, &timestamp_ms.to_le_bytes())
+            .map_err(|e| AikvError::Storage(format!("Failed to set expiration: {}", e)))?;
+
+        Ok(true)
     }
 
     /// Get TTL in milliseconds
     pub fn get_ttl_in_db(&self, db_index: usize, key: &str) -> Result<i64> {
-        let databases = self
-            .databases
-            .read()
-            .map_err(|e| AikvError::Storage(format!("Lock error: {}", e)))?;
+        if db_index >= self.databases.len() {
+            return Err(AikvError::Storage(format!(
+                "Invalid database index: {}",
+                db_index
+            )));
+        }
 
-        if let Some(db) = databases.get(db_index) {
-            if let Some(stored) = db.get(key) {
-                if stored.is_expired() {
-                    return Ok(-2); // Key doesn't exist (expired)
-                }
-                if let Some(expires_at) = stored.expires_at {
-                    let now = Self::current_time_ms();
-                    if expires_at > now {
-                        return Ok((expires_at - now) as i64);
-                    } else {
-                        return Ok(-2); // Already expired
-                    }
+        let db = &self.databases[db_index];
+        let key_bytes = key.as_bytes();
+
+        // Check if key exists
+        if db
+            .get(key_bytes)
+            .map_err(|e| AikvError::Storage(format!("Failed to check key existence: {}", e)))?
+            .is_none()
+        {
+            return Ok(-2); // Key doesn't exist
+        }
+
+        // Check if expired
+        if self.is_expired(db, key_bytes)? {
+            return Ok(-2);
+        }
+
+        // Get expiration
+        let expire_key = Self::expiration_key(key_bytes);
+        if let Some(expire_bytes) = db
+            .get(&expire_key)
+            .map_err(|e| AikvError::Storage(format!("Failed to get expiration: {}", e)))?
+        {
+            if expire_bytes.len() == 8 {
+                let expire_at = u64::from_le_bytes([
+                    expire_bytes[0],
+                    expire_bytes[1],
+                    expire_bytes[2],
+                    expire_bytes[3],
+                    expire_bytes[4],
+                    expire_bytes[5],
+                    expire_bytes[6],
+                    expire_bytes[7],
+                ]);
+                let now = Self::current_time_ms();
+                if expire_at > now {
+                    return Ok((expire_at - now) as i64);
                 } else {
-                    return Ok(-1); // No expiration set
+                    return Ok(-2);
                 }
             }
         }
-        Ok(-2) // Key doesn't exist
+
+        Ok(-1) // No expiration set
     }
 
     /// Get expiration timestamp in milliseconds
     pub fn get_expire_time_in_db(&self, db_index: usize, key: &str) -> Result<i64> {
-        let databases = self
-            .databases
-            .read()
-            .map_err(|e| AikvError::Storage(format!("Lock error: {}", e)))?;
+        if db_index >= self.databases.len() {
+            return Err(AikvError::Storage(format!(
+                "Invalid database index: {}",
+                db_index
+            )));
+        }
 
-        if let Some(db) = databases.get(db_index) {
-            if let Some(stored) = db.get(key) {
-                if stored.is_expired() {
-                    return Ok(-2); // Key doesn't exist (expired)
-                }
-                if let Some(expires_at) = stored.expires_at {
-                    return Ok(expires_at as i64);
-                } else {
-                    return Ok(-1); // No expiration set
-                }
+        let db = &self.databases[db_index];
+        let key_bytes = key.as_bytes();
+
+        // Check if key exists
+        if db
+            .get(key_bytes)
+            .map_err(|e| AikvError::Storage(format!("Failed to check key existence: {}", e)))?
+            .is_none()
+        {
+            return Ok(-2); // Key doesn't exist
+        }
+
+        // Check if expired
+        if self.is_expired(db, key_bytes)? {
+            return Ok(-2);
+        }
+
+        // Get expiration
+        let expire_key = Self::expiration_key(key_bytes);
+        if let Some(expire_bytes) = db
+            .get(&expire_key)
+            .map_err(|e| AikvError::Storage(format!("Failed to get expiration: {}", e)))?
+        {
+            if expire_bytes.len() == 8 {
+                let expire_at = u64::from_le_bytes([
+                    expire_bytes[0],
+                    expire_bytes[1],
+                    expire_bytes[2],
+                    expire_bytes[3],
+                    expire_bytes[4],
+                    expire_bytes[5],
+                    expire_bytes[6],
+                    expire_bytes[7],
+                ]);
+                return Ok(expire_at as i64);
             }
         }
-        Ok(-2) // Key doesn't exist
+
+        Ok(-1) // No expiration set
     }
 
     /// Remove expiration from a key
     pub fn persist_in_db(&self, db_index: usize, key: &str) -> Result<bool> {
-        let mut databases = self
-            .databases
-            .write()
-            .map_err(|e| AikvError::Storage(format!("Lock error: {}", e)))?;
-
-        if let Some(db) = databases.get_mut(db_index) {
-            if let Some(stored) = db.get_mut(key) {
-                if stored.is_expired() {
-                    db.remove(key);
-                    return Ok(false);
-                }
-                if stored.expires_at.is_some() {
-                    stored.expires_at = None;
-                    return Ok(true);
-                }
-            }
+        if db_index >= self.databases.len() {
+            return Err(AikvError::Storage(format!(
+                "Invalid database index: {}",
+                db_index
+            )));
         }
+
+        let db = &self.databases[db_index];
+        let key_bytes = key.as_bytes();
+
+        // Check if key exists
+        if db
+            .get(key_bytes)
+            .map_err(|e| AikvError::Storage(format!("Failed to check key existence: {}", e)))?
+            .is_none()
+        {
+            return Ok(false);
+        }
+
+        // Check if expired
+        if self.is_expired(db, key_bytes)? {
+            return Ok(false);
+        }
+
+        // Check if expiration exists
+        let expire_key = Self::expiration_key(key_bytes);
+        if db
+            .get(&expire_key)
+            .map_err(|e| AikvError::Storage(format!("Failed to get expiration: {}", e)))?
+            .is_some()
+        {
+            // Remove expiration
+            db.delete(&expire_key)
+                .map_err(|e| AikvError::Storage(format!("Failed to delete expiration: {}", e)))?;
+            return Ok(true);
+        }
+
         Ok(false)
     }
 
     /// Delete a key from a specific database
     pub fn delete_from_db(&self, db_index: usize, key: &str) -> Result<bool> {
-        let mut databases = self
-            .databases
-            .write()
-            .map_err(|e| AikvError::Storage(format!("Lock error: {}", e)))?;
+        if db_index >= self.databases.len() {
+            return Err(AikvError::Storage(format!(
+                "Invalid database index: {}",
+                db_index
+            )));
+        }
 
-        if let Some(db) = databases.get_mut(db_index) {
-            Ok(db.remove(key).is_some())
+        let db = &self.databases[db_index];
+        let key_bytes = key.as_bytes();
+
+        // Check if key exists
+        let exists = db
+            .get(key_bytes)
+            .map_err(|e| AikvError::Storage(format!("Failed to check key existence: {}", e)))?
+            .is_some();
+
+        if exists {
+            // Delete the key
+            db.delete(key_bytes)
+                .map_err(|e| AikvError::Storage(format!("Failed to delete key: {}", e)))?;
+
+            // Delete expiration metadata if exists
+            let expire_key = Self::expiration_key(key_bytes);
+            let _ = db.delete(&expire_key);
+
+            Ok(true)
         } else {
             Ok(false)
         }
@@ -296,17 +427,26 @@ impl StorageAdapter {
 
     /// Check if a key exists in a specific database
     pub fn exists_in_db(&self, db_index: usize, key: &str) -> Result<bool> {
-        let databases = self
-            .databases
-            .read()
-            .map_err(|e| AikvError::Storage(format!("Lock error: {}", e)))?;
-
-        if let Some(db) = databases.get(db_index) {
-            if let Some(stored) = db.get(key) {
-                return Ok(!stored.is_expired());
-            }
+        if db_index >= self.databases.len() {
+            return Err(AikvError::Storage(format!(
+                "Invalid database index: {}",
+                db_index
+            )));
         }
-        Ok(false)
+
+        let db = &self.databases[db_index];
+        let key_bytes = key.as_bytes();
+
+        // Check if expired
+        if self.is_expired(db, key_bytes)? {
+            return Ok(false);
+        }
+
+        // Check if key exists
+        Ok(db
+            .get(key_bytes)
+            .map_err(|e| AikvError::Storage(format!("Failed to check key existence: {}", e)))?
+            .is_some())
     }
 
     /// Check if a key exists (in default database 0)
@@ -315,171 +455,220 @@ impl StorageAdapter {
     }
 
     /// Get all keys in a database
+    /// Note: This is an expensive operation for large databases
     pub fn get_all_keys_in_db(&self, db_index: usize) -> Result<Vec<String>> {
-        let databases = self
-            .databases
-            .read()
-            .map_err(|e| AikvError::Storage(format!("Lock error: {}", e)))?;
-
-        if let Some(db) = databases.get(db_index) {
-            let keys: Vec<String> = db
-                .iter()
-                .filter(|(_, v)| !v.is_expired())
-                .map(|(k, _)| k.clone())
-                .collect();
-            Ok(keys)
-        } else {
-            Ok(Vec::new())
+        if db_index >= self.databases.len() {
+            return Err(AikvError::Storage(format!(
+                "Invalid database index: {}",
+                db_index
+            )));
         }
+
+        let db = &self.databases[db_index];
+        let mut keys = Vec::new();
+
+        // Create an iterator to scan all keys
+        let mut iter = db.iter();
+
+        while iter.valid() {
+            let key = iter.key();
+
+            // Skip expiration metadata keys
+            if key.starts_with(b"__exp__:") {
+                iter.next();
+                continue;
+            }
+
+            // Check if expired
+            if self.is_expired(db, key)? {
+                iter.next();
+                continue;
+            }
+
+            if let Ok(key_str) = String::from_utf8(key.to_vec()) {
+                keys.push(key_str);
+            }
+
+            iter.next();
+        }
+
+        Ok(keys)
     }
 
     /// Get database size (number of keys)
     pub fn dbsize_in_db(&self, db_index: usize) -> Result<usize> {
-        let databases = self
-            .databases
-            .read()
-            .map_err(|e| AikvError::Storage(format!("Lock error: {}", e)))?;
-
-        if let Some(db) = databases.get(db_index) {
-            let count = db.iter().filter(|(_, v)| !v.is_expired()).count();
-            Ok(count)
-        } else {
-            Ok(0)
-        }
+        Ok(self.get_all_keys_in_db(db_index)?.len())
     }
 
     /// Clear a specific database
     pub fn flush_db(&self, db_index: usize) -> Result<()> {
-        let mut databases = self
-            .databases
-            .write()
-            .map_err(|e| AikvError::Storage(format!("Lock error: {}", e)))?;
-
-        if let Some(db) = databases.get_mut(db_index) {
-            db.clear();
+        if db_index >= self.databases.len() {
+            return Err(AikvError::Storage(format!(
+                "Invalid database index: {}",
+                db_index
+            )));
         }
+
+        let db = &self.databases[db_index];
+
+        // Get all keys and delete them
+        let mut iter = db.iter();
+
+        while iter.valid() {
+            let key = iter.key().to_vec();
+            iter.next();
+
+            db.delete(&key)
+                .map_err(|e| AikvError::Storage(format!("Failed to delete key: {}", e)))?;
+        }
+
         Ok(())
     }
 
     /// Clear all databases
     pub fn flush_all(&self) -> Result<()> {
-        let mut databases = self
-            .databases
-            .write()
-            .map_err(|e| AikvError::Storage(format!("Lock error: {}", e)))?;
-
-        for db in databases.iter_mut() {
-            db.clear();
+        for i in 0..self.databases.len() {
+            self.flush_db(i)?;
         }
         Ok(())
     }
 
     /// Swap two databases
-    pub fn swap_db(&self, db1: usize, db2: usize) -> Result<()> {
-        let mut databases = self
-            .databases
-            .write()
-            .map_err(|e| AikvError::Storage(format!("Lock error: {}", e)))?;
-
-        if db1 >= databases.len() || db2 >= databases.len() {
-            return Err(AikvError::Storage(format!(
-                "Invalid database index: {} or {}",
-                db1, db2
-            )));
-        }
-
-        databases.swap(db1, db2);
-        Ok(())
+    /// Note: This is not efficiently implementable with AiDb, so we return an error
+    pub fn swap_db(&self, _db1: usize, _db2: usize) -> Result<()> {
+        Err(AikvError::Storage(
+            "SWAPDB is not supported with AiDb storage backend".to_string(),
+        ))
     }
 
     /// Move a key from one database to another
     pub fn move_key(&self, src_db: usize, dst_db: usize, key: &str) -> Result<bool> {
-        let mut databases = self
-            .databases
-            .write()
-            .map_err(|e| AikvError::Storage(format!("Lock error: {}", e)))?;
-
-        if src_db >= databases.len() || dst_db >= databases.len() {
+        if src_db >= self.databases.len() || dst_db >= self.databases.len() {
             return Err(AikvError::Storage(format!(
                 "Invalid database index: {} or {}",
                 src_db, dst_db
             )));
         }
 
-        // Check if key exists in source and not expired
-        let value = if let Some(src) = databases.get(src_db) {
-            if let Some(stored) = src.get(key) {
-                if stored.is_expired() {
-                    return Ok(false);
-                }
-                Some(stored.clone())
-            } else {
-                None
-            }
-        } else {
-            None
+        let src = &self.databases[src_db];
+        let dst = &self.databases[dst_db];
+        let key_bytes = key.as_bytes();
+
+        // Check if key exists in source and is not expired
+        if self.is_expired(src, key_bytes)? {
+            return Ok(false);
+        }
+
+        let value = match src
+            .get(key_bytes)
+            .map_err(|e| AikvError::Storage(format!("Failed to get value: {}", e)))?
+        {
+            Some(v) => v,
+            None => return Ok(false),
         };
 
-        if let Some(stored_value) = value {
-            // Check if key already exists in destination
-            if let Some(dst) = databases.get(dst_db) {
-                if dst.contains_key(key) {
-                    return Ok(false);
-                }
-            }
-
-            // Remove from source and add to destination
-            if let Some(src) = databases.get_mut(src_db) {
-                src.remove(key);
-            }
-            if let Some(dst) = databases.get_mut(dst_db) {
-                dst.insert(key.to_string(), stored_value);
-            }
-            Ok(true)
-        } else {
-            Ok(false)
+        // Check if key already exists in destination
+        if dst
+            .get(key_bytes)
+            .map_err(|e| AikvError::Storage(format!("Failed to check destination: {}", e)))?
+            .is_some()
+        {
+            return Ok(false);
         }
+
+        // Copy to destination
+        dst.put(key_bytes, &value)
+            .map_err(|e| AikvError::Storage(format!("Failed to put value: {}", e)))?;
+
+        // Copy expiration if exists
+        let expire_key = Self::expiration_key(key_bytes);
+        if let Some(expire_bytes) = src
+            .get(&expire_key)
+            .map_err(|e| AikvError::Storage(format!("Failed to get expiration: {}", e)))?
+        {
+            dst.put(&expire_key, &expire_bytes)
+                .map_err(|e| AikvError::Storage(format!("Failed to put expiration: {}", e)))?;
+        }
+
+        // Delete from source
+        src.delete(key_bytes)
+            .map_err(|e| AikvError::Storage(format!("Failed to delete from source: {}", e)))?;
+        let _ = src.delete(&expire_key);
+
+        Ok(true)
     }
 
     /// Rename a key
     pub fn rename_in_db(&self, db_index: usize, old_key: &str, new_key: &str) -> Result<bool> {
-        let mut databases = self
-            .databases
-            .write()
-            .map_err(|e| AikvError::Storage(format!("Lock error: {}", e)))?;
-
-        if let Some(db) = databases.get_mut(db_index) {
-            if let Some(value) = db.remove(old_key) {
-                if value.is_expired() {
-                    return Ok(false);
-                }
-                db.insert(new_key.to_string(), value);
-                return Ok(true);
-            }
+        if db_index >= self.databases.len() {
+            return Err(AikvError::Storage(format!(
+                "Invalid database index: {}",
+                db_index
+            )));
         }
-        Ok(false)
+
+        let db = &self.databases[db_index];
+        let old_key_bytes = old_key.as_bytes();
+        let new_key_bytes = new_key.as_bytes();
+
+        // Check if old key exists and is not expired
+        if self.is_expired(db, old_key_bytes)? {
+            return Ok(false);
+        }
+
+        let value = match db
+            .get(old_key_bytes)
+            .map_err(|e| AikvError::Storage(format!("Failed to get value: {}", e)))?
+        {
+            Some(v) => v,
+            None => return Ok(false),
+        };
+
+        // Set new key
+        db.put(new_key_bytes, &value)
+            .map_err(|e| AikvError::Storage(format!("Failed to put value: {}", e)))?;
+
+        // Copy expiration if exists
+        let old_expire_key = Self::expiration_key(old_key_bytes);
+        let new_expire_key = Self::expiration_key(new_key_bytes);
+        if let Some(expire_bytes) = db
+            .get(&old_expire_key)
+            .map_err(|e| AikvError::Storage(format!("Failed to get expiration: {}", e)))?
+        {
+            db.put(&new_expire_key, &expire_bytes)
+                .map_err(|e| AikvError::Storage(format!("Failed to put expiration: {}", e)))?;
+        }
+
+        // Delete old key
+        db.delete(old_key_bytes)
+            .map_err(|e| AikvError::Storage(format!("Failed to delete old key: {}", e)))?;
+        let _ = db.delete(&old_expire_key);
+
+        Ok(true)
     }
 
     /// Rename a key only if new key doesn't exist
     pub fn rename_nx_in_db(&self, db_index: usize, old_key: &str, new_key: &str) -> Result<bool> {
-        let mut databases = self
-            .databases
-            .write()
-            .map_err(|e| AikvError::Storage(format!("Lock error: {}", e)))?;
-
-        if let Some(db) = databases.get_mut(db_index) {
-            if db.contains_key(new_key) {
-                return Ok(false);
-            }
-            if let Some(value) = db.remove(old_key) {
-                if value.is_expired() {
-                    return Ok(false);
-                }
-                db.insert(new_key.to_string(), value);
-                return Ok(true);
-            }
+        if db_index >= self.databases.len() {
+            return Err(AikvError::Storage(format!(
+                "Invalid database index: {}",
+                db_index
+            )));
         }
-        Ok(false)
+
+        let db = &self.databases[db_index];
+        let new_key_bytes = new_key.as_bytes();
+
+        // Check if new key exists
+        if db
+            .get(new_key_bytes)
+            .map_err(|e| AikvError::Storage(format!("Failed to check new key: {}", e)))?
+            .is_some()
+        {
+            return Ok(false);
+        }
+
+        self.rename_in_db(db_index, old_key, new_key)
     }
 
     /// Copy a key
@@ -491,70 +680,71 @@ impl StorageAdapter {
         dst_key: &str,
         replace: bool,
     ) -> Result<bool> {
-        let mut databases = self
-            .databases
-            .write()
-            .map_err(|e| AikvError::Storage(format!("Lock error: {}", e)))?;
-
-        if src_db >= databases.len() || dst_db >= databases.len() {
+        if src_db >= self.databases.len() || dst_db >= self.databases.len() {
             return Err(AikvError::Storage(format!(
                 "Invalid database index: {} or {}",
                 src_db, dst_db
             )));
         }
 
-        // Get value from source
-        let value = if let Some(src) = databases.get(src_db) {
-            if let Some(stored) = src.get(src_key) {
-                if stored.is_expired() {
-                    return Ok(false);
-                }
-                Some(stored.clone())
-            } else {
-                None
-            }
-        } else {
-            None
+        let src = &self.databases[src_db];
+        let dst = &self.databases[dst_db];
+        let src_key_bytes = src_key.as_bytes();
+        let dst_key_bytes = dst_key.as_bytes();
+
+        // Check if source key exists and is not expired
+        if self.is_expired(src, src_key_bytes)? {
+            return Ok(false);
+        }
+
+        let value = match src
+            .get(src_key_bytes)
+            .map_err(|e| AikvError::Storage(format!("Failed to get value: {}", e)))?
+        {
+            Some(v) => v,
+            None => return Ok(false),
         };
 
-        if let Some(stored_value) = value {
-            // Check if destination key exists
-            if let Some(dst) = databases.get(dst_db) {
-                if dst.contains_key(dst_key) && !replace {
-                    return Ok(false);
-                }
-            }
+        // Check if destination key exists
+        let dst_exists = dst
+            .get(dst_key_bytes)
+            .map_err(|e| AikvError::Storage(format!("Failed to check destination: {}", e)))?
+            .is_some();
 
-            // Copy to destination
-            if let Some(dst) = databases.get_mut(dst_db) {
-                dst.insert(dst_key.to_string(), stored_value);
-            }
-            Ok(true)
-        } else {
-            Ok(false)
+        if dst_exists && !replace {
+            return Ok(false);
         }
+
+        // Copy to destination
+        dst.put(dst_key_bytes, &value)
+            .map_err(|e| AikvError::Storage(format!("Failed to put value: {}", e)))?;
+
+        // Copy expiration if exists
+        let src_expire_key = Self::expiration_key(src_key_bytes);
+        let dst_expire_key = Self::expiration_key(dst_key_bytes);
+        if let Some(expire_bytes) = src
+            .get(&src_expire_key)
+            .map_err(|e| AikvError::Storage(format!("Failed to get expiration: {}", e)))?
+        {
+            dst.put(&dst_expire_key, &expire_bytes)
+                .map_err(|e| AikvError::Storage(format!("Failed to put expiration: {}", e)))?;
+        }
+
+        Ok(true)
     }
 
     /// Get multiple keys from a specific database
     pub fn mget_from_db(&self, db_index: usize, keys: &[String]) -> Result<Vec<Option<Bytes>>> {
-        let databases = self
-            .databases
-            .read()
-            .map_err(|e| AikvError::Storage(format!("Lock error: {}", e)))?;
+        if db_index >= self.databases.len() {
+            return Err(AikvError::Storage(format!(
+                "Invalid database index: {}",
+                db_index
+            )));
+        }
 
         let mut result = Vec::with_capacity(keys.len());
-        if let Some(db) = databases.get(db_index) {
-            for key in keys {
-                if let Some(stored) = db.get(key) {
-                    if !stored.is_expired() {
-                        result.push(Some(stored.data.clone()));
-                        continue;
-                    }
-                }
-                result.push(None);
-            }
-        } else {
-            result.resize(keys.len(), None);
+        for key in keys {
+            result.push(self.get_from_db(db_index, key)?);
         }
         Ok(result)
     }
@@ -566,22 +756,17 @@ impl StorageAdapter {
 
     /// Set multiple key-value pairs in a specific database
     pub fn mset_in_db(&self, db_index: usize, pairs: Vec<(String, Bytes)>) -> Result<()> {
-        let mut databases = self
-            .databases
-            .write()
-            .map_err(|e| AikvError::Storage(format!("Lock error: {}", e)))?;
-
-        if let Some(db) = databases.get_mut(db_index) {
-            for (key, value) in pairs {
-                db.insert(key, StoredValue::new(value));
-            }
-            Ok(())
-        } else {
-            Err(AikvError::Storage(format!(
+        if db_index >= self.databases.len() {
+            return Err(AikvError::Storage(format!(
                 "Invalid database index: {}",
                 db_index
-            )))
+            )));
         }
+
+        for (key, value) in pairs {
+            self.set_in_db(db_index, key, value)?;
+        }
+        Ok(())
     }
 
     /// Set multiple key-value pairs (in default database 0)
@@ -591,44 +776,89 @@ impl StorageAdapter {
 
     /// Get a random key from a database
     pub fn random_key_in_db(&self, db_index: usize) -> Result<Option<String>> {
-        let databases = self
-            .databases
-            .read()
-            .map_err(|e| AikvError::Storage(format!("Lock error: {}", e)))?;
+        if db_index >= self.databases.len() {
+            return Err(AikvError::Storage(format!(
+                "Invalid database index: {}",
+                db_index
+            )));
+        }
 
-        if let Some(db) = databases.get(db_index) {
-            let valid_keys: Vec<String> = db
-                .iter()
-                .filter(|(_, v)| !v.is_expired())
-                .map(|(k, _)| k.clone())
-                .collect();
+        let db = &self.databases[db_index];
 
-            if valid_keys.is_empty() {
-                return Ok(None);
+        // Create an iterator and get the first valid key
+        let mut iter = db.iter();
+
+        while iter.valid() {
+            let key = iter.key();
+
+            // Skip expiration metadata keys
+            if key.starts_with(b"__exp__:") {
+                iter.next();
+                continue;
             }
 
-            // Simple random selection using current time
-            let idx = (Self::current_time_ms() as usize) % valid_keys.len();
-            Ok(Some(valid_keys[idx].clone()))
-        } else {
-            Ok(None)
-        }
-    }
-}
+            // Check if expired
+            if self.is_expired(db, key)? {
+                iter.next();
+                continue;
+            }
 
-impl Default for StorageAdapter {
-    fn default() -> Self {
-        Self::new()
+            if let Ok(key_str) = String::from_utf8(key.to_vec()) {
+                // Use current time as a simple random selection mechanism
+                // In a production system, this would use a proper random number generator
+                let now_ns = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos() as u64;
+                if now_ns.is_multiple_of(5) {
+                    return Ok(Some(key_str));
+                }
+            }
+
+            iter.next();
+        }
+
+        // If we didn't find a key through random selection, return the first valid key
+        let mut iter = db.iter();
+
+        while iter.valid() {
+            let key = iter.key();
+
+            if key.starts_with(b"__exp__:") {
+                iter.next();
+                continue;
+            }
+
+            if self.is_expired(db, key)? {
+                iter.next();
+                continue;
+            }
+
+            if let Ok(key_str) = String::from_utf8(key.to_vec()) {
+                return Ok(Some(key_str));
+            }
+
+            iter.next();
+        }
+
+        Ok(None)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
+
+    fn create_temp_storage() -> (TempDir, AiDbStorageAdapter) {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = AiDbStorageAdapter::new(temp_dir.path(), 2).unwrap();
+        (temp_dir, storage)
+    }
 
     #[test]
     fn test_set_get() {
-        let storage = StorageAdapter::new();
+        let (_dir, storage) = create_temp_storage();
         storage
             .set("key1".to_string(), Bytes::from("value1"))
             .unwrap();
@@ -639,7 +869,7 @@ mod tests {
 
     #[test]
     fn test_delete() {
-        let storage = StorageAdapter::new();
+        let (_dir, storage) = create_temp_storage();
         storage
             .set("key1".to_string(), Bytes::from("value1"))
             .unwrap();
@@ -653,7 +883,7 @@ mod tests {
 
     #[test]
     fn test_exists() {
-        let storage = StorageAdapter::new();
+        let (_dir, storage) = create_temp_storage();
         storage
             .set("key1".to_string(), Bytes::from("value1"))
             .unwrap();
@@ -664,7 +894,7 @@ mod tests {
 
     #[test]
     fn test_mget_mset() {
-        let storage = StorageAdapter::new();
+        let (_dir, storage) = create_temp_storage();
 
         storage
             .mset(vec![
@@ -680,5 +910,27 @@ mod tests {
         assert_eq!(values[0], Some(Bytes::from("value1")));
         assert_eq!(values[1], Some(Bytes::from("value2")));
         assert_eq!(values[2], None);
+    }
+
+    #[test]
+    fn test_expiration() {
+        let (_dir, storage) = create_temp_storage();
+        storage
+            .set("key1".to_string(), Bytes::from("value1"))
+            .unwrap();
+
+        // Set expiration to 1 second from now
+        let expire_ms = 1000;
+        storage.set_expire_in_db(0, "key1", expire_ms).unwrap();
+
+        // Key should still exist
+        assert!(storage.exists("key1").unwrap());
+
+        // Wait for expiration
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+
+        // Key should be expired
+        assert!(!storage.exists("key1").unwrap());
+        assert_eq!(storage.get("key1").unwrap(), None);
     }
 }

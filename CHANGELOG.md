@@ -8,6 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **AiDb Storage Engine Integration**
+  - Full integration of AiDb v0.1.0 LSM-Tree storage engine
+  - New `AiDbStorageAdapter` with persistent storage support
+  - Support for WAL (Write-Ahead Log) and SSTable persistence
+  - Bloom Filter for faster key lookups
+  - Snappy compression support
+  - Multi-database support (16 databases)
+  - All Redis storage operations:
+    - CRUD operations (get, set, delete, exists)
+    - Expiration management (TTL, EXPIRE, PERSIST)
+    - Batch operations (MGET, MSET)
+    - Key operations (RENAME, COPY, MOVE)
+    - Database operations (FLUSHDB, FLUSHALL, DBSIZE)
+- Dual storage backend support
+  - Memory-based storage (original, fast, non-persistent)
+  - AiDb-based storage (persistent, durable, with LSM-Tree)
+- Example code for AiDb storage usage (`examples/aidb_storage_example.rs`)
+- Comprehensive tests for AiDb adapter (5 new test cases)
+- Updated documentation to reflect AiDb integration
 - GitHub Actions CI/CD workflows
   - Continuous Integration pipeline (`.github/workflows/ci.yml`)
   - Security audit workflow (`.github/workflows/security.yml`)
@@ -28,6 +47,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Cluster and high availability plan
 
 ### Changed
+- Renamed `aidb_adapter.rs` to `memory_adapter.rs` for clarity
+- Created new `aidb_adapter.rs` with real AiDb integration
+- Updated `storage/mod.rs` to export both storage adapters
+- Updated `Cargo.toml` to include AiDb dependency
+- Added `tempfile` as dev-dependency for testing
+- Updated README.md with storage engine information
+- Updated TODO.md to mark AiDb integration tasks as complete
 - Updated project goals to include RESP3 and DB/Key commands
 - Improved code formatting across all files
 - Updated Cargo edition from 2024 to 2021 (stable)
