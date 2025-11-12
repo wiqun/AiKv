@@ -17,8 +17,8 @@ pub enum AikvError {
     #[error("Invalid argument: {0}")]
     InvalidArgument(String),
 
-    #[error("Key not found: {0}")]
-    KeyNotFound(String),
+    #[error("Key not found")]
+    KeyNotFound,
 
     #[error("Wrong type: {0}")]
     WrongType(String),

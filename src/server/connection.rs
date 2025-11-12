@@ -2,8 +2,11 @@ use crate::command::CommandExecutor;
 use crate::error::Result;
 use crate::protocol::{RespParser, RespValue};
 use bytes::Bytes;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+
+static CLIENT_ID_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// Protocol version
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -18,15 +21,33 @@ pub struct Connection {
     parser: RespParser,
     executor: CommandExecutor,
     protocol_version: ProtocolVersion,
+    current_db: usize,
+    client_id: usize,
 }
 
 impl Connection {
     pub fn new(stream: TcpStream, executor: CommandExecutor) -> Self {
+        let client_id = CLIENT_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let peer_addr = stream
+            .peer_addr()
+            .map(|addr| addr.to_string())
+            .unwrap_or_else(|_| "unknown".to_string());
+
+        // Register client
+        if let Err(e) = executor
+            .server_commands()
+            .register_client(client_id, peer_addr)
+        {
+            eprintln!("Failed to register client: {}", e);
+        }
+
         Self {
             stream,
             parser: RespParser::new(8192),
             executor,
             protocol_version: ProtocolVersion::Resp2, // Default to RESP2
+            current_db: 0,                            // Default to database 0
+            client_id,
         }
     }
 
@@ -37,7 +58,14 @@ impl Connection {
             let n = self.stream.read_buf(self.parser.buffer_mut()).await?;
 
             if n == 0 {
-                // Connection closed
+                // Connection closed - unregister client
+                if let Err(e) = self
+                    .executor
+                    .server_commands()
+                    .unregister_client(self.client_id)
+                {
+                    eprintln!("Failed to unregister client: {}", e);
+                }
                 return Ok(());
             }
 
@@ -73,7 +101,10 @@ impl Connection {
                     })
                     .collect();
 
-                match self.executor.execute(&command, &args) {
+                match self
+                    .executor
+                    .execute(&command, &args, &mut self.current_db, self.client_id)
+                {
                     Ok(resp) => resp,
                     Err(e) => RespValue::error(format!("ERR {}", e)),
                 }

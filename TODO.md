@@ -84,45 +84,45 @@
 ## 优先级 3 - Redis 基础命令支持
 
 ### 3.1 Database (DB) 相关命令
-- [ ] `SELECT` - 切换数据库
-- [ ] `DBSIZE` - 获取当前数据库键数量
-- [ ] `FLUSHDB` - 清空当前数据库
-- [ ] `FLUSHALL` - 清空所有数据库
-- [ ] `SWAPDB` - 交换两个数据库
-- [ ] `MOVE` - 移动键到其他数据库
+- [x] `SELECT` - 切换数据库
+- [x] `DBSIZE` - 获取当前数据库键数量
+- [x] `FLUSHDB` - 清空当前数据库
+- [x] `FLUSHALL` - 清空所有数据库
+- [x] `SWAPDB` - 交换两个数据库
+- [x] `MOVE` - 移动键到其他数据库
 
 **实现要点:**
-- [ ] 修改 `StorageAdapter` 支持多数据库
-- [ ] 添加数据库索引管理
-- [ ] 更新连接状态跟踪当前数据库
+- [x] 修改 `StorageAdapter` 支持多数据库
+- [x] 添加数据库索引管理
+- [x] 更新连接状态跟踪当前数据库
 
 ### 3.2 Key 相关通用命令
-- [ ] `KEYS` - 查找匹配模式的键
-- [ ] `SCAN` - 迭代数据库中的键（游标）
-- [ ] `RANDOMKEY` - 返回随机键
-- [ ] `RENAME` - 重命名键
-- [ ] `RENAMENX` - 仅当新键名不存在时重命名
-- [ ] `TYPE` - 返回键的类型
+- [x] `KEYS` - 查找匹配模式的键
+- [x] `SCAN` - 迭代数据库中的键（游标）
+- [x] `RANDOMKEY` - 返回随机键
+- [x] `RENAME` - 重命名键
+- [x] `RENAMENX` - 仅当新键名不存在时重命名
+- [x] `TYPE` - 返回键的类型
 - [ ] `DUMP` - 序列化键的值
 - [ ] `RESTORE` - 反序列化并创建键
-- [ ] `COPY` - 复制键 (Redis 6.2+)
+- [x] `COPY` - 复制键 (Redis 6.2+)
 - [ ] `MIGRATE` - 原子性迁移键到另一个实例
 
 ### 3.3 Key 过期相关命令
-- [ ] `EXPIRE` - 设置键过期时间（秒）
-- [ ] `EXPIREAT` - 设置键过期时间戳（秒）
-- [ ] `PEXPIRE` - 设置键过期时间（毫秒）
-- [ ] `PEXPIREAT` - 设置键过期时间戳（毫秒）
-- [ ] `TTL` - 获取键剩余生存时间（秒）
-- [ ] `PTTL` - 获取键剩余生存时间（毫秒）
-- [ ] `PERSIST` - 移除键的过期时间
-- [ ] `EXPIRETIME` - 获取键过期时间戳（秒）(Redis 7.0+)
-- [ ] `PEXPIRETIME` - 获取键过期时间戳（毫秒）(Redis 7.0+)
+- [x] `EXPIRE` - 设置键过期时间（秒）
+- [x] `EXPIREAT` - 设置键过期时间戳（秒）
+- [x] `PEXPIRE` - 设置键过期时间（毫秒）
+- [x] `PEXPIREAT` - 设置键过期时间戳（毫秒）
+- [x] `TTL` - 获取键剩余生存时间（秒）
+- [x] `PTTL` - 获取键剩余生存时间（毫秒）
+- [x] `PERSIST` - 移除键的过期时间
+- [x] `EXPIRETIME` - 获取键过期时间戳（秒）(Redis 7.0+)
+- [x] `PEXPIRETIME` - 获取键过期时间戳（毫秒）(Redis 7.0+)
 
 **实现要点:**
-- [ ] 实现 TTL 管理器（后台定期清理过期键）
-- [ ] 修改 `StorageAdapter` 存储过期时间
-- [ ] 实现懒惰删除和主动删除策略
+- [x] 实现 TTL 管理器（后台定期清理过期键）
+- [x] 修改 `StorageAdapter` 存储过期时间
+- [x] 实现懒惰删除和主动删除策略
 - [ ] 添加过期键统计
 
 ### 3.4 Key 排序命令
@@ -130,19 +130,19 @@
 - [ ] `SORT_RO` - 只读排序 (Redis 7.0+)
 
 ### 3.5 Server 管理命令
-- [ ] `PING` - ✅ 已实现
-- [ ] `ECHO` - ✅ 已实现
-- [ ] `INFO` - 服务器信息
-- [ ] `CONFIG GET` - 获取配置参数
-- [ ] `CONFIG SET` - 设置配置参数
+- [x] `PING` - ✅ 已实现
+- [x] `ECHO` - ✅ 已实现
+- [x] `INFO` - 服务器信息
+- [x] `CONFIG GET` - 获取配置参数
+- [x] `CONFIG SET` - 设置配置参数
 - [ ] `CONFIG REWRITE` - 重写配置文件
 - [ ] `COMMAND` - 获取命令详细信息
 - [ ] `COMMAND COUNT` - 获取命令总数
 - [ ] `COMMAND INFO` - 获取特定命令信息
-- [ ] `TIME` - 返回服务器时间
-- [ ] `CLIENT LIST` - 列出客户端连接
-- [ ] `CLIENT SETNAME` - 设置客户端名称
-- [ ] `CLIENT GETNAME` - 获取客户端名称
+- [x] `TIME` - 返回服务器时间
+- [x] `CLIENT LIST` - 列出客户端连接
+- [x] `CLIENT SETNAME` - 设置客户端名称
+- [x] `CLIENT GETNAME` - 获取客户端名称
 - [ ] `SHUTDOWN` - 关闭服务器
 - [ ] `SAVE` - 同步保存数据到磁盘
 - [ ] `BGSAVE` - 后台保存数据到磁盘
@@ -404,5 +404,5 @@
 
 ---
 
-**最后更新**: 2025-11-11
+**最后更新**: 2025-11-12
 **负责人**: @Genuineh, @copilot

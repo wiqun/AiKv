@@ -27,7 +27,7 @@ AiKv 是一个基于 [AiDb v0.1.0](https://github.com/Genuineh/AiDb) 的高性�
 ### String 命令
 
 - `GET` - 获取键的值
-- `SET` - 设置键的值（支持 EX, NX, XX 选项）
+- `SET` - 设置键的值（支持 EX, PX, NX, XX 选项）
 - `DEL` - 删除一个或多个键
 - `EXISTS` - 检查键是否存在
 - `MGET` - 批量获取多个键
@@ -44,6 +44,47 @@ AiKv 是一个基于 [AiDb v0.1.0](https://github.com/Genuineh/AiDb) 的高性�
 - `JSON.STRLEN` - 获取 JSON 字符串长度
 - `JSON.ARRLEN` - 获取 JSON 数组长度
 - `JSON.OBJLEN` - 获取 JSON 对象键数量
+
+### Database 命令
+
+- `SELECT` - 切换数据库
+- `DBSIZE` - 获取当前数据库键数量
+- `FLUSHDB` - 清空当前数据库
+- `FLUSHALL` - 清空所有数据库
+- `SWAPDB` - 交换两个数据库
+- `MOVE` - 移动键到其他数据库
+
+### Key 管理命令
+
+- `KEYS` - 查找匹配模式的键
+- `SCAN` - 游标迭代数据库键（支持 MATCH 和 COUNT 选项）
+- `RANDOMKEY` - 返回随机键
+- `RENAME` - 重命名键
+- `RENAMENX` - 仅当新键名不存在时重命名
+- `TYPE` - 返回键的类型
+- `COPY` - 复制键 (Redis 6.2+)
+
+### Key 过期命令
+
+- `EXPIRE` - 设置键过期时间（秒）
+- `EXPIREAT` - 设置键过期时间戳（秒）
+- `PEXPIRE` - 设置键过期时间（毫秒）
+- `PEXPIREAT` - 设置键过期时间戳（毫秒）
+- `TTL` - 获取键剩余生存时间（秒）
+- `PTTL` - 获取键剩余生存时间（毫秒）
+- `PERSIST` - 移除键的过期时间
+- `EXPIRETIME` - 获取键过期时间戳（秒，Redis 7.0+）
+- `PEXPIRETIME` - 获取键过期时间戳（毫秒，Redis 7.0+）
+
+### Server 管理命令
+
+- `INFO` - 服务器信息
+- `CONFIG GET` - 获取配置参数
+- `CONFIG SET` - 设置配置参数
+- `TIME` - 返回服务器时间
+- `CLIENT LIST` - 列出客户端连接
+- `CLIENT SETNAME` - 设置客户端名称
+- `CLIENT GETNAME` - 获取客户端名称
 
 ## 🚀 快速开始
 

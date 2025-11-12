@@ -17,7 +17,7 @@ impl JsonCommands {
     }
 
     /// JSON.GET key \[path\]
-    pub fn json_get(&self, args: &[Bytes]) -> Result<RespValue> {
+    pub fn json_get(&self, args: &[Bytes], current_db: usize) -> Result<RespValue> {
         if args.is_empty() {
             return Err(AikvError::WrongArgCount("JSON.GET".to_string()));
         }
@@ -29,7 +29,7 @@ impl JsonCommands {
             "$".to_string()
         };
 
-        match self.storage.get(&key)? {
+        match self.storage.get_from_db(current_db, &key)? {
             Some(value) => {
                 let json: JsonValue = serde_json::from_slice(&value)?;
 
@@ -47,8 +47,8 @@ impl JsonCommands {
         }
     }
 
-    /// JSON.SET key path value [NX|XX]
-    pub fn json_set(&self, args: &[Bytes]) -> Result<RespValue> {
+    /// JSON.SET key path value \[NX|XX\]
+    pub fn json_set(&self, args: &[Bytes], current_db: usize) -> Result<RespValue> {
         if args.len() < 3 {
             return Err(AikvError::WrongArgCount("JSON.SET".to_string()));
         }
@@ -70,7 +70,7 @@ impl JsonCommands {
         }
 
         // Check conditions
-        let exists = self.storage.exists(&key)?;
+        let exists = self.storage.exists_in_db(current_db, &key)?;
         if nx && exists {
             return Ok(RespValue::null_bulk_string());
         }
@@ -86,7 +86,7 @@ impl JsonCommands {
             new_value
         } else {
             // Get existing value or create empty object
-            let mut json = match self.storage.get(&key)? {
+            let mut json = match self.storage.get_from_db(current_db, &key)? {
                 Some(existing) => serde_json::from_slice(&existing)?,
                 None => json!({}),
             };
@@ -97,13 +97,13 @@ impl JsonCommands {
         };
 
         let json_bytes = Bytes::from(serde_json::to_vec(&result_json)?);
-        self.storage.set(key, json_bytes)?;
+        self.storage.set_in_db(current_db, key, json_bytes)?;
 
         Ok(RespValue::ok())
     }
 
     /// JSON.DEL key \[path\]
-    pub fn json_del(&self, args: &[Bytes]) -> Result<RespValue> {
+    pub fn json_del(&self, args: &[Bytes], current_db: usize) -> Result<RespValue> {
         if args.is_empty() {
             return Err(AikvError::WrongArgCount("JSON.DEL".to_string()));
         }
@@ -117,20 +117,20 @@ impl JsonCommands {
 
         if path == "$" || path == "." {
             // Delete entire key
-            if self.storage.delete(&key)? {
+            if self.storage.delete_from_db(current_db, &key)? {
                 Ok(RespValue::integer(1))
             } else {
                 Ok(RespValue::integer(0))
             }
         } else {
             // Delete specific path
-            match self.storage.get(&key)? {
+            match self.storage.get_from_db(current_db, &key)? {
                 Some(value) => {
                     let mut json: JsonValue = serde_json::from_slice(&value)?;
 
                     if self.delete_json_path(&mut json, &path)? {
                         let json_bytes = Bytes::from(serde_json::to_vec(&json)?);
-                        self.storage.set(key, json_bytes)?;
+                        self.storage.set_in_db(current_db, key, json_bytes)?;
                         Ok(RespValue::integer(1))
                     } else {
                         Ok(RespValue::integer(0))
@@ -142,7 +142,7 @@ impl JsonCommands {
     }
 
     /// JSON.TYPE key \[path\]
-    pub fn json_type(&self, args: &[Bytes]) -> Result<RespValue> {
+    pub fn json_type(&self, args: &[Bytes], current_db: usize) -> Result<RespValue> {
         if args.is_empty() {
             return Err(AikvError::WrongArgCount("JSON.TYPE".to_string()));
         }
@@ -154,7 +154,7 @@ impl JsonCommands {
             "$".to_string()
         };
 
-        match self.storage.get(&key)? {
+        match self.storage.get_from_db(current_db, &key)? {
             Some(value) => {
                 let json: JsonValue = serde_json::from_slice(&value)?;
 
@@ -180,7 +180,7 @@ impl JsonCommands {
     }
 
     /// JSON.STRLEN key \[path\]
-    pub fn json_strlen(&self, args: &[Bytes]) -> Result<RespValue> {
+    pub fn json_strlen(&self, args: &[Bytes], current_db: usize) -> Result<RespValue> {
         if args.is_empty() {
             return Err(AikvError::WrongArgCount("JSON.STRLEN".to_string()));
         }
@@ -192,7 +192,7 @@ impl JsonCommands {
             "$".to_string()
         };
 
-        match self.storage.get(&key)? {
+        match self.storage.get_from_db(current_db, &key)? {
             Some(value) => {
                 let json: JsonValue = serde_json::from_slice(&value)?;
 
@@ -213,7 +213,7 @@ impl JsonCommands {
     }
 
     /// JSON.ARRLEN key \[path\]
-    pub fn json_arrlen(&self, args: &[Bytes]) -> Result<RespValue> {
+    pub fn json_arrlen(&self, args: &[Bytes], current_db: usize) -> Result<RespValue> {
         if args.is_empty() {
             return Err(AikvError::WrongArgCount("JSON.ARRLEN".to_string()));
         }
@@ -225,7 +225,7 @@ impl JsonCommands {
             "$".to_string()
         };
 
-        match self.storage.get(&key)? {
+        match self.storage.get_from_db(current_db, &key)? {
             Some(value) => {
                 let json: JsonValue = serde_json::from_slice(&value)?;
 
@@ -246,7 +246,7 @@ impl JsonCommands {
     }
 
     /// JSON.OBJLEN key \[path\]
-    pub fn json_objlen(&self, args: &[Bytes]) -> Result<RespValue> {
+    pub fn json_objlen(&self, args: &[Bytes], current_db: usize) -> Result<RespValue> {
         if args.is_empty() {
             return Err(AikvError::WrongArgCount("JSON.OBJLEN".to_string()));
         }
@@ -258,7 +258,7 @@ impl JsonCommands {
             "$".to_string()
         };
 
-        match self.storage.get(&key)? {
+        match self.storage.get_from_db(current_db, &key)? {
             Some(value) => {
                 let json: JsonValue = serde_json::from_slice(&value)?;
 
@@ -394,10 +394,13 @@ mod tests {
         let cmd = setup();
 
         let json_str = r#"{"name":"John","age":30}"#;
-        cmd.json_set(&[Bytes::from("user"), Bytes::from("$"), Bytes::from(json_str)])
-            .unwrap();
+        cmd.json_set(
+            &[Bytes::from("user"), Bytes::from("$"), Bytes::from(json_str)],
+            0,
+        )
+        .unwrap();
 
-        let result = cmd.json_get(&[Bytes::from("user")]).unwrap();
+        let result = cmd.json_get(&[Bytes::from("user")], 0).unwrap();
         if let RespValue::BulkString(Some(data)) = result {
             let json: JsonValue = serde_json::from_slice(&data).unwrap();
             assert_eq!(json["name"], "John");
@@ -411,20 +414,23 @@ mod tests {
     fn test_json_type() {
         let cmd = setup();
 
-        cmd.json_set(&[
-            Bytes::from("user"),
-            Bytes::from("$"),
-            Bytes::from(r#"{"name":"John","age":30,"active":true}"#),
-        ])
+        cmd.json_set(
+            &[
+                Bytes::from("user"),
+                Bytes::from("$"),
+                Bytes::from(r#"{"name":"John","age":30,"active":true}"#),
+            ],
+            0,
+        )
         .unwrap();
 
         let result = cmd
-            .json_type(&[Bytes::from("user"), Bytes::from("$.name")])
+            .json_type(&[Bytes::from("user"), Bytes::from("$.name")], 0)
             .unwrap();
         assert_eq!(result, RespValue::simple_string("string"));
 
         let result = cmd
-            .json_type(&[Bytes::from("user"), Bytes::from("$.age")])
+            .json_type(&[Bytes::from("user"), Bytes::from("$.age")], 0)
             .unwrap();
         assert_eq!(result, RespValue::simple_string("number"));
     }
@@ -433,14 +439,17 @@ mod tests {
     fn test_json_arrlen() {
         let cmd = setup();
 
-        cmd.json_set(&[
-            Bytes::from("arr"),
-            Bytes::from("$"),
-            Bytes::from("[1,2,3,4,5]"),
-        ])
+        cmd.json_set(
+            &[
+                Bytes::from("arr"),
+                Bytes::from("$"),
+                Bytes::from("[1,2,3,4,5]"),
+            ],
+            0,
+        )
         .unwrap();
 
-        let result = cmd.json_arrlen(&[Bytes::from("arr")]).unwrap();
+        let result = cmd.json_arrlen(&[Bytes::from("arr")], 0).unwrap();
         assert_eq!(result, RespValue::integer(5));
     }
 
@@ -448,14 +457,17 @@ mod tests {
     fn test_json_objlen() {
         let cmd = setup();
 
-        cmd.json_set(&[
-            Bytes::from("user"),
-            Bytes::from("$"),
-            Bytes::from(r#"{"name":"John","age":30}"#),
-        ])
+        cmd.json_set(
+            &[
+                Bytes::from("user"),
+                Bytes::from("$"),
+                Bytes::from(r#"{"name":"John","age":30}"#),
+            ],
+            0,
+        )
         .unwrap();
 
-        let result = cmd.json_objlen(&[Bytes::from("user")]).unwrap();
+        let result = cmd.json_objlen(&[Bytes::from("user")], 0).unwrap();
         assert_eq!(result, RespValue::integer(2));
     }
 }
