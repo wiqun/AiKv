@@ -171,53 +171,63 @@
 ## 优先级 5 - 更多 Redis 数据类型
 
 ### 5.1 List 列表类型
-- [ ] `LPUSH`, `RPUSH` - 左/右推入
-- [ ] `LPOP`, `RPOP` - 左/右弹出
-- [ ] `LLEN` - 列表长度
-- [ ] `LRANGE` - 获取范围元素
-- [ ] `LINDEX` - 获取指定索引元素
-- [ ] `LSET` - 设置指定索引元素
+- [x] `LPUSH`, `RPUSH` - 左/右推入
+- [x] `LPOP`, `RPOP` - 左/右弹出
+- [x] `LLEN` - 列表长度
+- [x] `LRANGE` - 获取范围元素
+- [x] `LINDEX` - 获取指定索引元素
+- [x] `LSET` - 设置指定索引元素
 - [ ] `LINSERT` - 插入元素
-- [ ] `LREM` - 删除元素
-- [ ] `LTRIM` - 修剪列表
+- [x] `LREM` - 删除元素
+- [x] `LTRIM` - 修剪列表
 - [ ] `BLPOP`, `BRPOP` - 阻塞弹出
 - [ ] `LMOVE`, `BLMOVE` - 移动元素
 
 ### 5.2 Set 集合类型
-- [ ] `SADD` - 添加成员
-- [ ] `SREM` - 删除成员
-- [ ] `SISMEMBER` - 检查成员存在
-- [ ] `SMEMBERS` - 获取所有成员
-- [ ] `SCARD` - 集合大小
-- [ ] `SPOP` - 随机弹出成员
-- [ ] `SRANDMEMBER` - 随机获取成员
+- [x] `SADD` - 添加成员
+- [x] `SREM` - 删除成员
+- [x] `SISMEMBER` - 检查成员存在
+- [x] `SMEMBERS` - 获取所有成员
+- [x] `SCARD` - 集合大小
+- [x] `SPOP` - 随机弹出成员
+- [x] `SRANDMEMBER` - 随机获取成员
 - [ ] `SMOVE` - 移动成员
-- [ ] `SUNION`, `SINTER`, `SDIFF` - 集合运算
-- [ ] `SUNIONSTORE`, `SINTERSTORE`, `SDIFFSTORE` - 集合运算并存储
+- [x] `SUNION`, `SINTER`, `SDIFF` - 集合运算
+- [x] `SUNIONSTORE`, `SINTERSTORE`, `SDIFFSTORE` - 集合运算并存储
 
 ### 5.3 Hash 哈希类型
-- [ ] `HSET`, `HSETNX` - 设置字段
-- [ ] `HGET` - 获取字段值
-- [ ] `HMSET`, `HMGET` - 批量操作
-- [ ] `HDEL` - 删除字段
-- [ ] `HEXISTS` - 检查字段存在
-- [ ] `HLEN` - 字段数量
-- [ ] `HKEYS`, `HVALS` - 获取所有键/值
-- [ ] `HGETALL` - 获取所有字段和值
-- [ ] `HINCRBY`, `HINCRBYFLOAT` - 增量操作
+- [x] `HSET`, `HSETNX` - 设置字段
+- [x] `HGET` - 获取字段值
+- [x] `HMGET` - 批量操作 (HMSET is deprecated, use HSET)
+- [x] `HDEL` - 删除字段
+- [x] `HEXISTS` - 检查字段存在
+- [x] `HLEN` - 字段数量
+- [x] `HKEYS`, `HVALS` - 获取所有键/值
+- [x] `HGETALL` - 获取所有字段和值
+- [x] `HINCRBY`, `HINCRBYFLOAT` - 增量操作
 - [ ] `HSCAN` - 迭代字段
 
 ### 5.4 Sorted Set 有序集合类型
-- [ ] `ZADD` - 添加成员
-- [ ] `ZREM` - 删除成员
-- [ ] `ZSCORE` - 获取成员分数
-- [ ] `ZRANK`, `ZREVRANK` - 获取排名
-- [ ] `ZRANGE`, `ZREVRANGE` - 范围查询
-- [ ] `ZRANGEBYSCORE`, `ZREVRANGEBYSCORE` - 按分数范围
-- [ ] `ZCARD` - 集合大小
-- [ ] `ZCOUNT` - 统计范围内成员数
-- [ ] `ZINCRBY` - 增加分数
+- [x] `ZADD` - 添加成员
+- [x] `ZREM` - 删除成员
+- [x] `ZSCORE` - 获取成员分数
+- [x] `ZRANK`, `ZREVRANK` - 获取排名
+- [x] `ZRANGE`, `ZREVRANGE` - 范围查询
+- [x] `ZRANGEBYSCORE`, `ZREVRANGEBYSCORE` - 按分数范围
+- [x] `ZCARD` - 集合大小
+- [x] `ZCOUNT` - 统计范围内成员数
+- [x] `ZINCRBY` - 增加分数
 - [ ] `ZUNION`, `ZINTER`, `ZDIFF` - 集合运算
+
+**实现要点:**
+- [x] 扩展 `StoredValue` 支持多种数据类型 (String, List, Hash, Set, ZSet)
+- [x] 实现所有主要的 List 命令 (10个)
+- [x] 实现所有主要的 Hash 命令 (12个)
+- [x] 实现所有主要的 Set 命令 (13个)
+- [x] 实现所有主要的 Sorted Set 命令 (12个)
+- [x] 添加数据类型检查和错误处理
+- [x] 通过 clippy 和格式化检查
+- [x] 所有测试通过
 
 ---
 
