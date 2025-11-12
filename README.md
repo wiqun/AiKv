@@ -14,7 +14,7 @@ AiKv 是一个基于 [AiDb v0.1.0](https://github.com/Genuineh/AiDb) 的高性�
 - 🔧 **易于部署**: 单一可执行文件，无需复杂配置
 - 🔒 **类型安全**: 使用 Rust 编写，保证内存安全和并发安全
 - 📊 **JSON 支持**: 原生支持 JSON 数据类型操作
-- 🔄 **RESP3 支持**: 完整支持 RESP3 协议的所有新类型 (Null, Boolean, Double, Map, Set, Push 等)
+- 🔄 **RESP3 支持**: 完整支持 RESP3 协议的所有新类型 (Null, Boolean, Double, Map, Set, Push, Attributes, Streaming 等)
 
 ## 🎯 支持的命令
 

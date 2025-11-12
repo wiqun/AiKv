@@ -122,6 +122,8 @@ Redis 使用 RESP (REdis Serialization Protocol) 协议进行客户端-服务器
 - **Map**: `%2\r\n+first\r\n:1\r\n+second\r\n:2\r\n`
 - **Set**: `~2\r\n+orange\r\n+apple\r\n`
 - **Push**: `>3\r\n+pubsub\r\n+message\r\n+Hello\r\n`
+- **Attribute**: `|1\r\n+ttl\r\n:3600\r\n+OK\r\n` (附加元数据)
+- **Streamed String**: `$?\r\n;4\r\nHell\r\n;2\r\no!\r\n;0\r\n` (分块传输)
 
 #### 任务清单
 - [x] 实现 RESP 数据类型定义 (RESP2)
@@ -140,6 +142,8 @@ Redis 使用 RESP (REdis Serialization Protocol) 协议进行客户端-服务器
   - 添加 RESP3 单元测试
   - 实现 HELLO 命令用于协议版本切换
   - 向后兼容 RESP2
+  - 实现 Attributes 支持 (元数据附加)
+  - 实现 Streamed String 支持 (分块传输)
 
 #### 示例代码结构
 ```rust

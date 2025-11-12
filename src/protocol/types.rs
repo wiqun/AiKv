@@ -47,6 +47,17 @@ pub enum RespValue {
 
     /// Push: >4\r\n+pubsub\r\n+message\r\n+channel\r\n+message\r\n
     Push(Vec<RespValue>),
+
+    /// Attribute: |1\r\n+key-popularity\r\n%2\r\n$1\r\na\r\n,0.1923\r\n$1\r\nb\r\n,0.0012\r\n
+    /// Attributes are metadata attached to responses (RESP3)
+    Attribute {
+        attributes: Vec<(RespValue, RespValue)>,
+        data: Box<RespValue>,
+    },
+
+    /// Streamed String: $?\r\n;4\r\nHell\r\n;5\r\no wor\r\n;1\r\nd\r\n;0\r\n
+    /// For streaming large bulk strings in chunks (RESP3)
+    StreamedString(Vec<Bytes>),
 }
 
 impl RespValue {
@@ -140,6 +151,19 @@ impl RespValue {
         RespValue::Push(items)
     }
 
+    /// Create an attribute response (RESP3)
+    pub fn attribute(attributes: Vec<(RespValue, RespValue)>, data: RespValue) -> Self {
+        RespValue::Attribute {
+            attributes,
+            data: Box::new(data),
+        }
+    }
+
+    /// Create a streamed string response (RESP3)
+    pub fn streamed_string(chunks: Vec<Bytes>) -> Self {
+        RespValue::StreamedString(chunks)
+    }
+
     /// Serialize to RESP format bytes
     /// Supports both RESP2 and RESP3 formats
     pub fn serialize(&self) -> Bytes {
@@ -218,6 +242,32 @@ impl RespValue {
                 for item in items {
                     result.push_str(&String::from_utf8_lossy(&item.serialize()));
                 }
+                Bytes::from(result)
+            }
+            RespValue::Attribute {
+                attributes,
+                data,
+            } => {
+                // Serialize attributes map followed by the actual data
+                let mut result = format!("|{}\r\n", attributes.len());
+                for (key, value) in attributes {
+                    result.push_str(&String::from_utf8_lossy(&key.serialize()));
+                    result.push_str(&String::from_utf8_lossy(&value.serialize()));
+                }
+                // Append the actual data
+                result.push_str(&String::from_utf8_lossy(&data.serialize()));
+                Bytes::from(result)
+            }
+            RespValue::StreamedString(chunks) => {
+                // Streamed string format: $?\r\n;len\r\ndata\r\n...;0\r\n
+                let mut result = String::from("$?\r\n");
+                for chunk in chunks {
+                    result.push_str(&format!(";{}\r\n", chunk.len()));
+                    result.push_str(&String::from_utf8_lossy(chunk));
+                    result.push_str("\r\n");
+                }
+                // Terminator
+                result.push_str(";0\r\n");
                 Bytes::from(result)
             }
         }
@@ -369,6 +419,52 @@ mod tests {
         assert_eq!(
             val.serialize(),
             Bytes::from(">4\r\n+pubsub\r\n+message\r\n+channel\r\n$5\r\nHello\r\n")
+        );
+    }
+
+    #[test]
+    fn test_attribute() {
+        let val = RespValue::attribute(
+            vec![(RespValue::simple_string("ttl"), RespValue::integer(3600))],
+            RespValue::simple_string("OK"),
+        );
+        assert_eq!(
+            val.serialize(),
+            Bytes::from("|1\r\n+ttl\r\n:3600\r\n+OK\r\n")
+        );
+    }
+
+    #[test]
+    fn test_streamed_string() {
+        let val = RespValue::streamed_string(vec![
+            Bytes::from("Hell"),
+            Bytes::from("o wor"),
+            Bytes::from("ld"),
+        ]);
+        assert_eq!(
+            val.serialize(),
+            Bytes::from("$?\r\n;4\r\nHell\r\n;5\r\no wor\r\n;2\r\nld\r\n;0\r\n")
+        );
+    }
+
+    #[test]
+    fn test_attribute_with_complex_data() {
+        let val = RespValue::attribute(
+            vec![
+                (
+                    RespValue::simple_string("server"),
+                    RespValue::simple_string("aikv"),
+                ),
+                (RespValue::simple_string("version"), RespValue::double(1.0)),
+            ],
+            RespValue::array(vec![
+                RespValue::bulk_string("value1"),
+                RespValue::bulk_string("value2"),
+            ]),
+        );
+        assert_eq!(
+            val.serialize(),
+            Bytes::from("|2\r\n+server\r\n+aikv\r\n+version\r\n,1\r\n*2\r\n$6\r\nvalue1\r\n$6\r\nvalue2\r\n")
         );
     }
 }

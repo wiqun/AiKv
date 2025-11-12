@@ -9,7 +9,12 @@
 AiKv 支持两种 Redis 序列化协议版本：
 
 - **RESP2** (默认): 传统的 Redis 协议，兼容所有 Redis 客户端
-- **RESP3**: 新版协议，支持更多数据类型 (Null, Boolean, Double, Map, Set, Push 等)
+- **RESP3**: 新版协议，支持更多数据类型 (Null, Boolean, Double, Map, Set, Push, Attributes, Streaming 等)
+
+### RESP3 高级特性
+
+- **Attributes**: 允许服务器在响应中附加元数据，如 TTL、流行度统计等
+- **Streaming**: 支持大型字符串的分块传输，减少内存使用
 
 ### 协议切换
 

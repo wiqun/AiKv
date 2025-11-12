@@ -68,6 +68,8 @@ impl RespParser {
             b'%' => self.parse_map(cursor),
             b'~' => self.parse_set(cursor),
             b'>' => self.parse_push(cursor),
+            b'|' => self.parse_attribute(cursor),
+            b';' => self.parse_streamed_chunk(cursor),
             _ => Err(AikvError::Protocol(format!(
                 "Invalid RESP type marker: {}",
                 byte as char
@@ -95,6 +97,12 @@ impl RespParser {
 
     fn parse_bulk_string(&self, cursor: &mut std::io::Cursor<&[u8]>) -> Result<RespValue> {
         let line = self.read_line(cursor)?;
+
+        // Check for streamed string marker
+        if line == "?" {
+            return self.parse_streamed_string_body(cursor);
+        }
+
         let len = line
             .parse::<i64>()
             .map_err(|_| AikvError::Protocol(format!("Invalid bulk string length: {}", line)))?;
@@ -323,6 +331,87 @@ impl RespParser {
 
         Ok(RespValue::Push(items))
     }
+
+    fn parse_attribute(&self, cursor: &mut std::io::Cursor<&[u8]>) -> Result<RespValue> {
+        let line = self.read_line(cursor)?;
+        let len = line
+            .parse::<i64>()
+            .map_err(|_| AikvError::Protocol(format!("Invalid attribute length: {}", line)))?;
+
+        if len < 0 {
+            return Err(AikvError::Protocol(format!(
+                "Invalid attribute length: {}",
+                len
+            )));
+        }
+
+        let mut attributes = Vec::with_capacity(len as usize);
+        for _ in 0..len {
+            let key = self.parse_value(cursor)?;
+            let value = self.parse_value(cursor)?;
+            attributes.push((key, value));
+        }
+
+        // After attributes, parse the actual data
+        let data = self.parse_value(cursor)?;
+
+        Ok(RespValue::Attribute {
+            attributes,
+            data: Box::new(data),
+        })
+    }
+
+    fn parse_streamed_string_body(&self, cursor: &mut std::io::Cursor<&[u8]>) -> Result<RespValue> {
+        let mut chunks = Vec::new();
+
+        loop {
+            // Expect ';' marker for each chunk
+            if cursor.position() >= cursor.get_ref().len() as u64 {
+                return Err(AikvError::Protocol(
+                    "Incomplete streamed string".to_string(),
+                ));
+            }
+
+            let byte = cursor.get_ref()[cursor.position() as usize];
+            if byte != b';' {
+                return Err(AikvError::Protocol(format!(
+                    "Expected ';' in streamed string, got {}",
+                    byte as char
+                )));
+            }
+            cursor.set_position(cursor.position() + 1);
+
+            let line = self.read_line(cursor)?;
+            let len = line.parse::<usize>().map_err(|_| {
+                AikvError::Protocol(format!("Invalid streamed chunk length: {}", line))
+            })?;
+
+            // Length 0 means end of stream
+            if len == 0 {
+                break;
+            }
+
+            let pos = cursor.position() as usize;
+            let data = cursor.get_ref();
+
+            if pos + len + 2 > data.len() {
+                return Err(AikvError::Protocol("Incomplete streamed chunk".to_string()));
+            }
+
+            let chunk = Bytes::copy_from_slice(&data[pos..pos + len]);
+            cursor.set_position((pos + len + 2) as u64); // Skip \r\n
+            chunks.push(chunk);
+        }
+
+        Ok(RespValue::StreamedString(chunks))
+    }
+
+    fn parse_streamed_chunk(&self, _cursor: &mut std::io::Cursor<&[u8]>) -> Result<RespValue> {
+        // This should not be called directly as ';' is handled within streamed string parsing
+        Err(AikvError::Protocol(
+            "Unexpected ';' marker outside streamed string context".to_string(),
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -537,6 +626,67 @@ mod tests {
                 RespValue::SimpleString("message".to_string()),
                 RespValue::SimpleString("Hello".to_string()),
             ]))
+        );
+    }
+
+    #[test]
+    fn test_parse_attribute() {
+        let mut parser = RespParser::new(256);
+        parser.feed(b"|1\r\n+ttl\r\n:3600\r\n+OK\r\n");
+
+        let result = parser.parse().unwrap();
+        assert_eq!(
+            result,
+            Some(RespValue::Attribute {
+                attributes: vec![(
+                    RespValue::SimpleString("ttl".to_string()),
+                    RespValue::Integer(3600)
+                )],
+                data: Box::new(RespValue::SimpleString("OK".to_string()))
+            })
+        );
+    }
+
+    #[test]
+    fn test_parse_streamed_string() {
+        let mut parser = RespParser::new(256);
+        parser.feed(b"$?\r\n;4\r\nHell\r\n;2\r\no!\r\n;0\r\n");
+
+        let result = parser.parse().unwrap();
+        assert_eq!(
+            result,
+            Some(RespValue::StreamedString(vec![
+                Bytes::from("Hell"),
+                Bytes::from("o!"),
+            ]))
+        );
+    }
+
+    #[test]
+    fn test_parse_attribute_with_array() {
+        let mut parser = RespParser::new(512);
+        parser
+            .feed(b"|2\r\n+key1\r\n+val1\r\n+key2\r\n:42\r\n*2\r\n$5\r\nhello\r\n$5\r\nworld\r\n");
+
+        let result = parser.parse().unwrap();
+        assert_eq!(
+            result,
+            Some(RespValue::Attribute {
+                attributes: vec![
+                    (
+                        RespValue::SimpleString("key1".to_string()),
+                        RespValue::SimpleString("val1".to_string())
+                    ),
+                    (
+                        RespValue::SimpleString("key2".to_string()),
+                        RespValue::Integer(42)
+                    ),
+                ],
+                data: Box::new(RespValue::Array(Some(vec![
+                    RespValue::BulkString(Some(Bytes::from("hello"))),
+                    RespValue::BulkString(Some(Bytes::from("world"))),
+                ])))
+            })
         );
     }
 }
