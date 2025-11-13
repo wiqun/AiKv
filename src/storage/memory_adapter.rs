@@ -1,5 +1,6 @@
 use crate::error::{AikvError, Result};
 use bytes::Bytes;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -20,6 +21,75 @@ pub struct StoredValue {
     pub(crate) value: ValueType,
     /// Expiration time in milliseconds since UNIX epoch
     pub(crate) expires_at: Option<u64>,
+}
+
+// Serializable versions for storage (optimized for bincode)
+#[derive(Serialize, Deserialize)]
+enum SerializableValueType {
+    String(Vec<u8>),
+    List(Vec<Vec<u8>>),
+    Hash(Vec<(String, Vec<u8>)>),
+    Set(Vec<Vec<u8>>),
+    ZSet(Vec<(Vec<u8>, f64)>),
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct SerializableStoredValue {
+    value: SerializableValueType,
+    expires_at: Option<u64>,
+}
+
+impl StoredValue {
+    /// Convert to serializable format for storage
+    pub fn to_serializable(&self) -> SerializableStoredValue {
+        let value = match &self.value {
+            ValueType::String(bytes) => SerializableValueType::String(bytes.to_vec()),
+            ValueType::List(list) => {
+                SerializableValueType::List(list.iter().map(|b| b.to_vec()).collect())
+            }
+            ValueType::Hash(hash) => SerializableValueType::Hash(
+                hash.iter()
+                    .map(|(k, v)| (k.clone(), v.to_vec()))
+                    .collect(),
+            ),
+            ValueType::Set(set) => {
+                SerializableValueType::Set(set.iter().cloned().collect())
+            }
+            ValueType::ZSet(zset) => {
+                SerializableValueType::ZSet(zset.iter().map(|(k, v)| (k.clone(), *v)).collect())
+            }
+        };
+        SerializableStoredValue {
+            value,
+            expires_at: self.expires_at,
+        }
+    }
+
+    /// Create from serializable format
+    pub fn from_serializable(serializable: SerializableStoredValue) -> Self {
+        let value = match serializable.value {
+            SerializableValueType::String(vec) => ValueType::String(Bytes::from(vec)),
+            SerializableValueType::List(vec_list) => {
+                ValueType::List(vec_list.into_iter().map(Bytes::from).collect())
+            }
+            SerializableValueType::Hash(vec_hash) => ValueType::Hash(
+                vec_hash
+                    .into_iter()
+                    .map(|(k, v)| (k, Bytes::from(v)))
+                    .collect(),
+            ),
+            SerializableValueType::Set(vec_set) => {
+                ValueType::Set(vec_set.into_iter().collect())
+            }
+            SerializableValueType::ZSet(vec_zset) => {
+                ValueType::ZSet(vec_zset.into_iter().collect())
+            }
+        };
+        Self {
+            value,
+            expires_at: serializable.expires_at,
+        }
+    }
 }
 
 impl StoredValue {
