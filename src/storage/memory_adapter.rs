@@ -863,10 +863,18 @@ mod tests {
 
         // Migrated: Use set_value instead of mset
         storage
-            .set_value(0, "key1".to_string(), StoredValue::new_string(Bytes::from("value1")))
+            .set_value(
+                0,
+                "key1".to_string(),
+                StoredValue::new_string(Bytes::from("value1")),
+            )
             .unwrap();
         storage
-            .set_value(0, "key2".to_string(), StoredValue::new_string(Bytes::from("value2")))
+            .set_value(
+                0,
+                "key2".to_string(),
+                StoredValue::new_string(Bytes::from("value2")),
+            )
             .unwrap();
 
         // Migrated: Use get_value instead of mget

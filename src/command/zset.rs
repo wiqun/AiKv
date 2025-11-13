@@ -75,7 +75,7 @@ impl ZSetCommands {
 
         if let Some(stored) = self.storage.get_value(db_index, &key)? {
             let mut zset = stored.as_zset()?.clone();
-            
+
             for member in &members {
                 if zset.remove(&member.to_vec()).is_some() {
                     count += 1;
@@ -132,7 +132,7 @@ impl ZSetCommands {
         let rank = if let Some(stored) = self.storage.get_value(db_index, &key)? {
             let zset = stored.as_zset()?;
             let member_vec = member.to_vec();
-            
+
             if !zset.contains_key(&member_vec) {
                 None
             } else {
@@ -166,7 +166,7 @@ impl ZSetCommands {
         let rank = if let Some(stored) = self.storage.get_value(db_index, &key)? {
             let zset = stored.as_zset()?;
             let member_vec = member.to_vec();
-            
+
             if !zset.contains_key(&member_vec) {
                 None
             } else {
@@ -404,7 +404,7 @@ impl ZSetCommands {
         }
 
         let key = String::from_utf8_lossy(&args[0]).to_string();
-        
+
         // Migrated: Logic moved from storage layer to command layer
         let count = if let Some(stored) = self.storage.get_value(db_index, &key)? {
             let zset = stored.as_zset()?;

@@ -164,11 +164,7 @@ fn bench_batch_sizes(c: &mut Criterion) {
                 b.iter(|| {
                     for (key, value) in black_box(pairs.clone()) {
                         storage
-                            .set_value(
-                                0,
-                                key,
-                                aikv::storage::StoredValue::new_string(value),
-                            )
+                            .set_value(0, key, aikv::storage::StoredValue::new_string(value))
                             .unwrap();
                     }
                 });

@@ -67,7 +67,7 @@ impl SetCommands {
 
         if let Some(stored) = self.storage.get_value(db_index, &key)? {
             let mut set = stored.as_set()?.clone();
-            
+
             for member in &members {
                 if set.remove(&member.to_vec()) {
                     count += 1;
@@ -114,7 +114,7 @@ impl SetCommands {
         }
 
         let key = String::from_utf8_lossy(&args[0]).to_string();
-        
+
         let members = if let Some(stored) = self.storage.get_value(db_index, &key)? {
             let set = stored.as_set()?;
             set.iter().map(|v| Bytes::from(v.clone())).collect()
@@ -135,7 +135,7 @@ impl SetCommands {
         }
 
         let key = String::from_utf8_lossy(&args[0]).to_string();
-        
+
         let count = if let Some(stored) = self.storage.get_value(db_index, &key)? {
             let set = stored.as_set()?;
             set.len()
@@ -167,7 +167,7 @@ impl SetCommands {
 
         if let Some(stored) = self.storage.get_value(db_index, &key)? {
             let mut set = stored.as_set()?.clone();
-            
+
             let to_remove: Vec<Vec<u8>> = set.iter().take(count).cloned().collect();
             for member in to_remove {
                 set.remove(&member);
@@ -354,7 +354,8 @@ impl SetCommands {
         }
 
         let count = result.len();
-        self.storage.set_value(db_index, dest, StoredValue::new_set(result))?;
+        self.storage
+            .set_value(db_index, dest, StoredValue::new_set(result))?;
 
         Ok(RespValue::Integer(count as i64))
     }
@@ -391,7 +392,8 @@ impl SetCommands {
 
         let final_set = result.unwrap_or_default();
         let count = final_set.len();
-        self.storage.set_value(db_index, dest, StoredValue::new_set(final_set))?;
+        self.storage
+            .set_value(db_index, dest, StoredValue::new_set(final_set))?;
 
         Ok(RespValue::Integer(count as i64))
     }
@@ -426,7 +428,8 @@ impl SetCommands {
         }
 
         let count = result.len();
-        self.storage.set_value(db_index, dest, StoredValue::new_set(result))?;
+        self.storage
+            .set_value(db_index, dest, StoredValue::new_set(result))?;
 
         Ok(RespValue::Integer(count as i64))
     }
