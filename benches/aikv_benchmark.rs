@@ -165,7 +165,13 @@ fn bench_multi_key_operations(c: &mut Criterion) {
                 .collect();
             let storage = StorageAdapter::new();
 
-            b.iter(|| storage.mset(black_box(pairs.clone())).unwrap());
+            b.iter(|| {
+                for (key, value) in black_box(pairs.clone()) {
+                    storage
+                        .set_value(0, key, aikv::storage::StoredValue::new_string(value))
+                        .unwrap();
+                }
+            });
         });
 
         // Benchmark MGET with different key counts
@@ -175,9 +181,17 @@ fn bench_multi_key_operations(c: &mut Criterion) {
                 .map(|i| (format!("key_{}", i), Bytes::from(format!("value_{}", i))))
                 .collect();
             let keys: Vec<String> = (0..size).map(|i| format!("key_{}", i)).collect();
-            storage.mset(pairs).unwrap();
+            for (key, value) in pairs {
+                storage
+                    .set_value(0, key, aikv::storage::StoredValue::new_string(value))
+                    .unwrap();
+            }
 
-            b.iter(|| storage.mget(black_box(&keys)).unwrap());
+            b.iter(|| {
+                for key in black_box(&keys) {
+                    storage.get_value(0, key).unwrap();
+                }
+            });
         });
     }
 
