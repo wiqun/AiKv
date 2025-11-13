@@ -1,7 +1,8 @@
 use crate::error::{AikvError, Result};
 use crate::protocol::RespValue;
-use crate::storage::StorageAdapter;
+use crate::storage::{StorageAdapter, StoredValue};
 use bytes::Bytes;
+use std::collections::HashSet;
 
 /// Set command handler
 pub struct SetCommands {
@@ -25,8 +26,30 @@ impl SetCommands {
         let key = String::from_utf8_lossy(&args[0]).to_string();
         let members: Vec<Bytes> = args[1..].to_vec();
 
-        let count = self.storage.set_add_in_db(db_index, &key, members)?;
-        Ok(RespValue::Integer(count as i64))
+        // Migrated: Logic moved from storage layer to command layer
+        let set = if let Some(stored) = self.storage.get_value(db_index, &key)? {
+            let mut set = stored.as_set()?.clone();
+            let mut count = 0;
+            for member in &members {
+                if set.insert(member.to_vec()) {
+                    count += 1;
+                }
+            }
+            (count, set)
+        } else {
+            let mut set = HashSet::new();
+            let mut count = 0;
+            for member in &members {
+                if set.insert(member.to_vec()) {
+                    count += 1;
+                }
+            }
+            (count, set)
+        };
+
+        self.storage
+            .set_value(db_index, key, StoredValue::new_set(set.1))?;
+        Ok(RespValue::Integer(set.0 as i64))
     }
 
     /// SREM key member [member ...]
@@ -39,7 +62,27 @@ impl SetCommands {
         let key = String::from_utf8_lossy(&args[0]).to_string();
         let members: Vec<Bytes> = args[1..].to_vec();
 
-        let count = self.storage.set_rem_in_db(db_index, &key, members)?;
+        // Migrated: Logic moved from storage layer to command layer
+        let mut count = 0;
+
+        if let Some(stored) = self.storage.get_value(db_index, &key)? {
+            let mut set = stored.as_set()?.clone();
+            
+            for member in &members {
+                if set.remove(&member.to_vec()) {
+                    count += 1;
+                }
+            }
+
+            // Update or delete the set
+            if set.is_empty() {
+                self.storage.delete_from_db(db_index, &key)?;
+            } else {
+                self.storage
+                    .set_value(db_index, key, StoredValue::new_set(set))?;
+            }
+        }
+
         Ok(RespValue::Integer(count as i64))
     }
 
@@ -53,7 +96,13 @@ impl SetCommands {
         let key = String::from_utf8_lossy(&args[0]).to_string();
         let member = args[1].clone();
 
-        let is_member = self.storage.set_ismember_in_db(db_index, &key, &member)?;
+        let is_member = if let Some(stored) = self.storage.get_value(db_index, &key)? {
+            let set = stored.as_set()?;
+            set.contains(&member.to_vec())
+        } else {
+            false
+        };
+
         Ok(RespValue::Integer(if is_member { 1 } else { 0 }))
     }
 
@@ -65,7 +114,14 @@ impl SetCommands {
         }
 
         let key = String::from_utf8_lossy(&args[0]).to_string();
-        let members = self.storage.set_members_in_db(db_index, &key)?;
+        
+        let members = if let Some(stored) = self.storage.get_value(db_index, &key)? {
+            let set = stored.as_set()?;
+            set.iter().map(|v| Bytes::from(v.clone())).collect()
+        } else {
+            Vec::new()
+        };
+
         Ok(RespValue::Array(Some(
             members.into_iter().map(RespValue::bulk_string).collect(),
         )))
@@ -79,7 +135,14 @@ impl SetCommands {
         }
 
         let key = String::from_utf8_lossy(&args[0]).to_string();
-        let count = self.storage.set_card_in_db(db_index, &key)?;
+        
+        let count = if let Some(stored) = self.storage.get_value(db_index, &key)? {
+            let set = stored.as_set()?;
+            set.len()
+        } else {
+            0
+        };
+
         Ok(RespValue::Integer(count as i64))
     }
 
@@ -99,7 +162,26 @@ impl SetCommands {
             1
         };
 
-        let members = self.storage.set_pop_in_db(db_index, &key, count)?;
+        // Migrated: Logic moved from storage layer to command layer
+        let mut members = Vec::new();
+
+        if let Some(stored) = self.storage.get_value(db_index, &key)? {
+            let mut set = stored.as_set()?.clone();
+            
+            let to_remove: Vec<Vec<u8>> = set.iter().take(count).cloned().collect();
+            for member in to_remove {
+                set.remove(&member);
+                members.push(Bytes::from(member));
+            }
+
+            // Update or delete the set
+            if set.is_empty() {
+                self.storage.delete_from_db(db_index, &key)?;
+            } else {
+                self.storage
+                    .set_value(db_index, key, StoredValue::new_set(set))?;
+            }
+        }
 
         if members.is_empty() {
             Ok(RespValue::Null)
@@ -128,7 +210,15 @@ impl SetCommands {
             1
         };
 
-        let members = self.storage.set_randmember_in_db(db_index, &key, count)?;
+        let members = if let Some(stored) = self.storage.get_value(db_index, &key)? {
+            let set = stored.as_set()?;
+            set.iter()
+                .take(count.unsigned_abs() as usize)
+                .map(|v| Bytes::from(v.clone()))
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         if members.is_empty() && args.len() == 1 {
             Ok(RespValue::Null)
@@ -153,9 +243,19 @@ impl SetCommands {
             .map(|b| String::from_utf8_lossy(b).to_string())
             .collect();
 
-        let members = self.storage.set_union_in_db(db_index, &keys)?;
+        let mut result = HashSet::new();
+        for key in keys {
+            if let Some(stored) = self.storage.get_value(db_index, &key)? {
+                let set = stored.as_set()?;
+                result.extend(set.iter().cloned());
+            }
+        }
+
         Ok(RespValue::Array(Some(
-            members.into_iter().map(RespValue::bulk_string).collect(),
+            result
+                .into_iter()
+                .map(|v| RespValue::bulk_string(Bytes::from(v)))
+                .collect(),
         )))
     }
 
@@ -171,9 +271,28 @@ impl SetCommands {
             .map(|b| String::from_utf8_lossy(b).to_string())
             .collect();
 
-        let members = self.storage.set_inter_in_db(db_index, &keys)?;
+        let mut result: Option<HashSet<Vec<u8>>> = None;
+
+        for key in keys {
+            if let Some(stored) = self.storage.get_value(db_index, &key)? {
+                let set = stored.as_set()?;
+                if let Some(res) = &mut result {
+                    *res = res.intersection(set).cloned().collect();
+                } else {
+                    result = Some(set.clone());
+                }
+            } else {
+                // If any key doesn't exist, intersection is empty
+                return Ok(RespValue::Array(Some(Vec::new())));
+            }
+        }
+
         Ok(RespValue::Array(Some(
-            members.into_iter().map(RespValue::bulk_string).collect(),
+            result
+                .unwrap_or_default()
+                .into_iter()
+                .map(|v| RespValue::bulk_string(Bytes::from(v)))
+                .collect(),
         )))
     }
 
@@ -189,9 +308,27 @@ impl SetCommands {
             .map(|b| String::from_utf8_lossy(b).to_string())
             .collect();
 
-        let members = self.storage.set_diff_in_db(db_index, &keys)?;
+        let mut result: HashSet<Vec<u8>> = HashSet::new();
+
+        // Start with the first set
+        if let Some(stored) = self.storage.get_value(db_index, &keys[0])? {
+            let set = stored.as_set()?;
+            result = set.clone();
+        }
+
+        // Subtract all other sets
+        for key in &keys[1..] {
+            if let Some(stored) = self.storage.get_value(db_index, key)? {
+                let set = stored.as_set()?;
+                result = result.difference(set).cloned().collect();
+            }
+        }
+
         Ok(RespValue::Array(Some(
-            members.into_iter().map(RespValue::bulk_string).collect(),
+            result
+                .into_iter()
+                .map(|v| RespValue::bulk_string(Bytes::from(v)))
+                .collect(),
         )))
     }
 
@@ -208,7 +345,17 @@ impl SetCommands {
             .map(|b| String::from_utf8_lossy(b).to_string())
             .collect();
 
-        let count = self.storage.set_unionstore_in_db(db_index, &dest, &keys)?;
+        let mut result = HashSet::new();
+        for key in keys {
+            if let Some(stored) = self.storage.get_value(db_index, &key)? {
+                let set = stored.as_set()?;
+                result.extend(set.iter().cloned());
+            }
+        }
+
+        let count = result.len();
+        self.storage.set_value(db_index, dest, StoredValue::new_set(result))?;
+
         Ok(RespValue::Integer(count as i64))
     }
 
@@ -225,7 +372,27 @@ impl SetCommands {
             .map(|b| String::from_utf8_lossy(b).to_string())
             .collect();
 
-        let count = self.storage.set_interstore_in_db(db_index, &dest, &keys)?;
+        let mut result: Option<HashSet<Vec<u8>>> = None;
+
+        for key in keys {
+            if let Some(stored) = self.storage.get_value(db_index, &key)? {
+                let set = stored.as_set()?;
+                if let Some(res) = &mut result {
+                    *res = res.intersection(set).cloned().collect();
+                } else {
+                    result = Some(set.clone());
+                }
+            } else {
+                // If any key doesn't exist, intersection is empty
+                result = Some(HashSet::new());
+                break;
+            }
+        }
+
+        let final_set = result.unwrap_or_default();
+        let count = final_set.len();
+        self.storage.set_value(db_index, dest, StoredValue::new_set(final_set))?;
+
         Ok(RespValue::Integer(count as i64))
     }
 
@@ -242,7 +409,25 @@ impl SetCommands {
             .map(|b| String::from_utf8_lossy(b).to_string())
             .collect();
 
-        let count = self.storage.set_diffstore_in_db(db_index, &dest, &keys)?;
+        let mut result: HashSet<Vec<u8>> = HashSet::new();
+
+        // Start with the first set
+        if let Some(stored) = self.storage.get_value(db_index, &keys[0])? {
+            let set = stored.as_set()?;
+            result = set.clone();
+        }
+
+        // Subtract all other sets
+        for key in &keys[1..] {
+            if let Some(stored) = self.storage.get_value(db_index, key)? {
+                let set = stored.as_set()?;
+                result = result.difference(set).cloned().collect();
+            }
+        }
+
+        let count = result.len();
+        self.storage.set_value(db_index, dest, StoredValue::new_set(result))?;
+
         Ok(RespValue::Integer(count as i64))
     }
 }
