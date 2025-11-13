@@ -260,22 +260,101 @@ impl ListCommands {
 
 重构分为 7 个阶段，每个阶段独立完成并测试：
 
-### 阶段 1: 准备工作
-- 创建新的 `StorageBackend` trait
-- 为 `StoredValue` 添加公开访问方法
-- 确保所有现有测试通过
+### ✅ 阶段 1: 准备工作 (已完成)
+- ✅ 使 `StoredValue` 和 `ValueType` 公开
+- ✅ 为 `StoredValue` 添加公开访问方法 (`as_string()`, `as_list()`, `as_hash()`, `as_set()`, `as_zset()`)
+- ✅ 添加最小化存储接口方法 (`get_value()`, `set_value()`, `update_value()`, `delete_and_get()`)
+- ✅ 所有现有测试通过
 
 ### 阶段 2-6: 逐个迁移数据类型
-- 阶段 2: String 命令 (MSET, MGET)
-- 阶段 3: List 命令 (10 个方法)
-- 阶段 4: Hash 命令 (12 个方法)
-- 阶段 5: Set 命令 (13 个方法)
-- 阶段 6: ZSet 命令 (10 个方法)
 
-### 阶段 7: 清理和优化
-- 移除所有命令特定方法
-- 统一两个适配器的接口
-- 完整测试和性能验证
+#### ✅ 阶段 2: String 命令 (已完成)
+- ✅ MGET - 移至命令层，使用基础 `get_from_db()`
+- ✅ MSET - 移至命令层，使用基础 `set_in_db()`
+
+#### ✅ 阶段 3: List 命令 (已完成)
+已迁移 10 个命令:
+- ✅ LPUSH, RPUSH - 命令层直接操作 `VecDeque<Bytes>`
+- ✅ LPOP, RPOP - 命令层处理弹出逻辑和空列表删除
+- ✅ LLEN, LRANGE, LINDEX - 命令层直接查询
+- ✅ LSET, LREM, LTRIM - 命令层处理修改逻辑
+
+#### ✅ 阶段 4: Hash 命令 (已完成)
+已迁移 12 个命令:
+- ✅ HSET, HSETNX - 命令层使用 Entry API
+- ✅ HGET, HMGET - 命令层直接访问 `HashMap`
+- ✅ HDEL - 命令层处理批量删除和空哈希清理
+- ✅ HEXISTS, HLEN - 命令层直接查询
+- ✅ HKEYS, HVALS, HGETALL - 命令层直接迭代
+- ✅ HINCRBY, HINCRBYFLOAT - 命令层处理解析-修改-存储
+
+#### ⏳ 阶段 5: Set 命令 (待完成)
+待迁移 13 个命令:
+- [ ] SADD, SREM, SISMEMBER, SMEMBERS, SCARD
+- [ ] SPOP, SRANDMEMBER
+- [ ] SUNION, SINTER, SDIFF
+- [ ] SUNIONSTORE, SINTERSTORE, SDIFFSTORE
+
+#### ⏳ 阶段 6: ZSet 命令 (待完成)
+待迁移 10 个命令:
+- [ ] ZADD, ZREM, ZSCORE
+- [ ] ZRANK, ZREVRANK
+- [ ] ZRANGE, ZREVRANGE
+- [ ] ZRANGEBYSCORE, ZREVRANGEBYSCORE
+- [ ] ZCARD, ZCOUNT, ZINCRBY
+
+### ⏳ 阶段 7: 清理和优化 (待完成)
+- [ ] 从 `MemoryAdapter` 移除已迁移的命令特定方法
+- [ ] 更新 `AiDbStorageAdapter` 以支持复杂类型（需要序列化）
+- [ ] 统一两个适配器的接口
+- [ ] 完整测试和性能验证
+
+## 当前实施状态
+
+### 已完成工作 (2025-11-13)
+
+**迁移进度**: 24/52 命令 (46%)
+
+- ✅ **Phase 1**: 基础架构 - 完成
+  - 公开 `StoredValue` 和 `ValueType`
+  - 添加类型安全的访问器方法
+  - 实现最小化存储接口
+  
+- ✅ **Phase 2**: String 命令 (2/2) - 完成
+- ✅ **Phase 3**: List 命令 (10/10) - 完成  
+- ✅ **Phase 4**: Hash 命令 (12/12) - 完成
+
+**代码质量**:
+- ✅ 78 个单元测试全部通过
+- ✅ 5 个集成测试全部通过
+- ✅ cargo clippy 零警告
+- ✅ cargo fmt 已格式化
+- ✅ codeql 安全扫描零问题
+
+**文件变更**:
+- `src/storage/mod.rs` - 导出公共类型
+- `src/storage/memory_adapter.rs` - 添加最小接口 (+205 行)
+- `src/command/string.rs` - 迁移 MGET, MSET
+- `src/command/list.rs` - 迁移所有 10 个列表命令 (+254 行)
+- `src/command/hash.rs` - 迁移所有 12 个哈希命令 (+130 行)
+
+### AiDbStorageAdapter 状态说明
+
+**当前限制**:
+- `AiDbStorageAdapter` 目前仅支持字符串类型（存储原始 `Bytes`）
+- 不支持 List, Hash, Set, ZSet 等复杂类型
+- 这是设计上的差异：AiDb 是持久化引擎，需要序列化复杂类型
+
+**未来工作**:
+- 为 `StoredValue` 实现序列化/反序列化（使用 bincode 或类似库）
+- 扩展 `AiDbStorageAdapter` 以支持所有数据类型
+- 实现类型元数据存储（存储类型信息以便反序列化）
+- 添加针对复杂类型的集成测试
+
+**当前使用建议**:
+- 对于纯字符串操作，可以使用 `AiDbStorageAdapter`
+- 对于复杂数据类型（List, Hash, Set, ZSet），目前仅 `MemoryAdapter` 支持
+- 生产环境建议暂时使用 `MemoryAdapter` 直到 AiDb 支持完整
 
 ## 预期收益
 

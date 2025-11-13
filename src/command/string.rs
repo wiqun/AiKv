@@ -144,21 +144,17 @@ impl StringCommands {
             return Err(AikvError::WrongArgCount("MGET".to_string()));
         }
 
-        let keys: Vec<String> = args
-            .iter()
-            .map(|b| String::from_utf8_lossy(b).to_string())
-            .collect();
+        // Migrated: Logic moved from storage layer to command layer
+        let mut result = Vec::with_capacity(args.len());
+        for arg in args {
+            let key = String::from_utf8_lossy(arg).to_string();
+            match self.storage.get_from_db(current_db, &key)? {
+                Some(bytes) => result.push(RespValue::bulk_string(bytes)),
+                None => result.push(RespValue::null_bulk_string()),
+            }
+        }
 
-        let values = self.storage.mget_from_db(current_db, &keys)?;
-        let resp_values: Vec<RespValue> = values
-            .into_iter()
-            .map(|v| match v {
-                Some(bytes) => RespValue::bulk_string(bytes),
-                None => RespValue::null_bulk_string(),
-            })
-            .collect();
-
-        Ok(RespValue::array(resp_values))
+        Ok(RespValue::array(result))
     }
 
     /// MSET key value \[key value ...\]
@@ -167,14 +163,13 @@ impl StringCommands {
             return Err(AikvError::WrongArgCount("MSET".to_string()));
         }
 
-        let mut pairs = Vec::new();
+        // Migrated: Logic moved from storage layer to command layer
         for chunk in args.chunks(2) {
             let key = String::from_utf8_lossy(&chunk[0]).to_string();
             let value = chunk[1].clone();
-            pairs.push((key, value));
+            self.storage.set_in_db(current_db, key, value)?;
         }
 
-        self.storage.mset_in_db(current_db, pairs)?;
         Ok(RespValue::ok())
     }
 

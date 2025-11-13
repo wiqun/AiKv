@@ -1,7 +1,8 @@
 use crate::error::{AikvError, Result};
 use crate::protocol::RespValue;
-use crate::storage::StorageAdapter;
+use crate::storage::{StorageAdapter, StoredValue};
 use bytes::Bytes;
+use std::collections::HashMap;
 
 /// Hash command handler
 pub struct HashCommands {
@@ -23,14 +24,25 @@ impl HashCommands {
         }
 
         let key = String::from_utf8_lossy(&args[0]).to_string();
-        let mut fields = Vec::new();
+
+        // Migrated: Logic moved from storage layer to command layer
+        let mut hash = if let Some(stored) = self.storage.get_value(db_index, &key)? {
+            stored.as_hash()?.clone()
+        } else {
+            HashMap::new()
+        };
+
+        let mut count = 0;
         for i in (1..args.len()).step_by(2) {
             let field = String::from_utf8_lossy(&args[i]).to_string();
             let value = args[i + 1].clone();
-            fields.push((field, value));
+            if hash.insert(field, value).is_none() {
+                count += 1;
+            }
         }
 
-        let count = self.storage.hash_set_in_db(db_index, &key, fields)?;
+        self.storage
+            .set_value(db_index, key, StoredValue::new_hash(hash))?;
         Ok(RespValue::Integer(count as i64))
     }
 
@@ -45,9 +57,25 @@ impl HashCommands {
         let field = String::from_utf8_lossy(&args[1]).to_string();
         let value = args[2].clone();
 
-        let set = self
-            .storage
-            .hash_setnx_in_db(db_index, &key, field, value)?;
+        // Migrated: Logic moved from storage layer to command layer
+        let mut hash = if let Some(stored) = self.storage.get_value(db_index, &key)? {
+            stored.as_hash()?.clone()
+        } else {
+            HashMap::new()
+        };
+
+        let set = if let std::collections::hash_map::Entry::Vacant(e) = hash.entry(field) {
+            e.insert(value);
+            true
+        } else {
+            false
+        };
+
+        if set {
+            self.storage
+                .set_value(db_index, key, StoredValue::new_hash(hash))?;
+        }
+
         Ok(RespValue::Integer(if set { 1 } else { 0 }))
     }
 
@@ -61,7 +89,14 @@ impl HashCommands {
         let key = String::from_utf8_lossy(&args[0]).to_string();
         let field = String::from_utf8_lossy(&args[1]).to_string();
 
-        match self.storage.hash_get_in_db(db_index, &key, &field)? {
+        // Migrated: Logic moved from storage layer to command layer
+        let value = if let Some(stored) = self.storage.get_value(db_index, &key)? {
+            stored.as_hash()?.get(&field).cloned()
+        } else {
+            None
+        };
+
+        match value {
             Some(value) => Ok(RespValue::bulk_string(value)),
             None => Ok(RespValue::Null),
         }
@@ -80,7 +115,14 @@ impl HashCommands {
             .map(|b| String::from_utf8_lossy(b).to_string())
             .collect();
 
-        let values = self.storage.hash_mget_in_db(db_index, &key, &fields)?;
+        // Migrated: Logic moved from storage layer to command layer
+        let values = if let Some(stored) = self.storage.get_value(db_index, &key)? {
+            let hash = stored.as_hash()?;
+            fields.iter().map(|f| hash.get(f).cloned()).collect()
+        } else {
+            vec![None; fields.len()]
+        };
+
         Ok(RespValue::Array(Some(
             values
                 .into_iter()
@@ -105,7 +147,29 @@ impl HashCommands {
             .map(|b| String::from_utf8_lossy(b).to_string())
             .collect();
 
-        let count = self.storage.hash_del_in_db(db_index, &key, &fields)?;
+        // Migrated: Logic moved from storage layer to command layer
+        let count = if let Some(stored) = self.storage.get_value(db_index, &key)? {
+            let mut hash = stored.as_hash()?.clone();
+            let mut deleted = 0;
+
+            for field in fields {
+                if hash.remove(&field).is_some() {
+                    deleted += 1;
+                }
+            }
+
+            if hash.is_empty() {
+                self.storage.delete_from_db(db_index, &key)?;
+            } else {
+                self.storage
+                    .set_value(db_index, key, StoredValue::new_hash(hash))?;
+            }
+
+            deleted
+        } else {
+            0
+        };
+
         Ok(RespValue::Integer(count as i64))
     }
 
@@ -119,7 +183,13 @@ impl HashCommands {
         let key = String::from_utf8_lossy(&args[0]).to_string();
         let field = String::from_utf8_lossy(&args[1]).to_string();
 
-        let exists = self.storage.hash_exists_in_db(db_index, &key, &field)?;
+        // Migrated: Logic moved from storage layer to command layer
+        let exists = if let Some(stored) = self.storage.get_value(db_index, &key)? {
+            stored.as_hash()?.contains_key(&field)
+        } else {
+            false
+        };
+
         Ok(RespValue::Integer(if exists { 1 } else { 0 }))
     }
 
@@ -131,7 +201,14 @@ impl HashCommands {
         }
 
         let key = String::from_utf8_lossy(&args[0]).to_string();
-        let len = self.storage.hash_len_in_db(db_index, &key)?;
+
+        // Migrated: Logic moved from storage layer to command layer
+        let len = if let Some(stored) = self.storage.get_value(db_index, &key)? {
+            stored.as_hash()?.len()
+        } else {
+            0
+        };
+
         Ok(RespValue::Integer(len as i64))
     }
 
@@ -143,7 +220,14 @@ impl HashCommands {
         }
 
         let key = String::from_utf8_lossy(&args[0]).to_string();
-        let keys = self.storage.hash_keys_in_db(db_index, &key)?;
+
+        // Migrated: Logic moved from storage layer to command layer
+        let keys = if let Some(stored) = self.storage.get_value(db_index, &key)? {
+            stored.as_hash()?.keys().cloned().collect()
+        } else {
+            Vec::new()
+        };
+
         Ok(RespValue::Array(Some(
             keys.into_iter()
                 .map(|k| RespValue::bulk_string(Bytes::from(k)))
@@ -159,7 +243,14 @@ impl HashCommands {
         }
 
         let key = String::from_utf8_lossy(&args[0]).to_string();
-        let vals = self.storage.hash_vals_in_db(db_index, &key)?;
+
+        // Migrated: Logic moved from storage layer to command layer
+        let vals = if let Some(stored) = self.storage.get_value(db_index, &key)? {
+            stored.as_hash()?.values().cloned().collect()
+        } else {
+            Vec::new()
+        };
+
         Ok(RespValue::Array(Some(
             vals.into_iter().map(RespValue::bulk_string).collect(),
         )))
@@ -173,7 +264,17 @@ impl HashCommands {
         }
 
         let key = String::from_utf8_lossy(&args[0]).to_string();
-        let fields = self.storage.hash_getall_in_db(db_index, &key)?;
+
+        // Migrated: Logic moved from storage layer to command layer
+        let fields = if let Some(stored) = self.storage.get_value(db_index, &key)? {
+            stored
+                .as_hash()?
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         let mut result = Vec::new();
         for (field, value) in fields {
@@ -197,9 +298,28 @@ impl HashCommands {
             .parse::<i64>()
             .map_err(|_| AikvError::InvalidArgument("invalid increment".to_string()))?;
 
-        let new_value = self
-            .storage
-            .hash_incrby_in_db(db_index, &key, &field, increment)?;
+        // Migrated: Logic moved from storage layer to command layer
+        let mut hash = if let Some(stored) = self.storage.get_value(db_index, &key)? {
+            stored.as_hash()?.clone()
+        } else {
+            HashMap::new()
+        };
+
+        let current_value = if let Some(val_bytes) = hash.get(&field) {
+            String::from_utf8_lossy(val_bytes)
+                .parse::<i64>()
+                .map_err(|_| {
+                    AikvError::InvalidArgument("hash value is not an integer".to_string())
+                })?
+        } else {
+            0
+        };
+
+        let new_value = current_value + increment;
+        hash.insert(field, Bytes::from(new_value.to_string()));
+
+        self.storage
+            .set_value(db_index, key, StoredValue::new_hash(hash))?;
         Ok(RespValue::Integer(new_value))
     }
 
@@ -216,9 +336,26 @@ impl HashCommands {
             .parse::<f64>()
             .map_err(|_| AikvError::InvalidArgument("invalid increment".to_string()))?;
 
-        let new_value = self
-            .storage
-            .hash_incrbyfloat_in_db(db_index, &key, &field, increment)?;
+        // Migrated: Logic moved from storage layer to command layer
+        let mut hash = if let Some(stored) = self.storage.get_value(db_index, &key)? {
+            stored.as_hash()?.clone()
+        } else {
+            HashMap::new()
+        };
+
+        let current_value = if let Some(val_bytes) = hash.get(&field) {
+            String::from_utf8_lossy(val_bytes)
+                .parse::<f64>()
+                .map_err(|_| AikvError::InvalidArgument("hash value is not a float".to_string()))?
+        } else {
+            0.0
+        };
+
+        let new_value = current_value + increment;
+        hash.insert(field, Bytes::from(new_value.to_string()));
+
+        self.storage
+            .set_value(db_index, key, StoredValue::new_hash(hash))?;
         Ok(RespValue::bulk_string(Bytes::from(new_value.to_string())))
     }
 }

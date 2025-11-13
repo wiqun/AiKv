@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Different value types supported by the storage
 #[derive(Clone, Debug)]
-enum ValueType {
+pub enum ValueType {
     String(Bytes),
     List(VecDeque<Bytes>),
     Hash(HashMap<String, Bytes>),
@@ -16,56 +16,56 @@ enum ValueType {
 
 /// Value with optional expiration time
 #[derive(Clone, Debug)]
-struct StoredValue {
-    value: ValueType,
+pub struct StoredValue {
+    pub(crate) value: ValueType,
     /// Expiration time in milliseconds since UNIX epoch
-    expires_at: Option<u64>,
+    pub(crate) expires_at: Option<u64>,
 }
 
 impl StoredValue {
-    fn new_string(data: Bytes) -> Self {
+    pub fn new_string(data: Bytes) -> Self {
         Self {
             value: ValueType::String(data),
             expires_at: None,
         }
     }
 
-    fn new_list(list: VecDeque<Bytes>) -> Self {
+    pub fn new_list(list: VecDeque<Bytes>) -> Self {
         Self {
             value: ValueType::List(list),
             expires_at: None,
         }
     }
 
-    fn new_hash(hash: HashMap<String, Bytes>) -> Self {
+    pub fn new_hash(hash: HashMap<String, Bytes>) -> Self {
         Self {
             value: ValueType::Hash(hash),
             expires_at: None,
         }
     }
 
-    fn new_set(set: HashSet<Vec<u8>>) -> Self {
+    pub fn new_set(set: HashSet<Vec<u8>>) -> Self {
         Self {
             value: ValueType::Set(set),
             expires_at: None,
         }
     }
 
-    fn new_zset(zset: BTreeMap<Vec<u8>, f64>) -> Self {
+    pub fn new_zset(zset: BTreeMap<Vec<u8>, f64>) -> Self {
         Self {
             value: ValueType::ZSet(zset),
             expires_at: None,
         }
     }
 
-    fn with_expiration(value: ValueType, expires_at: u64) -> Self {
+    pub fn with_expiration(value: ValueType, expires_at: u64) -> Self {
         Self {
             value,
             expires_at: Some(expires_at),
         }
     }
 
-    fn is_expired(&self) -> bool {
+    pub fn is_expired(&self) -> bool {
         if let Some(expires_at) = self.expires_at {
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -77,8 +77,7 @@ impl StoredValue {
         }
     }
 
-    #[allow(dead_code)]
-    fn get_type_name(&self) -> &str {
+    pub fn get_type_name(&self) -> &str {
         match &self.value {
             ValueType::String(_) => "string",
             ValueType::List(_) => "list",
@@ -86,6 +85,116 @@ impl StoredValue {
             ValueType::Set(_) => "set",
             ValueType::ZSet(_) => "zset",
         }
+    }
+
+    /// Get reference to the underlying value
+    pub fn value(&self) -> &ValueType {
+        &self.value
+    }
+
+    /// Get mutable reference to the underlying value
+    pub fn value_mut(&mut self) -> &mut ValueType {
+        &mut self.value
+    }
+
+    /// Check if value is of String type and return reference to it
+    pub fn as_string(&self) -> Result<&Bytes> {
+        match &self.value {
+            ValueType::String(data) => Ok(data),
+            _ => Err(AikvError::WrongType(
+                "Operation against a key holding the wrong kind of value".to_string(),
+            )),
+        }
+    }
+
+    /// Check if value is of List type and return reference to it
+    pub fn as_list(&self) -> Result<&VecDeque<Bytes>> {
+        match &self.value {
+            ValueType::List(list) => Ok(list),
+            _ => Err(AikvError::WrongType(
+                "Operation against a key holding the wrong kind of value".to_string(),
+            )),
+        }
+    }
+
+    /// Check if value is of List type and return mutable reference to it
+    pub fn as_list_mut(&mut self) -> Result<&mut VecDeque<Bytes>> {
+        match &mut self.value {
+            ValueType::List(list) => Ok(list),
+            _ => Err(AikvError::WrongType(
+                "Operation against a key holding the wrong kind of value".to_string(),
+            )),
+        }
+    }
+
+    /// Check if value is of Hash type and return reference to it
+    pub fn as_hash(&self) -> Result<&HashMap<String, Bytes>> {
+        match &self.value {
+            ValueType::Hash(hash) => Ok(hash),
+            _ => Err(AikvError::WrongType(
+                "Operation against a key holding the wrong kind of value".to_string(),
+            )),
+        }
+    }
+
+    /// Check if value is of Hash type and return mutable reference to it
+    pub fn as_hash_mut(&mut self) -> Result<&mut HashMap<String, Bytes>> {
+        match &mut self.value {
+            ValueType::Hash(hash) => Ok(hash),
+            _ => Err(AikvError::WrongType(
+                "Operation against a key holding the wrong kind of value".to_string(),
+            )),
+        }
+    }
+
+    /// Check if value is of Set type and return reference to it
+    pub fn as_set(&self) -> Result<&HashSet<Vec<u8>>> {
+        match &self.value {
+            ValueType::Set(set) => Ok(set),
+            _ => Err(AikvError::WrongType(
+                "Operation against a key holding the wrong kind of value".to_string(),
+            )),
+        }
+    }
+
+    /// Check if value is of Set type and return mutable reference to it
+    pub fn as_set_mut(&mut self) -> Result<&mut HashSet<Vec<u8>>> {
+        match &mut self.value {
+            ValueType::Set(set) => Ok(set),
+            _ => Err(AikvError::WrongType(
+                "Operation against a key holding the wrong kind of value".to_string(),
+            )),
+        }
+    }
+
+    /// Check if value is of ZSet type and return reference to it
+    pub fn as_zset(&self) -> Result<&BTreeMap<Vec<u8>, f64>> {
+        match &self.value {
+            ValueType::ZSet(zset) => Ok(zset),
+            _ => Err(AikvError::WrongType(
+                "Operation against a key holding the wrong kind of value".to_string(),
+            )),
+        }
+    }
+
+    /// Check if value is of ZSet type and return mutable reference to it
+    pub fn as_zset_mut(&mut self) -> Result<&mut BTreeMap<Vec<u8>, f64>> {
+        match &mut self.value {
+            ValueType::ZSet(zset) => Ok(zset),
+            _ => Err(AikvError::WrongType(
+                "Operation against a key holding the wrong kind of value".to_string(),
+            )),
+        }
+    }
+
+    /// Get expiration time in milliseconds since UNIX epoch
+    pub fn expires_at(&self) -> Option<u64> {
+        self.expires_at
+    }
+
+    /// Set expiration time in milliseconds since UNIX epoch
+    pub fn set_expiration(&mut self, expires_at: Option<u64>) {
+        self.expires_at = expires_at;
     }
 }
 
@@ -136,6 +245,86 @@ impl StorageAdapter {
             db.retain(|_, v| !v.is_expired());
         }
         Ok(())
+    }
+
+    /// Get a StoredValue by key from a specific database (new minimal interface)
+    /// This is the new core method that commands should use
+    pub fn get_value(&self, db_index: usize, key: &str) -> Result<Option<StoredValue>> {
+        let databases = self
+            .databases
+            .read()
+            .map_err(|e| AikvError::Storage(format!("Lock error: {}", e)))?;
+
+        if let Some(db) = databases.get(db_index) {
+            if let Some(stored) = db.get(key) {
+                if stored.is_expired() {
+                    return Ok(None);
+                }
+                return Ok(Some(stored.clone()));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Set a StoredValue for a key in a specific database (new minimal interface)
+    /// This is the new core method that commands should use
+    pub fn set_value(&self, db_index: usize, key: String, value: StoredValue) -> Result<()> {
+        let mut databases = self
+            .databases
+            .write()
+            .map_err(|e| AikvError::Storage(format!("Lock error: {}", e)))?;
+
+        if let Some(db) = databases.get_mut(db_index) {
+            db.insert(key, value);
+            Ok(())
+        } else {
+            Err(AikvError::Storage(format!(
+                "Invalid database index: {}",
+                db_index
+            )))
+        }
+    }
+
+    /// Delete a key and return the old value if it existed (new minimal interface)
+    /// This enables atomic operations like pop
+    pub fn delete_and_get(&self, db_index: usize, key: &str) -> Result<Option<StoredValue>> {
+        let mut databases = self
+            .databases
+            .write()
+            .map_err(|e| AikvError::Storage(format!("Lock error: {}", e)))?;
+
+        if let Some(db) = databases.get_mut(db_index) {
+            if let Some(stored) = db.remove(key) {
+                if !stored.is_expired() {
+                    return Ok(Some(stored));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Update a value in place with a closure (new minimal interface)
+    /// This enables atomic updates like increment operations
+    pub fn update_value<F>(&self, db_index: usize, key: &str, f: F) -> Result<bool>
+    where
+        F: FnOnce(&mut StoredValue) -> Result<()>,
+    {
+        let mut databases = self
+            .databases
+            .write()
+            .map_err(|e| AikvError::Storage(format!("Lock error: {}", e)))?;
+
+        if let Some(db) = databases.get_mut(db_index) {
+            if let Some(stored) = db.get_mut(key) {
+                if stored.is_expired() {
+                    db.remove(key);
+                    return Ok(false);
+                }
+                f(stored)?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Get a value by key from a specific database

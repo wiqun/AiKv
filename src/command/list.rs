@@ -1,7 +1,8 @@
 use crate::error::{AikvError, Result};
 use crate::protocol::RespValue;
-use crate::storage::StorageAdapter;
+use crate::storage::{StorageAdapter, StoredValue};
 use bytes::Bytes;
+use std::collections::VecDeque;
 
 /// List command handler
 pub struct ListCommands {
@@ -25,7 +26,27 @@ impl ListCommands {
         let key = String::from_utf8_lossy(&args[0]).to_string();
         let elements: Vec<Bytes> = args[1..].to_vec();
 
-        let len = self.storage.list_lpush_in_db(db_index, &key, elements)?;
+        // Migrated: Logic moved from storage layer to command layer
+        let list = if let Some(stored) = self.storage.get_value(db_index, &key)? {
+            // Get existing list or return error if wrong type
+            let mut list = stored.as_list()?.clone();
+            // Insert elements at the front (left) in reverse order to maintain order
+            for element in elements.iter().rev() {
+                list.push_front(element.clone());
+            }
+            list
+        } else {
+            // Create new list with elements
+            let mut list = VecDeque::new();
+            for element in elements.iter().rev() {
+                list.push_front(element.clone());
+            }
+            list
+        };
+
+        let len = list.len();
+        self.storage
+            .set_value(db_index, key, StoredValue::new_list(list))?;
         Ok(RespValue::Integer(len as i64))
     }
 
@@ -39,7 +60,27 @@ impl ListCommands {
         let key = String::from_utf8_lossy(&args[0]).to_string();
         let elements: Vec<Bytes> = args[1..].to_vec();
 
-        let len = self.storage.list_rpush_in_db(db_index, &key, elements)?;
+        // Migrated: Logic moved from storage layer to command layer
+        let list = if let Some(stored) = self.storage.get_value(db_index, &key)? {
+            // Get existing list or return error if wrong type
+            let mut list = stored.as_list()?.clone();
+            // Insert elements at the back (right)
+            for element in elements {
+                list.push_back(element);
+            }
+            list
+        } else {
+            // Create new list with elements
+            let mut list = VecDeque::new();
+            for element in elements {
+                list.push_back(element);
+            }
+            list
+        };
+
+        let len = list.len();
+        self.storage
+            .set_value(db_index, key, StoredValue::new_list(list))?;
         Ok(RespValue::Integer(len as i64))
     }
 
@@ -59,7 +100,27 @@ impl ListCommands {
             1
         };
 
-        let values = self.storage.list_lpop_in_db(db_index, &key, count)?;
+        // Migrated: Logic moved from storage layer to command layer
+        let mut values = Vec::new();
+
+        if let Some(stored) = self.storage.get_value(db_index, &key)? {
+            let mut list = stored.as_list()?.clone();
+
+            // Pop elements from the front
+            for _ in 0..count.min(list.len()) {
+                if let Some(value) = list.pop_front() {
+                    values.push(value);
+                }
+            }
+
+            // Update or delete the list
+            if list.is_empty() {
+                self.storage.delete_from_db(db_index, &key)?;
+            } else {
+                self.storage
+                    .set_value(db_index, key, StoredValue::new_list(list))?;
+            }
+        }
 
         if values.is_empty() {
             Ok(RespValue::Null)
@@ -88,7 +149,27 @@ impl ListCommands {
             1
         };
 
-        let values = self.storage.list_rpop_in_db(db_index, &key, count)?;
+        // Migrated: Logic moved from storage layer to command layer
+        let mut values = Vec::new();
+
+        if let Some(stored) = self.storage.get_value(db_index, &key)? {
+            let mut list = stored.as_list()?.clone();
+
+            // Pop elements from the back
+            for _ in 0..count.min(list.len()) {
+                if let Some(value) = list.pop_back() {
+                    values.push(value);
+                }
+            }
+
+            // Update or delete the list
+            if list.is_empty() {
+                self.storage.delete_from_db(db_index, &key)?;
+            } else {
+                self.storage
+                    .set_value(db_index, key, StoredValue::new_list(list))?;
+            }
+        }
 
         if values.is_empty() {
             Ok(RespValue::Null)
@@ -109,7 +190,14 @@ impl ListCommands {
         }
 
         let key = String::from_utf8_lossy(&args[0]).to_string();
-        let len = self.storage.list_len_in_db(db_index, &key)?;
+
+        // Migrated: Logic moved from storage layer to command layer
+        let len = if let Some(stored) = self.storage.get_value(db_index, &key)? {
+            stored.as_list()?.len()
+        } else {
+            0
+        };
+
         Ok(RespValue::Integer(len as i64))
     }
 
@@ -128,7 +216,42 @@ impl ListCommands {
             .parse::<i64>()
             .map_err(|_| AikvError::InvalidArgument("invalid stop index".to_string()))?;
 
-        let values = self.storage.list_range_in_db(db_index, &key, start, stop)?;
+        // Migrated: Logic moved from storage layer to command layer
+        let values = if let Some(stored) = self.storage.get_value(db_index, &key)? {
+            let list = stored.as_list()?;
+            let len = list.len() as i64;
+
+            if len == 0 {
+                Vec::new()
+            } else {
+                // Normalize negative indices
+                let start_idx = if start < 0 {
+                    (len + start).max(0) as usize
+                } else {
+                    start.min(len) as usize
+                };
+
+                let stop_idx = if stop < 0 {
+                    (len + stop).max(0) as usize
+                } else {
+                    stop.min(len - 1) as usize
+                };
+
+                // Extract range
+                if start_idx > stop_idx || start_idx >= len as usize {
+                    Vec::new()
+                } else {
+                    list.iter()
+                        .skip(start_idx)
+                        .take(stop_idx - start_idx + 1)
+                        .cloned()
+                        .collect()
+                }
+            }
+        } else {
+            Vec::new()
+        };
+
         Ok(RespValue::Array(Some(
             values.into_iter().map(RespValue::bulk_string).collect(),
         )))
@@ -146,7 +269,28 @@ impl ListCommands {
             .parse::<i64>()
             .map_err(|_| AikvError::InvalidArgument("invalid index".to_string()))?;
 
-        match self.storage.list_index_in_db(db_index, &key, index)? {
+        // Migrated: Logic moved from storage layer to command layer
+        let value = if let Some(stored) = self.storage.get_value(db_index, &key)? {
+            let list = stored.as_list()?;
+            let len = list.len() as i64;
+
+            if len == 0 {
+                None
+            } else {
+                // Normalize negative index
+                let idx = if index < 0 { len + index } else { index };
+
+                if idx >= 0 && idx < len {
+                    list.get(idx as usize).cloned()
+                } else {
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        match value {
             Some(value) => Ok(RespValue::bulk_string(value)),
             None => Ok(RespValue::Null),
         }
@@ -165,9 +309,27 @@ impl ListCommands {
             .map_err(|_| AikvError::InvalidArgument("invalid index".to_string()))?;
         let element = args[2].clone();
 
-        self.storage
-            .list_set_in_db(db_index, &key, index, element)?;
-        Ok(RespValue::simple_string("OK"))
+        // Migrated: Logic moved from storage layer to command layer
+        if let Some(stored) = self.storage.get_value(db_index, &key)? {
+            let mut list = stored.as_list()?.clone();
+            let len = list.len() as i64;
+
+            // Normalize negative index
+            let idx = if index < 0 { len + index } else { index };
+
+            if idx >= 0 && idx < len {
+                if let Some(elem) = list.get_mut(idx as usize) {
+                    *elem = element;
+                }
+                self.storage
+                    .set_value(db_index, key, StoredValue::new_list(list))?;
+                Ok(RespValue::simple_string("OK"))
+            } else {
+                Err(AikvError::InvalidArgument("index out of range".to_string()))
+            }
+        } else {
+            Err(AikvError::InvalidArgument("no such key".to_string()))
+        }
     }
 
     /// LREM key count element
@@ -183,9 +345,62 @@ impl ListCommands {
             .map_err(|_| AikvError::InvalidArgument("invalid count".to_string()))?;
         let element = args[2].clone();
 
-        let removed = self
-            .storage
-            .list_rem_in_db(db_index, &key, count, element)?;
+        // Migrated: Logic moved from storage layer to command layer
+        let removed = if let Some(stored) = self.storage.get_value(db_index, &key)? {
+            let mut list = stored.as_list()?.clone();
+            let mut removed_count = 0;
+
+            if count == 0 {
+                // Remove all occurrences
+                list.retain(|e| {
+                    if e == &element {
+                        removed_count += 1;
+                        false
+                    } else {
+                        true
+                    }
+                });
+            } else if count > 0 {
+                // Remove first count occurrences from head
+                let mut to_remove = count as usize;
+                let mut new_list = VecDeque::new();
+                for elem in list {
+                    if to_remove > 0 && elem == element {
+                        to_remove -= 1;
+                        removed_count += 1;
+                    } else {
+                        new_list.push_back(elem);
+                    }
+                }
+                list = new_list;
+            } else {
+                // Remove first |count| occurrences from tail
+                let mut to_remove = (-count) as usize;
+                let mut new_list = VecDeque::new();
+                for elem in list.into_iter().rev() {
+                    if to_remove > 0 && elem == element {
+                        to_remove -= 1;
+                        removed_count += 1;
+                    } else {
+                        new_list.push_front(elem);
+                    }
+                }
+                list = new_list;
+            }
+
+            // Update or delete the list
+            if list.is_empty() {
+                self.storage.delete_from_db(db_index, &key)?;
+            } else {
+                self.storage
+                    .set_value(db_index, key, StoredValue::new_list(list))?;
+            }
+
+            removed_count
+        } else {
+            0
+        };
+
         Ok(RespValue::Integer(removed as i64))
     }
 
@@ -204,7 +419,45 @@ impl ListCommands {
             .parse::<i64>()
             .map_err(|_| AikvError::InvalidArgument("invalid stop index".to_string()))?;
 
-        self.storage.list_trim_in_db(db_index, &key, start, stop)?;
+        // Migrated: Logic moved from storage layer to command layer
+        if let Some(stored) = self.storage.get_value(db_index, &key)? {
+            let list = stored.as_list()?;
+            let len = list.len() as i64;
+
+            if len == 0 {
+                // Empty list, just delete
+                self.storage.delete_from_db(db_index, &key)?;
+            } else {
+                // Normalize negative indices
+                let start_idx = if start < 0 {
+                    (len + start).max(0) as usize
+                } else {
+                    start.min(len) as usize
+                };
+
+                let stop_idx = if stop < 0 {
+                    (len + stop).max(0) as usize
+                } else {
+                    stop.min(len - 1) as usize
+                };
+
+                // Trim the list
+                if start_idx > stop_idx || start_idx >= len as usize {
+                    // Result would be empty
+                    self.storage.delete_from_db(db_index, &key)?;
+                } else {
+                    let trimmed: VecDeque<Bytes> = list
+                        .iter()
+                        .skip(start_idx)
+                        .take(stop_idx - start_idx + 1)
+                        .cloned()
+                        .collect();
+                    self.storage
+                        .set_value(db_index, key, StoredValue::new_list(trimmed))?;
+                }
+            }
+        }
+
         Ok(RespValue::simple_string("OK"))
     }
 }
