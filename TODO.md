@@ -373,9 +373,156 @@
 
 ---
 
+## 优先级 0 - 存储层架构重构 (架构修正)
+
+### 问题描述
+当前存储层（StorageAdapter）承担了过多不属于它的职责，包含了大量命令级别的逻辑实现。这违反了单一职责原则和关注点分离原则，导致：
+- 存储层有 52+ 个命令特定方法（如 `mset_in_db`, `list_lpush_in_db`, `hash_set_in_db` 等）
+- 命令逻辑与存储逻辑混合，难以维护和测试
+- 存储接口不够正交和精简
+- 切换存储引擎（如从内存到 AiDb）需要重新实现所有命令逻辑
+
+### 架构目标
+1. **存储层**: 只提供最基本的正交存储操作接口（CRUD + 过期管理）
+2. **命令层**: 所有命令相关的业务逻辑应在各自的命令实现类中完成
+3. **清晰的分层**: 存储层负责数据持久化，命令层负责业务逻辑
+
+### 0.1 架构分析阶段
+- [ ] 分析当前存储层的所有公开方法（52+ 方法）
+- [ ] 将方法分类为：
+  - [ ] 核心存储操作（应保留）
+  - [ ] 命令特定逻辑（应移至命令层）
+  - [ ] 辅助功能（需重新设计）
+- [ ] 识别存储层的最小正交接口集合
+- [ ] 记录当前依赖关系和影响范围
+
+**当前存储层方法清单**:
+- 基础操作: `get_from_db`, `set_in_db`, `delete_from_db`, `exists_in_db`
+- 过期管理: `set_expire_in_db`, `get_ttl_in_db`, `persist_in_db`, `get_expire_time_in_db`, `set_expire_at_in_db`
+- 数据库操作: `dbsize_in_db`, `flush_db`, `flush_all`, `swap_db`, `get_all_keys_in_db`
+- 键管理: `rename_in_db`, `rename_nx_in_db`, `copy_in_db`, `move_key`, `random_key_in_db`
+- 批量字符串操作: `mget_from_db`, `mset_in_db` (命令特定)
+- List 操作 (9个): `list_lpush_in_db`, `list_rpush_in_db`, `list_lpop_in_db`, `list_rpop_in_db`, `list_len_in_db`, `list_range_in_db`, `list_index_in_db`, `list_set_in_db`, `list_rem_in_db`, `list_trim_in_db` (全部命令特定)
+- Hash 操作 (10个): `hash_set_in_db`, `hash_setnx_in_db`, `hash_get_in_db`, `hash_mget_in_db`, `hash_del_in_db`, `hash_exists_in_db`, `hash_len_in_db`, `hash_keys_in_db`, `hash_vals_in_db`, `hash_getall_in_db`, `hash_incrby_in_db`, `hash_incrbyfloat_in_db` (全部命令特定)
+- Set 操作 (11个): `set_add_in_db`, `set_rem_in_db`, `set_ismember_in_db`, `set_members_in_db`, `set_card_in_db`, `set_pop_in_db`, `set_randmember_in_db`, `set_union_in_db`, `set_inter_in_db`, `set_diff_in_db`, `set_unionstore_in_db`, `set_interstore_in_db`, `set_diffstore_in_db` (全部命令特定)
+- ZSet 操作 (10个): `zset_add_in_db`, `zset_rem_in_db`, `zset_score_in_db`, `zset_rank_in_db`, `zset_range_in_db`, `zset_rangebyscore_in_db`, `zset_card_in_db`, `zset_count_in_db`, `zset_incrby_in_db` (全部命令特定)
+
+### 0.2 新架构设计阶段
+- [ ] 设计最小化存储层接口
+  - [ ] 定义核心存储 trait: `StorageBackend`
+  - [ ] 包含的基本操作：
+    - [ ] `get(db: usize, key: &str) -> Result<Option<StoredValue>>`
+    - [ ] `set(db: usize, key: String, value: StoredValue) -> Result<()>`
+    - [ ] `delete(db: usize, key: &str) -> Result<bool>`
+    - [ ] `exists(db: usize, key: &str) -> Result<bool>`
+    - [ ] `keys(db: usize, pattern: Option<&str>) -> Result<Vec<String>>`
+    - [ ] `scan(db: usize, cursor: u64, pattern: Option<&str>, count: usize) -> Result<(u64, Vec<String>)>`
+  - [ ] 数据库级操作：
+    - [ ] `flush_db(db: usize) -> Result<()>`
+    - [ ] `flush_all() -> Result<()>`
+    - [ ] `db_size(db: usize) -> Result<usize>`
+    - [ ] `swap_db(db1: usize, db2: usize) -> Result<()>`
+  - [ ] 过期管理（保留在存储层，因为是持久化关注点）：
+    - [ ] `set_expiration(db: usize, key: &str, expire_at_ms: u64) -> Result<bool>`
+    - [ ] `get_expiration(db: usize, key: &str) -> Result<Option<u64>>`
+    - [ ] `remove_expiration(db: usize, key: &str) -> Result<bool>`
+
+- [ ] 设计 `StoredValue` 作为通用值容器
+  - [ ] 支持所有数据类型: String, List, Hash, Set, ZSet
+  - [ ] 提供类型检查和转换方法
+  - [ ] 暴露底层数据结构供命令层直接操作
+
+- [ ] 为命令层设计辅助结构
+  - [ ] 创建独立的值操作辅助函数（在命令层或辅助模块中）
+  - [ ] 提供类型安全的值访问和修改模式
+  - [ ] 确保原子性操作的支持（如需要）
+
+### 0.3 重构实现计划
+- [ ] **阶段 1: 准备工作**
+  - [ ] 创建新的 `StorageBackend` trait
+  - [ ] 为 `StoredValue` 添加公开访问方法
+  - [ ] 确保所有现有测试仍然通过
+  
+- [ ] **阶段 2: String 命令迁移**
+  - [ ] 将 `mset_in_db` 逻辑移到 `StringCommands::mset`
+  - [ ] 将 `mget_from_db` 逻辑移到 `StringCommands::mget`
+  - [ ] 更新相关测试
+  - [ ] 验证功能正确性
+
+- [ ] **阶段 3: List 命令迁移**
+  - [ ] 将所有 `list_*_in_db` 方法的逻辑移到 `ListCommands`
+  - [ ] 在命令层直接操作 `VecDeque<Bytes>`
+  - [ ] 更新相关测试
+  - [ ] 验证功能正确性
+
+- [ ] **阶段 4: Hash 命令迁移**
+  - [ ] 将所有 `hash_*_in_db` 方法的逻辑移到 `HashCommands`
+  - [ ] 在命令层直接操作 `HashMap<String, Bytes>`
+  - [ ] 处理 `hincrby` 和 `hincrbyfloat` 的原子性
+  - [ ] 更新相关测试
+  - [ ] 验证功能正确性
+
+- [ ] **阶段 5: Set 命令迁移**
+  - [ ] 将所有 `set_*_in_db` 方法的逻辑移到 `SetCommands`
+  - [ ] 在命令层直接操作 `HashSet<Vec<u8>>`
+  - [ ] 实现集合运算逻辑（union, inter, diff）
+  - [ ] 更新相关测试
+  - [ ] 验证功能正确性
+
+- [ ] **阶段 6: ZSet 命令迁移**
+  - [ ] 将所有 `zset_*_in_db` 方法的逻辑移到 `ZSetCommands`
+  - [ ] 在命令层直接操作 `BTreeMap<Vec<u8>, f64>`
+  - [ ] 实现排序和范围查询逻辑
+  - [ ] 更新相关测试
+  - [ ] 验证功能正确性
+
+- [ ] **阶段 7: 清理和优化**
+  - [ ] 从 `StorageAdapter` 和 `AiDbStorageAdapter` 中移除所有命令特定方法
+  - [ ] 确保两个适配器都实现统一的 `StorageBackend` trait
+  - [ ] 重构 `rename`, `copy`, `move` 等键管理命令
+  - [ ] 更新所有受影响的集成测试
+  - [ ] 运行完整测试套件
+  - [ ] 性能基准测试对比
+
+### 0.4 文档和验证
+- [ ] 更新架构文档说明新的分层设计
+- [ ] 创建存储层 API 文档（rustdoc）
+- [ ] 添加架构决策记录 (ADR)
+- [ ] 编写迁移指南（如果有外部依赖者）
+- [ ] 进行全面的回归测试
+- [ ] 性能对比分析（重构前后）
+
+### 0.5 后续优化
+- [ ] 考虑为高频操作添加专门的优化路径
+- [ ] 评估是否需要批量操作接口（如 `batch_get`, `batch_set`）
+- [ ] 考虑引入事务支持的存储接口
+- [ ] 优化锁粒度和并发性能
+- [ ] 评估使用 RwLock 以外的并发原语
+
+### 预期收益
+1. **清晰的架构**: 存储层和命令层职责明确
+2. **易于维护**: 命令逻辑集中在命令类中，便于修改和测试
+3. **灵活性**: 可以轻松切换存储引擎而不影响命令实现
+4. **可测试性**: 存储层和命令层可以独立测试
+5. **性能**: 减少不必要的抽象层，可能提升性能
+6. **扩展性**: 新增命令只需要使用基础存储接口，不需要修改存储层
+
+### 风险和缓解
+- **风险**: 大规模重构可能引入 bug
+  - **缓解**: 分阶段实施，每个阶段都有完整测试
+- **风险**: 性能可能受影响
+  - **缓解**: 每个阶段进行性能基准测试，及时调整
+- **风险**: 代码量可能增加
+  - **缓解**: 通过辅助函数和宏减少重复代码
+- **风险**: 原子性操作可能变复杂
+  - **缓解**: 在命令层使用适当的锁策略，或在存储层提供事务接口
+
+---
+
 ## 版本规划
 
 ### v0.2.0 (近期)
+- **存储层架构重构** (优先级 0)
 - CI/CD 流水线
 - 代码规范和格式化
 - RESP3 支持
@@ -414,5 +561,5 @@
 
 ---
 
-**最后更新**: 2025-11-12
+**最后更新**: 2025-11-13
 **负责人**: @Genuineh, @copilot
