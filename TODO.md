@@ -388,13 +388,13 @@
 3. **清晰的分层**: 存储层负责数据持久化，命令层负责业务逻辑
 
 ### 0.1 架构分析阶段
-- [ ] 分析当前存储层的所有公开方法（52+ 方法）
-- [ ] 将方法分类为：
-  - [ ] 核心存储操作（应保留）
-  - [ ] 命令特定逻辑（应移至命令层）
-  - [ ] 辅助功能（需重新设计）
-- [ ] 识别存储层的最小正交接口集合
-- [ ] 记录当前依赖关系和影响范围
+- [x] 分析当前存储层的所有公开方法（52+ 方法）
+- [x] 将方法分类为：
+  - [x] 核心存储操作（应保留）
+  - [x] 命令特定逻辑（应移至命令层）
+  - [x] 辅助功能（需重新设计）
+- [x] 识别存储层的最小正交接口集合
+- [x] 记录当前依赖关系和影响范围
 
 **当前存储层方法清单**:
 - 基础操作: `get_from_db`, `set_in_db`, `delete_from_db`, `exists_in_db`
@@ -408,89 +408,112 @@
 - ZSet 操作 (10个): `zset_add_in_db`, `zset_rem_in_db`, `zset_score_in_db`, `zset_rank_in_db`, `zset_range_in_db`, `zset_rangebyscore_in_db`, `zset_card_in_db`, `zset_count_in_db`, `zset_incrby_in_db` (全部命令特定)
 
 ### 0.2 新架构设计阶段
-- [ ] 设计最小化存储层接口
-  - [ ] 定义核心存储 trait: `StorageBackend`
-  - [ ] 包含的基本操作：
-    - [ ] `get(db: usize, key: &str) -> Result<Option<StoredValue>>`
-    - [ ] `set(db: usize, key: String, value: StoredValue) -> Result<()>`
-    - [ ] `delete(db: usize, key: &str) -> Result<bool>`
-    - [ ] `exists(db: usize, key: &str) -> Result<bool>`
-    - [ ] `keys(db: usize, pattern: Option<&str>) -> Result<Vec<String>>`
-    - [ ] `scan(db: usize, cursor: u64, pattern: Option<&str>, count: usize) -> Result<(u64, Vec<String>)>`
-  - [ ] 数据库级操作：
-    - [ ] `flush_db(db: usize) -> Result<()>`
-    - [ ] `flush_all() -> Result<()>`
-    - [ ] `db_size(db: usize) -> Result<usize>`
-    - [ ] `swap_db(db1: usize, db2: usize) -> Result<()>`
-  - [ ] 过期管理（保留在存储层，因为是持久化关注点）：
-    - [ ] `set_expiration(db: usize, key: &str, expire_at_ms: u64) -> Result<bool>`
-    - [ ] `get_expiration(db: usize, key: &str) -> Result<Option<u64>>`
-    - [ ] `remove_expiration(db: usize, key: &str) -> Result<bool>`
+- [x] 设计最小化存储层接口
+  - [x] 定义核心存储方法（实现为具体方法而非 trait）
+  - [x] 包含的基本操作：
+    - [x] `get_value(db: usize, key: &str) -> Result<Option<StoredValue>>`
+    - [x] `set_value(db: usize, key: String, value: StoredValue) -> Result<()>`
+    - [x] `delete_and_get(db: usize, key: &str) -> Result<Option<StoredValue>>`
+    - [x] `update_value<F>(db: usize, key: &str, f: F) -> Result<bool>`
+    - [x] 保留已有的 `delete(db: usize, key: &str) -> Result<bool>`
+    - [x] 保留已有的 `exists(db: usize, key: &str) -> Result<bool>`
+  - [x] 数据库级操作（保持不变）：
+    - [x] `flush_db(db: usize) -> Result<()>`
+    - [x] `flush_all() -> Result<()>`
+    - [x] `db_size(db: usize) -> Result<usize>`
+    - [x] `swap_db(db1: usize, db2: usize) -> Result<()>`
+  - [x] 过期管理（保留在存储层，已存在）：
+    - [x] `set_expire_in_db(db: usize, key: &str, expire_ms: u64) -> Result<bool>`
+    - [x] `get_ttl_in_db(db: usize, key: &str) -> Result<i64>`
+    - [x] `persist_in_db(db: usize, key: &str) -> Result<bool>`
 
-- [ ] 设计 `StoredValue` 作为通用值容器
-  - [ ] 支持所有数据类型: String, List, Hash, Set, ZSet
-  - [ ] 提供类型检查和转换方法
-  - [ ] 暴露底层数据结构供命令层直接操作
+- [x] 设计 `StoredValue` 作为通用值容器
+  - [x] 支持所有数据类型: String, List, Hash, Set, ZSet
+  - [x] 提供类型检查和转换方法
+  - [x] 暴露底层数据结构供命令层直接操作
 
-- [ ] 为命令层设计辅助结构
-  - [ ] 创建独立的值操作辅助函数（在命令层或辅助模块中）
-  - [ ] 提供类型安全的值访问和修改模式
-  - [ ] 确保原子性操作的支持（如需要）
+- [x] 为命令层设计辅助结构
+  - [x] 公开 `StoredValue` 和 `ValueType`
+  - [x] 提供类型安全的值访问和修改模式（`as_string()`, `as_list_mut()` 等）
+  - [x] 确保原子性操作的支持（通过 `update_value` 闭包）
 
 ### 0.3 重构实现计划
-- [ ] **阶段 1: 准备工作**
-  - [ ] 创建新的 `StorageBackend` trait
-  - [ ] 为 `StoredValue` 添加公开访问方法
-  - [ ] 确保所有现有测试仍然通过
+- [x] **阶段 1: 准备工作** ✅ (Commit: 3f568b6)
+  - [x] 使 `StoredValue` 和 `ValueType` 公开
+  - [x] 为 `StoredValue` 添加公开访问方法 (`as_string()`, `as_list()`, `as_hash()`, `as_set()`, `as_zset()`)
+  - [x] 添加可变访问方法 (`as_list_mut()`, `as_hash_mut()`, `as_set_mut()`, `as_zset_mut()`)
+  - [x] 添加最小化存储接口 (`get_value()`, `set_value()`, `update_value()`, `delete_and_get()`)
+  - [x] 确保所有现有测试仍然通过 (78 个单元测试全部通过)
   
-- [ ] **阶段 2: String 命令迁移**
-  - [ ] 将 `mset_in_db` 逻辑移到 `StringCommands::mset`
-  - [ ] 将 `mget_from_db` 逻辑移到 `StringCommands::mget`
-  - [ ] 更新相关测试
-  - [ ] 验证功能正确性
+- [x] **阶段 2: String 命令迁移** ✅ (Commit: 650ed9d)
+  - [x] 将 `mset_in_db` 逻辑移到 `StringCommands::mset`
+  - [x] 将 `mget_from_db` 逻辑移到 `StringCommands::mget`
+  - [x] 更新相关测试
+  - [x] 验证功能正确性
 
-- [ ] **阶段 3: List 命令迁移**
-  - [ ] 将所有 `list_*_in_db` 方法的逻辑移到 `ListCommands`
-  - [ ] 在命令层直接操作 `VecDeque<Bytes>`
-  - [ ] 更新相关测试
-  - [ ] 验证功能正确性
+- [x] **阶段 3: List 命令迁移** ✅ (Commit: 3dcca1c)
+  - [x] 将所有 `list_*_in_db` 方法的逻辑移到 `ListCommands` (10 个命令)
+  - [x] 在命令层直接操作 `VecDeque<Bytes>`
+  - [x] 实现: LPUSH, RPUSH, LPOP, RPOP, LLEN, LRANGE, LINDEX, LSET, LREM, LTRIM
+  - [x] 更新相关测试
+  - [x] 验证功能正确性
 
-- [ ] **阶段 4: Hash 命令迁移**
-  - [ ] 将所有 `hash_*_in_db` 方法的逻辑移到 `HashCommands`
-  - [ ] 在命令层直接操作 `HashMap<String, Bytes>`
-  - [ ] 处理 `hincrby` 和 `hincrbyfloat` 的原子性
-  - [ ] 更新相关测试
-  - [ ] 验证功能正确性
+- [x] **阶段 4: Hash 命令迁移** ✅ (Commits: e692a93, 60db157)
+  - [x] 将所有 `hash_*_in_db` 方法的逻辑移到 `HashCommands` (12 个命令)
+  - [x] 在命令层直接操作 `HashMap<String, Bytes>`
+  - [x] 处理 `hincrby` 和 `hincrbyfloat` 的原子性（在命令层解析-修改-存储）
+  - [x] 实现: HSET, HSETNX, HGET, HMGET, HDEL, HEXISTS, HLEN, HKEYS, HVALS, HGETALL, HINCRBY, HINCRBYFLOAT
+  - [x] 使用 Entry API 优化 HSETNX (修复 clippy 警告)
+  - [x] 更新相关测试
+  - [x] 验证功能正确性
 
-- [ ] **阶段 5: Set 命令迁移**
+- [ ] **阶段 5: Set 命令迁移** ⏳ (待完成 - 13 个命令)
   - [ ] 将所有 `set_*_in_db` 方法的逻辑移到 `SetCommands`
   - [ ] 在命令层直接操作 `HashSet<Vec<u8>>`
   - [ ] 实现集合运算逻辑（union, inter, diff）
+  - [ ] 命令: SADD, SREM, SISMEMBER, SMEMBERS, SCARD, SPOP, SRANDMEMBER, SUNION, SINTER, SDIFF, SUNIONSTORE, SINTERSTORE, SDIFFSTORE
   - [ ] 更新相关测试
   - [ ] 验证功能正确性
 
-- [ ] **阶段 6: ZSet 命令迁移**
+- [ ] **阶段 6: ZSet 命令迁移** ⏳ (待完成 - 10 个命令)
   - [ ] 将所有 `zset_*_in_db` 方法的逻辑移到 `ZSetCommands`
   - [ ] 在命令层直接操作 `BTreeMap<Vec<u8>, f64>`
   - [ ] 实现排序和范围查询逻辑
+  - [ ] 命令: ZADD, ZREM, ZSCORE, ZRANK, ZREVRANK, ZRANGE, ZREVRANGE, ZRANGEBYSCORE, ZREVRANGEBYSCORE, ZCARD, ZCOUNT, ZINCRBY
   - [ ] 更新相关测试
   - [ ] 验证功能正确性
 
-- [ ] **阶段 7: 清理和优化**
-  - [ ] 从 `StorageAdapter` 和 `AiDbStorageAdapter` 中移除所有命令特定方法
-  - [ ] 确保两个适配器都实现统一的 `StorageBackend` trait
-  - [ ] 重构 `rename`, `copy`, `move` 等键管理命令
+- [ ] **阶段 7: 清理和优化** ⏳ (待完成)
+  - [ ] 从 `StorageAdapter` 中移除已迁移的命令特定方法 (24 个方法)
+  - [ ] 为 `AiDbStorageAdapter` 实现 `StoredValue` 序列化支持
+  - [ ] 扩展 `AiDbStorageAdapter` 支持复杂类型 (List, Hash, Set, ZSet)
+  - [ ] 重构 `rename`, `copy`, `move` 等键管理命令（如需要）
   - [ ] 更新所有受影响的集成测试
   - [ ] 运行完整测试套件
   - [ ] 性能基准测试对比
 
+**当前进度**: 24/52 命令已迁移 (46%)
+- ✅ String: 2/2
+- ✅ List: 10/10
+- ✅ Hash: 12/12
+- ⏳ Set: 0/13
+- ⏳ ZSet: 0/10
+
 ### 0.4 文档和验证
-- [ ] 更新架构文档说明新的分层设计
-- [ ] 创建存储层 API 文档（rustdoc）
-- [ ] 添加架构决策记录 (ADR)
-- [ ] 编写迁移指南（如果有外部依赖者）
-- [ ] 进行全面的回归测试
-- [ ] 性能对比分析（重构前后）
+- [x] 更新架构文档说明新的分层设计 ✅ (Commit: a959c93)
+  - [x] 创建 `docs/ARCHITECTURE_REFACTORING.md` - 完整的重构计划和实施状态
+  - [x] 更新 `CHANGELOG.md` - 记录所有重构变更
+  - [x] 文档化 AiDbStorageAdapter 的当前限制和未来工作
+- [ ] 创建存储层 API 文档（rustdoc）⏳
+- [ ] 添加架构决策记录 (ADR) ⏳
+- [ ] 编写迁移指南（如果有外部依赖者）⏳
+- [x] 进行全面的回归测试 ✅
+  - [x] 78 个单元测试全部通过
+  - [x] 5 个集成测试全部通过
+  - [x] cargo clippy 零警告
+  - [x] cargo fmt 已格式化
+  - [x] codeql 安全扫描零问题
+- [ ] 性能对比分析（重构前后）⏳
 
 ### 0.5 后续优化
 - [ ] 考虑为高频操作添加专门的优化路径
@@ -498,6 +521,55 @@
 - [ ] 考虑引入事务支持的存储接口
 - [ ] 优化锁粒度和并发性能
 - [ ] 评估使用 RwLock 以外的并发原语
+
+---
+
+### 📊 重构进度总结 (2025-11-13)
+
+**整体进度**: 阶段 1-4 已完成 (46% 命令迁移完成)
+
+**已完成**:
+- ✅ 阶段 0.1: 架构分析 - 完成
+- ✅ 阶段 0.2: 新架构设计 - 完成
+- ✅ 阶段 0.3.1: 准备工作 - 完成 (Commit: 3f568b6)
+- ✅ 阶段 0.3.2: String 命令迁移 (2/2) - 完成 (Commit: 650ed9d)
+- ✅ 阶段 0.3.3: List 命令迁移 (10/10) - 完成 (Commit: 3dcca1c)
+- ✅ 阶段 0.3.4: Hash 命令迁移 (12/12) - 完成 (Commits: e692a93, 60db157)
+- ✅ 阶段 0.4: 文档和验证 (部分) - 完成 (Commit: a959c93)
+
+**命令迁移统计**:
+- String: 2/2 ✅ (100%)
+- List: 10/10 ✅ (100%)
+- Hash: 12/12 ✅ (100%)
+- Set: 0/13 ⏳ (0%)
+- ZSet: 0/10 ⏳ (0%)
+- **总计**: 24/52 命令 (46%)
+
+**测试状态**:
+- ✅ 78 个单元测试全部通过
+- ✅ 5 个集成测试全部通过
+- ✅ cargo clippy 零警告
+- ✅ cargo fmt 代码格式化
+- ✅ codeql 安全扫描零问题
+
+**待完成工作**:
+1. 阶段 5: Set 命令迁移 (13 个命令)
+2. 阶段 6: ZSet 命令迁移 (10 个命令)
+3. 阶段 7: 清理已迁移的方法，扩展 AiDb 支持
+4. 性能基准测试对比
+5. 完善 API 文档
+
+**AiDbStorageAdapter 说明**:
+- 当前仅支持字符串类型（存储原始 Bytes）
+- 复杂类型（List, Hash, Set, ZSet）需要序列化支持
+- 未来工作已在 `docs/ARCHITECTURE_REFACTORING.md` 中详细记录
+
+**参考文档**:
+- 详细计划: `docs/ARCHITECTURE_REFACTORING.md`
+- 变更记录: `CHANGELOG.md`
+- Pull Request: #[当前 PR]
+
+---
 
 ### 预期收益
 1. **清晰的架构**: 存储层和命令层职责明确
