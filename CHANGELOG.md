@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Storage Layer Architecture Refactoring (Phase 1-4)**
+  - New minimal storage interface with `get_value()`, `set_value()`, `update_value()`, `delete_and_get()`
+  - Public `StoredValue` and `ValueType` with typed accessor methods
+  - Type-safe accessors: `as_string()`, `as_list()`, `as_hash()`, `as_set()`, `as_zset()`
+  - Mutable accessors: `as_list_mut()`, `as_hash_mut()`, `as_set_mut()`, `as_zset_mut()`
+  - Documentation: `docs/ARCHITECTURE_REFACTORING.md` - complete refactoring plan and status
+
 - **AiDb Storage Engine Integration**
   - Full integration of AiDb v0.1.0 LSM-Tree storage engine
   - New `AiDbStorageAdapter` with persistent storage support
@@ -47,9 +54,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Cluster and high availability plan
 
 ### Changed
+- **Storage Layer Architecture Refactoring (24/52 commands migrated - 46%)**
+  - Migrated String commands (2/2): MGET, MSET
+    - Commands now use basic `get_from_db()`/`set_in_db()` instead of specialized batch methods
+  - Migrated List commands (10/10): LPUSH, RPUSH, LPOP, RPOP, LLEN, LRANGE, LINDEX, LSET, LREM, LTRIM
+    - Commands directly manipulate `VecDeque<Bytes>` using `get_value()`/`set_value()`
+    - Business logic (index normalization, range extraction, etc.) moved from storage to command layer
+  - Migrated Hash commands (12/12): HSET, HSETNX, HGET, HMGET, HDEL, HEXISTS, HLEN, HKEYS, HVALS, HGETALL, HINCRBY, HINCRBYFLOAT
+    - Commands directly manipulate `HashMap<String, Bytes>`
+    - Increment operations (HINCRBY, HINCRBYFLOAT) now parse-modify-store in command layer
+    - Used Entry API for HSETNX to avoid clippy warnings
+  - Set and ZSet commands remain to be migrated in future phases
+
 - Renamed `aidb_adapter.rs` to `memory_adapter.rs` for clarity
 - Created new `aidb_adapter.rs` with real AiDb integration
-- Updated `storage/mod.rs` to export both storage adapters
+- Updated `storage/mod.rs` to export both storage adapters and new public types
 - Updated `Cargo.toml` to include AiDb dependency
 - Added `tempfile` as dev-dependency for testing
 - Updated README.md with storage engine information
@@ -57,6 +76,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Updated project goals to include RESP3 and DB/Key commands
 - Improved code formatting across all files
 - Updated Cargo edition from 2024 to 2021 (stable)
+
+### Notes
+- **AiDbStorageAdapter Limitation**: Currently only supports string values (raw Bytes). Complex types (List, Hash, Set, ZSet) require serialization support to be added in future releases.
+- **Migration Status**: Memory adapter fully refactored for String, List, and Hash commands. Remaining work: Set (13 commands), ZSet (10 commands), and cleanup phase.
 
 ## [0.1.0] - 2025-11-11
 
