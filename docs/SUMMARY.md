@@ -236,6 +236,21 @@ OK
 
 ## 后续优化建议
 
+### 架构重构（优先级 0）
+
+为了提高代码质量和可维护性，计划进行存储层架构重构：
+
+**问题**: 当前存储层包含 52+ 个命令特定方法，违反单一职责原则
+**目标**: 将命令逻辑从存储层分离，使存储层只提供基础的 CRUD 接口
+**收益**: 
+- 清晰的架构分层
+- 易于切换存储引擎
+- 提高可测试性和可维护性
+
+详细计划请参考：
+- docs/ARCHITECTURE_REFACTORING.md
+- TODO.md - 优先级 0 部分
+
 ### 短期优化
 1. 集成实际的 AiDb v0.1.0
 2. 添加配置文件支持
@@ -281,9 +296,11 @@ OK
 ## 相关文件
 
 - **开发计划**: docs/DEVELOPMENT_PLAN.md
+- **架构重构计划**: docs/ARCHITECTURE_REFACTORING.md
 - **API 文档**: docs/API.md
 - **部署指南**: docs/DEPLOYMENT.md
 - **README**: README.md
+- **项目待办**: TODO.md
 - **示例代码**: examples/client_example.rs
 - **主程序**: src/main.rs
 - **库入口**: src/lib.rs
