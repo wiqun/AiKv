@@ -48,13 +48,9 @@ impl StoredValue {
                 SerializableValueType::List(list.iter().map(|b| b.to_vec()).collect())
             }
             ValueType::Hash(hash) => SerializableValueType::Hash(
-                hash.iter()
-                    .map(|(k, v)| (k.clone(), v.to_vec()))
-                    .collect(),
+                hash.iter().map(|(k, v)| (k.clone(), v.to_vec())).collect(),
             ),
-            ValueType::Set(set) => {
-                SerializableValueType::Set(set.iter().cloned().collect())
-            }
+            ValueType::Set(set) => SerializableValueType::Set(set.iter().cloned().collect()),
             ValueType::ZSet(zset) => {
                 SerializableValueType::ZSet(zset.iter().map(|(k, v)| (k.clone(), *v)).collect())
             }
@@ -78,9 +74,7 @@ impl StoredValue {
                     .map(|(k, v)| (k, Bytes::from(v)))
                     .collect(),
             ),
-            SerializableValueType::Set(vec_set) => {
-                ValueType::Set(vec_set.into_iter().collect())
-            }
+            SerializableValueType::Set(vec_set) => ValueType::Set(vec_set.into_iter().collect()),
             SerializableValueType::ZSet(vec_zset) => {
                 ValueType::ZSet(vec_zset.into_iter().collect())
             }

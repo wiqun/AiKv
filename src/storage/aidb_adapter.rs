@@ -116,7 +116,9 @@ impl AiDbStorageAdapter {
             Some(serialized) => {
                 // Deserialize using bincode
                 let serializable: SerializableStoredValue = bincode::deserialize(&serialized)
-                    .map_err(|e| AikvError::Storage(format!("Failed to deserialize value: {}", e)))?;
+                    .map_err(|e| {
+                        AikvError::Storage(format!("Failed to deserialize value: {}", e))
+                    })?;
                 Ok(Some(StoredValue::from_serializable(serializable)))
             }
             None => Ok(None),
@@ -213,7 +215,6 @@ impl AiDbStorageAdapter {
     // ========================================================================
     // LEGACY METHODS (For backward compatibility with existing code)
     // ========================================================================
-
 
     /// Get a value by key from a specific database
     pub fn get_from_db(&self, db_index: usize, key: &str) -> Result<Option<Bytes>> {
@@ -1078,9 +1079,11 @@ mod tests {
     fn test_stored_value_string() {
         let (_dir, storage) = create_temp_storage();
         let value = StoredValue::new_string(Bytes::from("hello world"));
-        
-        storage.set_value(0, "key1".to_string(), value.clone()).unwrap();
-        
+
+        storage
+            .set_value(0, "key1".to_string(), value.clone())
+            .unwrap();
+
         let retrieved = storage.get_value(0, "key1").unwrap().unwrap();
         assert_eq!(retrieved.as_string().unwrap(), &Bytes::from("hello world"));
     }
@@ -1092,10 +1095,10 @@ mod tests {
         list.push_back(Bytes::from("item1"));
         list.push_back(Bytes::from("item2"));
         list.push_back(Bytes::from("item3"));
-        
+
         let value = StoredValue::new_list(list.clone());
         storage.set_value(0, "mylist".to_string(), value).unwrap();
-        
+
         let retrieved = storage.get_value(0, "mylist").unwrap().unwrap();
         let retrieved_list = retrieved.as_list().unwrap();
         assert_eq!(retrieved_list.len(), 3);
@@ -1110,15 +1113,21 @@ mod tests {
         let mut hash = HashMap::new();
         hash.insert("field1".to_string(), Bytes::from("value1"));
         hash.insert("field2".to_string(), Bytes::from("value2"));
-        
+
         let value = StoredValue::new_hash(hash);
         storage.set_value(0, "myhash".to_string(), value).unwrap();
-        
+
         let retrieved = storage.get_value(0, "myhash").unwrap().unwrap();
         let retrieved_hash = retrieved.as_hash().unwrap();
         assert_eq!(retrieved_hash.len(), 2);
-        assert_eq!(retrieved_hash.get("field1").unwrap(), &Bytes::from("value1"));
-        assert_eq!(retrieved_hash.get("field2").unwrap(), &Bytes::from("value2"));
+        assert_eq!(
+            retrieved_hash.get("field1").unwrap(),
+            &Bytes::from("value1")
+        );
+        assert_eq!(
+            retrieved_hash.get("field2").unwrap(),
+            &Bytes::from("value2")
+        );
     }
 
     #[test]
@@ -1128,10 +1137,10 @@ mod tests {
         set.insert(b"member1".to_vec());
         set.insert(b"member2".to_vec());
         set.insert(b"member3".to_vec());
-        
+
         let value = StoredValue::new_set(set);
         storage.set_value(0, "myset".to_string(), value).unwrap();
-        
+
         let retrieved = storage.get_value(0, "myset").unwrap().unwrap();
         let retrieved_set = retrieved.as_set().unwrap();
         assert_eq!(retrieved_set.len(), 3);
@@ -1147,10 +1156,10 @@ mod tests {
         zset.insert(b"member1".to_vec(), 1.0);
         zset.insert(b"member2".to_vec(), 2.5);
         zset.insert(b"member3".to_vec(), 3.7);
-        
+
         let value = StoredValue::new_zset(zset);
         storage.set_value(0, "myzset".to_string(), value).unwrap();
-        
+
         let retrieved = storage.get_value(0, "myzset").unwrap().unwrap();
         let retrieved_zset = retrieved.as_zset().unwrap();
         assert_eq!(retrieved_zset.len(), 3);
@@ -1164,18 +1173,20 @@ mod tests {
         let (_dir, storage) = create_temp_storage();
         let mut list = VecDeque::new();
         list.push_back(Bytes::from("item1"));
-        
+
         let value = StoredValue::new_list(list);
         storage.set_value(0, "mylist".to_string(), value).unwrap();
-        
+
         // Update the list by adding an item
-        let updated = storage.update_value(0, "mylist", |v| {
-            v.as_list_mut()?.push_back(Bytes::from("item2"));
-            Ok(())
-        }).unwrap();
-        
+        let updated = storage
+            .update_value(0, "mylist", |v| {
+                v.as_list_mut()?.push_back(Bytes::from("item2"));
+                Ok(())
+            })
+            .unwrap();
+
         assert!(updated);
-        
+
         let retrieved = storage.get_value(0, "mylist").unwrap().unwrap();
         let retrieved_list = retrieved.as_list().unwrap();
         assert_eq!(retrieved_list.len(), 2);
@@ -1188,11 +1199,14 @@ mod tests {
         let (_dir, storage) = create_temp_storage();
         let value = StoredValue::new_string(Bytes::from("test value"));
         storage.set_value(0, "key1".to_string(), value).unwrap();
-        
+
         let deleted_value = storage.delete_and_get(0, "key1").unwrap();
         assert!(deleted_value.is_some());
-        assert_eq!(deleted_value.unwrap().as_string().unwrap(), &Bytes::from("test value"));
-        
+        assert_eq!(
+            deleted_value.unwrap().as_string().unwrap(),
+            &Bytes::from("test value")
+        );
+
         // Key should no longer exist
         assert!(!storage.exists_in_db(0, "key1").unwrap());
     }
@@ -1202,22 +1216,22 @@ mod tests {
         let (_dir, storage) = create_temp_storage();
         let mut hash = HashMap::new();
         hash.insert("field1".to_string(), Bytes::from("value1"));
-        
+
         let mut value = StoredValue::new_hash(hash);
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis() as u64;
         value.set_expiration(Some(now + 1000)); // Expire in 1 second
-        
+
         storage.set_value(0, "myhash".to_string(), value).unwrap();
-        
+
         // Key should exist
         assert!(storage.exists_in_db(0, "myhash").unwrap());
-        
+
         // Wait for expiration
         std::thread::sleep(std::time::Duration::from_millis(1100));
-        
+
         // Key should be expired
         assert!(!storage.exists_in_db(0, "myhash").unwrap());
         assert!(storage.get_value(0, "myhash").unwrap().is_none());
@@ -1226,18 +1240,18 @@ mod tests {
     #[test]
     fn test_cross_database_operations() {
         let (_dir, storage) = create_temp_storage();
-        
+
         // Set values in different databases
         let value1 = StoredValue::new_string(Bytes::from("db0 value"));
         let value2 = StoredValue::new_string(Bytes::from("db1 value"));
-        
+
         storage.set_value(0, "key".to_string(), value1).unwrap();
         storage.set_value(1, "key".to_string(), value2).unwrap();
-        
+
         // Verify they're separate
         let v0 = storage.get_value(0, "key").unwrap().unwrap();
         let v1 = storage.get_value(1, "key").unwrap().unwrap();
-        
+
         assert_eq!(v0.as_string().unwrap(), &Bytes::from("db0 value"));
         assert_eq!(v1.as_string().unwrap(), &Bytes::from("db1 value"));
     }
@@ -1249,18 +1263,20 @@ mod tests {
         list.push_back(Bytes::from("a"));
         list.push_back(Bytes::from("b"));
         list.push_back(Bytes::from("c"));
-        
+
         let value = StoredValue::new_list(list);
         storage.set_value(0, "mylist".to_string(), value).unwrap();
-        
+
         // Modify the list
-        storage.update_value(0, "mylist", |v| {
-            let list = v.as_list_mut()?;
-            list.pop_front();
-            list.push_back(Bytes::from("d"));
-            Ok(())
-        }).unwrap();
-        
+        storage
+            .update_value(0, "mylist", |v| {
+                let list = v.as_list_mut()?;
+                list.pop_front();
+                list.push_back(Bytes::from("d"));
+                Ok(())
+            })
+            .unwrap();
+
         let retrieved = storage.get_value(0, "mylist").unwrap().unwrap();
         let retrieved_list = retrieved.as_list().unwrap();
         assert_eq!(retrieved_list.len(), 3);
@@ -1275,23 +1291,28 @@ mod tests {
         let mut hash = HashMap::new();
         hash.insert("name".to_string(), Bytes::from("Alice"));
         hash.insert("age".to_string(), Bytes::from("30"));
-        
+
         let value = StoredValue::new_hash(hash);
         storage.set_value(0, "user:1".to_string(), value).unwrap();
-        
+
         // Update hash
-        storage.update_value(0, "user:1", |v| {
-            let hash = v.as_hash_mut()?;
-            hash.insert("age".to_string(), Bytes::from("31"));
-            hash.insert("city".to_string(), Bytes::from("New York"));
-            Ok(())
-        }).unwrap();
-        
+        storage
+            .update_value(0, "user:1", |v| {
+                let hash = v.as_hash_mut()?;
+                hash.insert("age".to_string(), Bytes::from("31"));
+                hash.insert("city".to_string(), Bytes::from("New York"));
+                Ok(())
+            })
+            .unwrap();
+
         let retrieved = storage.get_value(0, "user:1").unwrap().unwrap();
         let retrieved_hash = retrieved.as_hash().unwrap();
         assert_eq!(retrieved_hash.len(), 3);
         assert_eq!(retrieved_hash.get("name").unwrap(), &Bytes::from("Alice"));
         assert_eq!(retrieved_hash.get("age").unwrap(), &Bytes::from("31"));
-        assert_eq!(retrieved_hash.get("city").unwrap(), &Bytes::from("New York"));
+        assert_eq!(
+            retrieved_hash.get("city").unwrap(),
+            &Bytes::from("New York")
+        );
     }
 }
