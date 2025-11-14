@@ -564,14 +564,16 @@
 1. ~~阶段 5: Set 命令迁移 (13 个命令)~~ ✅ 已完成
 2. ~~阶段 6: ZSet 命令迁移 (10 个命令)~~ ✅ 已完成
 3. ~~阶段 7: 清理已迁移的方法~~ ✅ 已完成
-4. AiDbStorageAdapter 扩展 (未来工作)
+4. ~~AiDbStorageAdapter 扩展~~ ✅ 已完成 (2025-11-13)
 5. 性能基准测试对比 (可选)
 6. 完善 API 文档 (可选)
 
-**AiDbStorageAdapter 说明**:
-- 当前仅支持字符串类型（存储原始 Bytes）
-- 复杂类型（List, Hash, Set, ZSet）需要序列化支持
-- 未来工作已在 `docs/ARCHITECTURE_REFACTORING.md` 中详细记录
+**AiDbStorageAdapter 扩展完成** ✅:
+- 使用 bincode 实现高性能序列化/反序列化
+- 支持所有数据类型（String, List, Hash, Set, ZSet）
+- 新增 11 个测试用例，所有 89 个测试通过
+- 与 MemoryAdapter 功能完全对等
+- 详细信息见 `docs/ARCHITECTURE_REFACTORING.md`
 
 **参考文档**:
 - 详细计划: `docs/ARCHITECTURE_REFACTORING.md`

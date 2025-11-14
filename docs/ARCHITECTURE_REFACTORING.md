@@ -340,21 +340,24 @@ impl ListCommands {
 
 ### AiDbStorageAdapter 状态说明
 
-**当前限制**:
-- `AiDbStorageAdapter` 目前仅支持字符串类型（存储原始 `Bytes`）
-- 不支持 List, Hash, Set, ZSet 等复杂类型
-- 这是设计上的差异：AiDb 是持久化引擎，需要序列化复杂类型
+**✅ 已完成 (2025-11-13)**:
+- `AiDbStorageAdapter` 现已支持所有数据类型（String, List, Hash, Set, ZSet）
+- 使用 bincode 实现高性能二进制序列化/反序列化
+- 通过 `SerializableStoredValue` 中间层进行类型转换
+- 完整测试覆盖，包括所有数据类型的集成测试
+- 性能优化：采用二进制格式，序列化开销最小化
 
-**未来工作**:
-- 为 `StoredValue` 实现序列化/反序列化（使用 bincode 或类似库）
-- 扩展 `AiDbStorageAdapter` 以支持所有数据类型
-- 实现类型元数据存储（存储类型信息以便反序列化）
-- 添加针对复杂类型的集成测试
+**实现细节**:
+- `get_value()` - 支持反序列化所有类型
+- `set_value()` - 支持序列化所有类型  
+- `update_value()` - 支持原子性更新操作
+- `delete_and_get()` - 支持删除并返回值
+- 过期时间管理与所有数据类型兼容
 
-**当前使用建议**:
-- 对于纯字符串操作，可以使用 `AiDbStorageAdapter`
-- 对于复杂数据类型（List, Hash, Set, ZSet），目前仅 `MemoryAdapter` 支持
-- 生产环境建议暂时使用 `MemoryAdapter` 直到 AiDb 支持完整
+**使用建议**:
+- ✅ 生产环境可以使用 `AiDbStorageAdapter` 获得完整功能和持久化能力
+- ✅ 对于所有数据类型（String, List, Hash, Set, ZSet），AiDb 和 Memory 两种后端均支持
+- ✅ 可以根据需求选择：Memory（纯内存，速度最快）或 AiDb（持久化，数据安全）
 
 ## 预期收益
 

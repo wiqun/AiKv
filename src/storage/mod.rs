@@ -9,4 +9,4 @@ pub use memory_adapter::StorageAdapter;
 pub use aidb_adapter::AiDbStorageAdapter;
 
 // Export the core storage types for command implementations
-pub use memory_adapter::{StoredValue, ValueType};
+pub use memory_adapter::{SerializableStoredValue, StoredValue, ValueType};

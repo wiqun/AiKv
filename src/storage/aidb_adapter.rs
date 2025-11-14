@@ -1,4 +1,5 @@
 use crate::error::{AikvError, Result};
+use crate::storage::{SerializableStoredValue, StoredValue};
 use aidb::{Options, DB};
 use bytes::Bytes;
 use std::path::Path;
@@ -79,6 +80,141 @@ impl AiDbStorageAdapter {
         expire_key.extend_from_slice(key);
         expire_key
     }
+
+    // ========================================================================
+    // NEW CORE STORAGE METHODS (Post-refactoring minimal interface)
+    // ========================================================================
+
+    /// Get a StoredValue by key from a specific database (supports all types via deserialization)
+    pub fn get_value(&self, db_index: usize, key: &str) -> Result<Option<StoredValue>> {
+        if db_index >= self.databases.len() {
+            return Err(AikvError::Storage(format!(
+                "Invalid database index: {}",
+                db_index
+            )));
+        }
+
+        let db = &self.databases[db_index];
+        let key_bytes = key.as_bytes();
+
+        // Check if key is expired
+        if self.is_expired(db, key_bytes)? {
+            // Clean up expired key
+            db.delete(key_bytes)
+                .map_err(|e| AikvError::Storage(format!("Failed to delete expired key: {}", e)))?;
+            let expire_key = Self::expiration_key(key_bytes);
+            db.delete(&expire_key)
+                .map_err(|e| AikvError::Storage(format!("Failed to delete expiration: {}", e)))?;
+            return Ok(None);
+        }
+
+        // Get the serialized value
+        match db
+            .get(key_bytes)
+            .map_err(|e| AikvError::Storage(format!("Failed to get value: {}", e)))?
+        {
+            Some(serialized) => {
+                // Deserialize using bincode
+                let serializable: SerializableStoredValue = bincode::deserialize(&serialized)
+                    .map_err(|e| {
+                        AikvError::Storage(format!("Failed to deserialize value: {}", e))
+                    })?;
+                Ok(Some(StoredValue::from_serializable(serializable)))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Set a StoredValue for a key in a specific database (supports all types via serialization)
+    pub fn set_value(&self, db_index: usize, key: String, value: StoredValue) -> Result<()> {
+        if db_index >= self.databases.len() {
+            return Err(AikvError::Storage(format!(
+                "Invalid database index: {}",
+                db_index
+            )));
+        }
+
+        let db = &self.databases[db_index];
+        let key_bytes = key.as_bytes();
+
+        // Serialize using bincode
+        let serializable = value.to_serializable();
+        let serialized = bincode::serialize(&serializable)
+            .map_err(|e| AikvError::Storage(format!("Failed to serialize value: {}", e)))?;
+
+        // Store the serialized value
+        db.put(key_bytes, &serialized)
+            .map_err(|e| AikvError::Storage(format!("Failed to put value: {}", e)))?;
+
+        // Handle expiration if set
+        if let Some(expires_at) = value.expires_at() {
+            let expire_key = Self::expiration_key(key_bytes);
+            db.put(&expire_key, &expires_at.to_le_bytes())
+                .map_err(|e| AikvError::Storage(format!("Failed to set expiration: {}", e)))?;
+        }
+
+        Ok(())
+    }
+
+    /// Update a value using a closure (supports all types)
+    /// Returns true if the key existed and was updated, false otherwise
+    pub fn update_value<F>(&self, db_index: usize, key: &str, f: F) -> Result<bool>
+    where
+        F: FnOnce(&mut StoredValue) -> Result<()>,
+    {
+        if db_index >= self.databases.len() {
+            return Err(AikvError::Storage(format!(
+                "Invalid database index: {}",
+                db_index
+            )));
+        }
+
+        // Get the current value
+        let mut value = match self.get_value(db_index, key)? {
+            Some(v) => v,
+            None => return Ok(false),
+        };
+
+        // Apply the update function
+        f(&mut value)?;
+
+        // Store the updated value
+        self.set_value(db_index, key.to_string(), value)?;
+
+        Ok(true)
+    }
+
+    /// Delete a key and return its value (supports all types)
+    pub fn delete_and_get(&self, db_index: usize, key: &str) -> Result<Option<StoredValue>> {
+        if db_index >= self.databases.len() {
+            return Err(AikvError::Storage(format!(
+                "Invalid database index: {}",
+                db_index
+            )));
+        }
+
+        let db = &self.databases[db_index];
+        let key_bytes = key.as_bytes();
+
+        // Get the value before deleting
+        let value = self.get_value(db_index, key)?;
+
+        if value.is_some() {
+            // Delete the key
+            db.delete(key_bytes)
+                .map_err(|e| AikvError::Storage(format!("Failed to delete key: {}", e)))?;
+
+            // Delete expiration metadata if exists
+            let expire_key = Self::expiration_key(key_bytes);
+            let _ = db.delete(&expire_key);
+        }
+
+        Ok(value)
+    }
+
+    // ========================================================================
+    // LEGACY METHODS (For backward compatibility with existing code)
+    // ========================================================================
 
     /// Get a value by key from a specific database
     pub fn get_from_db(&self, db_index: usize, key: &str) -> Result<Option<Bytes>> {
@@ -848,6 +984,7 @@ impl AiDbStorageAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
     use tempfile::TempDir;
 
     fn create_temp_storage() -> (TempDir, AiDbStorageAdapter) {
@@ -932,5 +1069,250 @@ mod tests {
         // Key should be expired
         assert!(!storage.exists("key1").unwrap());
         assert_eq!(storage.get("key1").unwrap(), None);
+    }
+
+    // ========================================================================
+    // Tests for new serialization-based storage (all data types)
+    // ========================================================================
+
+    #[test]
+    fn test_stored_value_string() {
+        let (_dir, storage) = create_temp_storage();
+        let value = StoredValue::new_string(Bytes::from("hello world"));
+
+        storage
+            .set_value(0, "key1".to_string(), value.clone())
+            .unwrap();
+
+        let retrieved = storage.get_value(0, "key1").unwrap().unwrap();
+        assert_eq!(retrieved.as_string().unwrap(), &Bytes::from("hello world"));
+    }
+
+    #[test]
+    fn test_stored_value_list() {
+        let (_dir, storage) = create_temp_storage();
+        let mut list = VecDeque::new();
+        list.push_back(Bytes::from("item1"));
+        list.push_back(Bytes::from("item2"));
+        list.push_back(Bytes::from("item3"));
+
+        let value = StoredValue::new_list(list.clone());
+        storage.set_value(0, "mylist".to_string(), value).unwrap();
+
+        let retrieved = storage.get_value(0, "mylist").unwrap().unwrap();
+        let retrieved_list = retrieved.as_list().unwrap();
+        assert_eq!(retrieved_list.len(), 3);
+        assert_eq!(retrieved_list[0], Bytes::from("item1"));
+        assert_eq!(retrieved_list[1], Bytes::from("item2"));
+        assert_eq!(retrieved_list[2], Bytes::from("item3"));
+    }
+
+    #[test]
+    fn test_stored_value_hash() {
+        let (_dir, storage) = create_temp_storage();
+        let mut hash = HashMap::new();
+        hash.insert("field1".to_string(), Bytes::from("value1"));
+        hash.insert("field2".to_string(), Bytes::from("value2"));
+
+        let value = StoredValue::new_hash(hash);
+        storage.set_value(0, "myhash".to_string(), value).unwrap();
+
+        let retrieved = storage.get_value(0, "myhash").unwrap().unwrap();
+        let retrieved_hash = retrieved.as_hash().unwrap();
+        assert_eq!(retrieved_hash.len(), 2);
+        assert_eq!(
+            retrieved_hash.get("field1").unwrap(),
+            &Bytes::from("value1")
+        );
+        assert_eq!(
+            retrieved_hash.get("field2").unwrap(),
+            &Bytes::from("value2")
+        );
+    }
+
+    #[test]
+    fn test_stored_value_set() {
+        let (_dir, storage) = create_temp_storage();
+        let mut set = HashSet::new();
+        set.insert(b"member1".to_vec());
+        set.insert(b"member2".to_vec());
+        set.insert(b"member3".to_vec());
+
+        let value = StoredValue::new_set(set);
+        storage.set_value(0, "myset".to_string(), value).unwrap();
+
+        let retrieved = storage.get_value(0, "myset").unwrap().unwrap();
+        let retrieved_set = retrieved.as_set().unwrap();
+        assert_eq!(retrieved_set.len(), 3);
+        assert!(retrieved_set.contains(&b"member1".to_vec()));
+        assert!(retrieved_set.contains(&b"member2".to_vec()));
+        assert!(retrieved_set.contains(&b"member3".to_vec()));
+    }
+
+    #[test]
+    fn test_stored_value_zset() {
+        let (_dir, storage) = create_temp_storage();
+        let mut zset = BTreeMap::new();
+        zset.insert(b"member1".to_vec(), 1.0);
+        zset.insert(b"member2".to_vec(), 2.5);
+        zset.insert(b"member3".to_vec(), 3.7);
+
+        let value = StoredValue::new_zset(zset);
+        storage.set_value(0, "myzset".to_string(), value).unwrap();
+
+        let retrieved = storage.get_value(0, "myzset").unwrap().unwrap();
+        let retrieved_zset = retrieved.as_zset().unwrap();
+        assert_eq!(retrieved_zset.len(), 3);
+        assert_eq!(retrieved_zset.get(&b"member1".to_vec()).unwrap(), &1.0);
+        assert_eq!(retrieved_zset.get(&b"member2".to_vec()).unwrap(), &2.5);
+        assert_eq!(retrieved_zset.get(&b"member3".to_vec()).unwrap(), &3.7);
+    }
+
+    #[test]
+    fn test_update_value() {
+        let (_dir, storage) = create_temp_storage();
+        let mut list = VecDeque::new();
+        list.push_back(Bytes::from("item1"));
+
+        let value = StoredValue::new_list(list);
+        storage.set_value(0, "mylist".to_string(), value).unwrap();
+
+        // Update the list by adding an item
+        let updated = storage
+            .update_value(0, "mylist", |v| {
+                v.as_list_mut()?.push_back(Bytes::from("item2"));
+                Ok(())
+            })
+            .unwrap();
+
+        assert!(updated);
+
+        let retrieved = storage.get_value(0, "mylist").unwrap().unwrap();
+        let retrieved_list = retrieved.as_list().unwrap();
+        assert_eq!(retrieved_list.len(), 2);
+        assert_eq!(retrieved_list[0], Bytes::from("item1"));
+        assert_eq!(retrieved_list[1], Bytes::from("item2"));
+    }
+
+    #[test]
+    fn test_delete_and_get() {
+        let (_dir, storage) = create_temp_storage();
+        let value = StoredValue::new_string(Bytes::from("test value"));
+        storage.set_value(0, "key1".to_string(), value).unwrap();
+
+        let deleted_value = storage.delete_and_get(0, "key1").unwrap();
+        assert!(deleted_value.is_some());
+        assert_eq!(
+            deleted_value.unwrap().as_string().unwrap(),
+            &Bytes::from("test value")
+        );
+
+        // Key should no longer exist
+        assert!(!storage.exists_in_db(0, "key1").unwrap());
+    }
+
+    #[test]
+    fn test_expiration_with_serialized_value() {
+        let (_dir, storage) = create_temp_storage();
+        let mut hash = HashMap::new();
+        hash.insert("field1".to_string(), Bytes::from("value1"));
+
+        let mut value = StoredValue::new_hash(hash);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        value.set_expiration(Some(now + 1000)); // Expire in 1 second
+
+        storage.set_value(0, "myhash".to_string(), value).unwrap();
+
+        // Key should exist
+        assert!(storage.exists_in_db(0, "myhash").unwrap());
+
+        // Wait for expiration
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+
+        // Key should be expired
+        assert!(!storage.exists_in_db(0, "myhash").unwrap());
+        assert!(storage.get_value(0, "myhash").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_cross_database_operations() {
+        let (_dir, storage) = create_temp_storage();
+
+        // Set values in different databases
+        let value1 = StoredValue::new_string(Bytes::from("db0 value"));
+        let value2 = StoredValue::new_string(Bytes::from("db1 value"));
+
+        storage.set_value(0, "key".to_string(), value1).unwrap();
+        storage.set_value(1, "key".to_string(), value2).unwrap();
+
+        // Verify they're separate
+        let v0 = storage.get_value(0, "key").unwrap().unwrap();
+        let v1 = storage.get_value(1, "key").unwrap().unwrap();
+
+        assert_eq!(v0.as_string().unwrap(), &Bytes::from("db0 value"));
+        assert_eq!(v1.as_string().unwrap(), &Bytes::from("db1 value"));
+    }
+
+    #[test]
+    fn test_complex_list_operations() {
+        let (_dir, storage) = create_temp_storage();
+        let mut list = VecDeque::new();
+        list.push_back(Bytes::from("a"));
+        list.push_back(Bytes::from("b"));
+        list.push_back(Bytes::from("c"));
+
+        let value = StoredValue::new_list(list);
+        storage.set_value(0, "mylist".to_string(), value).unwrap();
+
+        // Modify the list
+        storage
+            .update_value(0, "mylist", |v| {
+                let list = v.as_list_mut()?;
+                list.pop_front();
+                list.push_back(Bytes::from("d"));
+                Ok(())
+            })
+            .unwrap();
+
+        let retrieved = storage.get_value(0, "mylist").unwrap().unwrap();
+        let retrieved_list = retrieved.as_list().unwrap();
+        assert_eq!(retrieved_list.len(), 3);
+        assert_eq!(retrieved_list[0], Bytes::from("b"));
+        assert_eq!(retrieved_list[1], Bytes::from("c"));
+        assert_eq!(retrieved_list[2], Bytes::from("d"));
+    }
+
+    #[test]
+    fn test_complex_hash_operations() {
+        let (_dir, storage) = create_temp_storage();
+        let mut hash = HashMap::new();
+        hash.insert("name".to_string(), Bytes::from("Alice"));
+        hash.insert("age".to_string(), Bytes::from("30"));
+
+        let value = StoredValue::new_hash(hash);
+        storage.set_value(0, "user:1".to_string(), value).unwrap();
+
+        // Update hash
+        storage
+            .update_value(0, "user:1", |v| {
+                let hash = v.as_hash_mut()?;
+                hash.insert("age".to_string(), Bytes::from("31"));
+                hash.insert("city".to_string(), Bytes::from("New York"));
+                Ok(())
+            })
+            .unwrap();
+
+        let retrieved = storage.get_value(0, "user:1").unwrap().unwrap();
+        let retrieved_hash = retrieved.as_hash().unwrap();
+        assert_eq!(retrieved_hash.len(), 3);
+        assert_eq!(retrieved_hash.get("name").unwrap(), &Bytes::from("Alice"));
+        assert_eq!(retrieved_hash.get("age").unwrap(), &Bytes::from("31"));
+        assert_eq!(
+            retrieved_hash.get("city").unwrap(),
+            &Bytes::from("New York")
+        );
     }
 }

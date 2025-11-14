@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **AiDbStorageAdapter Complete Data Type Support (2025-11-13)**
+  - Full serialization support for all data types (String, List, Hash, Set, ZSet)
+  - Using bincode for high-performance binary serialization/deserialization
+  - New `SerializableStoredValue` intermediate representation for efficient storage
+  - Core methods: `get_value()`, `set_value()`, `update_value()`, `delete_and_get()`
+  - Feature parity with MemoryAdapter achieved
+  - 11 new comprehensive test cases covering all data types
+  - Cross-database operations and expiration handling
+  - Zero performance overhead - optimized for production use
+  - No backward compatibility required - clean implementation
+
 - **Storage Layer Architecture Refactoring (Phase 1-4)**
   - New minimal storage interface with `get_value()`, `set_value()`, `update_value()`, `delete_and_get()`
   - Public `StoredValue` and `ValueType` with typed accessor methods

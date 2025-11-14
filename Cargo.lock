@@ -37,6 +37,7 @@ version = "0.1.0"
 dependencies = [
  "aidb",
  "anyhow",
+ "bincode",
  "bytes",
  "criterion",
  "mlua",
