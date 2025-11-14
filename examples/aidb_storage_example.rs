@@ -3,7 +3,7 @@
 // This example shows how to use AiKv with the AiDb LSM-Tree storage engine
 // for persistent storage.
 
-use aikv::storage::AiDbStorageAdapter;
+use aikv::storage::{AiDbStorageAdapter, StoredValue};
 use bytes::Bytes;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -18,14 +18,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create AiDb storage adapter with 16 databases (like Redis)
     let storage = AiDbStorageAdapter::new(db_path, 16)?;
 
-    // Basic operations
-    println!("1. Basic SET and GET operations:");
-    storage.set("user:1".to_string(), Bytes::from("Alice"))?;
-    storage.set("user:2".to_string(), Bytes::from("Bob"))?;
-    storage.set("user:3".to_string(), Bytes::from("Charlie"))?;
+    // Basic operations using the new minimal interface
+    println!("1. Basic SET and GET operations (using new interface):");
+    storage.set_value(
+        0,
+        "user:1".to_string(),
+        StoredValue::new_string(Bytes::from("Alice")),
+    )?;
+    storage.set_value(
+        0,
+        "user:2".to_string(),
+        StoredValue::new_string(Bytes::from("Bob")),
+    )?;
+    storage.set_value(
+        0,
+        "user:3".to_string(),
+        StoredValue::new_string(Bytes::from("Charlie")),
+    )?;
 
-    if let Some(value) = storage.get("user:1")? {
-        println!("   user:1 = {}", String::from_utf8_lossy(&value));
+    if let Some(value) = storage.get_value(0, "user:1")? {
+        let s = value.as_string()?;
+        println!("   user:1 = {}", String::from_utf8_lossy(s));
     }
 
     // Multiple databases
@@ -40,23 +53,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("   DB 1, key1 = {}", String::from_utf8_lossy(&val1));
     }
 
-    // Batch operations
-    println!("\n3. Batch MSET and MGET operations:");
-    storage.mset(vec![
-        ("product:1".to_string(), Bytes::from("Laptop")),
-        ("product:2".to_string(), Bytes::from("Mouse")),
-        ("product:3".to_string(), Bytes::from("Keyboard")),
-    ])?;
-
-    let products = storage.mget(&[
+    // Batch operations using new interface
+    println!("\n3. Multiple SET operations (command layer handles MSET logic):");
+    storage.set_value(
+        0,
         "product:1".to_string(),
+        StoredValue::new_string(Bytes::from("Laptop")),
+    )?;
+    storage.set_value(
+        0,
         "product:2".to_string(),
+        StoredValue::new_string(Bytes::from("Mouse")),
+    )?;
+    storage.set_value(
+        0,
         "product:3".to_string(),
-    ])?;
+        StoredValue::new_string(Bytes::from("Keyboard")),
+    )?;
 
-    for (i, product) in products.iter().enumerate() {
-        if let Some(p) = product {
-            println!("   product:{} = {}", i + 1, String::from_utf8_lossy(p));
+    // Get multiple values
+    let products = ["product:1", "product:2", "product:3"];
+    for (i, key) in products.iter().enumerate() {
+        if let Some(value) = storage.get_value(0, key)? {
+            let s = value.as_string()?;
+            println!("   product:{} = {}", i + 1, String::from_utf8_lossy(s));
         }
     }
 

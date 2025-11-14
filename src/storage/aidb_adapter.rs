@@ -1,3 +1,43 @@
+//! AiDb Storage Adapter - Persistent storage backend for AiKv
+//!
+//! This module provides a persistent storage adapter using AiDb as the underlying
+//! storage engine. It implements a minimal, orthogonal interface that separates
+//! storage concerns from command logic.
+//!
+//! # Architecture
+//!
+//! The storage layer follows these principles:
+//! - **Minimal Interface**: Only provides basic CRUD operations, not command-specific logic
+//! - **Type Agnostic**: All data types (String, List, Hash, Set, ZSet) use the same interface
+//! - **Separation of Concerns**: Storage handles persistence, commands handle business logic
+//! - **Efficiency**: Uses bincode for fast binary serialization/deserialization
+//!
+//! # Core Methods
+//!
+//! - `get_value()` - Retrieve any data type by key
+//! - `set_value()` - Store any data type with a key
+//! - `update_value()` - Atomically modify a value in-place
+//! - `delete_and_get()` - Atomically delete and return a value
+//!
+//! # Example
+//!
+//! ```ignore
+//! use aikv::storage::AiDbStorageAdapter;
+//! use aikv::storage::StoredValue;
+//! use bytes::Bytes;
+//!
+//! let storage = AiDbStorageAdapter::new("/tmp/aikv", 16)?;
+//!
+//! // Store a string
+//! let value = StoredValue::new_string(Bytes::from("hello"));
+//! storage.set_value(0, "key1".to_string(), value)?;
+//!
+//! // Retrieve it
+//! if let Some(v) = storage.get_value(0, "key1")? {
+//!     println!("Value: {:?}", v.as_string());
+//! }
+//! ```
+
 use crate::error::{AikvError, Result};
 use crate::storage::{SerializableStoredValue, StoredValue};
 use aidb::{Options, DB};
@@ -6,8 +46,19 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// AiDb-based storage adapter
-/// This adapter uses AiDb as the underlying storage engine
+/// AiDb-based storage adapter providing persistent storage for AiKv.
+///
+/// This adapter uses AiDb as the underlying storage engine and supports
+/// multiple databases (default 16, like Redis). Each database is a separate
+/// AiDb instance with its own directory for data isolation.
+///
+/// # Features
+///
+/// - **Persistent Storage**: All data is persisted to disk via AiDb
+/// - **Multi-Database**: Supports multiple logical databases (0-15 by default)
+/// - **All Data Types**: Supports String, List, Hash, Set, and ZSet through serialization
+/// - **Expiration**: Built-in support for key expiration with automatic cleanup
+/// - **Thread-Safe**: Uses Arc for safe sharing across threads
 #[derive(Clone)]
 pub struct AiDbStorageAdapter {
     /// Multiple databases (default: 16 databases like Redis)
@@ -16,7 +67,15 @@ pub struct AiDbStorageAdapter {
 }
 
 impl AiDbStorageAdapter {
-    /// Create a new AiDb storage adapter with the given path and database count
+    /// Create a new AiDb storage adapter with the given path and database count.
+    ///
+    /// # Arguments
+    /// * `path` - Base directory for storage (subdirectories created for each DB)
+    /// * `db_count` - Number of logical databases to create (typically 16)
+    ///
+    /// # Returns
+    /// * `Ok(AiDbStorageAdapter)` - If all databases were successfully opened
+    /// * `Err(AikvError)` - If directory creation or database opening fails
     pub fn new<P: AsRef<Path>>(path: P, db_count: usize) -> Result<Self> {
         let base_path = path.as_ref();
 
@@ -82,10 +141,38 @@ impl AiDbStorageAdapter {
     }
 
     // ========================================================================
-    // NEW CORE STORAGE METHODS (Post-refactoring minimal interface)
+    // CORE STORAGE METHODS (Minimal Interface Post-Refactoring)
     // ========================================================================
+    // These methods provide the minimal, orthogonal interface for storage operations.
+    // All command-specific logic should be implemented in the command layer.
+    // The storage layer only handles:
+    // - Basic CRUD operations (get, set, delete)
+    // - Database management (flush, swap, size)
+    // - Expiration management (as a storage concern)
 
-    /// Get a StoredValue by key from a specific database (supports all types via deserialization)
+    /// Get a stored value by key from a specific database.
+    ///
+    /// This method supports all data types (String, List, Hash, Set, ZSet) through
+    /// automatic deserialization. Expired keys are automatically cleaned up and return `None`.
+    ///
+    /// # Arguments
+    /// * `db_index` - The database index (0-15 by default)
+    /// * `key` - The key to retrieve
+    ///
+    /// # Returns
+    /// * `Ok(Some(StoredValue))` - The value if found and not expired
+    /// * `Ok(None)` - If the key doesn't exist or has expired
+    /// * `Err(AikvError)` - If the database index is invalid or I/O error occurs
+    ///
+    /// # Example
+    /// ```ignore
+    /// let value = storage.get_value(0, "mykey")?;
+    /// if let Some(v) = value {
+    ///     if let Some(s) = v.as_string() {
+    ///         println!("String value: {}", String::from_utf8_lossy(s));
+    ///     }
+    /// }
+    /// ```
     pub fn get_value(&self, db_index: usize, key: &str) -> Result<Option<StoredValue>> {
         if db_index >= self.databases.len() {
             return Err(AikvError::Storage(format!(
@@ -125,7 +212,26 @@ impl AiDbStorageAdapter {
         }
     }
 
-    /// Set a StoredValue for a key in a specific database (supports all types via serialization)
+    /// Set a value for a key in a specific database.
+    ///
+    /// This method supports all data types (String, List, Hash, Set, ZSet) through
+    /// automatic serialization using bincode for efficiency. The value's expiration
+    /// metadata (if set) is automatically stored as well.
+    ///
+    /// # Arguments
+    /// * `db_index` - The database index (0-15 by default)
+    /// * `key` - The key to set
+    /// * `value` - The StoredValue to store (can be any supported data type)
+    ///
+    /// # Returns
+    /// * `Ok(())` - If the value was successfully stored
+    /// * `Err(AikvError)` - If the database index is invalid, serialization fails, or I/O error occurs
+    ///
+    /// # Example
+    /// ```ignore
+    /// let value = StoredValue::new_string(Bytes::from("hello"));
+    /// storage.set_value(0, "mykey".to_string(), value)?;
+    /// ```
     pub fn set_value(&self, db_index: usize, key: String, value: StoredValue) -> Result<()> {
         if db_index >= self.databases.len() {
             return Err(AikvError::Storage(format!(
@@ -156,8 +262,30 @@ impl AiDbStorageAdapter {
         Ok(())
     }
 
-    /// Update a value using a closure (supports all types)
-    /// Returns true if the key existed and was updated, false otherwise
+    /// Atomically update a value using a closure.
+    ///
+    /// This method provides atomic read-modify-write semantics for updating values.
+    /// It's useful for implementing commands that need to modify data structures
+    /// in-place (e.g., LPUSH, HSET, SADD).
+    ///
+    /// # Arguments
+    /// * `db_index` - The database index (0-15 by default)
+    /// * `key` - The key to update
+    /// * `f` - A closure that modifies the StoredValue
+    ///
+    /// # Returns
+    /// * `Ok(true)` - If the key existed and was successfully updated
+    /// * `Ok(false)` - If the key doesn't exist
+    /// * `Err(AikvError)` - If the database index is invalid, the closure fails, or I/O error occurs
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Add an item to a list
+    /// let updated = storage.update_value(0, "mylist", |v| {
+    ///     v.as_list_mut()?.push_back(Bytes::from("item"));
+    ///     Ok(())
+    /// })?;
+    /// ```
     pub fn update_value<F>(&self, db_index: usize, key: &str, f: F) -> Result<bool>
     where
         F: FnOnce(&mut StoredValue) -> Result<()>,
@@ -184,7 +312,27 @@ impl AiDbStorageAdapter {
         Ok(true)
     }
 
-    /// Delete a key and return its value (supports all types)
+    /// Atomically delete a key and return its value.
+    ///
+    /// This method provides atomic delete-and-get semantics, useful for implementing
+    /// commands like LPOP, RPOP, SPOP that need to retrieve and remove values atomically.
+    ///
+    /// # Arguments
+    /// * `db_index` - The database index (0-15 by default)
+    /// * `key` - The key to delete
+    ///
+    /// # Returns
+    /// * `Ok(Some(StoredValue))` - If the key existed, returns its value before deletion
+    /// * `Ok(None)` - If the key doesn't exist
+    /// * `Err(AikvError)` - If the database index is invalid or I/O error occurs
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Pop from a list
+    /// if let Some(value) = storage.delete_and_get(0, "mykey")? {
+    ///     println!("Deleted value: {:?}", value);
+    /// }
+    /// ```
     pub fn delete_and_get(&self, db_index: usize, key: &str) -> Result<Option<StoredValue>> {
         if db_index >= self.databases.len() {
             return Err(AikvError::Storage(format!(
@@ -869,47 +1017,6 @@ impl AiDbStorageAdapter {
         Ok(true)
     }
 
-    /// Get multiple keys from a specific database
-    pub fn mget_from_db(&self, db_index: usize, keys: &[String]) -> Result<Vec<Option<Bytes>>> {
-        if db_index >= self.databases.len() {
-            return Err(AikvError::Storage(format!(
-                "Invalid database index: {}",
-                db_index
-            )));
-        }
-
-        let mut result = Vec::with_capacity(keys.len());
-        for key in keys {
-            result.push(self.get_from_db(db_index, key)?);
-        }
-        Ok(result)
-    }
-
-    /// Get multiple keys (from default database 0)
-    pub fn mget(&self, keys: &[String]) -> Result<Vec<Option<Bytes>>> {
-        self.mget_from_db(0, keys)
-    }
-
-    /// Set multiple key-value pairs in a specific database
-    pub fn mset_in_db(&self, db_index: usize, pairs: Vec<(String, Bytes)>) -> Result<()> {
-        if db_index >= self.databases.len() {
-            return Err(AikvError::Storage(format!(
-                "Invalid database index: {}",
-                db_index
-            )));
-        }
-
-        for (key, value) in pairs {
-            self.set_in_db(db_index, key, value)?;
-        }
-        Ok(())
-    }
-
-    /// Set multiple key-value pairs (in default database 0)
-    pub fn mset(&self, pairs: Vec<(String, Bytes)>) -> Result<()> {
-        self.mset_in_db(0, pairs)
-    }
-
     /// Get a random key from a database
     pub fn random_key_in_db(&self, db_index: usize) -> Result<Option<String>> {
         if db_index >= self.databases.len() {
@@ -1033,20 +1140,32 @@ mod tests {
     fn test_mget_mset() {
         let (_dir, storage) = create_temp_storage();
 
+        // Migrated: Use set_value instead of mset
         storage
-            .mset(vec![
-                ("key1".to_string(), Bytes::from("value1")),
-                ("key2".to_string(), Bytes::from("value2")),
-            ])
+            .set_value(
+                0,
+                "key1".to_string(),
+                StoredValue::new_string(Bytes::from("value1")),
+            )
+            .unwrap();
+        storage
+            .set_value(
+                0,
+                "key2".to_string(),
+                StoredValue::new_string(Bytes::from("value2")),
+            )
             .unwrap();
 
-        let values = storage
-            .mget(&["key1".to_string(), "key2".to_string(), "key3".to_string()])
-            .unwrap();
-        assert_eq!(values.len(), 3);
-        assert_eq!(values[0], Some(Bytes::from("value1")));
-        assert_eq!(values[1], Some(Bytes::from("value2")));
-        assert_eq!(values[2], None);
+        // Migrated: Use get_value instead of mget
+        let value1 = storage.get_value(0, "key1").unwrap();
+        let value2 = storage.get_value(0, "key2").unwrap();
+        let value3 = storage.get_value(0, "key3").unwrap();
+
+        assert!(value1.is_some());
+        assert_eq!(value1.unwrap().as_string().unwrap(), &Bytes::from("value1"));
+        assert!(value2.is_some());
+        assert_eq!(value2.unwrap().as_string().unwrap(), &Bytes::from("value2"));
+        assert!(value3.is_none());
     }
 
     #[test]

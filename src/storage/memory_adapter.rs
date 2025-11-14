@@ -1,3 +1,40 @@
+//! Memory Storage Adapter - In-memory storage backend for AiKv
+//!
+//! This module provides a high-performance in-memory storage adapter with support
+//! for all Redis data types. It implements the same minimal interface as the
+//! persistent AiDb adapter, allowing seamless switching between storage backends.
+//!
+//! # Architecture
+//!
+//! The memory adapter follows the same architectural principles as AiDbStorageAdapter:
+//! - **Minimal Interface**: Only provides basic CRUD operations
+//! - **Type Agnostic**: All data types use the same interface
+//! - **Separation of Concerns**: Storage handles data, commands handle logic
+//! - **High Performance**: Direct in-memory operations without serialization overhead
+//!
+//! # Core Methods
+//!
+//! - `get_value()` - Retrieve any data type by key
+//! - `set_value()` - Store any data type with a key
+//! - `update_value()` - Atomically modify a value in-place
+//! - `delete_and_get()` - Atomically delete and return a value
+//!
+//! # Example
+//!
+//! ```ignore
+//! use aikv::storage::StorageAdapter;
+//! use aikv::storage::StoredValue;
+//! use bytes::Bytes;
+//!
+//! let storage = StorageAdapter::new();
+//!
+//! // Store a list
+//! let mut list = VecDeque::new();
+//! list.push_back(Bytes::from("item1"));
+//! let value = StoredValue::new_list(list);
+//! storage.set_value(0, "mylist".to_string(), value)?;
+//! ```
+
 use crate::error::{AikvError, Result};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -5,17 +42,29 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Different value types supported by the storage
+/// Different value types supported by the storage.
+///
+/// These types correspond to Redis data types and are used by the storage layer
+/// to represent values generically. The command layer operates on these types
+/// directly through the StoredValue wrapper.
 #[derive(Clone, Debug)]
 pub enum ValueType {
+    /// String type - stores bytes
     String(Bytes),
+    /// List type - ordered collection of bytes (Redis LIST)
     List(VecDeque<Bytes>),
+    /// Hash type - key-value map (Redis HASH)
     Hash(HashMap<String, Bytes>),
+    /// Set type - unordered collection of unique bytes (Redis SET)
     Set(HashSet<Vec<u8>>), // Using Vec<u8> instead of Bytes for HashSet compatibility
+    /// Sorted Set type - ordered collection with scores (Redis ZSET)
     ZSet(BTreeMap<Vec<u8>, f64>), // member -> score mapping
 }
 
-/// Value with optional expiration time
+/// Value with optional expiration time.
+///
+/// This is the primary value container used throughout the storage layer.
+/// It wraps a ValueType and includes optional expiration metadata.
 #[derive(Clone, Debug)]
 pub struct StoredValue {
     pub(crate) value: ValueType,
@@ -33,6 +82,10 @@ enum SerializableValueType {
     ZSet(Vec<(Vec<u8>, f64)>),
 }
 
+/// Serializable representation of StoredValue for persistence.
+///
+/// This struct is used by AiDbStorageAdapter to serialize values to disk
+/// efficiently using bincode.
 #[derive(Serialize, Deserialize)]
 pub struct SerializableStoredValue {
     value: SerializableValueType,
@@ -40,7 +93,9 @@ pub struct SerializableStoredValue {
 }
 
 impl StoredValue {
-    /// Convert to serializable format for storage
+    /// Convert to serializable format for storage.
+    ///
+    /// Used by AiDbStorageAdapter to persist values to disk.
     pub fn to_serializable(&self) -> SerializableStoredValue {
         let value = match &self.value {
             ValueType::String(bytes) => SerializableValueType::String(bytes.to_vec()),
@@ -311,8 +366,35 @@ impl StorageAdapter {
         Ok(())
     }
 
-    /// Get a StoredValue by key from a specific database (new minimal interface)
-    /// This is the new core method that commands should use
+    // ========================================================================
+    // CORE STORAGE METHODS (Minimal Interface Post-Refactoring)
+    // ========================================================================
+    // These methods provide the minimal, orthogonal interface for storage operations.
+    // All command-specific logic should be implemented in the command layer.
+
+    /// Get a stored value by key from a specific database.
+    ///
+    /// This method supports all data types (String, List, Hash, Set, ZSet) without
+    /// serialization overhead. Expired keys are automatically filtered and return `None`.
+    ///
+    /// # Arguments
+    /// * `db_index` - The database index (0-15 by default)
+    /// * `key` - The key to retrieve
+    ///
+    /// # Returns
+    /// * `Ok(Some(StoredValue))` - The value if found and not expired
+    /// * `Ok(None)` - If the key doesn't exist or has expired
+    /// * `Err(AikvError)` - If lock acquisition fails
+    ///
+    /// # Example
+    /// ```ignore
+    /// let value = storage.get_value(0, "mykey")?;
+    /// if let Some(v) = value {
+    ///     if let Some(list) = v.as_list() {
+    ///         println!("List has {} items", list.len());
+    ///     }
+    /// }
+    /// ```
     pub fn get_value(&self, db_index: usize, key: &str) -> Result<Option<StoredValue>> {
         let databases = self
             .databases
@@ -330,8 +412,28 @@ impl StorageAdapter {
         Ok(None)
     }
 
-    /// Set a StoredValue for a key in a specific database (new minimal interface)
-    /// This is the new core method that commands should use
+    /// Set a value for a key in a specific database.
+    ///
+    /// This method supports all data types (String, List, Hash, Set, ZSet) with
+    /// direct in-memory storage (no serialization needed). The value's expiration
+    /// metadata is preserved.
+    ///
+    /// # Arguments
+    /// * `db_index` - The database index (0-15 by default)
+    /// * `key` - The key to set
+    /// * `value` - The StoredValue to store (can be any supported data type)
+    ///
+    /// # Returns
+    /// * `Ok(())` - If the value was successfully stored
+    /// * `Err(AikvError)` - If the database index is invalid or lock acquisition fails
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut hash = HashMap::new();
+    /// hash.insert("field1".to_string(), Bytes::from("value1"));
+    /// let value = StoredValue::new_hash(hash);
+    /// storage.set_value(0, "myhash".to_string(), value)?;
+    /// ```
     pub fn set_value(&self, db_index: usize, key: String, value: StoredValue) -> Result<()> {
         let mut databases = self
             .databases
@@ -349,8 +451,31 @@ impl StorageAdapter {
         }
     }
 
-    /// Delete a key and return the old value if it existed (new minimal interface)
-    /// This enables atomic operations like pop
+    /// Atomically delete a key and return its value.
+    ///
+    /// This method provides atomic delete-and-get semantics, useful for implementing
+    /// commands like LPOP, RPOP, SPOP that need to retrieve and remove values atomically.
+    ///
+    /// # Arguments
+    /// * `db_index` - The database index (0-15 by default)
+    /// * `key` - The key to delete
+    ///
+    /// # Returns
+    /// * `Ok(Some(StoredValue))` - If the key existed and wasn't expired
+    /// * `Ok(None)` - If the key doesn't exist or has expired
+    /// * `Err(AikvError)` - If lock acquisition fails
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Pop an item from a list
+    /// if let Some(mut value) = storage.delete_and_get(0, "mylist")? {
+    ///     if let Some(list) = value.as_list_mut() {
+    ///         if let Some(item) = list.pop_front() {
+    ///             println!("Popped: {:?}", item);
+    ///         }
+    ///     }
+    /// }
+    /// ```
     pub fn delete_and_get(&self, db_index: usize, key: &str) -> Result<Option<StoredValue>> {
         let mut databases = self
             .databases
@@ -367,8 +492,31 @@ impl StorageAdapter {
         Ok(None)
     }
 
-    /// Update a value in place with a closure (new minimal interface)
-    /// This enables atomic updates like increment operations
+    /// Atomically update a value using a closure.
+    ///
+    /// This method provides atomic read-modify-write semantics for updating values
+    /// in-place. It's useful for implementing commands that need to modify data
+    /// structures atomically (e.g., LPUSH, HSET, SADD, ZINCRBY).
+    ///
+    /// # Arguments
+    /// * `db_index` - The database index (0-15 by default)
+    /// * `key` - The key to update
+    /// * `f` - A closure that modifies the StoredValue
+    ///
+    /// # Returns
+    /// * `Ok(true)` - If the key existed and was successfully updated
+    /// * `Ok(false)` - If the key doesn't exist or has expired
+    /// * `Err(AikvError)` - If lock acquisition fails or the closure returns an error
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Add a field to a hash
+    /// let updated = storage.update_value(0, "myhash", |v| {
+    ///     let hash = v.as_hash_mut()?;
+    ///     hash.insert("field2".to_string(), Bytes::from("value2"));
+    ///     Ok(())
+    /// })?;
+    /// ```
     pub fn update_value<F>(&self, db_index: usize, key: &str, f: F) -> Result<bool>
     where
         F: FnOnce(&mut StoredValue) -> Result<()>,
