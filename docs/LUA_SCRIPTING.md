@@ -6,9 +6,58 @@ AiKv supports Lua scripting for executing complex operations atomically on the s
 
 Lua scripting in AiKv provides:
 - **Atomic execution**: Scripts run atomically without interruption
+- **Transactional semantics**: All operations within a script are buffered and committed together, or rolled back on error
 - **Server-side computation**: Reduce network round trips by executing logic on the server
 - **Script caching**: Scripts can be loaded once and executed multiple times
 - **Redis compatibility**: Supports Redis-style scripting API
+
+## Transaction Support
+
+AiKv implements automatic rollback for Lua scripts:
+
+- **Write buffering**: All write operations (SET, DEL) within a script are first written to an in-memory buffer
+- **Read-your-own-writes**: Read operations (GET, EXISTS) can see writes made earlier in the same script
+- **Automatic commit**: When a script completes successfully, all buffered writes are committed to storage atomically
+- **Automatic rollback**: If a script fails (Lua error, unsupported command, etc.), all buffered writes are discarded, ensuring data consistency
+
+### Example: Transaction Commit
+
+```lua
+-- Script succeeds - changes are committed
+EVAL "
+  redis.call('SET', 'key1', 'value1')
+  redis.call('SET', 'key2', 'value2')
+  return 'OK'
+" 0
+-- After execution, both key1 and key2 are in storage
+```
+
+### Example: Transaction Rollback
+
+```lua
+-- Script fails - changes are rolled back
+EVAL "
+  redis.call('SET', 'key1', 'value1')
+  redis.call('SET', 'key2', 'value2')
+  error('something went wrong')
+" 0
+-- After execution, neither key1 nor key2 exist in storage
+```
+
+### Example: Read Your Own Writes
+
+```lua
+-- Read operations see buffered writes
+EVAL "
+  redis.call('SET', 'mykey', 'first')
+  local v1 = redis.call('GET', 'mykey')  -- Returns 'first'
+  redis.call('SET', 'mykey', 'second')
+  local v2 = redis.call('GET', 'mykey')  -- Returns 'second'
+  return {v1, v2}
+" 0
+-- Returns: ['first', 'second']
+-- Storage contains: mykey = 'second'
+```
 
 ## Supported Commands
 
@@ -257,10 +306,11 @@ EVALSHA a9b7f1c8e2d3a4b5c6d7e8f9a0b1c2d3e4f5a6b7 1 mykey
 ## Limitations
 
 Current limitations (to be addressed in future versions):
-- Limited set of Redis commands available in scripts
+- Limited set of Redis commands available in scripts (GET, SET, DEL, EXISTS)
 - No timeout mechanism for long-running scripts
 - SCRIPT KILL is not functional in the current implementation
 - No support for script debugging
+- Transaction support only for String operations (List, Hash, Set, ZSet not yet supported in scripts)
 
 ## Performance Considerations
 

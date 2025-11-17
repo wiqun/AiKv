@@ -1,6 +1,6 @@
 use crate::error::{AikvError, Result};
 use crate::protocol::RespValue;
-use crate::storage::StorageAdapter;
+use crate::storage::{BatchOp, StorageAdapter};
 use bytes::Bytes;
 use mlua::{Lua, LuaOptions, StdLib, Value as LuaValue};
 use sha1::{Digest, Sha1};
@@ -11,6 +11,96 @@ use std::sync::{Arc, RwLock};
 #[derive(Clone, Debug)]
 struct CachedScript {
     script: String,
+}
+
+/// Transaction context for Lua script execution
+///
+/// This provides transactional semantics for Lua scripts by buffering all write
+/// operations and only committing them if the script completes successfully.
+/// If the script fails, the buffer is discarded, achieving automatic rollback.
+///
+/// When using AiDbStorageAdapter, this leverages AiDb's WriteBatch for true
+/// atomic batch writes with WAL durability guarantees.
+#[derive(Debug)]
+struct ScriptTransaction {
+    /// Database index for this transaction
+    db_index: usize,
+    /// Write buffer: key -> operation
+    write_buffer: HashMap<String, BatchOp>,
+}
+
+impl ScriptTransaction {
+    /// Create a new transaction context for a database
+    fn new(db_index: usize) -> Self {
+        Self {
+            db_index,
+            write_buffer: HashMap::new(),
+        }
+    }
+
+    /// Read a value, checking buffer first, then storage
+    ///
+    /// This implements "read your own writes" semantics - if a key was set
+    /// or deleted in this transaction, return that state.
+    fn get(&self, storage: &StorageAdapter, key: &str) -> Result<Option<Bytes>> {
+        // Check write buffer first
+        if let Some(op) = self.write_buffer.get(key) {
+            match op {
+                BatchOp::Set(value) => return Ok(Some(value.clone())),
+                BatchOp::Delete => return Ok(None),
+            }
+        }
+
+        // Fall back to storage
+        storage.get_from_db(self.db_index, key)
+    }
+
+    /// Write a value to the buffer
+    fn set(&mut self, key: String, value: Bytes) {
+        self.write_buffer.insert(key, BatchOp::Set(value));
+    }
+
+    /// Mark a key for deletion in the buffer
+    fn delete(&mut self, key: String) {
+        self.write_buffer.insert(key, BatchOp::Delete);
+    }
+
+    /// Check if a key exists, considering the buffer
+    fn exists(&self, storage: &StorageAdapter, key: &str) -> Result<bool> {
+        // Check write buffer first
+        if let Some(op) = self.write_buffer.get(key) {
+            match op {
+                BatchOp::Set(_) => return Ok(true),
+                BatchOp::Delete => return Ok(false),
+            }
+        }
+
+        // Fall back to storage
+        storage.exists_in_db(self.db_index, key)
+    }
+
+    /// Commit the transaction - apply all buffered operations to storage atomically
+    ///
+    /// This method uses write_batch() which provides:
+    /// - For MemoryAdapter: In-memory atomicity within a single lock
+    /// - For AiDbStorageAdapter: True atomic batch writes via AiDb's WriteBatch
+    ///   with WAL durability guarantees (all operations written to WAL first,
+    ///   single fsync, atomic recovery on crash)
+    fn commit(self, storage: &StorageAdapter) -> Result<()> {
+        if self.write_buffer.is_empty() {
+            return Ok(());
+        }
+
+        // Convert HashMap to Vec for write_batch
+        let operations: Vec<(String, BatchOp)> = self.write_buffer.into_iter().collect();
+
+        // Use write_batch for atomic commit
+        storage.write_batch(self.db_index, operations)?;
+
+        Ok(())
+    }
+
+    // Note: rollback() is implicit - just drop the transaction without calling commit()
 }
 
 /// Script command handler
@@ -188,91 +278,113 @@ impl ScriptCommands {
         argv: &[String],
         db_index: usize,
     ) -> Result<RespValue> {
-        // Create a new Lua instance with minimal standard library
-        let lua = Lua::new_with(
-            StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::UTF8,
-            LuaOptions::default(),
-        )
-        .map_err(|e| AikvError::Script(format!("Failed to create Lua instance: {}", e)))?;
+        // Create transaction context for this script execution
+        let transaction = Arc::new(RwLock::new(ScriptTransaction::new(db_index)));
 
-        // Set up KEYS and ARGV tables
-        lua.globals()
-            .set("KEYS", lua.create_table().unwrap())
-            .map_err(|e| AikvError::Script(format!("Failed to set KEYS: {}", e)))?;
-
-        lua.globals()
-            .set("ARGV", lua.create_table().unwrap())
-            .map_err(|e| AikvError::Script(format!("Failed to set ARGV: {}", e)))?;
-
-        // Populate KEYS (1-indexed in Lua)
-        let keys_table = lua.globals().get::<mlua::Table>("KEYS").unwrap();
-        for (i, key) in keys.iter().enumerate() {
-            keys_table
-                .set(i + 1, key.clone())
-                .map_err(|e| AikvError::Script(format!("Failed to set KEYS[{}]: {}", i + 1, e)))?;
-        }
-
-        // Populate ARGV (1-indexed in Lua)
-        let argv_table = lua.globals().get::<mlua::Table>("ARGV").unwrap();
-        for (i, arg) in argv.iter().enumerate() {
-            argv_table
-                .set(i + 1, arg.clone())
-                .map_err(|e| AikvError::Script(format!("Failed to set ARGV[{}]: {}", i + 1, e)))?;
-        }
-
-        // Set up redis.call and redis.pcall functions
-        let storage = self.storage.clone();
-        let db_index_for_call = db_index;
-
-        lua.globals()
-            .set(
-                "redis",
-                lua.create_table().map_err(|e| {
-                    AikvError::Script(format!("Failed to create redis table: {}", e))
-                })?,
+        // Execute the script in a scope to ensure Lua is dropped before we commit
+        let resp_result = {
+            // Create a new Lua instance with minimal standard library
+            let lua = Lua::new_with(
+                StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::UTF8,
+                LuaOptions::default(),
             )
-            .map_err(|e| AikvError::Script(format!("Failed to set redis table: {}", e)))?;
+            .map_err(|e| AikvError::Script(format!("Failed to create Lua instance: {}", e)))?;
 
-        let redis_table = lua.globals().get::<mlua::Table>("redis").unwrap();
+            // Set up KEYS and ARGV tables
+            lua.globals()
+                .set("KEYS", lua.create_table().unwrap())
+                .map_err(|e| AikvError::Script(format!("Failed to set KEYS: {}", e)))?;
 
-        // redis.call - Execute Redis command (throws error on failure)
-        let storage_for_call = storage.clone();
-        let call_fn = lua
-            .create_function(move |lua_ctx, args: mlua::MultiValue| {
-                Self::redis_call(&storage_for_call, db_index_for_call, lua_ctx, args, true)
-            })
-            .map_err(|e| AikvError::Script(format!("Failed to create call function: {}", e)))?;
+            lua.globals()
+                .set("ARGV", lua.create_table().unwrap())
+                .map_err(|e| AikvError::Script(format!("Failed to set ARGV: {}", e)))?;
 
-        redis_table
-            .set("call", call_fn)
-            .map_err(|e| AikvError::Script(format!("Failed to set redis.call: {}", e)))?;
+            // Populate KEYS (1-indexed in Lua)
+            let keys_table = lua.globals().get::<mlua::Table>("KEYS").unwrap();
+            for (i, key) in keys.iter().enumerate() {
+                keys_table.set(i + 1, key.clone()).map_err(|e| {
+                    AikvError::Script(format!("Failed to set KEYS[{}]: {}", i + 1, e))
+                })?;
+            }
 
-        // redis.pcall - Protected call (returns error as result)
-        let storage_for_pcall = storage.clone();
-        let pcall_fn = lua
-            .create_function(move |lua_ctx, args: mlua::MultiValue| {
-                Self::redis_call(&storage_for_pcall, db_index_for_call, lua_ctx, args, false)
-            })
-            .map_err(|e| AikvError::Script(format!("Failed to create pcall function: {}", e)))?;
+            // Populate ARGV (1-indexed in Lua)
+            let argv_table = lua.globals().get::<mlua::Table>("ARGV").unwrap();
+            for (i, arg) in argv.iter().enumerate() {
+                argv_table.set(i + 1, arg.clone()).map_err(|e| {
+                    AikvError::Script(format!("Failed to set ARGV[{}]: {}", i + 1, e))
+                })?;
+            }
 
-        redis_table
-            .set("pcall", pcall_fn)
-            .map_err(|e| AikvError::Script(format!("Failed to set redis.pcall: {}", e)))?;
+            // Set up redis.call and redis.pcall functions
+            let storage = self.storage.clone();
 
-        // Execute the script
-        let result: LuaValue = lua
-            .load(script)
-            .eval()
-            .map_err(|e| AikvError::Script(format!("Script execution error: {}", e)))?;
+            lua.globals()
+                .set(
+                    "redis",
+                    lua.create_table().map_err(|e| {
+                        AikvError::Script(format!("Failed to create redis table: {}", e))
+                    })?,
+                )
+                .map_err(|e| AikvError::Script(format!("Failed to set redis table: {}", e)))?;
 
-        // Convert Lua result to RespValue
-        Self::lua_to_resp(result)
+            let redis_table = lua.globals().get::<mlua::Table>("redis").unwrap();
+
+            // redis.call - Execute Redis command (throws error on failure)
+            let storage_for_call = storage.clone();
+            let txn_for_call = transaction.clone();
+            let call_fn = lua
+                .create_function(move |lua_ctx, args: mlua::MultiValue| {
+                    Self::redis_call(&storage_for_call, &txn_for_call, lua_ctx, args, true)
+                })
+                .map_err(|e| AikvError::Script(format!("Failed to create call function: {}", e)))?;
+
+            redis_table
+                .set("call", call_fn)
+                .map_err(|e| AikvError::Script(format!("Failed to set redis.call: {}", e)))?;
+
+            // redis.pcall - Protected call (returns error as result)
+            let storage_for_pcall = storage.clone();
+            let txn_for_pcall = transaction.clone();
+            let pcall_fn = lua
+                .create_function(move |lua_ctx, args: mlua::MultiValue| {
+                    Self::redis_call(&storage_for_pcall, &txn_for_pcall, lua_ctx, args, false)
+                })
+                .map_err(|e| {
+                    AikvError::Script(format!("Failed to create pcall function: {}", e))
+                })?;
+
+            redis_table
+                .set("pcall", pcall_fn)
+                .map_err(|e| AikvError::Script(format!("Failed to set redis.pcall: {}", e)))?;
+
+            // Execute the script
+            let result: LuaValue = lua
+                .load(script)
+                .eval()
+                .map_err(|e| AikvError::Script(format!("Script execution error: {}", e)))?;
+
+            // Convert Lua result to RespValue while Lua is still alive
+            Self::lua_to_resp(result)?
+            // Lua is dropped here, releasing the Arc references in the closures
+        };
+
+        // Script succeeded - commit the transaction
+        // Now that Lua is dropped, we can unwrap the Arc
+        let txn = Arc::try_unwrap(transaction)
+            .map_err(|_| AikvError::Script("Failed to unwrap transaction".to_string()))?
+            .into_inner()
+            .map_err(|e| AikvError::Script(format!("Lock error on commit: {}", e)))?;
+
+        txn.commit(&self.storage)?;
+
+        // Return the converted result
+        Ok(resp_result)
     }
 
     /// Execute a Redis command from Lua
     fn redis_call(
         storage: &StorageAdapter,
-        db_index: usize,
+        transaction: &Arc<RwLock<ScriptTransaction>>,
         lua: &mlua::Lua,
         args: mlua::MultiValue,
         throw_error: bool,
@@ -324,10 +436,10 @@ impl ScriptCommands {
 
         // Execute simple string commands
         let result = match command.as_str() {
-            "GET" => Self::execute_get(storage, command_args, db_index),
-            "SET" => Self::execute_set(storage, command_args, db_index),
-            "DEL" => Self::execute_del(storage, command_args, db_index),
-            "EXISTS" => Self::execute_exists(storage, command_args, db_index),
+            "GET" => Self::execute_get(storage, transaction, command_args),
+            "SET" => Self::execute_set(storage, transaction, command_args),
+            "DEL" => Self::execute_del(storage, transaction, command_args),
+            "EXISTS" => Self::execute_exists(storage, transaction, command_args),
             _ => {
                 if throw_error {
                     return Err(mlua::Error::RuntimeError(format!(
@@ -356,37 +468,66 @@ impl ScriptCommands {
     }
 
     /// Execute GET command
-    fn execute_get(storage: &StorageAdapter, args: &[Bytes], db_index: usize) -> Result<RespValue> {
+    fn execute_get(
+        storage: &StorageAdapter,
+        transaction: &Arc<RwLock<ScriptTransaction>>,
+        args: &[Bytes],
+    ) -> Result<RespValue> {
         if args.len() != 1 {
             return Err(AikvError::WrongArgCount("GET".to_string()));
         }
         let key = String::from_utf8_lossy(&args[0]).to_string();
-        match storage.get_from_db(db_index, &key)? {
+
+        let txn = transaction
+            .read()
+            .map_err(|e| AikvError::Storage(format!("Lock error: {}", e)))?;
+
+        match txn.get(storage, &key)? {
             Some(value) => Ok(RespValue::bulk_string(value)),
             None => Ok(RespValue::Null),
         }
     }
 
     /// Execute SET command
-    fn execute_set(storage: &StorageAdapter, args: &[Bytes], db_index: usize) -> Result<RespValue> {
+    fn execute_set(
+        _storage: &StorageAdapter,
+        transaction: &Arc<RwLock<ScriptTransaction>>,
+        args: &[Bytes],
+    ) -> Result<RespValue> {
         if args.len() < 2 {
             return Err(AikvError::WrongArgCount("SET".to_string()));
         }
         let key = String::from_utf8_lossy(&args[0]).to_string();
         let value = args[1].clone();
-        storage.set_in_db(db_index, key, value)?;
+
+        let mut txn = transaction
+            .write()
+            .map_err(|e| AikvError::Storage(format!("Lock error: {}", e)))?;
+
+        txn.set(key, value);
         Ok(RespValue::simple_string("OK"))
     }
 
     /// Execute DEL command
-    fn execute_del(storage: &StorageAdapter, args: &[Bytes], db_index: usize) -> Result<RespValue> {
+    fn execute_del(
+        storage: &StorageAdapter,
+        transaction: &Arc<RwLock<ScriptTransaction>>,
+        args: &[Bytes],
+    ) -> Result<RespValue> {
         if args.is_empty() {
             return Err(AikvError::WrongArgCount("DEL".to_string()));
         }
+
+        let mut txn = transaction
+            .write()
+            .map_err(|e| AikvError::Storage(format!("Lock error: {}", e)))?;
+
         let mut count = 0;
         for arg in args {
             let key = String::from_utf8_lossy(arg).to_string();
-            if storage.delete_from_db(db_index, &key)? {
+            // Check if key exists (in buffer or storage)
+            if txn.exists(storage, &key)? {
+                txn.delete(key);
                 count += 1;
             }
         }
@@ -396,16 +537,21 @@ impl ScriptCommands {
     /// Execute EXISTS command
     fn execute_exists(
         storage: &StorageAdapter,
+        transaction: &Arc<RwLock<ScriptTransaction>>,
         args: &[Bytes],
-        db_index: usize,
     ) -> Result<RespValue> {
         if args.is_empty() {
             return Err(AikvError::WrongArgCount("EXISTS".to_string()));
         }
+
+        let txn = transaction
+            .read()
+            .map_err(|e| AikvError::Storage(format!("Lock error: {}", e)))?;
+
         let mut count = 0;
         for arg in args {
             let key = String::from_utf8_lossy(arg).to_string();
-            if storage.exists_in_db(db_index, &key)? {
+            if txn.exists(storage, &key)? {
                 count += 1;
             }
         }
@@ -661,5 +807,220 @@ mod tests {
 
         let result = script_commands.evalsha(&args, 0);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_transaction_commit_on_success() {
+        let script_commands = setup();
+        let script = r#"
+            redis.call('SET', 'tx_key1', 'value1')
+            redis.call('SET', 'tx_key2', 'value2')
+            return 'OK'
+        "#;
+        let args = vec![Bytes::from(script), Bytes::from("0")];
+
+        // Execute script
+        let result = script_commands.eval(&args, 0);
+        assert!(result.is_ok());
+
+        // Verify values are committed to storage
+        let val1 = script_commands.storage.get_from_db(0, "tx_key1").unwrap();
+        assert_eq!(val1, Some(Bytes::from("value1")));
+
+        let val2 = script_commands.storage.get_from_db(0, "tx_key2").unwrap();
+        assert_eq!(val2, Some(Bytes::from("value2")));
+    }
+
+    #[test]
+    fn test_transaction_rollback_on_error() {
+        let script_commands = setup();
+        let script = r#"
+            redis.call('SET', 'rollback_key1', 'value1')
+            redis.call('SET', 'rollback_key2', 'value2')
+            error('intentional error')
+        "#;
+        let args = vec![Bytes::from(script), Bytes::from("0")];
+
+        // Execute script - should fail
+        let result = script_commands.eval(&args, 0);
+        assert!(result.is_err());
+
+        // Verify values are NOT in storage (rolled back)
+        let val1 = script_commands
+            .storage
+            .get_from_db(0, "rollback_key1")
+            .unwrap();
+        assert_eq!(val1, None);
+
+        let val2 = script_commands
+            .storage
+            .get_from_db(0, "rollback_key2")
+            .unwrap();
+        assert_eq!(val2, None);
+    }
+
+    #[test]
+    fn test_transaction_read_your_own_writes() {
+        let script_commands = setup();
+        let script = r#"
+            redis.call('SET', 'ryw_key', 'first')
+            local val1 = redis.call('GET', 'ryw_key')
+            redis.call('SET', 'ryw_key', 'second')
+            local val2 = redis.call('GET', 'ryw_key')
+            return {val1, val2}
+        "#;
+        let args = vec![Bytes::from(script), Bytes::from("0")];
+
+        let result = script_commands.eval(&args, 0).unwrap();
+        if let RespValue::Array(Some(arr)) = result {
+            assert_eq!(arr.len(), 2);
+            if let RespValue::BulkString(Some(v1)) = &arr[0] {
+                assert_eq!(String::from_utf8_lossy(v1), "first");
+            }
+            if let RespValue::BulkString(Some(v2)) = &arr[1] {
+                assert_eq!(String::from_utf8_lossy(v2), "second");
+            }
+        } else {
+            panic!("Expected Array");
+        }
+    }
+
+    #[test]
+    fn test_transaction_del_then_set() {
+        let script_commands = setup();
+
+        // Set initial value
+        script_commands
+            .storage
+            .set_in_db(0, "del_set_key".to_string(), Bytes::from("initial"))
+            .unwrap();
+
+        let script = r#"
+            redis.call('DEL', 'del_set_key')
+            local exists1 = redis.call('EXISTS', 'del_set_key')
+            redis.call('SET', 'del_set_key', 'new_value')
+            local exists2 = redis.call('EXISTS', 'del_set_key')
+            local val = redis.call('GET', 'del_set_key')
+            return {exists1, exists2, val}
+        "#;
+        let args = vec![Bytes::from(script), Bytes::from("0")];
+
+        let result = script_commands.eval(&args, 0).unwrap();
+        if let RespValue::Array(Some(arr)) = result {
+            assert_eq!(arr.len(), 3);
+            assert_eq!(arr[0], RespValue::Integer(0)); // After DEL
+            assert_eq!(arr[1], RespValue::Integer(1)); // After SET
+            if let RespValue::BulkString(Some(v)) = &arr[2] {
+                assert_eq!(String::from_utf8_lossy(v), "new_value");
+            }
+        } else {
+            panic!("Expected Array");
+        }
+
+        // Verify final committed value
+        let final_val = script_commands
+            .storage
+            .get_from_db(0, "del_set_key")
+            .unwrap();
+        assert_eq!(final_val, Some(Bytes::from("new_value")));
+    }
+
+    #[test]
+    fn test_transaction_multiple_dels() {
+        let script_commands = setup();
+
+        // Set initial values
+        script_commands
+            .storage
+            .set_in_db(0, "multi_del1".to_string(), Bytes::from("v1"))
+            .unwrap();
+        script_commands
+            .storage
+            .set_in_db(0, "multi_del2".to_string(), Bytes::from("v2"))
+            .unwrap();
+        script_commands
+            .storage
+            .set_in_db(0, "multi_del3".to_string(), Bytes::from("v3"))
+            .unwrap();
+
+        let script = r#"
+            local count = redis.call('DEL', 'multi_del1', 'multi_del2', 'multi_del3')
+            return count
+        "#;
+        let args = vec![Bytes::from(script), Bytes::from("0")];
+
+        let result = script_commands.eval(&args, 0).unwrap();
+        assert_eq!(result, RespValue::Integer(3));
+
+        // Verify all are deleted
+        assert_eq!(
+            script_commands
+                .storage
+                .get_from_db(0, "multi_del1")
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            script_commands
+                .storage
+                .get_from_db(0, "multi_del2")
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            script_commands
+                .storage
+                .get_from_db(0, "multi_del3")
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn test_transaction_exists_with_buffer() {
+        let script_commands = setup();
+
+        let script = r#"
+            local e1 = redis.call('EXISTS', 'exists_test')
+            redis.call('SET', 'exists_test', 'value')
+            local e2 = redis.call('EXISTS', 'exists_test')
+            redis.call('DEL', 'exists_test')
+            local e3 = redis.call('EXISTS', 'exists_test')
+            return {e1, e2, e3}
+        "#;
+        let args = vec![Bytes::from(script), Bytes::from("0")];
+
+        let result = script_commands.eval(&args, 0).unwrap();
+        if let RespValue::Array(Some(arr)) = result {
+            assert_eq!(arr[0], RespValue::Integer(0)); // Before SET
+            assert_eq!(arr[1], RespValue::Integer(1)); // After SET
+            assert_eq!(arr[2], RespValue::Integer(0)); // After DEL
+        } else {
+            panic!("Expected Array");
+        }
+    }
+
+    #[test]
+    fn test_transaction_overwrite_in_buffer() {
+        let script_commands = setup();
+
+        let script = r#"
+            redis.call('SET', 'overwrite', 'v1')
+            redis.call('SET', 'overwrite', 'v2')
+            redis.call('SET', 'overwrite', 'v3')
+            return redis.call('GET', 'overwrite')
+        "#;
+        let args = vec![Bytes::from(script), Bytes::from("0")];
+
+        let result = script_commands.eval(&args, 0).unwrap();
+        if let RespValue::BulkString(Some(val)) = result {
+            assert_eq!(String::from_utf8_lossy(&val), "v3");
+        } else {
+            panic!("Expected BulkString");
+        }
+
+        // Verify only final value is committed
+        let final_val = script_commands.storage.get_from_db(0, "overwrite").unwrap();
+        assert_eq!(final_val, Some(Bytes::from("v3")));
     }
 }

@@ -42,6 +42,15 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Batch operation for atomic writes
+#[derive(Debug, Clone)]
+pub enum BatchOp {
+    /// Set a key to a value
+    Set(Bytes),
+    /// Delete a key
+    Delete,
+}
+
 /// Different value types supported by the storage.
 ///
 /// These types correspond to Redis data types and are used by the storage layer
@@ -538,6 +547,60 @@ impl StorageAdapter {
         }
         Ok(false)
     }
+
+    /// Write a batch of operations atomically.
+    ///
+    /// For MemoryAdapter, this provides in-memory atomicity. All operations
+    /// succeed or fail together within the memory lock.
+    ///
+    /// # Arguments
+    /// * `db_index` - The database index (0-15 by default)
+    /// * `operations` - Vector of (key, operation) pairs where operation is either Set(value) or Delete
+    ///
+    /// # Returns
+    /// * `Ok(())` - If all operations succeeded
+    /// * `Err(AikvError)` - If any operation failed
+    ///
+    /// # Example
+    /// ```ignore
+    /// use crate::storage::memory_adapter::BatchOp;
+    ///
+    /// let ops = vec![
+    ///     ("key1".to_string(), BatchOp::Set(Bytes::from("value1"))),
+    ///     ("key2".to_string(), BatchOp::Set(Bytes::from("value2"))),
+    ///     ("key3".to_string(), BatchOp::Delete),
+    /// ];
+    /// storage.write_batch(0, ops)?;
+    /// ```
+    pub fn write_batch(&self, db_index: usize, operations: Vec<(String, BatchOp)>) -> Result<()> {
+        if operations.is_empty() {
+            return Ok(());
+        }
+
+        let mut databases = self
+            .databases
+            .write()
+            .map_err(|e| AikvError::Storage(format!("Lock error: {}", e)))?;
+
+        if let Some(db) = databases.get_mut(db_index) {
+            for (key, op) in operations {
+                match op {
+                    BatchOp::Set(value) => {
+                        db.insert(key, StoredValue::new_string(value));
+                    }
+                    BatchOp::Delete => {
+                        db.remove(&key);
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // LEGACY METHODS (Backward compatibility - to be used by command implementations)
+    // ========================================================================
 
     /// Get a value by key from a specific database
     pub fn get_from_db(&self, db_index: usize, key: &str) -> Result<Option<Bytes>> {

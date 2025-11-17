@@ -40,11 +40,14 @@
 
 use crate::error::{AikvError, Result};
 use crate::storage::{SerializableStoredValue, StoredValue};
-use aidb::{Options, DB};
+use aidb::{Options, WriteBatch, DB};
 use bytes::Bytes;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+// Re-export BatchOp from memory_adapter for consistency
+pub use crate::storage::memory_adapter::BatchOp;
 
 /// AiDb-based storage adapter providing persistent storage for AiKv.
 ///
@@ -358,6 +361,70 @@ impl AiDbStorageAdapter {
         }
 
         Ok(value)
+    }
+
+    /// Write a batch of operations atomically using AiDb's WriteBatch.
+    ///
+    /// This method provides atomic batch writes with durability guarantees:
+    /// - All operations are written to the WAL first
+    /// - Single fsync for the entire batch
+    /// - On failure, the entire batch is rolled back
+    /// - On crash recovery, all batch operations are replayed together
+    ///
+    /// # Arguments
+    /// * `db_index` - The database index (0-15 by default)
+    /// * `operations` - Vector of (key, operation) pairs where operation is either Set(value) or Delete
+    ///
+    /// # Returns
+    /// * `Ok(())` - If all operations succeeded
+    /// * `Err(AikvError)` - If any operation failed (entire batch is rolled back)
+    ///
+    /// # Example
+    /// ```ignore
+    /// use crate::storage::aidb_adapter::BatchOp;
+    ///
+    /// let ops = vec![
+    ///     ("key1".to_string(), BatchOp::Set(Bytes::from("value1"))),
+    ///     ("key2".to_string(), BatchOp::Set(Bytes::from("value2"))),
+    ///     ("key3".to_string(), BatchOp::Delete),
+    /// ];
+    /// storage.write_batch(0, ops)?;
+    /// ```
+    pub fn write_batch(&self, db_index: usize, operations: Vec<(String, BatchOp)>) -> Result<()> {
+        if db_index >= self.databases.len() {
+            return Err(AikvError::Storage(format!(
+                "Invalid database index: {}",
+                db_index
+            )));
+        }
+
+        if operations.is_empty() {
+            return Ok(());
+        }
+
+        let db = &self.databases[db_index];
+        let mut batch = WriteBatch::new();
+
+        for (key, op) in operations {
+            let key_bytes = key.as_bytes();
+            match op {
+                BatchOp::Set(value) => {
+                    batch.put(key_bytes, &value);
+                }
+                BatchOp::Delete => {
+                    batch.delete(key_bytes);
+                    // Also delete expiration metadata
+                    let expire_key = Self::expiration_key(key_bytes);
+                    batch.delete(&expire_key);
+                }
+            }
+        }
+
+        // Write the batch atomically
+        db.write(batch)
+            .map_err(|e| AikvError::Storage(format!("Failed to write batch: {}", e)))?;
+
+        Ok(())
     }
 
     // ========================================================================
