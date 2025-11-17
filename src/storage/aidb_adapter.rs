@@ -46,14 +46,8 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Batch operation for atomic writes
-#[derive(Debug, Clone)]
-pub enum BatchOp {
-    /// Set a key to a value
-    Set(Bytes),
-    /// Delete a key
-    Delete,
-}
+// Re-export BatchOp from memory_adapter for consistency
+pub use crate::storage::memory_adapter::BatchOp;
 
 /// AiDb-based storage adapter providing persistent storage for AiKv.
 ///
