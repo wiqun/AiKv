@@ -1,3 +1,4 @@
+pub mod cluster;
 pub mod command;
 pub mod error;
 pub mod persistence;

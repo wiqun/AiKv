@@ -746,14 +746,14 @@ redis-cli --cluster create 172.20.0.2:6379 172.20.0.3:6380 172.20.0.4:6381 \
 - ✅ Lua 脚本支持
 
 ### v0.2.0 (Stage 0: 周 1-2)
-- [ ] Multi-Raft 框架集成
-- [ ] MetaRaft 选举和状态管理
-- [ ] Thin Replication 同步
-- [ ] 3 节点启动验证
+- [x] Multi-Raft 框架集成
+- [x] MetaRaft 选举和状态管理
+- [x] Thin Replication 同步
+- [x] 3 节点启动验证
 
 ### v0.3.0 (Stage 1: 周 3-4)
 - [ ] 16384 槽映射初始化
-- [ ] CRC16 槽计算
+- [x] CRC16 槽计算
 - [ ] -MOVED/-ASK 重定向
 - [ ] 基础 CLUSTER 命令 (MEET/NODES/INFO)
 
