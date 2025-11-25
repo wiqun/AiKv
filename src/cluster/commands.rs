@@ -44,6 +44,17 @@ pub enum RedirectType {
     Ask,
 }
 
+/// Failover mode for CLUSTER FAILOVER command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailoverMode {
+    /// Default failover - wait for master agreement
+    Default,
+    /// Force failover without master agreement
+    Force,
+    /// Takeover - force failover even if master is unreachable
+    Takeover,
+}
+
 /// Node information for cluster management.
 #[derive(Debug, Clone)]
 pub struct NodeInfo {
@@ -57,6 +68,10 @@ pub struct NodeInfo {
     pub is_master: bool,
     /// Whether this node is connected
     pub is_connected: bool,
+    /// Master node ID (if this node is a replica)
+    pub master_id: Option<u64>,
+    /// Replica node IDs (if this node is a master)
+    pub replica_ids: Vec<u64>,
 }
 
 impl NodeInfo {
@@ -74,6 +89,26 @@ impl NodeInfo {
             cluster_port,
             is_master: true,
             is_connected: true,
+            master_id: None,
+            replica_ids: Vec::new(),
+        }
+    }
+
+    /// Create a new NodeInfo for a replica node.
+    pub fn new_replica(id: u64, addr: String, master_id: u64) -> Self {
+        let cluster_port = if let Some(port_str) = addr.split(':').next_back() {
+            port_str.parse::<u16>().unwrap_or(6379) + 10000
+        } else {
+            16379
+        };
+        Self {
+            id,
+            addr,
+            cluster_port,
+            is_master: false,
+            is_connected: true,
+            master_id: Some(master_id),
+            replica_ids: Vec::new(),
         }
     }
 }
@@ -108,6 +143,10 @@ pub struct ClusterState {
     pub migration_progress: HashMap<u16, MigrationProgress>,
     /// Current cluster epoch
     pub config_epoch: u64,
+    /// Master-replica relationships (master_id -> Vec<replica_id>)
+    pub replica_map: HashMap<u64, Vec<u64>>,
+    /// Whether this node is in readonly mode (for replicas)
+    pub readonly_mode: bool,
 }
 
 impl ClusterState {
@@ -120,6 +159,8 @@ impl ClusterState {
             migration_targets: HashMap::new(),
             migration_progress: HashMap::new(),
             config_epoch: 0,
+            replica_map: HashMap::new(),
+            readonly_mode: false,
         }
     }
 
@@ -175,6 +216,171 @@ impl ClusterState {
             None
         }
     }
+
+    /// Add a replica relationship.
+    ///
+    /// # Arguments
+    /// * `master_id` - The ID of the master node
+    /// * `replica_id` - The ID of the replica node
+    pub fn add_replica(&mut self, master_id: u64, replica_id: u64) {
+        // Update replica_map
+        self.replica_map
+            .entry(master_id)
+            .or_default()
+            .push(replica_id);
+
+        // Update node info for replica
+        if let Some(replica) = self.nodes.get_mut(&replica_id) {
+            replica.is_master = false;
+            replica.master_id = Some(master_id);
+        }
+
+        // Update node info for master
+        if let Some(master) = self.nodes.get_mut(&master_id) {
+            if !master.replica_ids.contains(&replica_id) {
+                master.replica_ids.push(replica_id);
+            }
+        }
+
+        self.config_epoch += 1;
+    }
+
+    /// Remove a replica relationship.
+    ///
+    /// # Arguments
+    /// * `replica_id` - The ID of the replica node to remove
+    pub fn remove_replica(&mut self, replica_id: u64) {
+        // Find and remove from master's replica list
+        if let Some(replica) = self.nodes.get(&replica_id) {
+            if let Some(master_id) = replica.master_id {
+                // Remove from replica_map
+                if let Some(replicas) = self.replica_map.get_mut(&master_id) {
+                    replicas.retain(|&id| id != replica_id);
+                    if replicas.is_empty() {
+                        self.replica_map.remove(&master_id);
+                    }
+                }
+
+                // Remove from master's replica_ids
+                if let Some(master) = self.nodes.get_mut(&master_id) {
+                    master.replica_ids.retain(|&id| id != replica_id);
+                }
+            }
+        }
+
+        // Update replica node info
+        if let Some(replica) = self.nodes.get_mut(&replica_id) {
+            replica.master_id = None;
+            replica.is_master = true;
+        }
+
+        self.config_epoch += 1;
+    }
+
+    /// Get replicas of a master node.
+    ///
+    /// # Arguments
+    /// * `master_id` - The ID of the master node
+    ///
+    /// # Returns
+    /// Vector of replica node IDs
+    pub fn get_replicas(&self, master_id: u64) -> Vec<u64> {
+        self.replica_map
+            .get(&master_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Get master of a replica node.
+    ///
+    /// # Arguments
+    /// * `replica_id` - The ID of the replica node
+    ///
+    /// # Returns
+    /// Option containing the master node ID
+    pub fn get_master(&self, replica_id: u64) -> Option<u64> {
+        self.nodes.get(&replica_id).and_then(|n| n.master_id)
+    }
+
+    /// Check if a node is a master.
+    ///
+    /// # Arguments
+    /// * `node_id` - The ID of the node to check
+    ///
+    /// # Returns
+    /// true if the node is a master, false otherwise
+    pub fn is_master(&self, node_id: u64) -> bool {
+        self.nodes.get(&node_id).is_some_and(|n| n.is_master)
+    }
+
+    /// Check if a node is a replica.
+    ///
+    /// # Arguments
+    /// * `node_id` - The ID of the node to check
+    ///
+    /// # Returns
+    /// true if the node is a replica, false otherwise
+    pub fn is_replica(&self, node_id: u64) -> bool {
+        self.nodes.get(&node_id).is_some_and(|n| !n.is_master)
+    }
+
+    /// Perform a failover: promote a replica to master.
+    ///
+    /// This method transfers slot ownership from the old master to the new master.
+    ///
+    /// # Arguments
+    /// * `replica_id` - The ID of the replica to promote
+    ///
+    /// # Returns
+    /// Ok(old_master_id) on success, Err if the node is not a replica
+    pub fn promote_replica(&mut self, replica_id: u64) -> std::result::Result<u64, String> {
+        // Get the master ID of this replica
+        let master_id = self
+            .get_master(replica_id)
+            .ok_or_else(|| format!("Node {} is not a replica", replica_id))?;
+
+        // Transfer slot ownership from master to replica
+        for slot in self.slot_assignments.iter_mut() {
+            if *slot == Some(master_id) {
+                *slot = Some(replica_id);
+            }
+        }
+
+        // Update replica to become master
+        if let Some(replica) = self.nodes.get_mut(&replica_id) {
+            replica.is_master = true;
+            replica.master_id = None;
+        }
+
+        // Update old master to become replica
+        if let Some(master) = self.nodes.get_mut(&master_id) {
+            master.is_master = false;
+            master.master_id = Some(replica_id);
+            master.replica_ids.clear();
+        }
+
+        // Update replica map
+        if let Some(old_replicas) = self.replica_map.remove(&master_id) {
+            // Other replicas of the old master now replicate the new master
+            let new_replicas: Vec<u64> = old_replicas
+                .into_iter()
+                .filter(|&id| id != replica_id)
+                .chain(std::iter::once(master_id))
+                .collect();
+
+            if !new_replicas.is_empty() {
+                self.replica_map.insert(replica_id, new_replicas.clone());
+
+                // Update new master's replica_ids
+                if let Some(new_master) = self.nodes.get_mut(&replica_id) {
+                    new_master.replica_ids = new_replicas;
+                }
+            }
+        }
+
+        self.config_epoch += 1;
+        Ok(master_id)
+    }
 }
 
 /// Type alias for a key scanner function.
@@ -214,6 +420,11 @@ pub type KeyCounter = Box<dyn Fn(usize, u16) -> usize + Send + Sync>;
 /// - `CLUSTER SETSLOT` - Set slot state (NODE/MIGRATING/IMPORTING)
 /// - `CLUSTER GETKEYSINSLOT` - Get keys belonging to a slot
 /// - `CLUSTER COUNTKEYSINSLOT` - Count keys in a slot
+/// - `CLUSTER REPLICATE` - Configure node as replica of a master
+/// - `CLUSTER FAILOVER` - Trigger manual failover
+/// - `CLUSTER REPLICAS` - List replicas of a master
+/// - `READONLY` - Enable readonly mode (for replicas)
+/// - `READWRITE` - Disable readonly mode
 pub struct ClusterCommands {
     router: SlotRouter,
     node_id: Option<u64>,
@@ -308,6 +519,39 @@ impl ClusterCommands {
         &self.router
     }
 
+    /// Enable readonly mode for this node.
+    ///
+    /// When readonly mode is enabled, this replica node can serve read requests
+    /// for keys it doesn't own (its master's keys).
+    ///
+    /// # Returns
+    ///
+    /// OK on success
+    pub fn readonly(&self) -> Result<RespValue> {
+        let mut state = self.state.write().unwrap();
+        state.readonly_mode = true;
+        Ok(RespValue::simple_string("OK"))
+    }
+
+    /// Disable readonly mode for this node.
+    ///
+    /// When readonly mode is disabled, the node will only serve requests
+    /// for keys it owns.
+    ///
+    /// # Returns
+    ///
+    /// OK on success
+    pub fn readwrite(&self) -> Result<RespValue> {
+        let mut state = self.state.write().unwrap();
+        state.readonly_mode = false;
+        Ok(RespValue::simple_string("OK"))
+    }
+
+    /// Check if readonly mode is enabled.
+    pub fn is_readonly(&self) -> bool {
+        self.state.read().map(|s| s.readonly_mode).unwrap_or(false)
+    }
+
     /// Execute a CLUSTER command.
     ///
     /// # Arguments
@@ -336,6 +580,9 @@ impl ClusterCommands {
             "SETSLOT" => self.setslot(&args[1..]),
             "GETKEYSINSLOT" => self.getkeysinslot(&args[1..]),
             "COUNTKEYSINSLOT" => self.countkeysinslot(&args[1..]),
+            "REPLICATE" => self.replicate(&args[1..]),
+            "FAILOVER" => self.failover(&args[1..]),
+            "SLAVES" | "REPLICAS" => self.replicas(&args[1..]),
             "HELP" => self.help(),
             _ => Err(AikvError::InvalidCommand(format!(
                 "Unknown CLUSTER subcommand: {}",
@@ -1063,6 +1310,228 @@ cluster_stats_messages_received:0\r\n",
         Ok(RespValue::Integer(0))
     }
 
+    /// CLUSTER REPLICATE node-id
+    ///
+    /// Configures a node to be a replica of the specified master.
+    /// This is used to set up replication relationships in the cluster.
+    ///
+    /// # Arguments
+    ///
+    /// * `args` - Should contain exactly one argument: the master node ID (40-char hex)
+    ///
+    /// # Returns
+    ///
+    /// OK on success, error if master is unknown or operation fails
+    fn replicate(&self, args: &[Bytes]) -> Result<RespValue> {
+        if args.len() != 1 {
+            return Err(AikvError::WrongArgCount("CLUSTER REPLICATE".to_string()));
+        }
+
+        let master_node_id_str = String::from_utf8_lossy(&args[0]).to_string();
+        let master_node_id = u64::from_str_radix(&master_node_id_str, 16)
+            .map_err(|_| AikvError::InvalidArgument("Invalid node ID".to_string()))?;
+
+        let my_node_id = self.node_id.ok_or_else(|| {
+            AikvError::InvalidCommand("Node ID not set for this cluster node".to_string())
+        })?;
+
+        // Cannot replicate self
+        if master_node_id == my_node_id {
+            return Err(AikvError::InvalidArgument(
+                "Cannot replicate myself".to_string(),
+            ));
+        }
+
+        let mut state = self.state.write().unwrap();
+
+        // Check if master node exists
+        if !state.nodes.contains_key(&master_node_id) {
+            return Err(AikvError::InvalidArgument(format!(
+                "Unknown node {}",
+                master_node_id_str
+            )));
+        }
+
+        // Check if target node is actually a master
+        if !state.is_master(master_node_id) {
+            return Err(AikvError::InvalidArgument(format!(
+                "Node {} is not a master",
+                master_node_id_str
+            )));
+        }
+
+        // If this node is already a replica, remove the old relationship
+        if state.is_replica(my_node_id) {
+            state.remove_replica(my_node_id);
+        }
+
+        // If this node is a master with replicas, we need to handle them
+        // In a production implementation, the replicas would be reassigned
+        // For now, we just remove them
+        if let Some(replicas) = state.replica_map.remove(&my_node_id) {
+            for replica_id in replicas {
+                if let Some(replica) = state.nodes.get_mut(&replica_id) {
+                    replica.master_id = None;
+                    replica.is_master = true;
+                }
+            }
+        }
+
+        // Remove slot assignments from this node (replicas don't own slots)
+        for slot in state.slot_assignments.iter_mut() {
+            if *slot == Some(my_node_id) {
+                *slot = None;
+            }
+        }
+
+        // Set up the new replication relationship
+        state.add_replica(master_node_id, my_node_id);
+
+        Ok(RespValue::simple_string("OK"))
+    }
+
+    /// CLUSTER FAILOVER [FORCE|TAKEOVER]
+    ///
+    /// Forces a replica to start a manual failover of its master.
+    ///
+    /// Options:
+    /// - FORCE: Force failover without master agreement
+    /// - TAKEOVER: Force failover even if master is unreachable (takes over immediately)
+    ///
+    /// # Arguments
+    ///
+    /// * `args` - Optional: FORCE or TAKEOVER mode
+    ///
+    /// # Returns
+    ///
+    /// OK on success, error if this node is not a replica
+    fn failover(&self, args: &[Bytes]) -> Result<RespValue> {
+        let mode = if args.is_empty() {
+            FailoverMode::Default
+        } else {
+            let mode_str = String::from_utf8_lossy(&args[0]).to_uppercase();
+            match mode_str.as_str() {
+                "FORCE" => FailoverMode::Force,
+                "TAKEOVER" => FailoverMode::Takeover,
+                _ => {
+                    return Err(AikvError::InvalidArgument(format!(
+                        "Invalid failover option: {}",
+                        mode_str
+                    )));
+                }
+            }
+        };
+
+        let my_node_id = self.node_id.ok_or_else(|| {
+            AikvError::InvalidCommand("Node ID not set for this cluster node".to_string())
+        })?;
+
+        let mut state = self.state.write().unwrap();
+
+        // Check if this node is a replica
+        if !state.is_replica(my_node_id) {
+            return Err(AikvError::InvalidArgument(
+                "This node is not a replica - cannot failover".to_string(),
+            ));
+        }
+
+        // Get master ID
+        let master_id = state.get_master(my_node_id).ok_or_else(|| {
+            AikvError::InvalidArgument("Cannot find master for this replica".to_string())
+        })?;
+
+        // Check if master is connected (for non-takeover modes)
+        let master_connected = state.nodes.get(&master_id).is_some_and(|m| m.is_connected);
+
+        match mode {
+            FailoverMode::Default if !master_connected => {
+                return Err(AikvError::InvalidArgument(
+                    "Master is disconnected. Use FORCE or TAKEOVER option".to_string(),
+                ));
+            }
+            FailoverMode::Force if !master_connected => {
+                // FORCE mode can proceed even if master is disconnected
+                // but it will wait for the master to come back
+                // For our implementation, we'll proceed with failover
+            }
+            FailoverMode::Takeover => {
+                // TAKEOVER mode proceeds immediately regardless of master state
+            }
+            _ => {}
+        }
+
+        // Perform the failover
+        state
+            .promote_replica(my_node_id)
+            .map_err(AikvError::InvalidArgument)?;
+
+        Ok(RespValue::simple_string("OK"))
+    }
+
+    /// CLUSTER REPLICAS node-id / CLUSTER SLAVES node-id
+    ///
+    /// Returns the list of replica nodes for the given master node.
+    ///
+    /// # Arguments
+    ///
+    /// * `args` - Should contain exactly one argument: the master node ID (40-char hex)
+    ///
+    /// # Returns
+    ///
+    /// An array of replica node information in CLUSTER NODES format
+    fn replicas(&self, args: &[Bytes]) -> Result<RespValue> {
+        if args.len() != 1 {
+            return Err(AikvError::WrongArgCount("CLUSTER REPLICAS".to_string()));
+        }
+
+        let master_node_id_str = String::from_utf8_lossy(&args[0]).to_string();
+        let master_node_id = u64::from_str_radix(&master_node_id_str, 16)
+            .map_err(|_| AikvError::InvalidArgument("Invalid node ID".to_string()))?;
+
+        let state = self.state.read().unwrap();
+
+        // Check if master node exists and is a master
+        if !state.nodes.contains_key(&master_node_id) {
+            return Err(AikvError::InvalidArgument(format!(
+                "Unknown node {}",
+                master_node_id_str
+            )));
+        }
+
+        if !state.is_master(master_node_id) {
+            return Err(AikvError::InvalidArgument(format!(
+                "Node {} is not a master",
+                master_node_id_str
+            )));
+        }
+
+        // Get replicas
+        let replica_ids = state.get_replicas(master_node_id);
+
+        let mut result = Vec::new();
+        for replica_id in replica_ids {
+            if let Some(info) = state.nodes.get(&replica_id) {
+                let status = if info.is_connected {
+                    "connected"
+                } else {
+                    "disconnected"
+                };
+                let node_line = format!(
+                    "{:040x} {}@{} slave {:040x} 0 0 {} {}",
+                    replica_id,
+                    info.addr,
+                    info.cluster_port,
+                    master_node_id,
+                    state.config_epoch,
+                    status
+                );
+                result.push(RespValue::bulk_string(Bytes::from(node_line)));
+            }
+        }
+
+        Ok(RespValue::Array(Some(result)))
+    }
+
     /// CLUSTER HELP
     ///
     /// Returns help text for CLUSTER commands.
@@ -1101,6 +1570,18 @@ cluster_stats_messages_received:0\r\n",
             RespValue::bulk_string(Bytes::from("CLUSTER COUNTKEYSINSLOT <slot>")),
             RespValue::bulk_string(Bytes::from(
                 "    Return the number of keys in the specified slot.",
+            )),
+            RespValue::bulk_string(Bytes::from("CLUSTER REPLICATE <node-id>")),
+            RespValue::bulk_string(Bytes::from(
+                "    Configure this node as replica of the specified master.",
+            )),
+            RespValue::bulk_string(Bytes::from("CLUSTER FAILOVER [FORCE|TAKEOVER]")),
+            RespValue::bulk_string(Bytes::from(
+                "    Trigger a manual failover of this replica to become master.",
+            )),
+            RespValue::bulk_string(Bytes::from("CLUSTER REPLICAS <node-id>")),
+            RespValue::bulk_string(Bytes::from(
+                "    Return the list of replicas for the specified master.",
             )),
         ];
 
@@ -2316,8 +2797,416 @@ mod tests {
             // Verify new commands are in help
             assert!(help_text.contains("GETKEYSINSLOT"));
             assert!(help_text.contains("COUNTKEYSINSLOT"));
+            assert!(help_text.contains("REPLICATE"));
+            assert!(help_text.contains("FAILOVER"));
+            assert!(help_text.contains("REPLICAS"));
         } else {
             panic!("Expected array response");
         }
+    }
+
+    // ========== Stage D: High Availability Tests ==========
+
+    #[test]
+    fn test_cluster_replicate() {
+        let cmd = ClusterCommands::with_node_id(1);
+
+        // Add another node (master) to the cluster
+        cmd.execute(&[
+            Bytes::from("MEET"),
+            Bytes::from("192.168.1.100"),
+            Bytes::from("6380"),
+        ])
+        .unwrap();
+
+        // Get the master node ID
+        let master_id: u64 = {
+            let state = cmd.state();
+            let state = state.read().unwrap();
+            *state.nodes.keys().find(|&&id| id != 1).unwrap()
+        };
+
+        // Replicate the master
+        let result = cmd.execute(&[
+            Bytes::from("REPLICATE"),
+            Bytes::from(format!("{:040x}", master_id)),
+        ]);
+        assert!(result.is_ok());
+
+        // Verify this node is now a replica
+        let state = cmd.state();
+        let state_guard = state.read().unwrap();
+        assert!(state_guard.is_replica(1));
+        assert!(!state_guard.is_master(1));
+        assert_eq!(state_guard.get_master(1), Some(master_id));
+    }
+
+    #[test]
+    fn test_cluster_replicate_self_error() {
+        let cmd = ClusterCommands::with_node_id(1);
+
+        // Try to replicate self - should fail
+        let result = cmd.execute(&[
+            Bytes::from("REPLICATE"),
+            Bytes::from(format!("{:040x}", 1u64)),
+        ]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cluster_replicate_unknown_node() {
+        let cmd = ClusterCommands::with_node_id(1);
+
+        // Try to replicate unknown node - should fail
+        let result = cmd.execute(&[
+            Bytes::from("REPLICATE"),
+            Bytes::from("0000000000000000000000000000000000000999"),
+        ]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cluster_replicate_wrong_args() {
+        let cmd = ClusterCommands::with_node_id(1);
+
+        // No args
+        let result = cmd.execute(&[Bytes::from("REPLICATE")]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cluster_failover() {
+        let cmd = ClusterCommands::with_node_id(1);
+
+        // Add a master node
+        cmd.execute(&[
+            Bytes::from("MEET"),
+            Bytes::from("192.168.1.100"),
+            Bytes::from("6380"),
+        ])
+        .unwrap();
+
+        // Get the master node ID
+        let master_id: u64 = {
+            let state = cmd.state();
+            let state = state.read().unwrap();
+            *state.nodes.keys().find(|&&id| id != 1).unwrap()
+        };
+
+        // Add slots to master
+        {
+            let state = cmd.state();
+            let mut state_guard = state.write().unwrap();
+            for i in 0..1000u16 {
+                state_guard.slot_assignments[i as usize] = Some(master_id);
+            }
+        }
+
+        // Make node 1 a replica of the master
+        cmd.execute(&[
+            Bytes::from("REPLICATE"),
+            Bytes::from(format!("{:040x}", master_id)),
+        ])
+        .unwrap();
+
+        // Perform failover
+        let result = cmd.execute(&[Bytes::from("FAILOVER")]);
+        assert!(result.is_ok());
+
+        // Verify node 1 is now master
+        let state = cmd.state();
+        let state_guard = state.read().unwrap();
+        assert!(state_guard.is_master(1));
+        assert!(state_guard.is_replica(master_id));
+
+        // Verify slots transferred
+        assert_eq!(state_guard.slot_assignments[0], Some(1));
+    }
+
+    #[test]
+    fn test_cluster_failover_force() {
+        let cmd = ClusterCommands::with_node_id(1);
+
+        // Add a master node
+        cmd.execute(&[
+            Bytes::from("MEET"),
+            Bytes::from("192.168.1.100"),
+            Bytes::from("6380"),
+        ])
+        .unwrap();
+
+        // Get the master node ID
+        let master_id: u64 = {
+            let state = cmd.state();
+            let state = state.read().unwrap();
+            *state.nodes.keys().find(|&&id| id != 1).unwrap()
+        };
+
+        // Mark master as disconnected
+        {
+            let state = cmd.state();
+            let mut state_guard = state.write().unwrap();
+            if let Some(master) = state_guard.nodes.get_mut(&master_id) {
+                master.is_connected = false;
+            }
+        }
+
+        // Make node 1 a replica
+        cmd.execute(&[
+            Bytes::from("REPLICATE"),
+            Bytes::from(format!("{:040x}", master_id)),
+        ])
+        .unwrap();
+
+        // Default failover should fail (master disconnected)
+        let result = cmd.execute(&[Bytes::from("FAILOVER")]);
+        assert!(result.is_err());
+
+        // FORCE failover should succeed
+        let result = cmd.execute(&[Bytes::from("FAILOVER"), Bytes::from("FORCE")]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_cluster_failover_takeover() {
+        let cmd = ClusterCommands::with_node_id(1);
+
+        // Add a master node
+        cmd.execute(&[
+            Bytes::from("MEET"),
+            Bytes::from("192.168.1.100"),
+            Bytes::from("6380"),
+        ])
+        .unwrap();
+
+        // Get the master node ID
+        let master_id: u64 = {
+            let state = cmd.state();
+            let state = state.read().unwrap();
+            *state.nodes.keys().find(|&&id| id != 1).unwrap()
+        };
+
+        // Make node 1 a replica
+        cmd.execute(&[
+            Bytes::from("REPLICATE"),
+            Bytes::from(format!("{:040x}", master_id)),
+        ])
+        .unwrap();
+
+        // TAKEOVER failover should succeed regardless of master state
+        let result = cmd.execute(&[Bytes::from("FAILOVER"), Bytes::from("TAKEOVER")]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_cluster_failover_not_replica() {
+        let cmd = ClusterCommands::with_node_id(1);
+
+        // Try failover on a master node - should fail
+        let result = cmd.execute(&[Bytes::from("FAILOVER")]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cluster_failover_invalid_option() {
+        let cmd = ClusterCommands::with_node_id(1);
+
+        // Invalid option
+        let result = cmd.execute(&[Bytes::from("FAILOVER"), Bytes::from("INVALID")]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cluster_replicas() {
+        let cmd = ClusterCommands::with_node_id(1);
+
+        // Add a replica node
+        cmd.execute(&[
+            Bytes::from("MEET"),
+            Bytes::from("192.168.1.101"),
+            Bytes::from("6381"),
+        ])
+        .unwrap();
+
+        // Get the replica node ID
+        let replica_id: u64 = {
+            let state = cmd.state();
+            let state = state.read().unwrap();
+            *state.nodes.keys().find(|&&id| id != 1).unwrap()
+        };
+
+        // Create a shared state handler for the replica
+        let cmd_replica = ClusterCommands::with_shared_state(Some(replica_id), cmd.state());
+
+        // Make replica replicate master (node 1)
+        cmd_replica
+            .execute(&[
+                Bytes::from("REPLICATE"),
+                Bytes::from(format!("{:040x}", 1u64)),
+            ])
+            .unwrap();
+
+        // List replicas of node 1
+        let result = cmd.execute(&[
+            Bytes::from("REPLICAS"),
+            Bytes::from(format!("{:040x}", 1u64)),
+        ]);
+        assert!(result.is_ok());
+
+        if let Ok(RespValue::Array(Some(replicas))) = result {
+            assert_eq!(replicas.len(), 1);
+        } else {
+            panic!("Expected array response");
+        }
+    }
+
+    #[test]
+    fn test_cluster_replicas_unknown_node() {
+        let cmd = ClusterCommands::with_node_id(1);
+
+        // Try to get replicas of unknown node - should fail
+        let result = cmd.execute(&[
+            Bytes::from("REPLICAS"),
+            Bytes::from("0000000000000000000000000000000000000999"),
+        ]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cluster_replicas_wrong_args() {
+        let cmd = ClusterCommands::with_node_id(1);
+
+        // No args
+        let result = cmd.execute(&[Bytes::from("REPLICAS")]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_readonly_readwrite() {
+        let cmd = ClusterCommands::with_node_id(1);
+
+        // Initially not in readonly mode
+        assert!(!cmd.is_readonly());
+
+        // Enable readonly mode
+        let result = cmd.readonly();
+        assert!(result.is_ok());
+        assert!(cmd.is_readonly());
+
+        // Disable readonly mode
+        let result = cmd.readwrite();
+        assert!(result.is_ok());
+        assert!(!cmd.is_readonly());
+    }
+
+    #[test]
+    fn test_cluster_state_add_replica() {
+        let mut state = ClusterState::new();
+
+        // Add two nodes
+        let master_id = 1u64;
+        let replica_id = 2u64;
+        state.nodes.insert(
+            master_id,
+            NodeInfo::new(master_id, "127.0.0.1:6379".to_string()),
+        );
+        state.nodes.insert(
+            replica_id,
+            NodeInfo::new(replica_id, "127.0.0.1:6380".to_string()),
+        );
+
+        // Add replica relationship
+        state.add_replica(master_id, replica_id);
+
+        // Verify
+        assert!(!state.is_replica(master_id));
+        assert!(state.is_replica(replica_id));
+        assert_eq!(state.get_master(replica_id), Some(master_id));
+        assert!(state.get_replicas(master_id).contains(&replica_id));
+    }
+
+    #[test]
+    fn test_cluster_state_remove_replica() {
+        let mut state = ClusterState::new();
+
+        // Add two nodes
+        let master_id = 1u64;
+        let replica_id = 2u64;
+        state.nodes.insert(
+            master_id,
+            NodeInfo::new(master_id, "127.0.0.1:6379".to_string()),
+        );
+        state.nodes.insert(
+            replica_id,
+            NodeInfo::new(replica_id, "127.0.0.1:6380".to_string()),
+        );
+
+        // Add and then remove replica relationship
+        state.add_replica(master_id, replica_id);
+        state.remove_replica(replica_id);
+
+        // Verify
+        assert!(state.is_master(replica_id));
+        assert_eq!(state.get_master(replica_id), None);
+        assert!(state.get_replicas(master_id).is_empty());
+    }
+
+    #[test]
+    fn test_cluster_state_promote_replica() {
+        let mut state = ClusterState::new();
+
+        // Add two nodes
+        let master_id = 1u64;
+        let replica_id = 2u64;
+        state.nodes.insert(
+            master_id,
+            NodeInfo::new(master_id, "127.0.0.1:6379".to_string()),
+        );
+        state.nodes.insert(
+            replica_id,
+            NodeInfo::new(replica_id, "127.0.0.1:6380".to_string()),
+        );
+
+        // Assign slots to master
+        for i in 0..100u16 {
+            state.slot_assignments[i as usize] = Some(master_id);
+        }
+
+        // Add replica
+        state.add_replica(master_id, replica_id);
+
+        // Promote replica
+        let result = state.promote_replica(replica_id);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), master_id);
+
+        // Verify new master
+        assert!(state.is_master(replica_id));
+        assert!(state.is_replica(master_id));
+        assert_eq!(state.get_master(master_id), Some(replica_id));
+
+        // Verify slots transferred
+        for i in 0..100u16 {
+            assert_eq!(state.slot_assignments[i as usize], Some(replica_id));
+        }
+    }
+
+    #[test]
+    fn test_node_info_new_replica() {
+        let master_id = 1u64;
+        let replica = NodeInfo::new_replica(2, "127.0.0.1:6380".to_string(), master_id);
+
+        assert_eq!(replica.id, 2);
+        assert!(!replica.is_master);
+        assert_eq!(replica.master_id, Some(master_id));
+    }
+
+    #[test]
+    fn test_failover_mode() {
+        // Test that FailoverMode enum works correctly
+        assert_eq!(FailoverMode::Default, FailoverMode::Default);
+        assert_eq!(FailoverMode::Force, FailoverMode::Force);
+        assert_eq!(FailoverMode::Takeover, FailoverMode::Takeover);
+        assert_ne!(FailoverMode::Default, FailoverMode::Force);
     }
 }

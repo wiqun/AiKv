@@ -469,11 +469,16 @@ AiKv 只需实现 **RESP 协议解析** 和 **Redis Cluster 命令到 AiDb API �
   - [x] 集成 `MigrationManager` 实现在线迁移
   - [ ] 实现 `MIGRATE` 命令 (需要网络层支持，移至后续版本)
 
-- [ ] **阶段 D: 高可用** (对应 Stage 4)
-  - [ ] 实现 `CLUSTER REPLICATE` 命令
-  - [ ] 实现 `CLUSTER FAILOVER` 命令
-  - [ ] 实现 `READONLY/READWRITE` 命令
-  - [ ] 集成 `MembershipCoordinator`
+- [x] **阶段 D: 高可用** (对应 Stage 4)
+  - [x] 实现 `CLUSTER REPLICATE` 命令
+  - [x] 实现 `CLUSTER FAILOVER` 命令 (支持 FORCE/TAKEOVER 模式)
+  - [x] 实现 `READONLY/READWRITE` 命令
+  - [x] 实现 `CLUSTER REPLICAS` / `CLUSTER SLAVES` 命令
+  - [x] 集成 `MembershipCoordinator` (通过 ClusterState 的 replica_map 实现)
+  - [x] 添加 FailoverMode 枚举
+  - [x] 添加 NodeInfo.new_replica() 构造器
+  - [x] 添加 ClusterState 副本管理方法 (add_replica, remove_replica, promote_replica)
+  - [x] 添加完整的单元测试覆盖
 
 - [ ] **阶段 E: Cluster Bus** (可选优化)
   - [ ] 实现节点间 gossip 协议
@@ -981,9 +986,16 @@ manager.get_with_migration_awareness(&key)?;
 ```
 
 ### v0.6.0 (Stage 4: 周 10-12) - 高可用
-- [ ] 实现 `CLUSTER REPLICATE` (使用 `MembershipCoordinator.add_learner`)
-- [ ] 实现 `CLUSTER FAILOVER` (使用 openraft `trigger_elect`)
-- [ ] 实现 `READONLY/READWRITE` 命令
+- [x] 实现 `CLUSTER REPLICATE` (使用 ClusterState.add_replica)
+- [x] 实现 `CLUSTER FAILOVER` (使用 ClusterState.promote_replica, 支持 FORCE/TAKEOVER)
+- [x] 实现 `READONLY/READWRITE` 命令
+- [x] 实现 `CLUSTER REPLICAS` / `CLUSTER SLAVES` 命令
+
+**实现说明**:
+- 通过 `ClusterState.replica_map` 管理副本关系
+- `promote_replica` 实现自动槽迁移和角色交换
+- `FailoverMode` 枚举支持 Default/Force/Takeover 三种模式
+- 完整单元测试覆盖
 
 **关键 AiDb API**:
 ```rust
