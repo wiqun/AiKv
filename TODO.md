@@ -662,11 +662,11 @@
 
 | 周次 | 阶段 & 里程碑 | 核心交付物 | 验收标准 |
 |------|---------------|------------|----------|
-| **周 1-2** | **Stage 0**: AiKv 完整接入 AiDb v0.4.0 Multi-Raft | v0.1.0 | 3 节点启动成功，MetaRaft 选举正常，Thin Replication 同步 < 50ms |
-| **周 3-4** | **Stage 1**: 16384 槽完美映射 + 路由核心 | v0.2.0 | `redis-cli --cluster create` 成功建集群，-c 自动跳槽 |
-| **周 5-6** | **Stage 2**: CLUSTER 全命令 + 节点管理 | v0.3.0 | `redis-cli --cluster add-node/del-node/check/info` 全通过 |
-| **周 7-9** | **Stage 3**: 槽在线迁移 (reshard) | v0.4.0 | `redis-cli --cluster reshard` 迁移 1000 槽 < 25s，零数据丢失 |
-| **周 10-12** | **Stage 4**: 副本 + 高可用 + 自动 failover | v0.5.0 | 3 主 3 从集群，杀任意主 < 10s 自动切换 |
+| **周 1-2** | **Stage 0**: AiKv 完整接入 AiDb v0.4.0 Multi-Raft | v0.2.0 | 3 节点启动成功，MetaRaft 选举正常，Thin Replication 同步 < 50ms |
+| **周 3-4** | **Stage 1**: 16384 槽完美映射 + 路由核心 | v0.3.0 | `redis-cli --cluster create` 成功建集群，-c 自动跳槽 |
+| **周 5-6** | **Stage 2**: CLUSTER 全命令 + 节点管理 | v0.4.0 | `redis-cli --cluster add-node/del-node/check/info` 全通过 |
+| **周 7-9** | **Stage 3**: 槽在线迁移 (reshard) | v0.5.0 | `redis-cli --cluster reshard` 迁移 1000 槽 < 25s，零数据丢失 |
+| **周 10-12** | **Stage 4**: 副本 + 高可用 + 自动 failover | v0.6.0 | 3 主 3 从集群，杀任意主 < 10s 自动切换 |
 | **周 13-15** | **Stage 5**: 高级数据类型 + Lua + Pub/Sub | v0.8.0 | List/Set/Hash/Zset/JSON 跨槽支持，EVAL 多槽拆分执行 |
 | **周 16-17** | **Stage 6**: 极限压测 + 官方测试套件 | v0.9.0 | 100% 通过 redis/tests/cluster 全套测试 (> 800 个 case) |
 | **周 18** | **Stage 7**: 发布 v1.0.0 + 生态 | v1.0.0 | Docker 镜像、helm chart、Prometheus exporter、完整文档 |
@@ -704,22 +704,22 @@ version: '3.8'
 services:
   aikv1:
     image: genuineh/aikv:1.0.0
-    command: --multi-raft --node-id n1 --bind 0.0.0.0 --port 6379 --peers n2:16379,n3:16379 --replicas 1
+    command: --multi-raft --node-id n1 --bind 0.0.0.0 --port 6379 --cluster-port 16379 --peers n2:16379,n3:16379,n4:16379,n5:16379,n6:16379
   aikv2:
     image: genuineh/aikv:1.0.0
-    command: --multi-raft --node-id n2 --port 6380
+    command: --multi-raft --node-id n2 --bind 0.0.0.0 --port 6380 --cluster-port 16380 --peers n1:16379,n3:16379,n4:16379,n5:16379,n6:16379
   aikv3:
     image: genuineh/aikv:1.0.0
-    command: --multi-raft --node-id n3 --port 6381
+    command: --multi-raft --node-id n3 --bind 0.0.0.0 --port 6381 --cluster-port 16381 --peers n1:16379,n2:16379,n4:16379,n5:16379,n6:16379
   aikv4:
     image: genuineh/aikv:1.0.0
-    command: --multi-raft --node-id n4 --port 6382  # 从节点
+    command: --multi-raft --node-id n4 --bind 0.0.0.0 --port 6382 --cluster-port 16382 --peers n1:16379,n2:16379,n3:16379,n5:16379,n6:16379
   aikv5:
     image: genuineh/aikv:1.0.0
-    command: --multi-raft --node-id n5 --port 6383
+    command: --multi-raft --node-id n5 --bind 0.0.0.0 --port 6383 --cluster-port 16383 --peers n1:16379,n2:16379,n3:16379,n4:16379,n6:16379
   aikv6:
     image: genuineh/aikv:1.0.0
-    command: --multi-raft --node-id n6 --port 6384
+    command: --multi-raft --node-id n6 --bind 0.0.0.0 --port 6384 --cluster-port 16384 --peers n1:16379,n2:16379,n3:16379,n4:16379,n5:16379
 ```
 
 启动后只需一句：
@@ -738,36 +738,40 @@ redis-cli --cluster create 172.20.0.2:6379 172.20.0.3:6380 172.20.0.4:6381 \
 - ✅ JSON 命令 (7个)
 - ✅ 基础 TCP 服务器
 - ✅ 内存存储适配器
-- ✅ AiDb v0.1.0 集成
+- ✅ AiDb v0.4.0 集成（已升级）
 - ✅ 多数据库支持 (16 个数据库)
 - ✅ 键过期机制 (TTL 支持)
 - ✅ 存储层架构重构完成
 - ✅ List/Set/Hash/ZSet 数据类型
 - ✅ Lua 脚本支持
 
-### v0.2.0 (Stage 0-1: 周 1-4)
-- [ ] 升级 AiDb v0.4.0 Multi-Raft 集成
+### v0.2.0 (Stage 0: 周 1-2)
+- [ ] Multi-Raft 框架集成
 - [ ] MetaRaft 选举和状态管理
+- [ ] Thin Replication 同步
+- [ ] 3 节点启动验证
+
+### v0.3.0 (Stage 1: 周 3-4)
 - [ ] 16384 槽映射初始化
 - [ ] CRC16 槽计算
 - [ ] -MOVED/-ASK 重定向
-- [ ] 基础 CLUSTER 命令
+- [ ] 基础 CLUSTER 命令 (MEET/NODES/INFO)
 
-### v0.3.0 (Stage 2: 周 5-6)
+### v0.4.0 (Stage 2: 周 5-6)
 - [ ] CLUSTER 全命令实现
 - [ ] 节点管理 (add-node/del-node)
 - [ ] CLUSTER NODES 标准格式
 - [ ] Cluster Bus (端口 16379)
 - [ ] 节点发现和心跳
 
-### v0.4.0 (Stage 3: 周 7-9)
+### v0.5.0 (Stage 3: 周 7-9)
 - [ ] 槽在线迁移 (reshard)
 - [ ] 双写机制
 - [ ] 原子切换
 - [ ] 数据一致性验证
 - [ ] 迁移进度监控
 
-### v0.5.0 (Stage 4: 周 10-12)
+### v0.6.0 (Stage 4: 周 10-12)
 - [ ] 副本同步
 - [ ] 高可用架构
 - [ ] 自动 failover
