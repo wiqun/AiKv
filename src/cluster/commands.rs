@@ -254,7 +254,7 @@ mod tests {
         assert!(result.is_ok());
 
         if let Ok(RespValue::Integer(slot)) = result {
-            assert!(slot >= 0 && slot < 16384);
+            assert!((0..16384).contains(&slot));
         } else {
             panic!("Expected integer response");
         }
@@ -278,8 +278,8 @@ mod tests {
         };
 
         // Both slots should be in valid range
-        assert!(slot1 >= 0 && slot1 < 16384);
-        assert!(slot2 >= 0 && slot2 < 16384);
+        assert!((0..16384).contains(&slot1));
+        assert!((0..16384).contains(&slot2));
 
         // Note: Hash tag handling depends on AiDb implementation when cluster feature is enabled
         // When not using cluster feature, our fallback implementation handles hash tags
