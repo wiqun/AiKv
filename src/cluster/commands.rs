@@ -3232,4 +3232,62 @@ mod tests {
         assert_eq!(FailoverMode::Takeover, FailoverMode::Takeover);
         assert_ne!(FailoverMode::Default, FailoverMode::Force);
     }
+
+    #[test]
+    fn test_cluster_state_promote_replica_with_multiple_replicas() {
+        let mut state = ClusterState::new();
+
+        // Add master and two replicas
+        let master_id = 1u64;
+        let replica1_id = 2u64;
+        let replica2_id = 3u64;
+
+        state.nodes.insert(
+            master_id,
+            NodeInfo::new(master_id, "127.0.0.1:6379".to_string()),
+        );
+        state.nodes.insert(
+            replica1_id,
+            NodeInfo::new(replica1_id, "127.0.0.1:6380".to_string()),
+        );
+        state.nodes.insert(
+            replica2_id,
+            NodeInfo::new(replica2_id, "127.0.0.1:6381".to_string()),
+        );
+
+        // Assign slots to master
+        for i in 0..100u16 {
+            state.slot_assignments[i as usize] = Some(master_id);
+        }
+
+        // Add both replicas
+        state.add_replica(master_id, replica1_id);
+        state.add_replica(master_id, replica2_id);
+
+        // Verify initial state
+        assert_eq!(state.get_master(replica1_id), Some(master_id));
+        assert_eq!(state.get_master(replica2_id), Some(master_id));
+        assert_eq!(state.get_replicas(master_id).len(), 2);
+
+        // Promote replica1 to master
+        let result = state.promote_replica(replica1_id);
+        assert!(result.is_ok());
+
+        // Verify replica1 is now master
+        assert!(state.is_master(replica1_id));
+        assert_eq!(state.get_master(replica1_id), None);
+
+        // Verify old master is now replica of replica1
+        assert!(state.is_replica(master_id));
+        assert_eq!(state.get_master(master_id), Some(replica1_id));
+
+        // Verify replica2's master_id is updated to point to new master (replica1)
+        assert!(state.is_replica(replica2_id));
+        assert_eq!(state.get_master(replica2_id), Some(replica1_id));
+
+        // Verify new master (replica1) has both old master and replica2 as replicas
+        let new_replicas = state.get_replicas(replica1_id);
+        assert!(new_replicas.contains(&master_id));
+        assert!(new_replicas.contains(&replica2_id));
+    }
 }
