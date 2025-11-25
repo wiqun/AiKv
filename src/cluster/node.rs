@@ -10,7 +10,8 @@ use crate::error::Result;
 /// Node ID type alias
 pub type NodeId = u64;
 
-/// Group ID type alias
+/// Group ID type alias (for future use with Raft Groups)
+#[cfg(feature = "cluster")]
 #[allow(dead_code)]
 pub type GroupId = u64;
 

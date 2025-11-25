@@ -5,8 +5,8 @@
 
 use crate::error::{AikvError, Result};
 
-/// Number of slots in Redis Cluster
-#[allow(dead_code)]
+/// Number of slots in Redis Cluster (used for fallback implementation)
+#[cfg(not(feature = "cluster"))]
 pub const REDIS_CLUSTER_SLOTS: u16 = 16384;
 
 /// Slot router that wraps AiDb's Router for Redis Cluster.
@@ -143,13 +143,16 @@ impl Default for SlotRouter {
 mod tests {
     use super::*;
 
+    // Slot count constant for tests
+    const TEST_SLOT_COUNT: u16 = 16384;
+
     #[test]
     fn test_key_to_slot() {
         let router = SlotRouter::new();
 
         // Test basic key
         let slot = router.key_to_slot(b"test");
-        assert!(slot < REDIS_CLUSTER_SLOTS);
+        assert!(slot < TEST_SLOT_COUNT);
 
         // Test that same key always gives same slot
         let slot2 = router.key_to_slot(b"test");
@@ -161,8 +164,8 @@ mod tests {
         // Note: they could be the same by chance, but unlikely
 
         // Basic sanity check
-        assert!(slot_a < REDIS_CLUSTER_SLOTS);
-        assert!(slot_b < REDIS_CLUSTER_SLOTS);
+        assert!(slot_a < TEST_SLOT_COUNT);
+        assert!(slot_b < TEST_SLOT_COUNT);
     }
 
     #[test]
@@ -175,9 +178,9 @@ mod tests {
         let slot3 = router.key_to_slot(b"{user1}email");
 
         // All slots should be in valid range
-        assert!(slot1 < REDIS_CLUSTER_SLOTS);
-        assert!(slot2 < REDIS_CLUSTER_SLOTS);
-        assert!(slot3 < REDIS_CLUSTER_SLOTS);
+        assert!(slot1 < TEST_SLOT_COUNT);
+        assert!(slot2 < TEST_SLOT_COUNT);
+        assert!(slot3 < TEST_SLOT_COUNT);
 
         // Note: Hash tag handling depends on AiDb implementation when cluster feature is enabled
         // When not using cluster feature, our fallback implementation handles hash tags
@@ -193,8 +196,8 @@ mod tests {
         let slot_b = router.key_to_slot(b"{userB}name");
 
         // Note: could be same by chance, but test they're both valid
-        assert!(slot_a < REDIS_CLUSTER_SLOTS);
-        assert!(slot_b < REDIS_CLUSTER_SLOTS);
+        assert!(slot_a < TEST_SLOT_COUNT);
+        assert!(slot_b < TEST_SLOT_COUNT);
     }
 
     #[test]
@@ -206,9 +209,9 @@ mod tests {
         // Note: Results depend on CRC16 implementation
 
         let slot = router.key_to_slot(b"foo");
-        assert!(slot < REDIS_CLUSTER_SLOTS);
+        assert!(slot < TEST_SLOT_COUNT);
 
         let slot = router.key_to_slot(b"bar");
-        assert!(slot < REDIS_CLUSTER_SLOTS);
+        assert!(slot < TEST_SLOT_COUNT);
     }
 }

@@ -32,7 +32,8 @@ impl ClusterCommands {
     }
 
     /// Create a new ClusterCommands handler with a node ID.
-    #[allow(dead_code)]
+    ///
+    /// This is used to set the node ID for commands like CLUSTER MYID.
     pub fn with_node_id(node_id: u64) -> Self {
         Self {
             router: SlotRouter::new(),
@@ -186,7 +187,6 @@ cluster_stats_messages_received:0\r\n";
     /// # Returns
     ///
     /// A RESP error value with the MOVED redirect
-    #[allow(dead_code)]
     pub fn moved_error(slot: u16, addr: &str) -> RespValue {
         RespValue::Error(format!("MOVED {} {}", slot, addr))
     }
@@ -204,7 +204,6 @@ cluster_stats_messages_received:0\r\n";
     /// # Returns
     ///
     /// A RESP error value with the ASK redirect
-    #[allow(dead_code)]
     pub fn ask_error(slot: u16, addr: &str) -> RespValue {
         RespValue::Error(format!("ASK {} {}", slot, addr))
     }
@@ -219,8 +218,8 @@ cluster_stats_messages_received:0\r\n";
     /// # Returns
     ///
     /// None if the key should be handled locally, or Some(slot, addr) if redirected
-    #[allow(dead_code)]
-    pub fn check_redirect(&self, key: &[u8], _local_slots: &[bool]) -> Option<(u16, String)> {
+    #[allow(unused_variables)]
+    pub fn check_redirect(&self, key: &[u8], local_slots: &[bool]) -> Option<(u16, String)> {
         let slot = self.router.key_to_slot(key);
 
         // TODO: Implement actual redirect logic when cluster routing is available
@@ -232,7 +231,6 @@ cluster_stats_messages_received:0\r\n";
         }
 
         // For now, no redirect needed
-        let _ = slot;
         None
     }
 }
