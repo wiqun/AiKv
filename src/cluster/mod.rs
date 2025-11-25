@@ -44,14 +44,23 @@
 //! - Migration state management (`MIGRATING`/`IMPORTING`)
 //! - `-ASK` redirection logic
 //! - Migration progress tracking
+//!
+//! # Stage D: High Availability
+//!
+//! This module includes support for high availability:
+//! - `CLUSTER REPLICATE` - Configure a node as a replica
+//! - `CLUSTER FAILOVER` - Manual failover trigger
+//! - `CLUSTER REPLICAS` - List replicas of a master
+//! - `READONLY` / `READWRITE` - Enable/disable readonly mode for replicas
+//! - Membership coordinator integration
 
 mod commands;
 mod node;
 mod router;
 
 pub use commands::{
-    ClusterCommands, ClusterState, KeyCounter, KeyScanner, MigrationProgress, NodeInfo,
-    RedirectType, SlotState,
+    ClusterCommands, ClusterState, FailoverMode, KeyCounter, KeyScanner, MigrationProgress,
+    NodeInfo, RedirectType, SlotState,
 };
 pub use node::ClusterNode;
 pub use router::SlotRouter;

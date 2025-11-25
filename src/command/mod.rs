@@ -224,6 +224,10 @@ impl CommandExecutor {
             // Cluster commands (only available with cluster feature)
             #[cfg(feature = "cluster")]
             "CLUSTER" => self.cluster_commands.execute(args),
+            #[cfg(feature = "cluster")]
+            "READONLY" => self.cluster_commands.readonly(),
+            #[cfg(feature = "cluster")]
+            "READWRITE" => self.cluster_commands.readwrite(),
 
             // Utility commands
             "PING" => Ok(RespValue::simple_string("PONG")),
