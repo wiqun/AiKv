@@ -8,6 +8,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **AiDb v0.4.0 Multi-Raft Upgrade (2025-11-25)**
+  - Upgraded AiDb dependency from v0.1.0 to v0.4.0
+  - AiDb v0.4.0 brings Multi-Raft + Sharding architecture support:
+    - Thin Replication for 90%+ replication cost reduction
+    - MetaRaft for global slot mapping and node state management
+    - MultiRaftNode implementation for distributed consensus
+    - CRC16-based slot calculation and per-group AiDb instances
+    - Dynamic member management for Multi-Raft
+    - Online slot migration with batch optimization and dual-write
+    - Production readiness: configuration, metrics, snapshots, log cleanup
+  - Added comprehensive 18-week roadmap for AiKv v1.0.0 (target: 2026.03.31)
+  - Updated TODO.md with detailed milestones and performance targets
+  - Backward compatible API - all existing tests pass
+
+- **AiKv v1.0.0 Roadmap**
+  - Stage 0 (Week 1-2): Multi-Raft integration
+  - Stage 1 (Week 3-4): 16384 slot mapping and routing
+  - Stage 2 (Week 5-6): CLUSTER commands and node management
+  - Stage 3 (Week 7-9): Online slot migration (reshard)
+  - Stage 4 (Week 10-12): Replication and auto failover
+  - Stage 5 (Week 13-15): Advanced data types + Lua + Pub/Sub
+  - Stage 6 (Week 16-17): Stress testing and official test suite
+  - Stage 7 (Week 18): v1.0.0 release with Docker, Helm, Prometheus
+
 - **AiDbStorageAdapter Complete Data Type Support (2025-11-13)**
   - Full serialization support for all data types (String, List, Hash, Set, ZSet)
   - Using bincode for high-performance binary serialization/deserialization
@@ -27,7 +51,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Documentation: `docs/ARCHITECTURE_REFACTORING.md` - complete refactoring plan and status
 
 - **AiDb Storage Engine Integration**
-  - Full integration of AiDb v0.1.0 LSM-Tree storage engine
+  - Full integration of AiDb v0.4.0 LSM-Tree storage engine with Multi-Raft support
   - New `AiDbStorageAdapter` with persistent storage support
   - Support for WAL (Write-Ahead Log) and SSTable persistence
   - Bloom Filter for faster key lookups

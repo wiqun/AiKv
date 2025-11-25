@@ -32,7 +32,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 toml = "0.8"
 
 # Storage engine
-aidb = { git = "https://github.com/Genuineh/AiDb", tag = "v0.1.0" }
+aidb = { git = "https://github.com/Genuineh/AiDb", tag = "v0.4.0" }
 
 # Lua scripting
 mlua = { version = "0.10", features = ["lua54", "async", "send", "vendored"] }

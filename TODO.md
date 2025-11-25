@@ -625,34 +625,178 @@
 
 ---
 
+## AiKv v1.0.0 完整终极规划 (2025.11.26 – 2026.03.31)
+
+**目标**: 发布全球第一个 100% Redis Cluster 协议兼容 + 完全 Rust 原生 + 基于 AiDb v0.4.0 Multi-Raft 的生产级分布式 KV 引擎
+
+**最终版本号**: AiKv v1.0.0 (2026 年 3 月 31 日发布)
+
+### 最终技术架构
+
+```
+每个 AiKv 节点 = 1 个 MultiRaftCluster（16384 个独立 Raft Group + 1 个 MetaRaft）
+┌─────────────────────────────────────────────────────────────────────┐
+│                     RESP Listener (6379)                            │
+│                             ↓                                       │
+│                   Command Parser + CRC16 Slot Calc                  │
+│                             ↓                                       │
+│                ┌───────────────────────────────┐                    │
+│                │      MetaRaft 查询槽拥有者      │                    │
+│                └───────────────────────────────┘                    │
+│         Local? → Yes → MultiRaftCluster.handle_group(slot, cmd)     │
+│         Remote? → No → 返回 -MOVED 或 gRPC 转发到目标节点           │
+│                             ↓                                       │
+│             ┌─────────────────────────────────────────────┐         │
+│             │            MultiRaftCluster (AiDb v0.4.0)   │         │
+│             │  • MetaRaft：全局槽映射、节点状态、配置变更  │         │
+│             │  • 16384 个 Raft Group → 每个对应 1 个 Redis 槽│       │
+│             │  • 每个 Group 独立 AiDb LSM + Thin WAL 复制  │         │
+│             │  • Stage 5 在线槽迁移（双写 + 原子切换）     │         │
+│             └─────────────────────────────────────────────┘         │
+│                             ↓                                       │
+│               Cluster Bus 端口 16379（gossip + 心跳）               │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### 18 周完整里程碑（7 大阶段）
+
+| 周次 | 阶段 & 里程碑 | 核心交付物 | 验收标准 |
+|------|---------------|------------|----------|
+| **周 1-2** | **Stage 0**: AiKv 完整接入 AiDb v0.4.0 Multi-Raft | v0.2.0 | 3 节点启动成功，MetaRaft 选举正常，Thin Replication 同步 < 50ms |
+| **周 3-4** | **Stage 1**: 16384 槽完美映射 + 路由核心 | v0.3.0 | `redis-cli --cluster create` 成功建集群，-c 自动跳槽 |
+| **周 5-6** | **Stage 2**: CLUSTER 全命令 + 节点管理 | v0.4.0 | `redis-cli --cluster add-node/del-node/check/info` 全通过 |
+| **周 7-9** | **Stage 3**: 槽在线迁移 (reshard) | v0.5.0 | `redis-cli --cluster reshard` 迁移 1000 槽 < 25s，零数据丢失 |
+| **周 10-12** | **Stage 4**: 副本 + 高可用 + 自动 failover | v0.6.0 | 3 主 3 从集群，杀任意主 < 10s 自动切换 |
+| **周 13-15** | **Stage 5**: 高级数据类型 + Lua + Pub/Sub | v0.8.0 | List/Set/Hash/Zset/JSON 跨槽支持，EVAL 多槽拆分执行 |
+| **周 16-17** | **Stage 6**: 极限压测 + 官方测试套件 | v0.9.0 | 100% 通过 redis/tests/cluster 全套测试 (> 800 个 case) |
+| **周 18** | **Stage 7**: 发布 v1.0.0 + 生态 | v1.0.0 | Docker 镜像、helm chart、Prometheus exporter、完整文档 |
+
+### v1.0.0 硬性指标 (CI 强制)
+
+| 指标 | 目标值 | 测试工具 |
+|------|--------|----------|
+| 3 节点吞吐 (50%读50%写) | ≥ 420k ops/sec | redis-benchmark -t set,get -n 5000000 -c 500 |
+| 单节点吞吐 | ≥ 220k ops/sec | 同上 |
+| 槽迁移速度 (1000 槽) | < 25 秒 | redis-cli --cluster reshard |
+| 自动故障转移时间 | < 10 秒 | 杀进程 + 监控切换 |
+| 副本延迟 (99.9%) | < 50 ms | 自研同步延迟监控 |
+| 官方 cluster test 通过率 | 100% | redis/tests/cluster |
+| 内存占用 (10 亿键, 3 节点) | < 120 GB 总和 | YCSB workload C |
+
+### v1.0.0 功能兼容清单
+
+| 类别 | 命令/功能 | 必须支持 |
+|------|-----------|----------|
+| **基本命令** | GET/SET/DEL/MGET/MSET/EXPIRE/TTL 等 | ✅ |
+| **高级数据类型** | List/Set/Hash/Zset/Bitmap/HLL/Stream/JSON | ✅ |
+| **事务** | MULTI/EXEC/WATCH/UNWATCH | ✅ |
+| **Lua 脚本** | EVAL/EVALSHA/SCRIPT LOAD/KILL | ✅ |
+| **Pub/Sub** | PUBLISH/SUBSCRIBE/PSUBSCRIBE | ✅ |
+| **Cluster 核心** | CLUSTER MEET/ADDSLOTS/NODES/INFO/SLOTS/KEYSLOT/SETSLOT/FAILOVER | ✅ |
+| **槽迁移** | CLUSTER GETKEYSINSLOT + reshard | ✅ |
+| **读写分离** | READONLY/READWRITE | ✅ |
+
+### 一键部署方案 (v1.0.0 附带)
+
+```yaml
+# docker-compose.yml（6 节点 3 主 3 从）
+version: '3.8'
+services:
+  aikv1:
+    image: genuineh/aikv:1.0.0
+    command: --multi-raft --node-id n1 --bind 0.0.0.0 --port 6379 --cluster-port 16379 --peers n2:16379,n3:16379,n4:16379,n5:16379,n6:16379
+  aikv2:
+    image: genuineh/aikv:1.0.0
+    command: --multi-raft --node-id n2 --bind 0.0.0.0 --port 6380 --cluster-port 16380 --peers n1:16379,n3:16379,n4:16379,n5:16379,n6:16379
+  aikv3:
+    image: genuineh/aikv:1.0.0
+    command: --multi-raft --node-id n3 --bind 0.0.0.0 --port 6381 --cluster-port 16381 --peers n1:16379,n2:16379,n4:16379,n5:16379,n6:16379
+  aikv4:
+    image: genuineh/aikv:1.0.0
+    command: --multi-raft --node-id n4 --bind 0.0.0.0 --port 6382 --cluster-port 16382 --peers n1:16379,n2:16379,n3:16379,n5:16379,n6:16379
+  aikv5:
+    image: genuineh/aikv:1.0.0
+    command: --multi-raft --node-id n5 --bind 0.0.0.0 --port 6383 --cluster-port 16383 --peers n1:16379,n2:16379,n3:16379,n4:16379,n6:16379
+  aikv6:
+    image: genuineh/aikv:1.0.0
+    command: --multi-raft --node-id n6 --bind 0.0.0.0 --port 6384 --cluster-port 16384 --peers n1:16379,n2:16379,n3:16379,n4:16379,n5:16379
+```
+
+启动后只需一句：
+```bash
+redis-cli --cluster create 172.20.0.2:6379 172.20.0.3:6380 172.20.0.4:6381 \
+  172.20.0.5:6382 172.20.0.6:6383 172.20.0.7:6384 --cluster-replicas 1
+```
+
+---
+
 ## 版本规划
 
-### v0.2.0 (近期)
-- **存储层架构重构** (优先级 0)
-- CI/CD 流水线
-- 代码规范和格式化
-- RESP3 支持
-- DB 和 Key 基础命令
-- 过期时间支持
-- 集成测试套件
+### v0.1.0 (当前版本 - 已完成)
+- ✅ RESP2/RESP3 协议支持
+- ✅ String 命令 (8个)
+- ✅ JSON 命令 (7个)
+- ✅ 基础 TCP 服务器
+- ✅ 内存存储适配器
+- ✅ AiDb v0.4.0 集成（已升级）
+- ✅ 多数据库支持 (16 个数据库)
+- ✅ 键过期机制 (TTL 支持)
+- ✅ 存储层架构重构完成
+- ✅ List/Set/Hash/ZSet 数据类型
+- ✅ Lua 脚本支持
 
-### v0.3.0 (中期)
-- AiDb 完整集成
-- List, Set, Hash 数据类型
-- 持久化支持
-- 性能优化
+### v0.2.0 (Stage 0: 周 1-2)
+- [ ] Multi-Raft 框架集成
+- [ ] MetaRaft 选举和状态管理
+- [ ] Thin Replication 同步
+- [ ] 3 节点启动验证
 
-### v0.4.0 (长期)
-- Sorted Set 数据类型
-- 事务支持
-- Pub/Sub
-- 主从复制
+### v0.3.0 (Stage 1: 周 3-4)
+- [ ] 16384 槽映射初始化
+- [ ] CRC16 槽计算
+- [ ] -MOVED/-ASK 重定向
+- [ ] 基础 CLUSTER 命令 (MEET/NODES/INFO)
 
-### v1.0.0 (远期)
-- 完整 Redis 兼容性
-- 集群支持
-- 生产级稳定性
-- 完善的文档和工具
+### v0.4.0 (Stage 2: 周 5-6)
+- [ ] CLUSTER 全命令实现
+- [ ] 节点管理 (add-node/del-node)
+- [ ] CLUSTER NODES 标准格式
+- [ ] Cluster Bus (端口 16379)
+- [ ] 节点发现和心跳
+
+### v0.5.0 (Stage 3: 周 7-9)
+- [ ] 槽在线迁移 (reshard)
+- [ ] 双写机制
+- [ ] 原子切换
+- [ ] 数据一致性验证
+- [ ] 迁移进度监控
+
+### v0.6.0 (Stage 4: 周 10-12)
+- [ ] 副本同步
+- [ ] 高可用架构
+- [ ] 自动 failover
+- [ ] READONLY/READWRITE
+- [ ] CLUSTER FAILOVER
+
+### v0.8.0 (Stage 5: 周 13-15)
+- [ ] 高级数据类型跨槽支持
+- [ ] EVAL/EVALSHA 多槽拆分
+- [ ] PUBLISH 跨节点投递
+- [ ] 事务支持 (MULTI/EXEC/WATCH)
+- [ ] Bitmap/HyperLogLog/Stream
+
+### v0.9.0 (Stage 6: 周 16-17)
+- [ ] 极限压测
+- [ ] 官方测试套件通过
+- [ ] 性能调优
+- [ ] 稳定性测试
+
+### v1.0.0 (Stage 7: 周 18 - 2026.03.31)
+- [ ] Docker 官方镜像
+- [ ] Helm Chart
+- [ ] Prometheus Exporter
+- [ ] 完整文档
+- [ ] YCSB 性能报告
 
 ---
 
@@ -664,8 +808,9 @@
 4. **向后兼容**: 尽量保持 API 向后兼容
 5. **性能关注**: 实现时始终关注性能影响
 6. **安全第一**: 定期进行安全审计
+7. **里程碑驱动**: 严格按照 18 周计划推进，每周检查进度
 
 ---
 
-**最后更新**: 2025-11-14
+**最后更新**: 2025-11-25
 **负责人**: @Genuineh, @copilot

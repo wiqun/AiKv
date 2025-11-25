@@ -4,13 +4,16 @@
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)]()
 
-AiKv 是一个基于 [AiDb v0.1.0](https://github.com/Genuineh/AiDb) 的高性能 Redis 协议兼容层实现，使用 Rust 编写。它提供了一个轻量级、高性能的键值存储服务，支持 Redis RESP 协议，使得现有的 Redis 客户端可以无缝连接。
+AiKv 是一个基于 [AiDb v0.4.0](https://github.com/Genuineh/AiDb) 的高性能 Redis 协议兼容层实现，使用 Rust 编写。它提供了一个轻量级、高性能的键值存储服务，支持 Redis RESP 协议，使得现有的 Redis 客户端可以无缝连接。
+
+**目标**: 发布全球第一个 100% Redis Cluster 协议兼容 + 完全 Rust 原生 + 基于 Multi-Raft 的生产级分布式 KV 引擎 (v1.0.0 - 2026.03.31)
 
 ## ✨ 特性
 
 - 🚀 **高性能**: 基于 Tokio 异步运行时，支持高并发
 - 🔌 **Redis 协议兼容**: 完全兼容 RESP2 和 RESP3 协议，支持各种 Redis 客户端
 - 💾 **双存储引擎**: 支持内存存储和 AiDb LSM-Tree 持久化存储
+- 🌐 **Multi-Raft 支持**: 基于 AiDb v0.4.0 的 Multi-Raft 分布式架构 (规划中)
 - 📦 **轻量级**: 小内存占用，快速启动
 - 🔧 **易于部署**: 单一可执行文件，无需复杂配置
 - 🔒 **类型安全**: 使用 Rust 编写，保证内存安全和并发安全
@@ -180,7 +183,7 @@ OK
 │  └─────┬─────┘  │
 │        │        │
 │  ┌─────┴─────┐  │
-│  │   AiDb    │  │  存储引擎 (v0.1.0)
+│  │   AiDb    │  │  存储引擎 (v0.4.0 + Multi-Raft)
 │  │  Engine   │  │
 │  └───────────┘  │
 └─────────────────┘
@@ -216,12 +219,14 @@ AiKv 支持两种存储引擎：
    - 数据不持久化，重启后丢失
    - 适合缓存场景
 
-2. **AiDb 存储（LSM-Tree）**:
-   - 基于 AiDb v0.1.0 的 LSM-Tree 存储引擎
+2. **AiDb 存储（LSM-Tree + Multi-Raft）**:
+   - 基于 AiDb v0.4.0 的 LSM-Tree 存储引擎
    - 支持数据持久化（WAL + SSTable）
    - 支持 Bloom Filter 加速查询
    - 支持数据压缩（Snappy）
-   - 适合需要持久化的场景
+   - **Multi-Raft 支持**: 分布式一致性（规划中）
+   - **Thin Replication**: 90%+ 复制成本降低
+   - 适合需要持久化和分布式的场景
 
 启动时指定配置文件：
 
@@ -237,6 +242,11 @@ AiKv 支持两种存储引擎：
 SET: ~80,000 ops/s
 GET: ~100,000 ops/s
 ```
+
+v1.0.0 性能目标 (Multi-Raft 集群):
+- 3 节点吞吐: ≥ 420k ops/sec
+- 单节点吞吐: ≥ 220k ops/sec
+- 副本延迟 (99.9%): < 50ms
 
 性能目标：
 - 延迟: P50 < 1ms, P99 < 5ms
@@ -259,27 +269,36 @@ redis-benchmark -h 127.0.0.1 -p 6379 -t set,get -n 100000 -q
 ## 🛣️ 路线图
 
 ### v0.1.0 (当前版本)
-- ✅ RESP2 协议解析器
-- ✅ String 命令支持
-- ✅ JSON 命令支持
-- ✅ 基于 AiDb 的存储引擎（完整集成）
-- ✅ RESP3 协议支持
+- ✅ RESP2/RESP3 协议解析器
+- ✅ String 命令支持 (8个)
+- ✅ JSON 命令支持 (7个)
+- ✅ 基于 AiDb v0.4.0 的存储引擎
 - ✅ 多数据库支持（16 个数据库）
 - ✅ 键过期机制（TTL 支持）
 - ✅ 双存储引擎：内存和 AiDb LSM-Tree
+- ✅ List/Set/Hash/ZSet 数据类型
+- ✅ Lua 脚本支持
 
-### v0.2.0 (计划中)
-- ⬜ List 数据类型支持
-- ⬜ Set 数据类型支持
-- ⬜ Hash 数据类型支持
-- ✅ 持久化支持（通过 AiDb 的 WAL 和 SSTable）
-- ⬜ 主从复制
+### v0.2.0 (Stage 0-1: Week 1-4)
+- ⬜ Multi-Raft 集成 (AiDb v0.4.0)
+- ⬜ MetaRaft 选举和状态管理
+- ⬜ 16384 槽映射和路由
+- ⬜ CRC16 槽计算
+- ⬜ -MOVED/-ASK 重定向
 
-### v0.3.0 (计划中)
-- ⬜ 集群模式
-- ⬜ Pub/Sub 支持
-- ⬜ 事务支持 (MULTI/EXEC)
-- ⬜ Lua 脚本支持
+### v0.5.0 (Stage 2-4: Week 5-12)
+- ⬜ CLUSTER 全命令
+- ⬜ 槽在线迁移 (reshard)
+- ⬜ 副本和高可用
+- ⬜ 自动 failover
+
+### v1.0.0 (目标: 2026.03.31)
+- ⬜ 100% Redis Cluster 协议兼容
+- ⬜ 官方测试套件通过
+- ⬜ Docker/Helm/Prometheus
+- ⬜ 完整文档和工具
+
+详细的 18 周开发计划请参考 [TODO.md](TODO.md)。
 
 ## 🤝 贡献
 
