@@ -92,8 +92,20 @@ impl ServerCommands {
             "redis_git_dirty:0".to_string(),
             format!("redis_build_id:aikv{}", AIKV_VERSION.replace('.', "")),
             "redis_mode:standalone".to_string(),
-            format!("os:{} {} {}", std::env::consts::OS, std::env::consts::FAMILY, std::env::consts::ARCH),
-            format!("arch_bits:{}", if cfg!(target_pointer_width = "64") { 64 } else { 32 }),
+            format!(
+                "os:{} {} {}",
+                std::env::consts::OS,
+                std::env::consts::FAMILY,
+                std::env::consts::ARCH
+            ),
+            format!(
+                "arch_bits:{}",
+                if cfg!(target_pointer_width = "64") {
+                    64
+                } else {
+                    32
+                }
+            ),
             "multiplexing_api:tokio".to_string(),
             format!("process_id:{}", pid),
             format!("run_id:{}", self.run_id),
@@ -255,31 +267,22 @@ impl ServerCommands {
 
     /// Build the Modules section info lines
     fn build_modules_info(&self) -> Vec<String> {
-        vec![
-            "# Modules".to_string(),
-        ]
+        vec!["# Modules".to_string()]
     }
 
     /// Build the Errorstats section info lines
     fn build_errorstats_info(&self) -> Vec<String> {
-        vec![
-            "# Errorstats".to_string(),
-        ]
+        vec!["# Errorstats".to_string()]
     }
 
     /// Build the Cluster section info lines
     fn build_cluster_info(&self) -> Vec<String> {
-        vec![
-            "# Cluster".to_string(),
-            "cluster_enabled:0".to_string(),
-        ]
+        vec!["# Cluster".to_string(), "cluster_enabled:0".to_string()]
     }
 
     /// Build the Keyspace section info lines
     fn build_keyspace_info(&self) -> Vec<String> {
-        vec![
-            "# Keyspace".to_string(),
-        ]
+        vec!["# Keyspace".to_string()]
     }
 
     /// Build the Persistence section info lines
