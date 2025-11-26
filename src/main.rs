@@ -2,7 +2,7 @@ use aikv::{Server, StorageEngine};
 use serde::Deserialize;
 use std::fs;
 use tracing::{info, warn};
-use tracing_subscriber::{self};
+use tracing_subscriber::{self, EnvFilter};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const LOGO: &str = r#"
@@ -56,6 +56,18 @@ fn default_databases() -> usize {
     16
 }
 
+/// Logging section of the configuration file
+#[derive(Deserialize, Default)]
+struct LoggingConfig {
+    /// Log level: trace, debug, info, warn, error
+    #[serde(default = "default_log_level")]
+    level: String,
+}
+
+fn default_log_level() -> String {
+    "info".to_string()
+}
+
 /// Root configuration structure
 #[derive(Deserialize, Default)]
 struct Config {
@@ -63,6 +75,8 @@ struct Config {
     server: ServerConfig,
     #[serde(default)]
     storage: StorageConfig,
+    #[serde(default)]
+    logging: LoggingConfig,
 }
 
 /// Command line arguments structure
@@ -109,11 +123,19 @@ fn print_help() {
     println!();
     println!("CONFIGURATION FILE:");
     println!("    See config/aikv.toml for a complete configuration template.");
-    println!("    Minimal configuration example:");
+    println!("    Implemented configuration options:");
     println!();
     println!("    [server]");
     println!("    host = \"127.0.0.1\"");
     println!("    port = 6379");
+    println!();
+    println!("    [storage]");
+    println!("    engine = \"memory\"    # or \"aidb\"");
+    println!("    data_dir = \"./data\"  # for aidb engine");
+    println!("    databases = 16");
+    println!();
+    println!("    [logging]");
+    println!("    level = \"info\"       # trace, debug, info, warn, error");
     println!();
     println!("For more information, visit: https://github.com/Genuineh/AiKv");
 }
@@ -221,7 +243,7 @@ fn parse_args() -> CliArgs {
 }
 
 /// Load configuration from file and merge with CLI arguments
-fn load_config(cli: &CliArgs) -> (String, u16, StorageConfig) {
+fn load_config(cli: &CliArgs) -> (String, u16, StorageConfig, LoggingConfig) {
     let mut config = Config::default();
 
     // Load from config file if specified
@@ -245,7 +267,7 @@ fn load_config(cli: &CliArgs) -> (String, u16, StorageConfig) {
     let host = cli.host.clone().unwrap_or(config.server.host);
     let port = cli.port.unwrap_or(config.server.port);
 
-    (host, port, config.storage)
+    (host, port, config.storage, config.logging)
 }
 
 /// Create storage engine based on configuration
@@ -293,14 +315,28 @@ async fn main() {
         return;
     }
 
-    // Initialize logging
+    // Load configuration
+    let (host, port, storage_config, logging_config) = load_config(&cli);
+
+    // Initialize logging with configured level
+    let log_level = logging_config.level.to_lowercase();
+    let valid_levels = ["trace", "debug", "info", "warn", "error"];
+    let effective_level = if valid_levels.contains(&log_level.as_str()) {
+        log_level
+    } else {
+        eprintln!(
+            "Warning: Invalid log level '{}', using 'info'",
+            logging_config.level
+        );
+        "info".to_string()
+    };
+    let filter = EnvFilter::new(&effective_level);
     tracing_subscriber::fmt()
         .with_target(false)
         .with_level(true)
+        .with_env_filter(filter)
         .init();
 
-    // Load configuration
-    let (host, port, storage_config) = load_config(&cli);
     let addr = format!("{}:{}", host, port);
 
     // Print startup banner

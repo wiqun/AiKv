@@ -4,31 +4,32 @@
 # 使用方法 / Usage:
 #   cp config/aikv.toml config.toml
 #   ./target/release/aikv --config config.toml
+#
+# 配置状态说明 / Configuration Status Legend:
+#   ✅ 已实现 / Implemented - 该配置项已在代码中生效
+#   🚧 计划中 / Planned - 该配置项已定义但尚未实现
+#
 
 # ============================================================
 # 服务器配置 / Server Configuration
 # ============================================================
 [server]
-# 监听地址 / Bind address
+# ✅ 监听地址 / Bind address
 host = "127.0.0.1"
 
-# 监听端口 / Bind port
+# ✅ 监听端口 / Bind port
 port = 6379
 
-# 最大并发连接数 / Maximum concurrent connections
-max_connections = 10000
-
-# 连接超时时间（秒）/ Connection timeout in seconds
-connection_timeout = 300
-
-# TCP 缓冲区大小 / TCP buffer size
-tcp_buffer_size = 65536
+# 🚧 以下配置项尚未实现 / The following options are not yet implemented:
+# max_connections = 10000      # 最大并发连接数 / Maximum concurrent connections
+# connection_timeout = 300     # 连接超时时间（秒）/ Connection timeout in seconds
+# tcp_buffer_size = 65536      # TCP 缓冲区大小 / TCP buffer size
 
 # ============================================================
 # 存储配置 / Storage Configuration
 # ============================================================
 [storage]
-# 存储引擎类型 / Storage engine type
+# ✅ 存储引擎类型 / Storage engine type
 # 可选值 / Options:
 #   - "memory"  : 内存存储，高性能，无持久化
 #                 In-memory storage, high performance, no persistence
@@ -36,98 +37,83 @@ tcp_buffer_size = 65536
 #                 AiDb LSM-Tree persistent storage
 engine = "memory"
 
-# 数据存储目录（aidb 模式需要）/ Data directory (required for aidb mode)
+# ✅ 数据存储目录（aidb 模式需要）/ Data directory (required for aidb mode)
 data_dir = "./data"
 
-# 最大内存使用（支持单位: B, KB, MB, GB）
-# Maximum memory usage (supports units: B, KB, MB, GB)
-max_memory = "1GB"
-
-# 数据库数量（0-15，共 16 个数据库）
+# ✅ 数据库数量（0-15，共 16 个数据库）
 # Number of databases (0-15, total 16 databases)
 databases = 16
 
-# ============================================================
-# 持久化配置 / Persistence Configuration
-# ============================================================
-[persistence]
-# 是否启用持久化 / Enable persistence
-enabled = false
-
-# 持久化模式 / Persistence mode
-# 可选值 / Options:
-#   - "rdb"     : RDB 快照模式
-#   - "aof"     : AOF 日志模式
-#   - "hybrid"  : 混合模式（RDB + AOF）
-mode = "rdb"
-
-# RDB 快照间隔（秒）/ RDB snapshot interval in seconds
-rdb_interval = 900
-
-# AOF 同步策略 / AOF sync policy
-# 可选值 / Options:
-#   - "always"   : 每次写入都同步
-#   - "everysec" : 每秒同步一次（推荐）
-#   - "no"       : 由操作系统决定
-aof_sync = "everysec"
+# 🚧 以下配置项尚未实现 / The following options are not yet implemented:
+# max_memory = "1GB"           # 最大内存使用 / Maximum memory usage
 
 # ============================================================
 # 日志配置 / Logging Configuration
 # ============================================================
 [logging]
-# 日志级别 / Log level
+# ✅ 日志级别 / Log level
 # 可选值 / Options: trace, debug, info, warn, error
 level = "info"
 
-# 日志文件路径 / Log file path
-file = "./logs/aikv.log"
-
-# 是否输出到控制台 / Output to console
-console = true
-
-# 日志轮转大小 / Log rotation size
-max_size = "100MB"
-
-# 保留日志文件数量 / Number of backup log files
-max_backups = 10
+# 🚧 以下配置项尚未实现 / The following options are not yet implemented:
+# file = "./logs/aikv.log"     # 日志文件路径 / Log file path
+# console = true               # 是否输出到控制台 / Output to console
+# max_size = "100MB"           # 日志轮转大小 / Log rotation size
+# max_backups = 10             # 保留日志文件数量 / Number of backup log files
 
 # ============================================================
-# 性能配置 / Performance Configuration
+# 🚧 以下配置节尚未实现 / The following sections are not yet implemented
 # ============================================================
-[performance]
-# 工作线程数（0 = CPU 核心数）/ Worker threads (0 = CPU cores)
-worker_threads = 0
 
-# 是否启用 TCP_NODELAY
-tcp_nodelay = true
+# [persistence]
+# # 是否启用持久化 / Enable persistence
+# enabled = false
+#
+# # 持久化模式 / Persistence mode
+# # 可选值 / Options:
+# #   - "rdb"     : RDB 快照模式
+# #   - "aof"     : AOF 日志模式
+# #   - "hybrid"  : 混合模式（RDB + AOF）
+# mode = "rdb"
+#
+# # RDB 快照间隔（秒）/ RDB snapshot interval in seconds
+# rdb_interval = 900
+#
+# # AOF 同步策略 / AOF sync policy
+# # 可选值 / Options:
+# #   - "always"   : 每次写入都同步
+# #   - "everysec" : 每秒同步一次（推荐）
+# #   - "no"       : 由操作系统决定
+# aof_sync = "everysec"
 
-# 是否启用 SO_KEEPALIVE
-tcp_keepalive = true
+# [performance]
+# # 工作线程数（0 = CPU 核心数）/ Worker threads (0 = CPU cores)
+# worker_threads = 0
+#
+# # 是否启用 TCP_NODELAY
+# tcp_nodelay = true
+#
+# # 是否启用 SO_KEEPALIVE
+# tcp_keepalive = true
+#
+# # Lua 脚本超时时间（毫秒，0 = 无限制）
+# # Lua script timeout in milliseconds (0 = unlimited)
+# lua_timeout = 5000
 
-# Lua 脚本超时时间（毫秒，0 = 无限制）
-# Lua script timeout in milliseconds (0 = unlimited)
-lua_timeout = 5000
+# [security]
+# # 是否需要密码认证 / Require password authentication
+# # requirepass = "your_password"
+#
+# # 允许的客户端 IP 列表（空 = 允许所有）
+# # Allowed client IPs (empty = allow all)
+# # allowed_ips = ["127.0.0.1", "192.168.1.0/24"]
 
-# ============================================================
-# 安全配置 / Security Configuration
-# ============================================================
-[security]
-# 是否需要密码认证 / Require password authentication
-# requirepass = "your_password"
-
-# 允许的客户端 IP 列表（空 = 允许所有）
-# Allowed client IPs (empty = allow all)
-# allowed_ips = ["127.0.0.1", "192.168.1.0/24"]
-
-# ============================================================
-# 过期键清理配置 / Key Expiration Configuration
-# ============================================================
-[expiration]
-# 后台清理间隔（秒）/ Background cleanup interval in seconds
-cleanup_interval = 1
-
-# 每次清理的最大键数 / Maximum keys per cleanup cycle
-max_keys_per_cycle = 100
-
-# 过期键采样数量 / Number of keys to sample
-sample_size = 20
+# [expiration]
+# # 后台清理间隔（秒）/ Background cleanup interval in seconds
+# cleanup_interval = 1
+#
+# # 每次清理的最大键数 / Maximum keys per cleanup cycle
+# max_keys_per_cycle = 100
+#
+# # 过期键采样数量 / Number of keys to sample
+# sample_size = 20
