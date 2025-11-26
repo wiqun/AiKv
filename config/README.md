@@ -10,6 +10,43 @@ This directory contains configuration templates for AiKv.
 | `aikv.toml` | 单机模式配置模板 / Single node configuration template |
 | `aikv-cluster.toml` | 集群模式配置模板 / Cluster mode configuration template |
 
+## 配置项实现状态 / Configuration Implementation Status
+
+配置文件中的选项有两种状态：
+Configuration options have two states:
+
+- ✅ **已实现 / Implemented** - 该配置项已在代码中生效
+- 🚧 **计划中 / Planned** - 该配置项已定义但尚未实现
+
+### 已实现的配置项 / Implemented Options
+
+| 配置节 / Section | 配置项 / Option | 说明 / Description |
+|-----------------|----------------|-------------------|
+| `[server]` | `host` | 监听地址 / Bind address |
+| `[server]` | `port` | 监听端口 / Bind port |
+| `[storage]` | `engine` | 存储引擎类型 (`memory` 或 `aidb`) / Storage engine type |
+| `[storage]` | `data_dir` | 数据目录 (aidb 模式) / Data directory for aidb mode |
+| `[storage]` | `databases` | 数据库数量 / Number of databases |
+| `[logging]` | `level` | 日志级别 / Log level (trace, debug, info, warn, error) |
+
+### 计划中的配置项 / Planned Options
+
+以下配置项在配置文件中已定义但尚未实现，将在后续版本中添加支持：
+The following options are defined but not yet implemented, support will be added in future versions:
+
+- `[server]`: `max_connections`, `connection_timeout`, `tcp_buffer_size`, `cluster_port`
+- `[storage]`: `max_memory`
+- `[logging]`: `file`, `console`, `max_size`, `max_backups`
+- `[persistence]`: 整个配置节 / Entire section
+- `[performance]`: 整个配置节 / Entire section
+- `[security]`: 整个配置节 / Entire section
+- `[expiration]`: 整个配置节 / Entire section
+- `[cluster]`: 整个配置节 / Entire section
+- `[raft]`: 整个配置节 / Entire section
+- `[migration]`: 整个配置节 / Entire section
+- `[failover]`: 整个配置节 / Entire section
+- `[monitoring]`: 整个配置节 / Entire section
+
 ## 使用方法 / Usage
 
 ### 单机模式 / Single Node Mode
@@ -25,31 +62,42 @@ vim config.toml
 ./target/release/aikv --config config.toml
 ```
 
+### 命令行参数 / Command Line Arguments
+
+命令行参数优先于配置文件：
+Command line arguments override config file:
+
+```bash
+# 使用配置文件
+./target/release/aikv --config config.toml
+
+# 覆盖主机和端口
+./target/release/aikv --config config.toml --host 0.0.0.0 --port 6380
+
+# 直接指定地址（不使用配置文件）
+./target/release/aikv --host 127.0.0.1 --port 6379
+
+# 旧版兼容模式
+./target/release/aikv 127.0.0.1:6379
+```
+
 ### 集群模式 / Cluster Mode
+
+> **注意**: 集群模式的配置支持尚未完全实现。
+> **Note**: Cluster mode configuration support is not yet fully implemented.
 
 ```bash
 # 使用集群特性编译
 cargo build --release --features cluster
 
-# 为每个节点复制并修改配置
-cp config/aikv-cluster.toml node1-config.toml
-cp config/aikv-cluster.toml node2-config.toml
-cp config/aikv-cluster.toml node3-config.toml
+# 复制并修改配置
+cp config/aikv-cluster.toml config.toml
 
-# 编辑每个节点的配置，修改以下参数：
-# - server.port
-# - server.cluster_port
-# - cluster.node_id
-# - cluster.node_name
-# - cluster.peers
-
-# 启动各节点
-./target/release/aikv --config node1-config.toml
-./target/release/aikv --config node2-config.toml
-./target/release/aikv --config node3-config.toml
+# 启动服务
+./target/release/aikv --config config.toml
 ```
 
-## 配置项说明 / Configuration Options
+## 配置项详细说明 / Configuration Options
 
 ### 存储引擎 / Storage Engine
 
@@ -58,48 +106,48 @@ cp config/aikv-cluster.toml node3-config.toml
 | `memory` | 内存存储，性能最佳，无持久化 / In-memory, best performance, no persistence |
 | `aidb` | AiDb LSM-Tree 存储，支持持久化 / AiDb LSM-Tree, supports persistence |
 
-推荐：
-- 开发/测试：使用 `memory`
-- 生产环境/集群：使用 `aidb`
+推荐 / Recommendations:
+- 开发/测试：使用 `memory` / Development/Testing: Use `memory`
+- 生产环境：使用 `aidb` / Production: Use `aidb`
 
-Recommendations:
-- Development/Testing: Use `memory`
-- Production/Cluster: Use `aidb`
+### 日志级别 / Log Level
 
-### 集群端口规划 / Cluster Port Planning
+| 级别 / Level | 说明 / Description |
+|-------------|-------------------|
+| `trace` | 最详细的日志，包括所有调试信息 / Most detailed, includes all debug info |
+| `debug` | 调试信息 / Debug information |
+| `info` | 一般信息（推荐）/ General information (recommended) |
+| `warn` | 警告信息 / Warning messages |
+| `error` | 仅错误信息 / Error messages only |
 
-建议使用以下端口规划：
+### 最小配置示例 / Minimal Configuration Example
 
-| 节点 / Node | 数据端口 / Data Port | 集群端口 / Cluster Port |
-|-------------|---------------------|------------------------|
-| Node 1 | 6379 | 16379 |
-| Node 2 | 6380 | 16380 |
-| Node 3 | 6381 | 16381 |
-| Node 4 | 6382 | 16382 |
-| Node 5 | 6383 | 16383 |
-| Node 6 | 6384 | 16384 |
+```toml
+[server]
+host = "127.0.0.1"
+port = 6379
 
-### 最小集群配置 / Minimum Cluster Configuration
+[storage]
+engine = "memory"
 
-生产环境推荐至少 6 节点（3 主 3 从）：
-Production recommends at least 6 nodes (3 masters + 3 replicas):
-
-```
-Node 1 (Master) ─── Node 4 (Replica)
-Node 2 (Master) ─── Node 5 (Replica)
-Node 3 (Master) ─── Node 6 (Replica)
+[logging]
+level = "info"
 ```
 
-## 环境变量覆盖 / Environment Variable Override
+### 使用 AiDb 持久化存储 / Using AiDb Persistent Storage
 
-配置项可以通过环境变量覆盖（优先级高于配置文件）：
-Configuration can be overridden by environment variables (higher priority than config file):
+```toml
+[server]
+host = "0.0.0.0"
+port = 6379
 
-```bash
-export AIKV_HOST=0.0.0.0
-export AIKV_PORT=6379
-export AIKV_MAX_MEMORY=2GB
-export AIKV_LOG_LEVEL=debug
+[storage]
+engine = "aidb"
+data_dir = "./data"
+databases = 16
+
+[logging]
+level = "info"
 ```
 
 ## 相关文档 / Related Documentation

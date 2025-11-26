@@ -81,65 +81,31 @@ cargo test -- --nocapture
 创建配置文件 `config.toml`:
 
 ```toml
+# 已实现的配置项 / Implemented options
 [server]
 # 服务器监听地址
 host = "127.0.0.1"
 # 服务器监听端口
 port = 6379
-# 最大并发连接数
-max_connections = 1000
-# 连接超时时间（秒）
-connection_timeout = 300
 
 [storage]
-# 数据存储目录
+# 存储引擎类型: "memory" 或 "aidb"
+engine = "memory"
+# 数据存储目录（aidb 模式需要）
 data_dir = "./data"
-# 最大内存使用（支持单位: B, KB, MB, GB）
-max_memory = "1GB"
-# 是否启用持久化
-persistence = true
-# 持久化间隔（秒）
-persistence_interval = 60
+# 数据库数量（默认 16）
+databases = 16
 
 [logging]
 # 日志级别: trace, debug, info, warn, error
 level = "info"
-# 日志文件路径
-file = "./logs/aikv.log"
-# 是否输出到控制台
-console = true
-# 日志轮转大小
-max_size = "100MB"
-# 保留日志文件数量
-max_backups = 10
-
-[performance]
-# 工作线程数（0 = CPU 核心数）
-worker_threads = 0
-# 是否启用 TCP_NODELAY
-tcp_nodelay = true
-# 是否启用 SO_KEEPALIVE
-tcp_keepalive = true
 ```
+
+> **注意**: 完整的配置模板请参考 `config/aikv.toml`。配置文件中标记为 🚧 的选项尚未实现。
 
 ### 环境变量
 
-也可以通过环境变量配置：
-
-```bash
-# 服务器配置
-export AIKV_HOST=127.0.0.1
-export AIKV_PORT=6379
-export AIKV_MAX_CONNECTIONS=1000
-
-# 存储配置
-export AIKV_DATA_DIR=./data
-export AIKV_MAX_MEMORY=1GB
-
-# 日志配置
-export AIKV_LOG_LEVEL=info
-export AIKV_LOG_FILE=./logs/aikv.log
-```
+> **注意**: 环境变量覆盖功能尚未实现。请使用配置文件或命令行参数。
 
 ## 启动服务
 
@@ -178,13 +144,17 @@ systemctl start aikv
 aikv [OPTIONS]
 
 OPTIONS:
-    -c, --config <FILE>       配置文件路径 [默认: ./config.toml]
-    -h, --host <HOST>         监听地址 [默认: 127.0.0.1]
+    -c, --config <FILE>       配置文件路径 (TOML 格式)
+    -H, --host <HOST>         监听地址 [默认: 127.0.0.1]
     -p, --port <PORT>         监听端口 [默认: 6379]
-    -d, --data-dir <DIR>      数据目录 [默认: ./data]
-    -l, --log-level <LEVEL>   日志级别 [默认: info]
-    --help                    显示帮助信息
-    --version                 显示版本信息
+    -h, --help                显示帮助信息
+    -v, --version             显示版本信息
+
+EXAMPLES:
+    aikv                           # 使用默认配置启动
+    aikv --config config.toml      # 使用配置文件
+    aikv -H 0.0.0.0 -p 6380        # 指定主机和端口
+    aikv 127.0.0.1:6379            # 旧版兼容模式
 ```
 
 ## 使用 Systemd 管理（Linux）
@@ -553,23 +523,39 @@ sysctl -w net.ipv4.tcp_max_syn_backlog=65535
 
 ### 应用层面
 
-在 `config.toml` 中调整：
+> **注意**: 以下配置项尚未实现，将在后续版本中添加。
+> **Note**: The following options are not yet implemented.
+
+在 `config.toml` 中调整（计划中的功能）：
 
 ```toml
-[performance]
-worker_threads = 4  # 根据 CPU 核心数调整
-tcp_nodelay = true
-tcp_keepalive = true
+# 🚧 以下配置尚未实现 / Not yet implemented
+# [performance]
+# worker_threads = 4  # 根据 CPU 核心数调整
+# tcp_nodelay = true
+# tcp_keepalive = true
+#
+# [storage]
+# max_memory = "2GB"  # 根据可用内存调整
+```
 
+当前可用的配置：
+
+```toml
 [storage]
-max_memory = "2GB"  # 根据可用内存调整
+# 选择合适的存储引擎
+engine = "aidb"  # 使用 AiDb 持久化存储
+data_dir = "./data"
+databases = 16
+
+[logging]
+level = "info"  # 生产环境推荐使用 info 或 warn
 ```
 
 ## 支持与帮助
 
 - GitHub Issues: https://github.com/Genuineh/AiKv/issues
-- 文档: https://github.com/Genuineh/AiKv/docs
-- 邮件: support@aikv.example.com
+- 文档: https://github.com/Genuineh/AiKv/tree/main/docs
 
 ## 许可证
 
