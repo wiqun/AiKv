@@ -38,16 +38,15 @@ fn generate_run_id() -> String {
     let hasher_builder = RandomState::new();
 
     // Generate enough random data for a 40-char hex string
-    for _ in 0..5 {
+    // Include loop index to ensure uniqueness even when called rapidly
+    for i in 0..5 {
         let mut hasher = hasher_builder.build_hasher();
-        hasher.write_u64(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos() as u64,
-        );
-        let hash = hasher.finish();
-        result.push_str(&format!("{:016x}", hash));
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        hasher.write_u64(nanos.wrapping_add(i as u64));
+        result.push_str(&format!("{:016x}", hasher.finish()));
     }
 
     result.truncate(40);

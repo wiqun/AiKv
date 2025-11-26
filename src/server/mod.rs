@@ -4,6 +4,7 @@ use self::connection::Connection;
 use crate::command::CommandExecutor;
 use crate::error::Result;
 use crate::storage::StorageAdapter;
+use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tracing::{error, info};
 
@@ -16,12 +17,19 @@ pub struct Server {
 
 impl Server {
     pub fn new(addr: String) -> Self {
-        // Extract port from address string
+        // Extract port from address string using proper SocketAddr parsing
+        // This handles both IPv4 (127.0.0.1:6379) and IPv6 ([::1]:6379) formats
         let port = addr
-            .split(':')
-            .last()
-            .and_then(|p| p.parse().ok())
-            .unwrap_or(6379);
+            .parse::<SocketAddr>()
+            .map(|a| a.port())
+            .unwrap_or_else(|_| {
+                // Fallback: try to extract port from the end after last ':'
+                // This handles edge cases where the string isn't a valid SocketAddr
+                addr.rsplit(':')
+                    .next()
+                    .and_then(|p| p.trim_end_matches(']').parse().ok())
+                    .unwrap_or(6379)
+            });
 
         Self {
             addr,
