@@ -55,10 +55,10 @@ fn print_help() {
     println!();
     println!("OPTIONS:");
     println!("    -c, --config <FILE>    Path to configuration file (TOML format)");
-    println!("    -h, --host <HOST>      Bind address (default: 127.0.0.1)");
+    println!("    -H, --host <HOST>      Bind address (default: 127.0.0.1)");
     println!("    -p, --port <PORT>      Bind port (default: 6379)");
-    println!("    --help                 Print help information");
-    println!("    --version              Print version information");
+    println!("    -h, --help             Print help information");
+    println!("    -v, --version          Print version information");
     println!();
     println!("EXAMPLES:");
     println!("    # Start with default settings (127.0.0.1:6379)");
@@ -70,7 +70,7 @@ fn print_help() {
     println!();
     println!("    # Start with custom host and port");
     println!("    aikv --host 0.0.0.0 --port 6380");
-    println!("    aikv -h 0.0.0.0 -p 6380");
+    println!("    aikv -H 0.0.0.0 -p 6380");
     println!();
     println!("    # Start with address directly (legacy mode)");
     println!("    aikv 127.0.0.1:6379");
@@ -104,11 +104,11 @@ fn parse_args() -> CliArgs {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "--help" => {
+            "-h" | "--help" => {
                 cli.show_help = true;
                 return cli;
             }
-            "--version" => {
+            "-v" | "--version" => {
                 cli.show_version = true;
                 return cli;
             }
@@ -121,7 +121,7 @@ fn parse_args() -> CliArgs {
                     std::process::exit(1);
                 }
             }
-            "-h" | "--host" => {
+            "-H" | "--host" => {
                 if i + 1 < args.len() {
                     cli.host = Some(args[i + 1].clone());
                     i += 1;
@@ -156,14 +156,20 @@ fn parse_args() -> CliArgs {
                             if let Ok(port) = parts[1].parse::<u16>() {
                                 cli.port = Some(port);
                             } else {
-                                eprintln!("Error: Invalid address format '{}'. Expected HOST:PORT", arg);
+                                eprintln!("Error: Invalid port in address '{}'. Expected HOST:PORT", arg);
                                 std::process::exit(1);
                             }
+                        } else {
+                            eprintln!("Error: Invalid address format '{}'. Expected HOST:PORT", arg);
+                            std::process::exit(1);
                         }
                     } else {
                         eprintln!("Error: Unknown option '{}'. Use --help for usage.", arg);
                         std::process::exit(1);
                     }
+                } else {
+                    eprintln!("Error: Unexpected argument '{}'. Use --help for usage.", arg);
+                    std::process::exit(1);
                 }
             }
         }
