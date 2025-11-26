@@ -91,7 +91,13 @@ impl AiDbStorageAdapter {
         let mut databases = Vec::with_capacity(db_count);
         for i in 0..db_count {
             let db_path = base_path.join(format!("db{}", i));
-            let options = Options::default();
+            // Use sync_wal(false) for better write performance.
+            // The default Options::default() has sync_wal: true, which causes
+            // synchronous disk writes for every put operation, resulting in
+            // very low write throughput (~155 rps). Setting sync_wal to false
+            // trades some durability for significantly better performance.
+            // Data is still written to WAL, but fsync is not called on every write.
+            let options = Options::default().sync_wal(false);
             let db = DB::open(&db_path, options)
                 .map_err(|e| AikvError::Storage(format!("Failed to open database {}: {}", i, e)))?;
             databases.push(Arc::new(db));
