@@ -47,7 +47,10 @@ struct CliArgs {
 
 fn print_help() {
     println!("{}", LOGO);
-    println!("AiKv v{} - Redis protocol compatible key-value store", VERSION);
+    println!(
+        "AiKv v{} - Redis protocol compatible key-value store",
+        VERSION
+    );
     println!();
     println!("USAGE:");
     println!("    aikv [OPTIONS]");
@@ -156,11 +159,17 @@ fn parse_args() -> CliArgs {
                             if let Ok(port) = parts[1].parse::<u16>() {
                                 cli.port = Some(port);
                             } else {
-                                eprintln!("Error: Invalid port in address '{}'. Expected HOST:PORT", arg);
+                                eprintln!(
+                                    "Error: Invalid port in address '{}'. Expected HOST:PORT",
+                                    arg
+                                );
                                 std::process::exit(1);
                             }
                         } else {
-                            eprintln!("Error: Invalid address format '{}'. Expected HOST:PORT", arg);
+                            eprintln!(
+                                "Error: Invalid address format '{}'. Expected HOST:PORT",
+                                arg
+                            );
                             std::process::exit(1);
                         }
                     } else {
@@ -168,7 +177,10 @@ fn parse_args() -> CliArgs {
                         std::process::exit(1);
                     }
                 } else {
-                    eprintln!("Error: Unexpected argument '{}'. Use --help for usage.", arg);
+                    eprintln!(
+                        "Error: Unexpected argument '{}'. Use --help for usage.",
+                        arg
+                    );
                     std::process::exit(1);
                 }
             }
@@ -234,7 +246,10 @@ async fn main() {
 
     // Print startup banner
     println!("{}", LOGO);
-    println!("AiKv v{} - Redis protocol compatible key-value store", VERSION);
+    println!(
+        "AiKv v{} - Redis protocol compatible key-value store",
+        VERSION
+    );
     println!();
 
     // Create and run server
