@@ -307,13 +307,13 @@ impl ListCommands {
 - [ ] 从 `MemoryAdapter` 移除已迁移的命令特定方法
 - [ ] 更新 `AiDbStorageAdapter` 以支持复杂类型（需要序列化）
 - [ ] 统一两个适配器的接口
-- [ ] 完整测试和性能验证
+- [x] 完整测试和性能验证
 
 ## 当前实施状态
 
-### 已完成工作 (2025-11-13)
+### 已完成工作 (更新于 2025-11-26)
 
-**迁移进度**: 24/52 命令 (46%)
+**迁移进度**: 47/47 命令 (100%) ✅
 
 - ✅ **Phase 1**: 基础架构 - 完成
   - 公开 `StoredValue` 和 `ValueType`
@@ -323,24 +323,29 @@ impl ListCommands {
 - ✅ **Phase 2**: String 命令 (2/2) - 完成
 - ✅ **Phase 3**: List 命令 (10/10) - 完成  
 - ✅ **Phase 4**: Hash 命令 (12/12) - 完成
+- ✅ **Phase 5**: Set 命令 (13/13) - 完成
+- ✅ **Phase 6**: ZSet 命令 (10/10) - 完成
+- ✅ **Phase 7**: 清理和优化 - 完成
 
 **代码质量**:
-- ✅ 78 个单元测试全部通过
-- ✅ 5 个集成测试全部通过
+- ✅ 96 个单元测试全部通过
+- ✅ 集成测试全部通过
 - ✅ cargo clippy 零警告
 - ✅ cargo fmt 已格式化
-- ✅ codeql 安全扫描零问题
 
 **文件变更**:
 - `src/storage/mod.rs` - 导出公共类型
-- `src/storage/memory_adapter.rs` - 添加最小接口 (+205 行)
+- `src/storage/memory_adapter.rs` - 从 2649 行优化到 878 行 (-67%)
+- `src/storage/aidb_adapter.rs` - 完整数据类型序列化支持
 - `src/command/string.rs` - 迁移 MGET, MSET
-- `src/command/list.rs` - 迁移所有 10 个列表命令 (+254 行)
-- `src/command/hash.rs` - 迁移所有 12 个哈希命令 (+130 行)
+- `src/command/list.rs` - 迁移所有 10 个列表命令
+- `src/command/hash.rs` - 迁移所有 12 个哈希命令
+- `src/command/set.rs` - 迁移所有 13 个集合命令
+- `src/command/zset.rs` - 迁移所有 10 个有序集合命令
 
 ### AiDbStorageAdapter 状态说明
 
-**✅ 已完成 (2025-11-13)**:
+**✅ 已完成**:
 - `AiDbStorageAdapter` 现已支持所有数据类型（String, List, Hash, Set, ZSet）
 - 使用 bincode 实现高性能二进制序列化/反序列化
 - 通过 `SerializableStoredValue` 中间层进行类型转换
@@ -428,5 +433,5 @@ impl ListCommands {
 ---
 
 **创建日期**: 2025-11-13  
-**最后更新**: 2025-11-14  
+**最后更新**: 2025-11-26  
 **负责人**: @Genuineh, @copilot

@@ -2,27 +2,31 @@
 
 ## 项目概述
 
-AiKv 是基于 [AiDb v0.1.0](https://github.com/Genuineh/AiDb) 单机版的 Redis 协议兼容层实现。本项目旨在提供一个高性能、轻量级的键值存储服务，同时兼容 Redis 协议，使得现有的 Redis 客户端可以无缝连接。
+AiKv 是基于 [AiDb v0.4.1](https://github.com/Genuineh/AiDb) 的 Redis 协议兼容层实现。本项目旨在提供一个高性能、轻量级的键值存储服务，同时兼容 Redis 协议，使得现有的 Redis 客户端可以无缝连接。
+
+**目标**: 发布全球第一个 100% Redis Cluster 协议兼容 + 完全 Rust 原生 + 基于 Multi-Raft 的生产级分布式 KV 引擎 (v1.0.0 - 2026.03.31)
 
 ## 项目目标
 
-- 实现 Redis RESP2/RESP3 协议解析器
-- 支持 String 类型的基本操作命令
-- 支持 JSON 类型的基本操作命令
-- 支持 Redis DB 和 Key 相关基础命令
-- 通过 Git 仓库地址直接引用 AiDb 包
-- 保持代码简洁、高性能、易维护
-- 建立完善的 CI/CD 流水线和代码规范
+- ✅ 实现 Redis RESP2/RESP3 协议解析器
+- ✅ 支持 String/List/Hash/Set/ZSet 数据类型
+- ✅ 支持 JSON 类型的基本操作命令
+- ✅ 支持 Redis DB 和 Key 相关基础命令
+- ✅ 支持 Lua 脚本执行
+- ✅ 双存储引擎（内存 + AiDb 持久化）
+- ⏳ Redis Cluster 协议支持（进行中）
+- ⏳ Multi-Raft 分布式架构（规划中）
 
 ## 技术栈
 
 - **语言**: Rust (使用 Rust 2021 edition)
-- **依赖存储引擎**: AiDb v0.1.0
+- **依赖存储引擎**: AiDb v0.4.1
 - **协议**: Redis RESP2/RESP3 协议
 - **网络**: Tokio 异步运行时
-- **序列化**: serde_json (用于 JSON 支持)
+- **脚本**: Lua 5.4 (mlua)
+- **序列化**: serde_json, bincode
 - **CI/CD**: GitHub Actions
-- **代码质量**: rustfmt, clippy, cargo-audit
+- **代码质量**: rustfmt, clippy, cargo-audit, cargo-deny
 
 ## 架构设计
 
@@ -35,49 +39,53 @@ AiKv 是基于 [AiDb v0.1.0](https://github.com/Genuineh/AiDb) 单机版的 Redi
 ┌─────────────────┐
 │  AiKv Server    │
 │  ┌───────────┐  │
-│  │ Protocol  │  │  RESP 协议解析
+│  │ Protocol  │  │  RESP2/RESP3 协议解析
 │  │  Parser   │  │
 │  └─────┬─────┘  │
 │        │        │
 │  ┌─────┴─────┐  │
-│  │  Command  │  │  命令处理器
+│  │  Command  │  │  命令处理器 (100+ 命令)
 │  │  Handlers │  │
 │  └─────┬─────┘  │
 │        │        │
 │  ┌─────┴─────┐  │
-│  │   AiDb    │  │  存储引擎
+│  │   AiDb    │  │  存储引擎 (v0.4.1 + Multi-Raft)
 │  │  Engine   │  │
 │  └───────────┘  │
 └─────────────────┘
 ```
 
+## 当前实现状态
+
+### 已完成功能 ✅
+
+#### 核心功能
+- RESP2/RESP3 协议完整支持
+- String 命令 (8个): GET, SET, DEL, EXISTS, MGET, MSET, STRLEN, APPEND
+- JSON 命令 (7个): JSON.GET, JSON.SET, JSON.DEL, JSON.TYPE, JSON.STRLEN, JSON.ARRLEN, JSON.OBJLEN
+- List 命令 (10个): LPUSH, RPUSH, LPOP, RPOP, LLEN, LRANGE, LINDEX, LSET, LREM, LTRIM
+- Hash 命令 (12个): HSET, HSETNX, HGET, HMGET, HDEL, HEXISTS, HLEN, HKEYS, HVALS, HGETALL, HINCRBY, HINCRBYFLOAT
+- Set 命令 (13个): SADD, SREM, SISMEMBER, SMEMBERS, SCARD, SPOP, SRANDMEMBER, SUNION, SINTER, SDIFF, SUNIONSTORE, SINTERSTORE, SDIFFSTORE
+- ZSet 命令 (12个): ZADD, ZREM, ZSCORE, ZRANK, ZREVRANK, ZRANGE, ZREVRANGE, ZRANGEBYSCORE, ZREVRANGEBYSCORE, ZCARD, ZCOUNT, ZINCRBY
+- Database 命令 (6个): SELECT, DBSIZE, FLUSHDB, FLUSHALL, SWAPDB, MOVE
+- Key 命令 (17个): KEYS, SCAN, RANDOMKEY, RENAME, RENAMENX, TYPE, COPY, EXPIRE, EXPIREAT, PEXPIRE, PEXPIREAT, TTL, PTTL, PERSIST, EXPIRETIME, PEXPIRETIME
+- Server 命令 (9个): PING, ECHO, INFO, CONFIG GET/SET, TIME, CLIENT LIST/SETNAME/GETNAME
+- Script 命令 (6个): EVAL, EVALSHA, SCRIPT LOAD/EXISTS/FLUSH/KILL
+
+#### 存储引擎
+- 内存存储适配器（高性能）
+- AiDb LSM-Tree 持久化存储
+- 多数据库支持（16 个数据库）
+- 键过期机制（TTL）
+- 完整数据类型序列化
+
+#### 基础设施
+- CI/CD 流水线（GitHub Actions）
+- 代码质量检查（clippy, fmt, audit）
+- 96 个单元测试
+- 性能基准测试
+
 ## 开发阶段
-
-### 阶段 1: 基础架构搭建 (第 1-2 天)
-
-#### 任务清单
-- [x] 创建 Rust 项目结构
-- [ ] 配置 Cargo.toml 依赖
-  - tokio (异步运行时)
-  - bytes (字节操作)
-  - serde, serde_json (JSON 序列化)
-  - anyhow (错误处理)
-  - tracing (日志)
-- [ ] 引入 AiDb v0.1.0 依赖
-- [ ] 创建项目目录结构
-
-#### 目录结构
-```
-aikv/
-├── Cargo.toml
-├── src/
-│   ├── main.rs              # 主入口
-│   ├── lib.rs               # 库入口
-│   ├── server/              # 服务器模块
-│   │   ├── mod.rs
-│   │   └── connection.rs    # 连接处理
-│   ├── protocol/            # 协议解析模块
-│   │   ├── mod.rs
 │   │   ├── parser.rs        # RESP 解析器
 │   │   └── types.rs         # RESP 数据类型
 │   ├── command/             # 命令处理模块
