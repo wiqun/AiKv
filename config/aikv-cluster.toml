@@ -1,0 +1,235 @@
+# AiKv 集群模式配置模板
+# Cluster Mode Configuration Template
+#
+# 使用方法 / Usage:
+#   1. 编译带集群特性的版本 / Build with cluster feature:
+#      cargo build --release --features cluster
+#
+#   2. 复制并修改配置 / Copy and modify config:
+#      cp config/aikv-cluster.toml config.toml
+#      vim config.toml
+#
+#   3. 启动服务 / Start service:
+#      ./target/release/aikv --config config.toml
+
+# ============================================================
+# 服务器配置 / Server Configuration
+# ============================================================
+[server]
+# 监听地址（集群模式推荐使用 0.0.0.0）
+# Bind address (0.0.0.0 recommended for cluster mode)
+host = "0.0.0.0"
+
+# 数据端口 / Data port
+port = 6379
+
+# 集群总线端口（通常为数据端口 + 10000）
+# Cluster bus port (typically data port + 10000)
+cluster_port = 16379
+
+# 最大并发连接数 / Maximum concurrent connections
+max_connections = 10000
+
+# 连接超时时间（秒）/ Connection timeout in seconds
+connection_timeout = 300
+
+# TCP 缓冲区大小 / TCP buffer size
+tcp_buffer_size = 65536
+
+# ============================================================
+# 集群配置 / Cluster Configuration
+# ============================================================
+[cluster]
+# 启用集群模式 / Enable cluster mode
+enabled = true
+
+# 节点 ID（每个节点必须唯一）
+# Node ID (must be unique for each node)
+node_id = "node1"
+
+# 节点名称（用于日志和监控）
+# Node name (for logging and monitoring)
+node_name = "aikv-node-1"
+
+# 集群数据目录 / Cluster data directory
+data_dir = "./cluster-data"
+
+# 初始集群节点列表（cluster_port 地址）
+# Initial cluster peer list (cluster_port addresses)
+peers = [
+    # "192.168.1.101:16379",
+    # "192.168.1.102:16379",
+    # "192.168.1.103:16379",
+]
+
+# 是否为引导节点（第一个启动的节点设为 true）
+# Is this the bootstrap node (set to true for the first node)
+is_bootstrap = false
+
+# 节点角色 / Node role
+# 可选值 / Options:
+#   - "master"  : 主节点，可读写
+#   - "replica" : 从节点，只读（需指定 master_id）
+role = "master"
+
+# 主节点 ID（当 role = "replica" 时需要设置）
+# Master node ID (required when role = "replica")
+# master_id = "node1"
+
+# ============================================================
+# 存储配置 / Storage Configuration
+# ============================================================
+[storage]
+# 存储引擎类型（集群模式推荐使用 aidb）
+# Storage engine type (aidb recommended for cluster mode)
+engine = "aidb"
+
+# 数据存储目录 / Data directory
+data_dir = "./data"
+
+# 最大内存使用 / Maximum memory usage
+max_memory = "2GB"
+
+# 数据库数量 / Number of databases
+databases = 16
+
+# ============================================================
+# Raft 共识配置 / Raft Consensus Configuration
+# ============================================================
+[raft]
+# 心跳间隔（毫秒）/ Heartbeat interval in milliseconds
+heartbeat_interval = 100
+
+# 选举超时范围（毫秒）/ Election timeout range in milliseconds
+election_timeout_min = 300
+election_timeout_max = 500
+
+# 快照间隔（日志条目数）/ Snapshot interval (number of log entries)
+snapshot_interval = 10000
+
+# 日志压缩阈值 / Log compaction threshold
+log_compaction_threshold = 50000
+
+# 最大追加日志批量大小 / Maximum append entries batch size
+max_append_entries = 100
+
+# ============================================================
+# 槽迁移配置 / Slot Migration Configuration
+# ============================================================
+[migration]
+# 迁移批量大小（每批迁移的键数）
+# Migration batch size (keys per batch)
+batch_size = 100
+
+# 迁移并发数 / Migration concurrency
+concurrency = 4
+
+# 迁移超时时间（秒）/ Migration timeout in seconds
+timeout = 300
+
+# 迁移限速（每秒迁移的键数，0 = 不限速）
+# Migration rate limit (keys per second, 0 = unlimited)
+rate_limit = 0
+
+# ============================================================
+# 故障转移配置 / Failover Configuration
+# ============================================================
+[failover]
+# 节点超时时间（毫秒）/ Node timeout in milliseconds
+node_timeout = 15000
+
+# 副本有效性因子 / Replica validity factor
+# 副本数据过期时间 = node_timeout * replica_validity_factor
+replica_validity_factor = 10
+
+# 故障转移授权超时（毫秒）/ Failover auth timeout in milliseconds
+failover_auth_timeout = 5000
+
+# 是否要求多数同意故障转移 / Require majority for failover
+require_majority = true
+
+# ============================================================
+# 持久化配置 / Persistence Configuration
+# ============================================================
+[persistence]
+# 是否启用持久化（集群模式推荐启用）
+# Enable persistence (recommended for cluster mode)
+enabled = true
+
+# 持久化模式 / Persistence mode
+mode = "hybrid"
+
+# RDB 快照间隔（秒）/ RDB snapshot interval in seconds
+rdb_interval = 900
+
+# AOF 同步策略 / AOF sync policy
+aof_sync = "everysec"
+
+# ============================================================
+# 日志配置 / Logging Configuration
+# ============================================================
+[logging]
+# 日志级别 / Log level
+level = "info"
+
+# 日志文件路径 / Log file path
+file = "./logs/aikv-cluster.log"
+
+# 是否输出到控制台 / Output to console
+console = true
+
+# 日志轮转大小 / Log rotation size
+max_size = "100MB"
+
+# 保留日志文件数量 / Number of backup log files
+max_backups = 10
+
+# ============================================================
+# 性能配置 / Performance Configuration
+# ============================================================
+[performance]
+# 工作线程数（0 = CPU 核心数）/ Worker threads (0 = CPU cores)
+worker_threads = 0
+
+# 是否启用 TCP_NODELAY
+tcp_nodelay = true
+
+# 是否启用 SO_KEEPALIVE
+tcp_keepalive = true
+
+# Lua 脚本超时时间（毫秒）/ Lua script timeout in milliseconds
+lua_timeout = 5000
+
+# ============================================================
+# 监控配置 / Monitoring Configuration
+# ============================================================
+[monitoring]
+# 是否启用 Prometheus 指标 / Enable Prometheus metrics
+prometheus_enabled = false
+
+# Prometheus 指标端口 / Prometheus metrics port
+prometheus_port = 9100
+
+# 是否启用慢日志 / Enable slow log
+slowlog_enabled = true
+
+# 慢日志阈值（微秒）/ Slow log threshold in microseconds
+slowlog_threshold = 10000
+
+# 慢日志最大条目数 / Maximum slow log entries
+slowlog_max_len = 128
+
+# ============================================================
+# 安全配置 / Security Configuration
+# ============================================================
+[security]
+# 是否需要密码认证 / Require password authentication
+# requirepass = "your_cluster_password"
+
+# 集群内部通信密钥 / Cluster internal communication key
+# cluster_auth = "your_cluster_auth_key"
+
+# 是否启用 TLS（规划中）/ Enable TLS (planned)
+# tls_enabled = false
+# tls_cert_file = "./certs/server.crt"
+# tls_key_file = "./certs/server.key"
