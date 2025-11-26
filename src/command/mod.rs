@@ -42,12 +42,16 @@ pub struct CommandExecutor {
 
 impl CommandExecutor {
     pub fn new(storage: StorageAdapter) -> Self {
+        Self::with_port(storage, 6379)
+    }
+
+    pub fn with_port(storage: StorageAdapter, port: u16) -> Self {
         Self {
             string_commands: StringCommands::new(storage.clone()),
             json_commands: JsonCommands::new(storage.clone()),
             database_commands: DatabaseCommands::new(storage.clone()),
             key_commands: KeyCommands::new(storage.clone()),
-            server_commands: ServerCommands::new(),
+            server_commands: ServerCommands::with_port(port),
             script_commands: ScriptCommands::new(storage.clone()),
             list_commands: ListCommands::new(storage.clone()),
             hash_commands: HashCommands::new(storage.clone()),

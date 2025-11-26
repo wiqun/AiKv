@@ -10,13 +10,22 @@ use tracing::{error, info};
 /// AiKv server
 pub struct Server {
     addr: String,
+    port: u16,
     storage: StorageAdapter,
 }
 
 impl Server {
     pub fn new(addr: String) -> Self {
+        // Extract port from address string
+        let port = addr
+            .split(':')
+            .last()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(6379);
+
         Self {
             addr,
+            port,
             storage: StorageAdapter::new(),
         }
     }
@@ -31,7 +40,7 @@ impl Server {
                 Ok((stream, addr)) => {
                     info!("New connection from: {}", addr);
 
-                    let executor = CommandExecutor::new(self.storage.clone());
+                    let executor = CommandExecutor::with_port(self.storage.clone(), self.port);
 
                     tokio::spawn(async move {
                         let mut conn = Connection::new(stream, executor);
