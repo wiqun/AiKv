@@ -230,7 +230,16 @@ impl CommandExecutor {
             "READWRITE" => self.cluster_commands.readwrite(),
 
             // Utility commands
-            "PING" => Ok(RespValue::simple_string("PONG")),
+            "PING" => {
+                if args.is_empty() {
+                    Ok(RespValue::simple_string("PONG"))
+                } else if args.len() == 1 {
+                    // Return a copy of the argument as a bulk string
+                    Ok(RespValue::bulk_string(args[0].clone()))
+                } else {
+                    Err(AikvError::WrongArgCount("PING".to_string()))
+                }
+            }
             "ECHO" => {
                 if args.len() != 1 {
                     return Err(AikvError::WrongArgCount("ECHO".to_string()));

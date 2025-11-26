@@ -155,7 +155,7 @@
 - [ ] `SORT_RO` - 只读排序 (Redis 7.0+)
 
 ### 3.5 Server 管理命令
-- [x] `PING` - ✅ 已实现
+- [x] `PING` - ✅ 已实现（支持可选 message 参数：无参数返回 PONG，有参数返回参数的副本）
 - [x] `ECHO` - ✅ 已实现
 - [x] `INFO` - 服务器信息
 - [x] `CONFIG GET` - 获取配置参数

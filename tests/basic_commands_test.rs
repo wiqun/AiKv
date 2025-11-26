@@ -385,6 +385,52 @@ fn test_expiration_commands() {
 }
 
 #[test]
+fn test_ping_command() {
+    let storage = StorageAdapter::new();
+    let executor = CommandExecutor::new(storage);
+    let mut current_db = 0;
+    let client_id = 1;
+
+    // Test PING without argument - should return simple string "PONG"
+    let result = executor
+        .execute("PING", &[], &mut current_db, client_id)
+        .unwrap();
+    assert_eq!(result, RespValue::simple_string("PONG"));
+
+    // Test PING with message argument - should return bulk string with the message
+    let result = executor
+        .execute("PING", &[Bytes::from("hello")], &mut current_db, client_id)
+        .unwrap();
+    assert_eq!(result, RespValue::bulk_string("hello"));
+
+    // Test PING with empty string argument
+    let result = executor
+        .execute("PING", &[Bytes::from("")], &mut current_db, client_id)
+        .unwrap();
+    assert_eq!(result, RespValue::bulk_string(""));
+
+    // Test PING with special characters
+    let result = executor
+        .execute(
+            "PING",
+            &[Bytes::from("hello world!")],
+            &mut current_db,
+            client_id,
+        )
+        .unwrap();
+    assert_eq!(result, RespValue::bulk_string("hello world!"));
+
+    // Test PING with too many arguments - should return error
+    let result = executor.execute(
+        "PING",
+        &[Bytes::from("hello"), Bytes::from("world")],
+        &mut current_db,
+        client_id,
+    );
+    assert!(result.is_err());
+}
+
+#[test]
 fn test_server_commands() {
     let storage = StorageAdapter::new();
     let executor = CommandExecutor::new(storage);
