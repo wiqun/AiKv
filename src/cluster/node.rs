@@ -88,10 +88,6 @@ pub struct ClusterNode {
     #[cfg(feature = "cluster")]
     inner: Option<std::sync::Arc<aidb::cluster::MultiRaftNode>>,
 
-    /// MetaRaftNode for cluster metadata (only available with cluster feature)
-    #[cfg(feature = "cluster")]
-    meta_raft: Option<std::sync::Arc<aidb::cluster::MetaRaftNode>>,
-
     /// Data directory path
     #[cfg(feature = "cluster")]
     data_dir: Option<std::path::PathBuf>,
@@ -123,8 +119,6 @@ impl ClusterNode {
             initialized: false,
             #[cfg(feature = "cluster")]
             inner: None,
-            #[cfg(feature = "cluster")]
-            meta_raft: None,
             #[cfg(feature = "cluster")]
             data_dir: None,
             #[cfg(feature = "cluster")]
@@ -411,16 +405,22 @@ impl ClusterNode {
     /// Shutdown the cluster node.
     ///
     /// This gracefully shuts down all Raft groups and the MetaRaft node.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if shutdown fails.
     pub async fn shutdown(&mut self) -> Result<()> {
         #[cfg(feature = "cluster")]
         {
+            use crate::error::AikvError;
+
             if let Some(inner) = &self.inner {
-                // Note: inner is in an Arc, so we can't get mutable access
-                // The shutdown is handled through the Arc reference
-                let _ = inner.shutdown().await;
+                // Shutdown the MultiRaftNode (which includes all Raft groups and MetaRaft)
+                inner.shutdown().await.map_err(|e| {
+                    AikvError::Storage(format!("Failed to shutdown cluster node: {}", e))
+                })?;
             }
             self.inner = None;
-            self.meta_raft = None;
         }
         self.initialized = false;
         Ok(())
