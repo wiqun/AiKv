@@ -1,11 +1,11 @@
 use aikv::command::CommandExecutor;
 use aikv::protocol::RespValue;
-use aikv::storage::StorageAdapter;
+use aikv::StorageEngine;
 use bytes::Bytes;
 
 #[test]
 fn test_list_commands() {
-    let storage = StorageAdapter::new();
+    let storage = StorageEngine::new_memory(16);
     let executor = CommandExecutor::new(storage);
     let mut current_db = 0;
     let client_id = 1;
@@ -39,7 +39,7 @@ fn test_list_commands() {
 
 #[test]
 fn test_hash_commands() {
-    let storage = StorageAdapter::new();
+    let storage = StorageEngine::new_memory(16);
     let executor = CommandExecutor::new(storage);
     let mut current_db = 0;
     let client_id = 1;
@@ -79,7 +79,7 @@ fn test_hash_commands() {
 
 #[test]
 fn test_set_commands() {
-    let storage = StorageAdapter::new();
+    let storage = StorageEngine::new_memory(16);
     let executor = CommandExecutor::new(storage);
     let mut current_db = 0;
     let client_id = 1;
@@ -122,7 +122,7 @@ fn test_set_commands() {
 
 #[test]
 fn test_zset_commands() {
-    let storage = StorageAdapter::new();
+    let storage = StorageEngine::new_memory(16);
     let executor = CommandExecutor::new(storage);
     let mut current_db = 0;
     let client_id = 1;
@@ -171,7 +171,7 @@ fn test_zset_commands() {
 
 #[test]
 fn test_set_operations() {
-    let storage = StorageAdapter::new();
+    let storage = StorageEngine::new_memory(16);
     let executor = CommandExecutor::new(storage);
     let mut current_db = 0;
     let client_id = 1;

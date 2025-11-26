@@ -1,6 +1,7 @@
-use aikv::Server;
+use aikv::{Server, StorageEngine};
 use serde::Deserialize;
 use std::fs;
+use tracing::{info, warn};
 use tracing_subscriber::{self};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -29,11 +30,39 @@ fn default_port() -> u16 {
     6379
 }
 
+/// Storage section of the configuration file
+#[derive(Deserialize, Default)]
+struct StorageConfig {
+    /// Storage engine type: "memory" or "aidb"
+    #[serde(default = "default_engine")]
+    engine: String,
+    /// Data directory for AiDb storage
+    #[serde(default = "default_data_dir")]
+    data_dir: String,
+    /// Number of databases (default: 16)
+    #[serde(default = "default_databases")]
+    databases: usize,
+}
+
+fn default_engine() -> String {
+    "memory".to_string()
+}
+
+fn default_data_dir() -> String {
+    "./data".to_string()
+}
+
+fn default_databases() -> usize {
+    16
+}
+
 /// Root configuration structure
 #[derive(Deserialize, Default)]
 struct Config {
     #[serde(default)]
     server: ServerConfig,
+    #[serde(default)]
+    storage: StorageConfig,
 }
 
 /// Command line arguments structure
@@ -192,7 +221,7 @@ fn parse_args() -> CliArgs {
 }
 
 /// Load configuration from file and merge with CLI arguments
-fn load_config(cli: &CliArgs) -> (String, u16) {
+fn load_config(cli: &CliArgs) -> (String, u16, StorageConfig) {
     let mut config = Config::default();
 
     // Load from config file if specified
@@ -216,7 +245,37 @@ fn load_config(cli: &CliArgs) -> (String, u16) {
     let host = cli.host.clone().unwrap_or(config.server.host);
     let port = cli.port.unwrap_or(config.server.port);
 
-    (host, port)
+    (host, port, config.storage)
+}
+
+/// Create storage engine based on configuration
+fn create_storage_engine(storage_config: &StorageConfig) -> StorageEngine {
+    match storage_config.engine.to_lowercase().as_str() {
+        "aidb" => {
+            info!(
+                "Using AiDb storage engine with data directory: {}",
+                storage_config.data_dir
+            );
+            match StorageEngine::new_aidb(&storage_config.data_dir, storage_config.databases) {
+                Ok(engine) => engine,
+                Err(e) => {
+                    eprintln!(
+                        "Failed to initialize AiDb storage at '{}': {}",
+                        storage_config.data_dir, e
+                    );
+                    std::process::exit(1);
+                }
+            }
+        }
+        "memory" => {
+            info!("Using in-memory storage engine");
+            StorageEngine::new_memory(storage_config.databases)
+        }
+        other => {
+            warn!("Unknown storage engine '{}', falling back to memory", other);
+            StorageEngine::new_memory(storage_config.databases)
+        }
+    }
 }
 
 #[tokio::main]
@@ -241,7 +300,7 @@ async fn main() {
         .init();
 
     // Load configuration
-    let (host, port) = load_config(&cli);
+    let (host, port, storage_config) = load_config(&cli);
     let addr = format!("{}:{}", host, port);
 
     // Print startup banner
@@ -252,8 +311,11 @@ async fn main() {
     );
     println!();
 
+    // Create storage engine based on configuration
+    let storage = create_storage_engine(&storage_config);
+
     // Create and run server
-    let server = Server::new(addr);
+    let server = Server::new(addr, storage);
 
     if let Err(e) = server.run().await {
         eprintln!("Server error: {}", e);

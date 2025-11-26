@@ -1,16 +1,16 @@
 use crate::error::{AikvError, Result};
 use crate::protocol::RespValue;
-use crate::storage::{StorageAdapter, StoredValue};
+use crate::storage::{StorageEngine, StoredValue};
 use bytes::Bytes;
 use std::collections::VecDeque;
 
 /// List command handler
 pub struct ListCommands {
-    storage: StorageAdapter,
+    storage: StorageEngine,
 }
 
 impl ListCommands {
-    pub fn new(storage: StorageAdapter) -> Self {
+    pub fn new(storage: StorageEngine) -> Self {
         Self {
             storage,
         }

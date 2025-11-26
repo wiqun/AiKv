@@ -1,16 +1,16 @@
 use crate::error::{AikvError, Result};
 use crate::protocol::RespValue;
-use crate::storage::{StorageAdapter, StoredValue};
+use crate::storage::{StorageEngine, StoredValue};
 use bytes::Bytes;
 use std::collections::BTreeMap;
 
 /// Sorted Set command handler
 pub struct ZSetCommands {
-    storage: StorageAdapter,
+    storage: StorageEngine,
 }
 
 impl ZSetCommands {
-    pub fn new(storage: StorageAdapter) -> Self {
+    pub fn new(storage: StorageEngine) -> Self {
         Self {
             storage,
         }

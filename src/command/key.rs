@@ -1,15 +1,15 @@
 use crate::error::{AikvError, Result};
 use crate::protocol::RespValue;
-use crate::storage::StorageAdapter;
+use crate::storage::StorageEngine;
 use bytes::Bytes;
 
 /// Key command handler
 pub struct KeyCommands {
-    storage: StorageAdapter,
+    storage: StorageEngine,
 }
 
 impl KeyCommands {
-    pub fn new(storage: StorageAdapter) -> Self {
+    pub fn new(storage: StorageEngine) -> Self {
         Self {
             storage,
         }

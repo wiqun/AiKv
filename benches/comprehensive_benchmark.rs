@@ -8,7 +8,7 @@
 
 use aikv::protocol::parser::RespParser;
 use aikv::protocol::types::RespValue;
-use aikv::storage::StorageAdapter;
+use aikv::StorageEngine;
 use bytes::Bytes;
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::sync::Arc;
@@ -22,7 +22,7 @@ fn bench_concurrent_operations(c: &mut Criterion) {
             BenchmarkId::new("concurrent_set", num_threads),
             num_threads,
             |b, &num_threads| {
-                let storage = Arc::new(StorageAdapter::new());
+                let storage = Arc::new(StorageEngine::new_memory(16));
                 b.iter(|| {
                     let handles: Vec<_> = (0..num_threads)
                         .map(|thread_id| {
@@ -48,7 +48,7 @@ fn bench_concurrent_operations(c: &mut Criterion) {
             BenchmarkId::new("concurrent_get", num_threads),
             num_threads,
             |b, &num_threads| {
-                let storage = Arc::new(StorageAdapter::new());
+                let storage = Arc::new(StorageEngine::new_memory(16));
                 // Pre-populate
                 for thread_id in 0..num_threads {
                     for i in 0..100 {
@@ -90,7 +90,7 @@ fn bench_large_values(c: &mut Criterion) {
         group.throughput(Throughput::Bytes(*size as u64));
 
         group.bench_with_input(BenchmarkId::new("set", size), size, |b, &size| {
-            let storage = StorageAdapter::new();
+            let storage = StorageEngine::new_memory(16);
             let value = Bytes::from(vec![b'x'; size]);
             b.iter(|| {
                 storage
@@ -100,7 +100,7 @@ fn bench_large_values(c: &mut Criterion) {
         });
 
         group.bench_with_input(BenchmarkId::new("get", size), size, |b, &size| {
-            let storage = StorageAdapter::new();
+            let storage = StorageEngine::new_memory(16);
             let value = Bytes::from(vec![b'x'; size]);
             storage.set("large_key".to_string(), value).unwrap();
             b.iter(|| storage.get(black_box("large_key")).unwrap());
@@ -159,7 +159,7 @@ fn bench_batch_sizes(c: &mut Criterion) {
                         )
                     })
                     .collect();
-                let storage = StorageAdapter::new();
+                let storage = StorageEngine::new_memory(16);
 
                 b.iter(|| {
                     for (key, value) in black_box(pairs.clone()) {
@@ -175,7 +175,7 @@ fn bench_batch_sizes(c: &mut Criterion) {
             BenchmarkId::new("mget", batch_size),
             batch_size,
             |b, &batch_size| {
-                let storage = StorageAdapter::new();
+                let storage = StorageEngine::new_memory(16);
                 let pairs: Vec<(String, Bytes)> = (0..batch_size)
                     .map(|i| {
                         (
@@ -212,7 +212,7 @@ fn bench_memory_patterns(c: &mut Criterion) {
     // Benchmark repeated allocations
     group.bench_function("repeated_alloc_dealloc", |b| {
         b.iter(|| {
-            let storage = StorageAdapter::new();
+            let storage = StorageEngine::new_memory(16);
             for i in 0..100 {
                 storage
                     .set(format!("key_{}", i), Bytes::from(format!("value_{}", i)))
@@ -227,7 +227,7 @@ fn bench_memory_patterns(c: &mut Criterion) {
     // Benchmark growing dataset
     group.bench_function("growing_dataset", |b| {
         b.iter(|| {
-            let storage = StorageAdapter::new();
+            let storage = StorageEngine::new_memory(16);
             for i in 0..1000 {
                 storage
                     .set(format!("key_{}", i), Bytes::from(format!("value_{}", i)))

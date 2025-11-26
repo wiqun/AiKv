@@ -3,7 +3,7 @@ pub mod connection;
 use self::connection::Connection;
 use crate::command::CommandExecutor;
 use crate::error::Result;
-use crate::storage::StorageAdapter;
+use crate::storage::StorageEngine;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tracing::{error, info};
@@ -12,11 +12,12 @@ use tracing::{error, info};
 pub struct Server {
     addr: String,
     port: u16,
-    storage: StorageAdapter,
+    storage: StorageEngine,
 }
 
 impl Server {
-    pub fn new(addr: String) -> Self {
+    /// Create a new server with the specified address and storage engine
+    pub fn new(addr: String, storage: StorageEngine) -> Self {
         // Extract port from address string using proper SocketAddr parsing
         // This handles both IPv4 (127.0.0.1:6379) and IPv6 ([::1]:6379) formats
         let port = addr
@@ -34,7 +35,7 @@ impl Server {
         Self {
             addr,
             port,
-            storage: StorageAdapter::new(),
+            storage,
         }
     }
 

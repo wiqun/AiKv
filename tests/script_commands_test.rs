@@ -1,11 +1,11 @@
 use aikv::command::CommandExecutor;
 use aikv::protocol::RespValue;
-use aikv::storage::StorageAdapter;
+use aikv::StorageEngine;
 use bytes::Bytes;
 
 #[test]
 fn test_script_load_and_exists() {
-    let storage = StorageAdapter::new();
+    let storage = StorageEngine::new_memory(16);
     let executor = CommandExecutor::new(storage);
     let mut current_db = 0;
     let client_id = 1;
@@ -65,7 +65,7 @@ fn test_script_load_and_exists() {
 
 #[test]
 fn test_eval_simple_script() {
-    let storage = StorageAdapter::new();
+    let storage = StorageEngine::new_memory(16);
     let executor = CommandExecutor::new(storage);
     let mut current_db = 0;
     let client_id = 1;
@@ -103,7 +103,7 @@ fn test_eval_simple_script() {
 
 #[test]
 fn test_eval_with_keys_and_argv() {
-    let storage = StorageAdapter::new();
+    let storage = StorageEngine::new_memory(16);
     let executor = CommandExecutor::new(storage);
     let mut current_db = 0;
     let client_id = 1;
@@ -153,7 +153,7 @@ fn test_eval_with_keys_and_argv() {
 
 #[test]
 fn test_eval_redis_call() {
-    let storage = StorageAdapter::new();
+    let storage = StorageEngine::new_memory(16);
     let executor = CommandExecutor::new(storage);
     let mut current_db = 0;
     let client_id = 1;
@@ -196,7 +196,7 @@ fn test_eval_redis_call() {
 
 #[test]
 fn test_evalsha() {
-    let storage = StorageAdapter::new();
+    let storage = StorageEngine::new_memory(16);
     let executor = CommandExecutor::new(storage);
     let mut current_db = 0;
     let client_id = 1;
@@ -237,7 +237,7 @@ fn test_evalsha() {
 
 #[test]
 fn test_evalsha_not_found() {
-    let storage = StorageAdapter::new();
+    let storage = StorageEngine::new_memory(16);
     let executor = CommandExecutor::new(storage);
     let mut current_db = 0;
     let client_id = 1;
@@ -258,7 +258,7 @@ fn test_evalsha_not_found() {
 
 #[test]
 fn test_script_flush() {
-    let storage = StorageAdapter::new();
+    let storage = StorageEngine::new_memory(16);
     let executor = CommandExecutor::new(storage);
     let mut current_db = 0;
     let client_id = 1;
@@ -323,7 +323,7 @@ fn test_script_flush() {
 
 #[test]
 fn test_script_kill() {
-    let storage = StorageAdapter::new();
+    let storage = StorageEngine::new_memory(16);
     let executor = CommandExecutor::new(storage);
     let mut current_db = 0;
     let client_id = 1;

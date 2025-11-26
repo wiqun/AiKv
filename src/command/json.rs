@@ -1,16 +1,16 @@
 use crate::error::{AikvError, Result};
 use crate::protocol::RespValue;
-use crate::storage::StorageAdapter;
+use crate::storage::StorageEngine;
 use bytes::Bytes;
 use serde_json::{json, Value as JsonValue};
 
 /// JSON command handler
 pub struct JsonCommands {
-    storage: StorageAdapter,
+    storage: StorageEngine,
 }
 
 impl JsonCommands {
-    pub fn new(storage: StorageAdapter) -> Self {
+    pub fn new(storage: StorageEngine) -> Self {
         Self {
             storage,
         }
@@ -384,9 +384,10 @@ impl JsonCommands {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::StorageEngine;
 
     fn setup() -> JsonCommands {
-        JsonCommands::new(StorageAdapter::new())
+        JsonCommands::new(StorageEngine::new_memory(16))
     }
 
     #[test]

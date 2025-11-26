@@ -1,15 +1,15 @@
 use crate::error::{AikvError, Result};
 use crate::protocol::RespValue;
-use crate::storage::StorageAdapter;
+use crate::storage::StorageEngine;
 use bytes::Bytes;
 
 /// String command handler
 pub struct StringCommands {
-    storage: StorageAdapter,
+    storage: StorageEngine,
 }
 
 impl StringCommands {
-    pub fn new(storage: StorageAdapter) -> Self {
+    pub fn new(storage: StorageEngine) -> Self {
         Self {
             storage,
         }
@@ -215,9 +215,10 @@ impl StringCommands {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::StorageEngine;
 
     fn setup() -> StringCommands {
-        StringCommands::new(StorageAdapter::new())
+        StringCommands::new(StorageEngine::new_memory(16))
     }
 
     #[test]

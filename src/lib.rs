@@ -10,3 +10,4 @@ pub mod cluster;
 
 pub use error::{AikvError, Result};
 pub use server::Server;
+pub use storage::StorageEngine;

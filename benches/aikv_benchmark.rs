@@ -6,7 +6,7 @@
 use aikv::command::json::JsonCommands;
 use aikv::protocol::parser::RespParser;
 use aikv::protocol::types::RespValue;
-use aikv::storage::StorageAdapter;
+use aikv::StorageEngine;
 use bytes::Bytes;
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 
@@ -106,7 +106,7 @@ fn bench_storage_operations(c: &mut Criterion) {
 
     // Benchmark SET operation
     group.bench_function("set", |b| {
-        let storage = StorageAdapter::new();
+        let storage = StorageEngine::new_memory(16);
         b.iter(|| {
             storage
                 .set(
@@ -119,7 +119,7 @@ fn bench_storage_operations(c: &mut Criterion) {
 
     // Benchmark GET operation
     group.bench_function("get", |b| {
-        let storage = StorageAdapter::new();
+        let storage = StorageEngine::new_memory(16);
         storage
             .set("benchmark_key".to_string(), Bytes::from("benchmark_value"))
             .unwrap();
@@ -128,7 +128,7 @@ fn bench_storage_operations(c: &mut Criterion) {
 
     // Benchmark EXISTS operation
     group.bench_function("exists", |b| {
-        let storage = StorageAdapter::new();
+        let storage = StorageEngine::new_memory(16);
         storage
             .set("benchmark_key".to_string(), Bytes::from("benchmark_value"))
             .unwrap();
@@ -139,7 +139,7 @@ fn bench_storage_operations(c: &mut Criterion) {
     group.bench_function("delete", |b| {
         b.iter_batched(
             || {
-                let storage = StorageAdapter::new();
+                let storage = StorageEngine::new_memory(16);
                 storage
                     .set("benchmark_key".to_string(), Bytes::from("benchmark_value"))
                     .unwrap();
@@ -163,7 +163,7 @@ fn bench_multi_key_operations(c: &mut Criterion) {
             let pairs: Vec<(String, Bytes)> = (0..size)
                 .map(|i| (format!("key_{}", i), Bytes::from(format!("value_{}", i))))
                 .collect();
-            let storage = StorageAdapter::new();
+            let storage = StorageEngine::new_memory(16);
 
             b.iter(|| {
                 for (key, value) in black_box(pairs.clone()) {
@@ -176,7 +176,7 @@ fn bench_multi_key_operations(c: &mut Criterion) {
 
         // Benchmark MGET with different key counts
         group.bench_with_input(BenchmarkId::new("mget", size), size, |b, &size| {
-            let storage = StorageAdapter::new();
+            let storage = StorageEngine::new_memory(16);
             let pairs: Vec<(String, Bytes)> = (0..size)
                 .map(|i| (format!("key_{}", i), Bytes::from(format!("value_{}", i))))
                 .collect();
@@ -204,7 +204,7 @@ fn bench_json_operations(c: &mut Criterion) {
 
     // Benchmark JSON.SET with simple object
     group.bench_function("json_set_simple", |b| {
-        let json_cmd = JsonCommands::new(StorageAdapter::new());
+        let json_cmd = JsonCommands::new(StorageEngine::new_memory(16));
         let json_str = r#"{"name":"John","age":30}"#;
         b.iter(|| {
             json_cmd
@@ -222,7 +222,7 @@ fn bench_json_operations(c: &mut Criterion) {
 
     // Benchmark JSON.SET with nested object
     group.bench_function("json_set_nested", |b| {
-        let json_cmd = JsonCommands::new(StorageAdapter::new());
+        let json_cmd = JsonCommands::new(StorageEngine::new_memory(16));
         let json_str =
             r#"{"user":{"name":"John","age":30,"address":{"city":"NYC","zip":"10001"}}}"#;
         b.iter(|| {
@@ -241,7 +241,7 @@ fn bench_json_operations(c: &mut Criterion) {
 
     // Benchmark JSON.GET
     group.bench_function("json_get", |b| {
-        let json_cmd = JsonCommands::new(StorageAdapter::new());
+        let json_cmd = JsonCommands::new(StorageEngine::new_memory(16));
         let json_str = r#"{"name":"John","age":30}"#;
         json_cmd
             .json_set(
@@ -258,7 +258,7 @@ fn bench_json_operations(c: &mut Criterion) {
 
     // Benchmark JSON.GET with path
     group.bench_function("json_get_path", |b| {
-        let json_cmd = JsonCommands::new(StorageAdapter::new());
+        let json_cmd = JsonCommands::new(StorageEngine::new_memory(16));
         let json_str = r#"{"user":{"name":"John","age":30}}"#;
         json_cmd
             .json_set(
@@ -281,7 +281,7 @@ fn bench_json_operations(c: &mut Criterion) {
 
     // Benchmark JSON.TYPE
     group.bench_function("json_type", |b| {
-        let json_cmd = JsonCommands::new(StorageAdapter::new());
+        let json_cmd = JsonCommands::new(StorageEngine::new_memory(16));
         let json_str = r#"{"name":"John","age":30,"active":true}"#;
         json_cmd
             .json_set(
@@ -304,7 +304,7 @@ fn bench_json_operations(c: &mut Criterion) {
 
     // Benchmark JSON.STRLEN
     group.bench_function("json_strlen", |b| {
-        let json_cmd = JsonCommands::new(StorageAdapter::new());
+        let json_cmd = JsonCommands::new(StorageEngine::new_memory(16));
         let json_str = r#"{"name":"John Doe","age":30}"#;
         json_cmd
             .json_set(
@@ -327,7 +327,7 @@ fn bench_json_operations(c: &mut Criterion) {
 
     // Benchmark JSON.ARRLEN
     group.bench_function("json_arrlen", |b| {
-        let json_cmd = JsonCommands::new(StorageAdapter::new());
+        let json_cmd = JsonCommands::new(StorageEngine::new_memory(16));
         let json_str = "[1,2,3,4,5,6,7,8,9,10]";
         json_cmd
             .json_set(
@@ -344,7 +344,7 @@ fn bench_json_operations(c: &mut Criterion) {
 
     // Benchmark JSON.OBJLEN
     group.bench_function("json_objlen", |b| {
-        let json_cmd = JsonCommands::new(StorageAdapter::new());
+        let json_cmd = JsonCommands::new(StorageEngine::new_memory(16));
         let json_str = r#"{"a":1,"b":2,"c":3,"d":4,"e":5}"#;
         json_cmd
             .json_set(
@@ -363,7 +363,7 @@ fn bench_json_operations(c: &mut Criterion) {
     group.bench_function("json_del", |b| {
         b.iter_batched(
             || {
-                let json_cmd = JsonCommands::new(StorageAdapter::new());
+                let json_cmd = JsonCommands::new(StorageEngine::new_memory(16));
                 let json_str = r#"{"name":"John","age":30}"#;
                 json_cmd
                     .json_set(
@@ -395,7 +395,7 @@ fn bench_json_data_sizes(c: &mut Criterion) {
             BenchmarkId::new("json_set_array", size),
             size,
             |b, &size| {
-                let json_cmd = JsonCommands::new(StorageAdapter::new());
+                let json_cmd = JsonCommands::new(StorageEngine::new_memory(16));
                 let array: Vec<i32> = (0..size).collect();
                 let json_str = serde_json::to_string(&array).unwrap();
                 b.iter(|| {
@@ -418,7 +418,7 @@ fn bench_json_data_sizes(c: &mut Criterion) {
             BenchmarkId::new("json_get_array", size),
             size,
             |b, &size| {
-                let json_cmd = JsonCommands::new(StorageAdapter::new());
+                let json_cmd = JsonCommands::new(StorageEngine::new_memory(16));
                 let array: Vec<i32> = (0..size).collect();
                 let json_str = serde_json::to_string(&array).unwrap();
                 json_cmd
@@ -444,7 +444,7 @@ fn bench_json_data_sizes(c: &mut Criterion) {
             BenchmarkId::new("json_set_object", size),
             size,
             |b, &size| {
-                let json_cmd = JsonCommands::new(StorageAdapter::new());
+                let json_cmd = JsonCommands::new(StorageEngine::new_memory(16));
                 let mut obj = serde_json::Map::new();
                 for i in 0..size {
                     obj.insert(

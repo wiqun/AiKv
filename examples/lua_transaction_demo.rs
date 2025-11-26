@@ -5,13 +5,13 @@
 /// - Failed scripts rollback all changes
 /// - Scripts can read their own writes
 use aikv::command::script::ScriptCommands;
-use aikv::storage::StorageAdapter;
+use aikv::StorageEngine;
 use bytes::Bytes;
 
 fn main() {
     println!("=== Lua Script Transaction Demo ===\n");
 
-    let storage = StorageAdapter::with_db_count(16);
+    let storage = StorageEngine::new_memory(16);
     let script_commands = ScriptCommands::new(storage.clone());
 
     // Example 1: Successful commit

@@ -1,16 +1,16 @@
 use crate::error::{AikvError, Result};
 use crate::protocol::RespValue;
-use crate::storage::{StorageAdapter, StoredValue};
+use crate::storage::{StorageEngine, StoredValue};
 use bytes::Bytes;
 use std::collections::HashSet;
 
 /// Set command handler
 pub struct SetCommands {
-    storage: StorageAdapter,
+    storage: StorageEngine,
 }
 
 impl SetCommands {
-    pub fn new(storage: StorageAdapter) -> Self {
+    pub fn new(storage: StorageEngine) -> Self {
         Self {
             storage,
         }

@@ -1,6 +1,6 @@
 use crate::error::{AikvError, Result};
 use crate::protocol::RespValue;
-use crate::storage::{BatchOp, StorageAdapter};
+use crate::storage::{BatchOp, StorageEngine};
 use bytes::Bytes;
 use mlua::{Lua, LuaOptions, StdLib, Value as LuaValue};
 use sha1::{Digest, Sha1};
@@ -19,7 +19,7 @@ struct CachedScript {
 /// operations and only committing them if the script completes successfully.
 /// If the script fails, the buffer is discarded, achieving automatic rollback.
 ///
-/// When using AiDbStorageAdapter, this leverages AiDb's WriteBatch for true
+/// When using AiDbStorageEngine, this leverages AiDb's WriteBatch for true
 /// atomic batch writes with WAL durability guarantees.
 #[derive(Debug)]
 struct ScriptTransaction {
@@ -42,7 +42,7 @@ impl ScriptTransaction {
     ///
     /// This implements "read your own writes" semantics - if a key was set
     /// or deleted in this transaction, return that state.
-    fn get(&self, storage: &StorageAdapter, key: &str) -> Result<Option<Bytes>> {
+    fn get(&self, storage: &StorageEngine, key: &str) -> Result<Option<Bytes>> {
         // Check write buffer first
         if let Some(op) = self.write_buffer.get(key) {
             match op {
@@ -66,7 +66,7 @@ impl ScriptTransaction {
     }
 
     /// Check if a key exists, considering the buffer
-    fn exists(&self, storage: &StorageAdapter, key: &str) -> Result<bool> {
+    fn exists(&self, storage: &StorageEngine, key: &str) -> Result<bool> {
         // Check write buffer first
         if let Some(op) = self.write_buffer.get(key) {
             match op {
@@ -83,10 +83,10 @@ impl ScriptTransaction {
     ///
     /// This method uses write_batch() which provides:
     /// - For MemoryAdapter: In-memory atomicity within a single lock
-    /// - For AiDbStorageAdapter: True atomic batch writes via AiDb's WriteBatch
+    /// - For AiDbStorageEngine: True atomic batch writes via AiDb's WriteBatch
     ///   with WAL durability guarantees (all operations written to WAL first,
     ///   single fsync, atomic recovery on crash)
-    fn commit(self, storage: &StorageAdapter) -> Result<()> {
+    fn commit(self, storage: &StorageEngine) -> Result<()> {
         if self.write_buffer.is_empty() {
             return Ok(());
         }
@@ -105,12 +105,12 @@ impl ScriptTransaction {
 
 /// Script command handler
 pub struct ScriptCommands {
-    storage: StorageAdapter,
+    storage: StorageEngine,
     script_cache: Arc<RwLock<HashMap<String, CachedScript>>>,
 }
 
 impl ScriptCommands {
-    pub fn new(storage: StorageAdapter) -> Self {
+    pub fn new(storage: StorageEngine) -> Self {
         Self {
             storage,
             script_cache: Arc::new(RwLock::new(HashMap::new())),
@@ -383,7 +383,7 @@ impl ScriptCommands {
 
     /// Execute a Redis command from Lua
     fn redis_call(
-        storage: &StorageAdapter,
+        storage: &StorageEngine,
         transaction: &Arc<RwLock<ScriptTransaction>>,
         lua: &mlua::Lua,
         args: mlua::MultiValue,
@@ -469,7 +469,7 @@ impl ScriptCommands {
 
     /// Execute GET command
     fn execute_get(
-        storage: &StorageAdapter,
+        storage: &StorageEngine,
         transaction: &Arc<RwLock<ScriptTransaction>>,
         args: &[Bytes],
     ) -> Result<RespValue> {
@@ -490,7 +490,7 @@ impl ScriptCommands {
 
     /// Execute SET command
     fn execute_set(
-        _storage: &StorageAdapter,
+        _storage: &StorageEngine,
         transaction: &Arc<RwLock<ScriptTransaction>>,
         args: &[Bytes],
     ) -> Result<RespValue> {
@@ -510,7 +510,7 @@ impl ScriptCommands {
 
     /// Execute DEL command
     fn execute_del(
-        storage: &StorageAdapter,
+        storage: &StorageEngine,
         transaction: &Arc<RwLock<ScriptTransaction>>,
         args: &[Bytes],
     ) -> Result<RespValue> {
@@ -536,7 +536,7 @@ impl ScriptCommands {
 
     /// Execute EXISTS command
     fn execute_exists(
-        storage: &StorageAdapter,
+        storage: &StorageEngine,
         transaction: &Arc<RwLock<ScriptTransaction>>,
         args: &[Bytes],
     ) -> Result<RespValue> {
@@ -633,10 +633,10 @@ impl ScriptCommands {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::StorageAdapter;
+    use crate::storage::StorageEngine;
 
     fn setup() -> ScriptCommands {
-        let storage = StorageAdapter::with_db_count(16);
+        let storage = StorageEngine::new_memory(16);
         ScriptCommands::new(storage)
     }
 

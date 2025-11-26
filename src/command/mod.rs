@@ -21,7 +21,7 @@ use self::string::StringCommands;
 use self::zset::ZSetCommands;
 use crate::error::{AikvError, Result};
 use crate::protocol::RespValue;
-use crate::storage::StorageAdapter;
+use crate::storage::StorageEngine;
 use bytes::Bytes;
 
 /// Command executor with database context
@@ -41,11 +41,11 @@ pub struct CommandExecutor {
 }
 
 impl CommandExecutor {
-    pub fn new(storage: StorageAdapter) -> Self {
+    pub fn new(storage: StorageEngine) -> Self {
         Self::with_port(storage, 6379)
     }
 
-    pub fn with_port(storage: StorageAdapter, port: u16) -> Self {
+    pub fn with_port(storage: StorageEngine, port: u16) -> Self {
         Self {
             string_commands: StringCommands::new(storage.clone()),
             json_commands: JsonCommands::new(storage.clone()),

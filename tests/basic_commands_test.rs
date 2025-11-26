@@ -1,11 +1,11 @@
 use aikv::command::CommandExecutor;
 use aikv::protocol::RespValue;
-use aikv::storage::StorageAdapter;
+use aikv::StorageEngine;
 use bytes::Bytes;
 
 #[test]
 fn test_database_commands() {
-    let storage = StorageAdapter::new();
+    let storage = StorageEngine::new_memory(16);
     let executor = CommandExecutor::new(storage);
     let mut current_db = 0;
     let client_id = 1;
@@ -87,7 +87,7 @@ fn test_database_commands() {
 
 #[test]
 fn test_key_commands() {
-    let storage = StorageAdapter::new();
+    let storage = StorageEngine::new_memory(16);
     let executor = CommandExecutor::new(storage);
     let mut current_db = 0;
     let client_id = 1;
@@ -268,7 +268,7 @@ fn test_key_commands() {
 
 #[test]
 fn test_expiration_commands() {
-    let storage = StorageAdapter::new();
+    let storage = StorageEngine::new_memory(16);
     let executor = CommandExecutor::new(storage);
     let mut current_db = 0;
     let client_id = 1;
@@ -386,7 +386,7 @@ fn test_expiration_commands() {
 
 #[test]
 fn test_ping_command() {
-    let storage = StorageAdapter::new();
+    let storage = StorageEngine::new_memory(16);
     let executor = CommandExecutor::new(storage);
     let mut current_db = 0;
     let client_id = 1;
@@ -432,7 +432,7 @@ fn test_ping_command() {
 
 #[test]
 fn test_server_commands() {
-    let storage = StorageAdapter::new();
+    let storage = StorageEngine::new_memory(16);
     let executor = CommandExecutor::new(storage);
     let mut current_db = 0;
     let client_id = 1;
@@ -509,7 +509,7 @@ fn test_server_commands() {
 
 #[test]
 fn test_scan_iteration() {
-    let storage = StorageAdapter::new();
+    let storage = StorageEngine::new_memory(16);
     let executor = CommandExecutor::new(storage);
     let mut current_db = 0;
     let client_id = 1;
@@ -610,7 +610,7 @@ fn test_scan_iteration() {
 
 #[test]
 fn test_set_with_expire_options() {
-    let storage = StorageAdapter::new();
+    let storage = StorageEngine::new_memory(16);
     let executor = CommandExecutor::new(storage);
     let mut current_db = 0;
     let client_id = 1;
