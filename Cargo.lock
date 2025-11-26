@@ -65,6 +65,7 @@ dependencies = [
  "bytes",
  "criterion",
  "mlua",
+ "openraft",
  "redis",
  "serde",
  "serde_json",

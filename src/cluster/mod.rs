@@ -53,6 +53,14 @@
 //! - `CLUSTER REPLICAS` - List replicas of a master
 //! - `READONLY` / `READWRITE` - Enable/disable readonly mode for replicas
 //! - Membership coordinator integration
+//!
+//! # Multi-Raft Integration (v0.2.0)
+//!
+//! The cluster module now integrates with AiDb's Multi-Raft implementation:
+//! - `MultiRaftNode` for managing multiple Raft groups
+//! - `MetaRaftNode` for cluster metadata consensus
+//! - Automatic key-to-slot-to-group routing
+//! - Support for 3-node cluster startup
 
 mod commands;
 mod node;
@@ -62,12 +70,16 @@ pub use commands::{
     ClusterCommands, ClusterState, FailoverMode, KeyCounter, KeyScanner, MigrationProgress,
     NodeInfo, RedirectType, SlotState,
 };
-pub use node::ClusterNode;
+pub use node::{ClusterNode, NodeId};
 pub use router::SlotRouter;
 
-// Re-export constants from AiDb
+// Re-export ClusterConfig when cluster feature is enabled
 #[cfg(feature = "cluster")]
-pub use aidb::cluster::SLOT_COUNT;
+pub use node::{ClusterConfig, GroupId};
+
+// Re-export AiDb cluster types when cluster feature is enabled
+#[cfg(feature = "cluster")]
+pub use aidb::cluster::{MetaRaftNode, MultiRaftNode, Router as AiDbRouter, SLOT_COUNT};
 
 /// Default slot count for Redis Cluster (16384 slots)
 #[cfg(not(feature = "cluster"))]

@@ -12,7 +12,7 @@ categories = ["database", "network-programming"]
 
 [features]
 default = []
-cluster = ["aidb/raft-cluster"]
+cluster = ["aidb/raft-cluster", "openraft"]
 
 [dependencies]
 # Async runtime
@@ -37,6 +37,9 @@ toml = "0.8"
 
 # Storage engine
 aidb = { git = "https://github.com/Genuineh/AiDb", tag = "v0.4.1" }
+
+# Raft consensus (optional, for cluster mode)
+openraft = { version = "0.9", features = ["serde"], optional = true }
 
 # Lua scripting
 mlua = { version = "0.10", features = ["lua54", "async", "send", "vendored"] }

@@ -49,14 +49,23 @@
 
 ## 待完成项 - 近期优先
 
-### 🔴 P0: 集群 Multi-Raft 集成 (v0.2.0)
+### ✅ 集群 Multi-Raft 集成 (v0.2.0) - 已完成
 
 > 预计时间: 2 周
+> 完成时间: 2025-11-26
 
-- [ ] 添加 `cluster` feature (`aidb/raft-cluster`)
-- [ ] 封装 `MultiRaftNode` 初始化
-- [ ] 封装 `MetaRaftNode` 初始化
-- [ ] 实现 3 节点启动和验证
+- [x] 添加 `cluster` feature (`aidb/raft-cluster`)
+- [x] 封装 `MultiRaftNode` 初始化
+- [x] 封装 `MetaRaftNode` 初始化
+- [x] 实现 3 节点启动和验证
+
+**实现说明:**
+- `ClusterNode` 现在封装了 AiDb 的 `MultiRaftNode` 和 `MetaRaftNode`
+- 支持通过 `initialize()` 方法初始化 Multi-Raft 节点
+- 支持通过 `bootstrap_meta_cluster()` 方法引导 MetaRaft 集群
+- 支持通过 `start_cluster()` 方法创建多个 Raft 组进行数据分片
+- 新增 `ClusterConfig` 配置结构
+- 新增完整的单元测试验证 3 节点集群功能
 
 ### 🔴 P0: Cluster Bus 实现 (AiDb 胶水层)
 
@@ -193,11 +202,11 @@
 - ✅ Lua 脚本 + 事务性
 - ✅ 集群命令框架 (90%)
 
-### v0.2.0 - Multi-Raft 集成 (周 1-2)
+### v0.2.0 ✅ Multi-Raft 集成 (已完成)
 
-- [ ] `cluster` feature 和 AiDb v0.4.1 集成
-- [ ] `MultiRaftNode` / `MetaRaftNode` 封装
-- [ ] 3 节点启动验证
+- [x] `cluster` feature 和 AiDb v0.4.1 集成
+- [x] `MultiRaftNode` / `MetaRaftNode` 封装
+- [x] 3 节点启动验证
 
 ### v0.3.0 - 槽路由 (周 3-4)
 
