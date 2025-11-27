@@ -11,5 +11,5 @@ pub mod cluster;
 
 pub use error::{AikvError, Result};
 pub use observability::{LoggingManager, Metrics};
-pub use server::Server;
+pub use server::{MonitorBroadcaster, MonitorMessage, Server};
 pub use storage::StorageEngine;

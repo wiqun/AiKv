@@ -1,4 +1,7 @@
 pub mod connection;
+pub mod monitor;
+
+pub use monitor::{MonitorBroadcaster, MonitorMessage};
 
 use self::connection::Connection;
 use crate::command::CommandExecutor;
@@ -16,6 +19,7 @@ pub struct Server {
     port: u16,
     storage: StorageEngine,
     metrics: Arc<Metrics>,
+    monitor_broadcaster: Arc<MonitorBroadcaster>,
 }
 
 impl Server {
@@ -40,12 +44,18 @@ impl Server {
             port,
             storage,
             metrics: Arc::new(Metrics::new()),
+            monitor_broadcaster: Arc::new(MonitorBroadcaster::new()),
         }
     }
 
     /// Get server metrics
     pub fn metrics(&self) -> Arc<Metrics> {
         Arc::clone(&self.metrics)
+    }
+
+    /// Get monitor broadcaster
+    pub fn monitor_broadcaster(&self) -> Arc<MonitorBroadcaster> {
+        Arc::clone(&self.monitor_broadcaster)
     }
 
     /// Run the server
@@ -63,9 +73,15 @@ impl Server {
 
                     let executor = CommandExecutor::with_port(self.storage.clone(), self.port);
                     let metrics = Arc::clone(&self.metrics);
+                    let monitor_broadcaster = Arc::clone(&self.monitor_broadcaster);
 
                     tokio::spawn(async move {
-                        let mut conn = Connection::new(stream, executor, Some(metrics.clone()));
+                        let mut conn = Connection::new(
+                            stream,
+                            executor,
+                            Some(metrics.clone()),
+                            Some(monitor_broadcaster),
+                        );
 
                         if let Err(e) = conn.handle().await {
                             error!("Connection error: {}", e);
