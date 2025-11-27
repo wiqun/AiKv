@@ -147,6 +147,7 @@
 
 ### 🟡 P2: Server 命令补全
 
+- [x] `MONITOR` - 实时命令监控 (支持 Redis 桌面客户端 Profiler 功能)
 - [ ] `CONFIG REWRITE` - 重写配置文件
 - [ ] `COMMAND` - 获取命令详细信息
 - [ ] `COMMAND COUNT` - 获取命令总数

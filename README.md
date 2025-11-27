@@ -88,10 +88,11 @@ AiKv 是一个基于 [AiDb v0.4.1](https://github.com/Genuineh/AiDb) 的高性�
 - `TTL`, `PTTL`, `PERSIST`
 - `EXPIRETIME`, `PEXPIRETIME` (Redis 7.0+)
 
-### Server 命令 (9个)
+### Server 命令 (10个)
 - `INFO`, `TIME`
 - `CONFIG GET/SET`
 - `CLIENT LIST/SETNAME/GETNAME`
+- `MONITOR` - 实时命令监控 (支持 Redis 桌面客户端 Profiler)
 
 ### Lua 脚本命令 (6个)
 - `EVAL`, `EVALSHA`
