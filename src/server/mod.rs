@@ -3,8 +3,10 @@ pub mod connection;
 use self::connection::Connection;
 use crate::command::CommandExecutor;
 use crate::error::Result;
+use crate::observability::Metrics;
 use crate::storage::StorageEngine;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing::{error, info};
 
@@ -13,6 +15,7 @@ pub struct Server {
     addr: String,
     port: u16,
     storage: StorageEngine,
+    metrics: Arc<Metrics>,
 }
 
 impl Server {
@@ -36,7 +39,13 @@ impl Server {
             addr,
             port,
             storage,
+            metrics: Arc::new(Metrics::new()),
         }
+    }
+
+    /// Get server metrics
+    pub fn metrics(&self) -> Arc<Metrics> {
+        Arc::clone(&self.metrics)
     }
 
     /// Run the server
@@ -49,15 +58,21 @@ impl Server {
                 Ok((stream, addr)) => {
                     info!("New connection from: {}", addr);
 
+                    // Record connection metrics
+                    self.metrics.connections.record_connection();
+
                     let executor = CommandExecutor::with_port(self.storage.clone(), self.port);
+                    let metrics = Arc::clone(&self.metrics);
 
                     tokio::spawn(async move {
-                        let mut conn = Connection::new(stream, executor);
+                        let mut conn = Connection::new(stream, executor, Some(metrics.clone()));
 
                         if let Err(e) = conn.handle().await {
                             error!("Connection error: {}", e);
                         }
 
+                        // Record disconnection
+                        metrics.connections.record_disconnection();
                         info!("Connection closed: {}", addr);
                     });
                 }

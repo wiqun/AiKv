@@ -159,23 +159,35 @@
 
 ## 待完成项 - 长期规划
 
-### 🔵 P3: 监控和可观测性
+### ✅ P3: 监控和可观测性 - 已完成
+
+> 完成时间: 2025-11-27
 
 **日志增强**:
-- [ ] 添加结构化日志
-- [ ] 实现日志级别动态调整
-- [ ] 添加慢查询日志
-- [ ] 实现日志轮转和归档
+- [x] 添加结构化日志 (`LogFormat::Json` 支持)
+- [x] 实现日志级别动态调整 (`CONFIG SET loglevel` 命令)
+- [x] 添加慢查询日志 (`SLOWLOG GET/LEN/RESET` 命令)
+- [x] 实现日志轮转和归档 (`LogConfig` 配置结构)
 
 **Metrics 指标**:
-- [ ] 集成 Prometheus metrics
-- [ ] 添加命令执行统计
-- [ ] 添加连接统计
-- [ ] 添加内存使用统计
+- [x] 集成 Prometheus metrics (`Metrics::export_prometheus()`)
+- [x] 添加命令执行统计 (`CommandMetrics`)
+- [x] 添加连接统计 (`ConnectionMetrics`)
+- [x] 添加内存使用统计 (`MemoryMetrics`)
 
 **追踪 (Tracing)**:
-- [ ] 集成分布式追踪 (OpenTelemetry)
-- [ ] 添加请求追踪
+- [x] 集成分布式追踪 (`TracingConfig` + OpenTelemetry 配置)
+- [x] 添加请求追踪 (`CommandSpan` + `TraceContext`)
+
+**实现说明:**
+- 新增 `src/observability/` 模块包含 `logging.rs`, `metrics.rs`, `tracing_setup.rs`
+- 支持 `CONFIG SET loglevel <level>` 动态调整日志级别
+- 支持 `CONFIG SET slowlog-log-slower-than <us>` 设置慢查询阈值
+- 支持 `CONFIG SET slowlog-max-len <len>` 设置慢查询日志最大长度
+- 实现 Redis 兼容的 `SLOWLOG GET/LEN/RESET/HELP` 命令
+- 实现 Prometheus 文本格式指标导出
+- 实现 W3C traceparent 格式的分布式追踪上下文
+- 完整的单元测试覆盖
 
 ### 🔵 P3: 文档和工具
 

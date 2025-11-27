@@ -133,6 +133,7 @@ impl CommandExecutor {
                     ))),
                 }
             }
+            "SLOWLOG" => self.server_commands.slowlog(args),
             "TIME" => self.server_commands.time(args),
             "CLIENT" => {
                 if args.is_empty() {

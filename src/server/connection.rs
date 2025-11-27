@@ -1,10 +1,14 @@
 use crate::command::CommandExecutor;
 use crate::error::Result;
+use crate::observability::Metrics;
 use crate::protocol::{RespParser, RespValue};
 use bytes::Bytes;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tracing::{debug, warn};
 
 static CLIENT_ID_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -23,10 +27,16 @@ pub struct Connection {
     protocol_version: ProtocolVersion,
     current_db: usize,
     client_id: usize,
+    metrics: Option<Arc<Metrics>>,
+    client_addr: String,
 }
 
 impl Connection {
-    pub fn new(stream: TcpStream, executor: CommandExecutor) -> Self {
+    pub fn new(
+        stream: TcpStream,
+        executor: CommandExecutor,
+        metrics: Option<Arc<Metrics>>,
+    ) -> Self {
         let client_id = CLIENT_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
         let peer_addr = stream
             .peer_addr()
@@ -36,9 +46,9 @@ impl Connection {
         // Register client
         if let Err(e) = executor
             .server_commands()
-            .register_client(client_id, peer_addr)
+            .register_client(client_id, peer_addr.clone())
         {
-            eprintln!("Failed to register client: {}", e);
+            warn!("Failed to register client: {}", e);
         }
 
         Self {
@@ -48,6 +58,8 @@ impl Connection {
             protocol_version: ProtocolVersion::Resp2, // Default to RESP2
             current_db: 0,                            // Default to database 0
             client_id,
+            metrics,
+            client_addr: peer_addr,
         }
     }
 
@@ -64,9 +76,14 @@ impl Connection {
                     .server_commands()
                     .unregister_client(self.client_id)
                 {
-                    eprintln!("Failed to unregister client: {}", e);
+                    warn!("Failed to unregister client: {}", e);
                 }
                 return Ok(());
+            }
+
+            // Record bytes received
+            if let Some(ref metrics) = self.metrics {
+                metrics.connections.record_bytes_received(n as u64);
             }
 
             // Parse and process commands
@@ -78,6 +95,8 @@ impl Connection {
     }
 
     async fn process_command(&mut self, value: RespValue) -> RespValue {
+        let start = Instant::now();
+
         match value {
             RespValue::Array(Some(arr)) if !arr.is_empty() => {
                 // Extract command and arguments
@@ -101,10 +120,31 @@ impl Connection {
                     })
                     .collect();
 
-                match self
-                    .executor
-                    .execute(&command, &args, &mut self.current_db, self.client_id)
-                {
+                let result =
+                    self.executor
+                        .execute(&command, &args, &mut self.current_db, self.client_id);
+
+                // Record metrics
+                if let Some(ref metrics) = self.metrics {
+                    let duration = start.elapsed();
+                    match &result {
+                        Ok(_) => {
+                            metrics.commands.record_command(&command, duration);
+                            debug!(
+                                command = %command,
+                                duration_us = duration.as_micros(),
+                                client = %self.client_addr,
+                                db = self.current_db,
+                                "Command executed"
+                            );
+                        }
+                        Err(_) => {
+                            metrics.commands.record_error(&command);
+                        }
+                    }
+                }
+
+                match result {
                     Ok(resp) => resp,
                     Err(e) => RespValue::error(format!("ERR {}", e)),
                 }
@@ -164,6 +204,12 @@ impl Connection {
 
     async fn write_response(&mut self, response: RespValue) -> Result<()> {
         let data = response.serialize();
+
+        // Record bytes sent
+        if let Some(ref metrics) = self.metrics {
+            metrics.connections.record_bytes_sent(data.len() as u64);
+        }
+
         self.stream.write_all(&data).await?;
         self.stream.flush().await?;
         Ok(())

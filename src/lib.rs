@@ -1,5 +1,6 @@
 pub mod command;
 pub mod error;
+pub mod observability;
 pub mod persistence;
 pub mod protocol;
 pub mod server;
@@ -9,5 +10,6 @@ pub mod storage;
 pub mod cluster;
 
 pub use error::{AikvError, Result};
+pub use observability::{LoggingManager, Metrics};
 pub use server::Server;
 pub use storage::StorageEngine;

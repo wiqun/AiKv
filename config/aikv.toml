@@ -53,13 +53,59 @@ databases = 16
 [logging]
 # ✅ 日志级别 / Log level
 # 可选值 / Options: trace, debug, info, warn, error
+# 可通过 CONFIG SET loglevel <level> 动态调整
 level = "info"
 
 # 🚧 以下配置项尚未实现 / The following options are not yet implemented:
 # file = "./logs/aikv.log"     # 日志文件路径 / Log file path
 # console = true               # 是否输出到控制台 / Output to console
+# format = "text"              # 日志格式 / Log format: "text" or "json"
 # max_size = "100MB"           # 日志轮转大小 / Log rotation size
 # max_backups = 10             # 保留日志文件数量 / Number of backup log files
+
+# ============================================================
+# 慢查询日志配置 / Slow Query Log Configuration
+# ============================================================
+[slowlog]
+# ✅ 慢查询阈值（微秒）/ Slow query threshold in microseconds
+# 超过此时间的查询将被记录到慢查询日志
+# 可通过 CONFIG SET slowlog-log-slower-than <us> 动态调整
+# Commands taking longer than this will be logged
+log-slower-than = 10000
+
+# ✅ 慢查询日志最大长度 / Maximum slow log entries
+# 可通过 CONFIG SET slowlog-max-len <len> 动态调整
+max-len = 128
+
+# ============================================================
+# 监控和可观测性 / Monitoring and Observability
+# ============================================================
+# [metrics]
+# # ✅ Prometheus 指标已实现 / Prometheus metrics implemented
+# # 可通过 Metrics::export_prometheus() 获取 Prometheus 格式的指标
+# # 支持的指标 / Supported metrics:
+# #   - aikv_uptime_seconds
+# #   - aikv_commands_total
+# #   - aikv_commands_errors_total
+# #   - aikv_commands_duration_avg_us
+# #   - aikv_ops_per_second
+# #   - aikv_connections_total
+# #   - aikv_connected_clients
+# #   - aikv_rejected_connections_total
+# #   - aikv_used_memory_bytes
+# #   - aikv_used_memory_peak_bytes
+# #   - aikv_keyspace_hits_total
+# #   - aikv_keyspace_misses_total
+# #   - aikv_expired_keys_total
+# #   - aikv_commands_by_type{command="..."}
+
+# [tracing]
+# # 分布式追踪配置 / Distributed tracing configuration
+# # 支持 W3C traceparent 格式
+# enabled = false
+# service_name = "aikv"
+# otlp_endpoint = "http://localhost:4317"
+# sampling_ratio = 1.0
 
 # ============================================================
 # 🚧 以下配置节尚未实现 / The following sections are not yet implemented

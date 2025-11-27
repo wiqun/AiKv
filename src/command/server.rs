@@ -1,9 +1,11 @@
 use crate::error::{AikvError, Result};
+use crate::observability::{LogConfig, SlowQueryLog};
 use crate::protocol::RespValue;
 use bytes::Bytes;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use tracing::Level;
 
 /// AiKv version - the actual version of this server
 const AIKV_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -27,6 +29,8 @@ pub struct ServerCommands {
     start_time: Instant,
     run_id: String,
     tcp_port: u16,
+    current_log_level: Arc<RwLock<Level>>,
+    slow_query_log: Arc<SlowQueryLog>,
 }
 
 /// Generate a random 40-character hex string for run_id (similar to Redis)
@@ -64,6 +68,9 @@ impl ServerCommands {
         default_config.insert("version".to_string(), AIKV_VERSION.to_string());
         default_config.insert("port".to_string(), port.to_string());
         default_config.insert("databases".to_string(), "16".to_string());
+        default_config.insert("loglevel".to_string(), "info".to_string());
+        default_config.insert("slowlog-log-slower-than".to_string(), "10000".to_string());
+        default_config.insert("slowlog-max-len".to_string(), "128".to_string());
 
         Self {
             clients: Arc::new(RwLock::new(HashMap::new())),
@@ -71,7 +78,22 @@ impl ServerCommands {
             start_time: Instant::now(),
             run_id: generate_run_id(),
             tcp_port: port,
+            current_log_level: Arc::new(RwLock::new(Level::INFO)),
+            slow_query_log: Arc::new(SlowQueryLog::new()),
         }
+    }
+
+    /// Get the slow query log
+    pub fn slow_query_log(&self) -> Arc<SlowQueryLog> {
+        Arc::clone(&self.slow_query_log)
+    }
+
+    /// Get current log level
+    pub fn log_level(&self) -> Level {
+        *self
+            .current_log_level
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     /// Get server uptime in seconds
@@ -432,23 +454,129 @@ impl ServerCommands {
         let parameter = String::from_utf8_lossy(&args[0]).to_string();
         let value = String::from_utf8_lossy(&args[1]).to_string();
 
+        // Handle special parameters with side effects (case-insensitive comparison)
+        let param_lower = parameter.to_lowercase();
+        if param_lower == "server" || param_lower == "version" || param_lower == "port" {
+            return Err(AikvError::InvalidArgument(
+                "ERR configuration parameter is read-only".to_string(),
+            ));
+        } else if param_lower == "loglevel" {
+            // Dynamic log level adjustment
+            if let Some(level) = LogConfig::parse_level(&value) {
+                if let Ok(mut current) = self.current_log_level.write() {
+                    *current = level;
+                }
+            } else {
+                return Err(AikvError::InvalidArgument(format!(
+                    "ERR invalid log level: {}",
+                    value
+                )));
+            }
+        } else if param_lower == "slowlog-log-slower-than" {
+            // Update slow query threshold
+            match value.parse::<u64>() {
+                Ok(threshold) => {
+                    self.slow_query_log.set_threshold_us(threshold);
+                }
+                Err(_) => {
+                    return Err(AikvError::InvalidArgument(
+                        "ERR invalid slowlog threshold value".to_string(),
+                    ));
+                }
+            }
+        } else if param_lower == "slowlog-max-len" {
+            // Update slow query max length
+            match value.parse::<usize>() {
+                Ok(max_len) => {
+                    self.slow_query_log.set_max_len(max_len);
+                }
+                Err(_) => {
+                    return Err(AikvError::InvalidArgument(
+                        "ERR invalid slowlog max length value".to_string(),
+                    ));
+                }
+            }
+        }
+
         let mut config = self
             .config
             .write()
             .map_err(|e| AikvError::Storage(format!("Lock error: {}", e)))?;
 
-        // For safety, only allow certain parameters to be set
-        match parameter.as_str() {
-            "server" | "version" | "port" => {
-                return Err(AikvError::InvalidArgument(
-                    "ERR configuration parameter is read-only".to_string(),
-                ));
-            }
-            _ => {}
-        }
-
         config.insert(parameter, value);
         Ok(RespValue::ok())
+    }
+
+    /// SLOWLOG subcommand - Manage the slow query log
+    pub fn slowlog(&self, args: &[Bytes]) -> Result<RespValue> {
+        if args.is_empty() {
+            return Err(AikvError::WrongArgCount("SLOWLOG".to_string()));
+        }
+
+        let subcommand = String::from_utf8_lossy(&args[0]).to_uppercase();
+
+        match subcommand.as_str() {
+            "GET" => {
+                // SLOWLOG GET [count]
+                let count = if args.len() > 1 {
+                    String::from_utf8_lossy(&args[1])
+                        .parse::<usize>()
+                        .unwrap_or(10)
+                } else {
+                    10
+                };
+
+                let entries = self.slow_query_log.get(count);
+                let result: Vec<RespValue> = entries
+                    .iter()
+                    .map(|entry| {
+                        RespValue::array(vec![
+                            RespValue::integer(entry.id as i64),
+                            RespValue::integer(entry.timestamp as i64),
+                            RespValue::integer(entry.duration_us as i64),
+                            RespValue::array(
+                                std::iter::once(RespValue::bulk_string(entry.command.clone()))
+                                    .chain(
+                                        entry
+                                            .args
+                                            .iter()
+                                            .map(|a| RespValue::bulk_string(a.clone())),
+                                    )
+                                    .collect(),
+                            ),
+                            RespValue::bulk_string(
+                                entry.client_addr.clone().unwrap_or_else(|| "".to_string()),
+                            ),
+                            RespValue::bulk_string(""), // client name (not tracked)
+                        ])
+                    })
+                    .collect();
+
+                Ok(RespValue::array(result))
+            }
+            "LEN" => {
+                // SLOWLOG LEN
+                Ok(RespValue::integer(self.slow_query_log.len() as i64))
+            }
+            "RESET" => {
+                // SLOWLOG RESET
+                self.slow_query_log.reset();
+                Ok(RespValue::ok())
+            }
+            "HELP" => {
+                // SLOWLOG HELP
+                Ok(RespValue::array(vec![
+                    RespValue::bulk_string("SLOWLOG GET [count] - Get the slow log entries"),
+                    RespValue::bulk_string("SLOWLOG LEN - Get the slow log length"),
+                    RespValue::bulk_string("SLOWLOG RESET - Reset the slow log"),
+                    RespValue::bulk_string("SLOWLOG HELP - Show this help"),
+                ]))
+            }
+            _ => Err(AikvError::InvalidCommand(format!(
+                "Unknown SLOWLOG subcommand: {}",
+                subcommand
+            ))),
+        }
     }
 
     /// TIME - Return the current server time
