@@ -144,6 +144,13 @@ impl NodeHealthInfo {
 /// The ClusterBus integrates with AiDb's MetaRaft to provide:
 /// - Leader heartbeat detection via `MetaRaftNode::is_leader()` and `get_leader()`
 /// - Failure detection via node status tracking and election timeout
+///
+/// # Feature-Dependent API
+///
+/// When the `cluster` feature is enabled, the ClusterBus uses `Arc<RwLock>` for
+/// thread-safe access, allowing methods like `register_node` to take `&self`.
+/// Without the feature, a plain `HashMap` is used, requiring `&mut self` for
+/// mutation methods. This is by design to minimize overhead in non-cluster mode.
 pub struct ClusterBus {
     /// This node's ID
     node_id: NodeId,
@@ -307,6 +314,10 @@ impl ClusterBus {
     }
 
     /// Perform cluster health check by querying MetaRaft.
+    ///
+    /// This method reads cluster metadata from the MetaRaft state machine and updates
+    /// the local node health tracking. `get_cluster_meta()` is infallible as it reads
+    /// from the local state machine without going through Raft consensus.
     #[cfg(feature = "cluster")]
     async fn check_cluster_health(
         node_id: NodeId,
@@ -314,7 +325,7 @@ impl ClusterBus {
         config: &ClusterBusConfig,
         node_health: &Arc<RwLock<HashMap<NodeId, NodeHealthInfo>>>,
     ) {
-        // Get cluster metadata
+        // Get cluster metadata (infallible - reads from local state machine)
         let cluster_meta = meta_raft.get_cluster_meta();
 
         // Check leader status
