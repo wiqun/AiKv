@@ -4,6 +4,9 @@ use crate::storage::{SerializableStoredValue, StorageEngine, StoredValue};
 use bytes::Bytes;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Default number of databases (matching Redis default)
+const DEFAULT_DB_COUNT: usize = 16;
+
 /// Key command handler
 pub struct KeyCommands {
     storage: StorageEngine,
@@ -461,21 +464,21 @@ impl KeyCommands {
                 // Build the dump format:
                 // - serialized value
                 // - 2 bytes RDB version (0x0009 = 9)
-                // - 8 bytes CRC64 checksum (simplified: we use a simple hash)
+                // - 8 bytes checksum (simplified additive checksum)
                 let mut dump_data = serialized;
                 dump_data.extend_from_slice(&[0x00, 0x09]); // RDB version 9
 
-                // Calculate a simple checksum (CRC64-like, but simplified)
+                // Calculate a simple 64-bit additive checksum for data integrity
                 let checksum = Self::calculate_checksum(&dump_data);
                 dump_data.extend_from_slice(&checksum.to_le_bytes());
 
-                Ok(RespValue::bulk_string(dump_data))
+                Ok(RespValue::bulk_string(Bytes::from(dump_data)))
             }
             None => Ok(RespValue::null_bulk_string()),
         }
     }
 
-    /// Calculate a simple 64-bit checksum for the data
+    /// Calculate a simple 64-bit additive checksum for the data
     fn calculate_checksum(data: &[u8]) -> u64 {
         let mut checksum: u64 = 0;
         for (i, byte) in data.iter().enumerate() {
@@ -712,7 +715,7 @@ impl KeyCommands {
         }
 
         // Validate destination database
-        if dest_db >= 16 {
+        if dest_db >= DEFAULT_DB_COUNT {
             return Err(AikvError::InvalidArgument(
                 "ERR invalid DB index".to_string(),
             ));
@@ -735,12 +738,29 @@ impl KeyCommands {
 
             // Get the source value
             if let Some(stored_value) = self.storage.get_value(current_db, key)? {
+                // Remember if destination had a value for rollback
+                let dest_had_value = self.storage.exists_in_db(dest_db, key)?;
+                let dest_old_value = if dest_had_value && replace {
+                    self.storage.get_value(dest_db, key)?
+                } else {
+                    None
+                };
+
                 // Copy to destination
-                self.storage.set_value(dest_db, key.clone(), stored_value)?;
+                self.storage
+                    .set_value(dest_db, key.clone(), stored_value.clone())?;
 
                 // Delete from source if not COPY mode
                 if !copy {
-                    self.storage.delete_from_db(current_db, key)?;
+                    if let Err(e) = self.storage.delete_from_db(current_db, key) {
+                        // Rollback: restore destination to previous state
+                        if let Some(old_val) = dest_old_value {
+                            let _ = self.storage.set_value(dest_db, key.clone(), old_val);
+                        } else if !dest_had_value {
+                            let _ = self.storage.delete_from_db(dest_db, key);
+                        }
+                        return Err(e);
+                    }
                 }
 
                 migrated_count += 1;
