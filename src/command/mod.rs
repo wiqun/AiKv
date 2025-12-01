@@ -182,6 +182,8 @@ impl CommandExecutor {
             "LSET" => self.list_commands.lset(args, *current_db),
             "LREM" => self.list_commands.lrem(args, *current_db),
             "LTRIM" => self.list_commands.ltrim(args, *current_db),
+            "LINSERT" => self.list_commands.linsert(args, *current_db),
+            "LMOVE" => self.list_commands.lmove(args, *current_db),
 
             // Hash commands
             "HSET" => self.hash_commands.hset(args, *current_db),

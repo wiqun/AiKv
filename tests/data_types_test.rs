@@ -38,6 +38,143 @@ fn test_list_commands() {
 }
 
 #[test]
+fn test_linsert_command() {
+    let storage = StorageEngine::new_memory(16);
+    let executor = CommandExecutor::new(storage);
+    let mut current_db = 0;
+    let client_id = 1;
+
+    // Create a list
+    let args = vec![Bytes::from("mylist"), Bytes::from("a"), Bytes::from("c")];
+    executor
+        .execute("RPUSH", &args, &mut current_db, client_id)
+        .unwrap();
+
+    // LINSERT BEFORE
+    let args = vec![
+        Bytes::from("mylist"),
+        Bytes::from("BEFORE"),
+        Bytes::from("c"),
+        Bytes::from("b"),
+    ];
+    let result = executor.execute("LINSERT", &args, &mut current_db, client_id);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), RespValue::Integer(3));
+
+    // Verify list order: a, b, c
+    let args = vec![Bytes::from("mylist"), Bytes::from("0"), Bytes::from("-1")];
+    let result = executor.execute("LRANGE", &args, &mut current_db, client_id);
+    if let Ok(RespValue::Array(Some(items))) = result {
+        assert_eq!(items.len(), 3);
+    } else {
+        panic!("Expected array result");
+    }
+
+    // LINSERT AFTER
+    let args = vec![
+        Bytes::from("mylist"),
+        Bytes::from("AFTER"),
+        Bytes::from("c"),
+        Bytes::from("d"),
+    ];
+    let result = executor.execute("LINSERT", &args, &mut current_db, client_id);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), RespValue::Integer(4));
+
+    // LINSERT with non-existent pivot returns -1
+    let args = vec![
+        Bytes::from("mylist"),
+        Bytes::from("BEFORE"),
+        Bytes::from("notexist"),
+        Bytes::from("x"),
+    ];
+    let result = executor.execute("LINSERT", &args, &mut current_db, client_id);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), RespValue::Integer(-1));
+
+    // LINSERT on non-existent key returns 0
+    let args = vec![
+        Bytes::from("nokey"),
+        Bytes::from("BEFORE"),
+        Bytes::from("a"),
+        Bytes::from("x"),
+    ];
+    let result = executor.execute("LINSERT", &args, &mut current_db, client_id);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), RespValue::Integer(0));
+}
+
+#[test]
+fn test_lmove_command() {
+    let storage = StorageEngine::new_memory(16);
+    let executor = CommandExecutor::new(storage);
+    let mut current_db = 0;
+    let client_id = 1;
+
+    // Create source list
+    let args = vec![
+        Bytes::from("src"),
+        Bytes::from("a"),
+        Bytes::from("b"),
+        Bytes::from("c"),
+    ];
+    executor
+        .execute("RPUSH", &args, &mut current_db, client_id)
+        .unwrap();
+
+    // LMOVE LEFT RIGHT (pop from left of src, push to right of dst)
+    let args = vec![
+        Bytes::from("src"),
+        Bytes::from("dst"),
+        Bytes::from("LEFT"),
+        Bytes::from("RIGHT"),
+    ];
+    let result = executor.execute("LMOVE", &args, &mut current_db, client_id);
+    assert!(result.is_ok());
+    if let RespValue::BulkString(Some(value)) = result.unwrap() {
+        assert_eq!(value.as_ref(), b"a");
+    } else {
+        panic!("Expected BulkString result");
+    }
+
+    // Verify src has 2 elements
+    let args = vec![Bytes::from("src")];
+    let result = executor.execute("LLEN", &args, &mut current_db, client_id);
+    assert_eq!(result.unwrap(), RespValue::Integer(2));
+
+    // Verify dst has 1 element
+    let args = vec![Bytes::from("dst")];
+    let result = executor.execute("LLEN", &args, &mut current_db, client_id);
+    assert_eq!(result.unwrap(), RespValue::Integer(1));
+
+    // LMOVE RIGHT LEFT (pop from right of src, push to left of dst)
+    let args = vec![
+        Bytes::from("src"),
+        Bytes::from("dst"),
+        Bytes::from("RIGHT"),
+        Bytes::from("LEFT"),
+    ];
+    let result = executor.execute("LMOVE", &args, &mut current_db, client_id);
+    assert!(result.is_ok());
+    if let RespValue::BulkString(Some(value)) = result.unwrap() {
+        assert_eq!(value.as_ref(), b"c");
+    } else {
+        panic!("Expected BulkString result");
+    }
+
+    // LMOVE on non-existent key returns Null
+    let args = vec![
+        Bytes::from("nokey"),
+        Bytes::from("dst"),
+        Bytes::from("LEFT"),
+        Bytes::from("RIGHT"),
+    ];
+    let result = executor.execute("LMOVE", &args, &mut current_db, client_id);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), RespValue::Null);
+}
+
+#[test]
 fn test_hash_commands() {
     let storage = StorageEngine::new_memory(16);
     let executor = CommandExecutor::new(storage);
