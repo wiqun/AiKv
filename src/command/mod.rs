@@ -188,6 +188,7 @@ impl CommandExecutor {
             "HSETNX" => self.hash_commands.hsetnx(args, *current_db),
             "HGET" => self.hash_commands.hget(args, *current_db),
             "HMGET" => self.hash_commands.hmget(args, *current_db),
+            "HMSET" => self.hash_commands.hmset(args, *current_db),
             "HDEL" => self.hash_commands.hdel(args, *current_db),
             "HEXISTS" => self.hash_commands.hexists(args, *current_db),
             "HLEN" => self.hash_commands.hlen(args, *current_db),
@@ -196,6 +197,7 @@ impl CommandExecutor {
             "HGETALL" => self.hash_commands.hgetall(args, *current_db),
             "HINCRBY" => self.hash_commands.hincrby(args, *current_db),
             "HINCRBYFLOAT" => self.hash_commands.hincrbyfloat(args, *current_db),
+            "HSCAN" => self.hash_commands.hscan(args, *current_db),
 
             // Set commands
             "SADD" => self.set_commands.sadd(args, *current_db),

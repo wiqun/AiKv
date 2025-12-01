@@ -78,6 +78,178 @@ fn test_hash_commands() {
 }
 
 #[test]
+fn test_hmset_command() {
+    let storage = StorageEngine::new_memory(16);
+    let executor = CommandExecutor::new(storage);
+    let mut current_db = 0;
+    let client_id = 1;
+
+    // HMSET - set multiple field-value pairs
+    let args = vec![
+        Bytes::from("testhash"),
+        Bytes::from("field1"),
+        Bytes::from("value1"),
+        Bytes::from("field2"),
+        Bytes::from("value2"),
+        Bytes::from("field3"),
+        Bytes::from("value3"),
+    ];
+    let result = executor.execute("HMSET", &args, &mut current_db, client_id);
+    assert!(result.is_ok());
+    // HMSET should return OK
+    if let RespValue::SimpleString(s) = result.unwrap() {
+        assert_eq!(s.as_str(), "OK");
+    } else {
+        panic!("Expected SimpleString OK result");
+    }
+
+    // Verify with HLEN
+    let args = vec![Bytes::from("testhash")];
+    let result = executor.execute("HLEN", &args, &mut current_db, client_id);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), RespValue::Integer(3));
+
+    // Verify individual fields with HGET
+    let args = vec![Bytes::from("testhash"), Bytes::from("field1")];
+    let result = executor.execute("HGET", &args, &mut current_db, client_id);
+    assert!(result.is_ok());
+    if let RespValue::BulkString(Some(value)) = result.unwrap() {
+        assert_eq!(value.as_ref(), b"value1");
+    } else {
+        panic!("Expected BulkString result");
+    }
+
+    // HMSET on existing hash should update/add fields
+    let args = vec![
+        Bytes::from("testhash"),
+        Bytes::from("field1"),
+        Bytes::from("newvalue1"),
+        Bytes::from("field4"),
+        Bytes::from("value4"),
+    ];
+    let result = executor.execute("HMSET", &args, &mut current_db, client_id);
+    assert!(result.is_ok());
+
+    // Verify updated field
+    let args = vec![Bytes::from("testhash"), Bytes::from("field1")];
+    let result = executor.execute("HGET", &args, &mut current_db, client_id);
+    assert!(result.is_ok());
+    if let RespValue::BulkString(Some(value)) = result.unwrap() {
+        assert_eq!(value.as_ref(), b"newvalue1");
+    } else {
+        panic!("Expected BulkString result");
+    }
+
+    // Verify total fields count
+    let args = vec![Bytes::from("testhash")];
+    let result = executor.execute("HLEN", &args, &mut current_db, client_id);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), RespValue::Integer(4));
+}
+
+#[test]
+fn test_hscan_command() {
+    let storage = StorageEngine::new_memory(16);
+    let executor = CommandExecutor::new(storage);
+    let mut current_db = 0;
+    let client_id = 1;
+
+    // Create a hash with multiple fields
+    let args = vec![
+        Bytes::from("scanhash"),
+        Bytes::from("field1"),
+        Bytes::from("value1"),
+        Bytes::from("field2"),
+        Bytes::from("value2"),
+        Bytes::from("field3"),
+        Bytes::from("value3"),
+        Bytes::from("anotherfield"),
+        Bytes::from("anothervalue"),
+    ];
+    executor
+        .execute("HSET", &args, &mut current_db, client_id)
+        .unwrap();
+
+    // HSCAN with cursor 0 (start of iteration)
+    let args = vec![Bytes::from("scanhash"), Bytes::from("0")];
+    let result = executor.execute("HSCAN", &args, &mut current_db, client_id);
+    assert!(result.is_ok());
+    if let RespValue::Array(Some(items)) = result.unwrap() {
+        assert_eq!(items.len(), 2); // [cursor, [fields]]
+                                    // Check fields array
+        if let RespValue::Array(Some(fields)) = &items[1] {
+            assert_eq!(fields.len(), 8); // 4 fields * 2 (field + value)
+        } else {
+            panic!("Expected array of fields");
+        }
+    } else {
+        panic!("Expected array result");
+    }
+
+    // HSCAN with COUNT option
+    let args = vec![
+        Bytes::from("scanhash"),
+        Bytes::from("0"),
+        Bytes::from("COUNT"),
+        Bytes::from("2"),
+    ];
+    let result = executor.execute("HSCAN", &args, &mut current_db, client_id);
+    assert!(result.is_ok());
+    if let RespValue::Array(Some(items)) = result.unwrap() {
+        assert_eq!(items.len(), 2);
+        // Check next cursor is not 0 (more fields to iterate)
+        if let RespValue::BulkString(Some(cursor)) = &items[0] {
+            let cursor_val: usize = String::from_utf8_lossy(cursor).parse().unwrap();
+            assert_eq!(cursor_val, 2); // Next cursor should be 2
+        }
+        // Check fields array has 4 items (2 fields * 2)
+        if let RespValue::Array(Some(fields)) = &items[1] {
+            assert_eq!(fields.len(), 4);
+        } else {
+            panic!("Expected array of fields");
+        }
+    } else {
+        panic!("Expected array result");
+    }
+
+    // HSCAN with MATCH option
+    let args = vec![
+        Bytes::from("scanhash"),
+        Bytes::from("0"),
+        Bytes::from("MATCH"),
+        Bytes::from("field*"),
+    ];
+    let result = executor.execute("HSCAN", &args, &mut current_db, client_id);
+    assert!(result.is_ok());
+    if let RespValue::Array(Some(items)) = result.unwrap() {
+        // Check fields array - should only have field1, field2, field3
+        if let RespValue::Array(Some(fields)) = &items[1] {
+            assert_eq!(fields.len(), 6); // 3 fields * 2 (field + value)
+        } else {
+            panic!("Expected array of fields");
+        }
+    } else {
+        panic!("Expected array result");
+    }
+
+    // HSCAN on non-existent key should return empty result
+    let args = vec![Bytes::from("nonexistent"), Bytes::from("0")];
+    let result = executor.execute("HSCAN", &args, &mut current_db, client_id);
+    assert!(result.is_ok());
+    if let RespValue::Array(Some(items)) = result.unwrap() {
+        assert_eq!(items.len(), 2);
+        if let RespValue::BulkString(Some(cursor)) = &items[0] {
+            assert_eq!(cursor.as_ref(), b"0");
+        }
+        if let RespValue::Array(Some(fields)) = &items[1] {
+            assert!(fields.is_empty());
+        }
+    } else {
+        panic!("Expected array result");
+    }
+}
+
+#[test]
 fn test_set_commands() {
     let storage = StorageEngine::new_memory(16);
     let executor = CommandExecutor::new(storage);
