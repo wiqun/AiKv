@@ -1,0 +1,68 @@
+# ============================================================
+# AiKv Docker Compose - Production Configuration
+# ============================================================
+#
+# Usage:
+#   docker-compose up -d          # Start services
+#   docker-compose down           # Stop services
+#   docker-compose logs -f        # View logs
+#   docker-compose ps             # List services
+#
+# ============================================================
+
+version: '3.8'
+
+services:
+  # ------------------------------------------------------------
+  # Single Node AiKv
+  # ------------------------------------------------------------
+  aikv:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: aikv:latest
+    container_name: aikv
+    ports:
+      - "6379:6379"
+    volumes:
+      # Persistent data storage
+      - aikv-data:/app/data
+      # Logs
+      - aikv-logs:/app/logs
+      # Custom configuration (optional)
+      # - ./config/aikv.toml:/app/config/aikv.toml:ro
+    environment:
+      - RUST_LOG=info
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "sh", "-c", "echo PING | nc -w 1 localhost 6379 | grep -q PONG"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# Named volumes for data persistence
+volumes:
+  aikv-data:
+    driver: local
+  aikv-logs:
+    driver: local
+
+# Network configuration
+networks:
+  default:
+    name: aikv-network
+    driver: bridge

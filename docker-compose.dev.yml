@@ -1,0 +1,63 @@
+# ============================================================
+# AiKv Docker Compose - Development Configuration
+# ============================================================
+#
+# Usage:
+#   docker-compose -f docker-compose.dev.yml up -d
+#   docker-compose -f docker-compose.dev.yml logs -f
+#   docker-compose -f docker-compose.dev.yml down
+#
+# This configuration is optimized for development:
+#   - Source code mounted for live editing
+#   - Debug logging enabled
+#   - No resource limits
+#   - Build from source on start
+#
+# ============================================================
+
+version: '3.8'
+
+services:
+  # ------------------------------------------------------------
+  # Development AiKv Instance
+  # ------------------------------------------------------------
+  aikv-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: aikv:dev
+    container_name: aikv-dev
+    ports:
+      - "6379:6379"
+    volumes:
+      # Data persistence
+      - ./dev-data:/app/data
+      # Logs
+      - ./dev-logs:/app/logs
+      # Custom configuration
+      - ./config/aikv.toml:/app/config/aikv.toml:ro
+    environment:
+      - RUST_LOG=debug
+      - RUST_BACKTRACE=1
+    restart: unless-stopped
+    command: ["--host", "0.0.0.0", "--port", "6379"]
+
+  # ------------------------------------------------------------
+  # Redis CLI for testing (optional)
+  # ------------------------------------------------------------
+  redis-cli:
+    image: redis:7-alpine
+    container_name: redis-cli
+    depends_on:
+      - aikv-dev
+    entrypoint: ["sh"]
+    stdin_open: true
+    tty: true
+    profiles:
+      - tools
+
+# Network configuration
+networks:
+  default:
+    name: aikv-dev-network
+    driver: bridge
