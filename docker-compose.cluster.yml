@@ -6,6 +6,11 @@
 #   - 3 master nodes (aikv1, aikv2, aikv3)
 #   - 3 replica nodes (aikv4, aikv5, aikv6)
 #
+# Note: Full cluster functionality (gossip, raft) is not yet 
+# implemented. This configuration prepares the infrastructure
+# for future cluster features. See config/aikv-cluster.toml
+# for cluster configuration status.
+#
 # Usage:
 #   # Start cluster
 #   docker-compose -f docker-compose.cluster.yml up -d
@@ -310,12 +315,18 @@ services:
     image: redis:7-alpine
     container_name: aikv-redis-cli
     depends_on:
-      - aikv1
-      - aikv2
-      - aikv3
-      - aikv4
-      - aikv5
-      - aikv6
+      aikv1:
+        condition: service_healthy
+      aikv2:
+        condition: service_healthy
+      aikv3:
+        condition: service_healthy
+      aikv4:
+        condition: service_healthy
+      aikv5:
+        condition: service_healthy
+      aikv6:
+        condition: service_healthy
     entrypoint: ["sh"]
     stdin_open: true
     tty: true
