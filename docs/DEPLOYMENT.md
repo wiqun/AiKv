@@ -342,6 +342,68 @@ docker-compose down
 docker-compose logs -f
 ```
 
+### 5. Docker Compose 集群部署
+
+项目提供了预配置的集群 Docker Compose 文件，用于快速部署 6 节点集群（3 主 3 从）。
+
+#### 使用预配置的集群文件
+
+```bash
+# 进入项目目录
+cd AiKv
+
+# 使用集群配置启动
+docker-compose -f docker-compose.cluster.yml up -d
+
+# 查看集群节点状态
+docker-compose -f docker-compose.cluster.yml ps
+
+# 查看集群日志
+docker-compose -f docker-compose.cluster.yml logs -f
+```
+
+#### 初始化集群
+
+启动所有节点后，使用 redis-cli 初始化集群：
+
+```bash
+# 创建集群 (3 主 3 从)
+redis-cli --cluster create \
+  127.0.0.1:6379 127.0.0.1:6380 127.0.0.1:6381 \
+  127.0.0.1:6382 127.0.0.1:6383 127.0.0.1:6384 \
+  --cluster-replicas 1
+
+# 验证集群状态
+redis-cli -c -p 6379 CLUSTER INFO
+
+# 查看集群节点
+redis-cli -c -p 6379 CLUSTER NODES
+```
+
+#### 集群管理
+
+```bash
+# 停止集群
+docker-compose -f docker-compose.cluster.yml down
+
+# 停止并删除数据卷
+docker-compose -f docker-compose.cluster.yml down -v
+
+# 重启某个节点
+docker-compose -f docker-compose.cluster.yml restart aikv1
+
+# 使用 redis-cli 工具容器
+docker-compose -f docker-compose.cluster.yml --profile tools run redis-cli
+```
+
+#### Docker Compose 文件说明
+
+| 文件 | 说明 |
+|-----|-----|
+| `docker-compose.yml` | 单节点生产配置 |
+| `docker-compose.dev.yml` | 单节点开发配置 |
+| `docker-compose.cluster.yml` | 6 节点集群配置 |
+
 ## 监控和维护
 
 ### 健康检查

@@ -1,0 +1,362 @@
+# ============================================================
+# AiKv Docker Compose - Cluster Configuration (6 nodes)
+# ============================================================
+#
+# This configuration deploys a 6-node AiKv cluster:
+#   - 3 master nodes (aikv1, aikv2, aikv3)
+#   - 3 replica nodes (aikv4, aikv5, aikv6)
+#
+# Usage:
+#   # Start cluster
+#   docker-compose -f docker-compose.cluster.yml up -d
+#
+#   # View logs
+#   docker-compose -f docker-compose.cluster.yml logs -f
+#
+#   # Initialize cluster (after all nodes are up)
+#   redis-cli --cluster create \
+#     127.0.0.1:6379 127.0.0.1:6380 127.0.0.1:6381 \
+#     127.0.0.1:6382 127.0.0.1:6383 127.0.0.1:6384 \
+#     --cluster-replicas 1
+#
+#   # Check cluster status
+#   redis-cli -c -p 6379 CLUSTER INFO
+#
+#   # Stop cluster
+#   docker-compose -f docker-compose.cluster.yml down
+#
+#   # Stop and remove volumes
+#   docker-compose -f docker-compose.cluster.yml down -v
+#
+# ============================================================
+
+version: '3.8'
+
+services:
+  # ------------------------------------------------------------
+  # Master Node 1
+  # ------------------------------------------------------------
+  aikv1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: aikv:cluster
+    container_name: aikv1
+    hostname: aikv1
+    command: >
+      /app/aikv --host 0.0.0.0 --port 6379
+    ports:
+      - "6379:6379"
+      - "16379:16379"
+    volumes:
+      - aikv1-data:/app/data
+      - aikv1-logs:/app/logs
+    environment:
+      - RUST_LOG=info
+      - AIKV_NODE_ID=n1
+      - AIKV_CLUSTER_PORT=16379
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "sh", "-c", "echo PING | nc -w 1 localhost 6379 | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    networks:
+      - aikv-cluster
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ------------------------------------------------------------
+  # Master Node 2
+  # ------------------------------------------------------------
+  aikv2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: aikv:cluster
+    container_name: aikv2
+    hostname: aikv2
+    command: >
+      /app/aikv --host 0.0.0.0 --port 6380
+    ports:
+      - "6380:6380"
+      - "16380:16380"
+    volumes:
+      - aikv2-data:/app/data
+      - aikv2-logs:/app/logs
+    environment:
+      - RUST_LOG=info
+      - AIKV_NODE_ID=n2
+      - AIKV_CLUSTER_PORT=16380
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "sh", "-c", "echo PING | nc -w 1 localhost 6380 | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    networks:
+      - aikv-cluster
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ------------------------------------------------------------
+  # Master Node 3
+  # ------------------------------------------------------------
+  aikv3:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: aikv:cluster
+    container_name: aikv3
+    hostname: aikv3
+    command: >
+      /app/aikv --host 0.0.0.0 --port 6381
+    ports:
+      - "6381:6381"
+      - "16381:16381"
+    volumes:
+      - aikv3-data:/app/data
+      - aikv3-logs:/app/logs
+    environment:
+      - RUST_LOG=info
+      - AIKV_NODE_ID=n3
+      - AIKV_CLUSTER_PORT=16381
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "sh", "-c", "echo PING | nc -w 1 localhost 6381 | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    networks:
+      - aikv-cluster
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ------------------------------------------------------------
+  # Replica Node 4
+  # ------------------------------------------------------------
+  aikv4:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: aikv:cluster
+    container_name: aikv4
+    hostname: aikv4
+    command: >
+      /app/aikv --host 0.0.0.0 --port 6382
+    ports:
+      - "6382:6382"
+      - "16382:16382"
+    volumes:
+      - aikv4-data:/app/data
+      - aikv4-logs:/app/logs
+    environment:
+      - RUST_LOG=info
+      - AIKV_NODE_ID=n4
+      - AIKV_CLUSTER_PORT=16382
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "sh", "-c", "echo PING | nc -w 1 localhost 6382 | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    networks:
+      - aikv-cluster
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ------------------------------------------------------------
+  # Replica Node 5
+  # ------------------------------------------------------------
+  aikv5:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: aikv:cluster
+    container_name: aikv5
+    hostname: aikv5
+    command: >
+      /app/aikv --host 0.0.0.0 --port 6383
+    ports:
+      - "6383:6383"
+      - "16383:16383"
+    volumes:
+      - aikv5-data:/app/data
+      - aikv5-logs:/app/logs
+    environment:
+      - RUST_LOG=info
+      - AIKV_NODE_ID=n5
+      - AIKV_CLUSTER_PORT=16383
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "sh", "-c", "echo PING | nc -w 1 localhost 6383 | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    networks:
+      - aikv-cluster
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ------------------------------------------------------------
+  # Replica Node 6
+  # ------------------------------------------------------------
+  aikv6:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: aikv:cluster
+    container_name: aikv6
+    hostname: aikv6
+    command: >
+      /app/aikv --host 0.0.0.0 --port 6384
+    ports:
+      - "6384:6384"
+      - "16384:16384"
+    volumes:
+      - aikv6-data:/app/data
+      - aikv6-logs:/app/logs
+    environment:
+      - RUST_LOG=info
+      - AIKV_NODE_ID=n6
+      - AIKV_CLUSTER_PORT=16384
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "sh", "-c", "echo PING | nc -w 1 localhost 6384 | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    networks:
+      - aikv-cluster
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ------------------------------------------------------------
+  # Redis CLI for cluster management (optional)
+  # ------------------------------------------------------------
+  redis-cli:
+    image: redis:7-alpine
+    container_name: aikv-redis-cli
+    depends_on:
+      - aikv1
+      - aikv2
+      - aikv3
+      - aikv4
+      - aikv5
+      - aikv6
+    entrypoint: ["sh"]
+    stdin_open: true
+    tty: true
+    networks:
+      - aikv-cluster
+    profiles:
+      - tools
+
+# Named volumes for data persistence
+volumes:
+  aikv1-data:
+    driver: local
+  aikv1-logs:
+    driver: local
+  aikv2-data:
+    driver: local
+  aikv2-logs:
+    driver: local
+  aikv3-data:
+    driver: local
+  aikv3-logs:
+    driver: local
+  aikv4-data:
+    driver: local
+  aikv4-logs:
+    driver: local
+  aikv5-data:
+    driver: local
+  aikv5-logs:
+    driver: local
+  aikv6-data:
+    driver: local
+  aikv6-logs:
+    driver: local
+
+# Network configuration
+networks:
+  aikv-cluster:
+    name: aikv-cluster-network
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.28.0.0/16

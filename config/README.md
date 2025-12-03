@@ -86,6 +86,28 @@ Command line arguments override config file:
 > **注意**: 集群模式的配置支持尚未完全实现。
 > **Note**: Cluster mode configuration support is not yet fully implemented.
 
+#### 使用 Docker Compose 部署集群 / Deploy Cluster with Docker Compose
+
+推荐使用预配置的 Docker Compose 文件快速部署集群：
+For quick cluster deployment, use the pre-configured Docker Compose file:
+
+```bash
+# 启动 6 节点集群 (3 主 3 从)
+# Start 6-node cluster (3 master + 3 replica)
+docker-compose -f docker-compose.cluster.yml up -d
+
+# 初始化集群 / Initialize cluster
+redis-cli --cluster create \
+  127.0.0.1:6379 127.0.0.1:6380 127.0.0.1:6381 \
+  127.0.0.1:6382 127.0.0.1:6383 127.0.0.1:6384 \
+  --cluster-replicas 1
+
+# 验证集群状态 / Verify cluster status
+redis-cli -c -p 6379 CLUSTER INFO
+```
+
+#### 手动部署 / Manual Deployment
+
 ```bash
 # 使用集群特性编译
 cargo build --release --features cluster

@@ -359,111 +359,45 @@ AiKv 支持两种存储引擎：
 
 ### Docker Compose 快速部署 (6 节点: 3 主 3 从)
 
-创建 `docker-compose.yml`:
+项目提供了预配置的集群 Docker Compose 文件 [`docker-compose.cluster.yml`](docker-compose.cluster.yml)：
 
-```yaml
-version: '3.8'
-services:
-  aikv1:
-    image: genuineh/aikv:latest
-    container_name: aikv1
-    command: >
-      aikv --cluster --node-id n1 --port 6379 --cluster-port 16379 
-      --peers n2:16379,n3:16379,n4:16379,n5:16379,n6:16379
-    ports:
-      - "6379:6379"
-      - "16379:16379"
-    volumes:
-      - ./data/n1:/app/data
-    networks:
-      - aikv-cluster
+| Docker Compose 文件 | 说明 |
+|-------------------|-----|
+| [`docker-compose.yml`](docker-compose.yml) | 单节点生产配置 |
+| [`docker-compose.dev.yml`](docker-compose.dev.yml) | 单节点开发配置 |
+| [`docker-compose.cluster.yml`](docker-compose.cluster.yml) | 6 节点集群配置 (3 主 3 从) |
 
-  aikv2:
-    image: genuineh/aikv:latest
-    container_name: aikv2
-    command: >
-      aikv --cluster --node-id n2 --port 6380 --cluster-port 16380
-      --peers n1:16379,n3:16379,n4:16379,n5:16379,n6:16379
-    ports:
-      - "6380:6380"
-      - "16380:16380"
-    volumes:
-      - ./data/n2:/app/data
-    networks:
-      - aikv-cluster
+### 启动集群
 
-  aikv3:
-    image: genuineh/aikv:latest
-    container_name: aikv3
-    command: >
-      aikv --cluster --node-id n3 --port 6381 --cluster-port 16381
-      --peers n1:16379,n2:16379,n4:16379,n5:16379,n6:16379
-    ports:
-      - "6381:6381"
-      - "16381:16381"
-    volumes:
-      - ./data/n3:/app/data
-    networks:
-      - aikv-cluster
+```bash
+# 使用集群配置启动 (6 节点)
+docker-compose -f docker-compose.cluster.yml up -d
 
-  aikv4:
-    image: genuineh/aikv:latest
-    container_name: aikv4
-    command: >
-      aikv --cluster --node-id n4 --port 6382 --cluster-port 16382
-      --peers n1:16379,n2:16379,n3:16379,n5:16379,n6:16379
-    ports:
-      - "6382:6382"
-      - "16382:16382"
-    volumes:
-      - ./data/n4:/app/data
-    networks:
-      - aikv-cluster
+# 查看集群状态
+docker-compose -f docker-compose.cluster.yml ps
 
-  aikv5:
-    image: genuineh/aikv:latest
-    container_name: aikv5
-    command: >
-      aikv --cluster --node-id n5 --port 6383 --cluster-port 16383
-      --peers n1:16379,n2:16379,n3:16379,n4:16379,n6:16379
-    ports:
-      - "6383:6383"
-      - "16383:16383"
-    volumes:
-      - ./data/n5:/app/data
-    networks:
-      - aikv-cluster
-
-  aikv6:
-    image: genuineh/aikv:latest
-    container_name: aikv6
-    command: >
-      aikv --cluster --node-id n6 --port 6384 --cluster-port 16384
-      --peers n1:16379,n2:16379,n3:16379,n4:16379,n5:16379
-    ports:
-      - "6384:6384"
-      - "16384:16384"
-    volumes:
-      - ./data/n6:/app/data
-    networks:
-      - aikv-cluster
-
-networks:
-  aikv-cluster:
-    driver: bridge
+# 查看日志
+docker-compose -f docker-compose.cluster.yml logs -f
 ```
 
 ### 初始化集群
 
 ```bash
-# 启动集群
-docker-compose up -d
-
 # 使用 redis-cli 创建集群 (3 主 3 从)
 redis-cli --cluster create \
   127.0.0.1:6379 127.0.0.1:6380 127.0.0.1:6381 \
   127.0.0.1:6382 127.0.0.1:6383 127.0.0.1:6384 \
   --cluster-replicas 1
+```
+
+### 停止集群
+
+```bash
+# 停止集群
+docker-compose -f docker-compose.cluster.yml down
+
+# 停止并删除数据卷
+docker-compose -f docker-compose.cluster.yml down -v
 ```
 
 ### 集群操作示例
