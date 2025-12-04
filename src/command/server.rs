@@ -1266,8 +1266,29 @@ impl ServerCommands {
         let mut info_lines = Vec::new();
 
         match section.to_lowercase().as_str() {
-            // "default" returns just server section (same as no args in Redis)
-            "default" | "server" => {
+            // "default" returns the standard default sections (server, clients, memory,
+            // persistence, stats, replication, cpu, cluster, keyspace)
+            // This is required for redis-cli --cluster create to detect cluster_enabled:1
+            "default" => {
+                info_lines.extend(self.build_server_info());
+                info_lines.push(String::new());
+                info_lines.extend(self.build_clients_info()?);
+                info_lines.push(String::new());
+                info_lines.extend(self.build_memory_info());
+                info_lines.push(String::new());
+                info_lines.extend(self.build_persistence_info());
+                info_lines.push(String::new());
+                info_lines.extend(self.build_stats_info());
+                info_lines.push(String::new());
+                info_lines.extend(self.build_replication_info());
+                info_lines.push(String::new());
+                info_lines.extend(self.build_cpu_info());
+                info_lines.push(String::new());
+                info_lines.extend(self.build_cluster_info());
+                info_lines.push(String::new());
+                info_lines.extend(self.build_keyspace_info());
+            }
+            "server" => {
                 info_lines.extend(self.build_server_info());
             }
             "clients" => {
@@ -1300,7 +1321,7 @@ impl ServerCommands {
             "persistence" => {
                 info_lines.extend(self.build_persistence_info());
             }
-            // "all" or "everything" returns all sections
+            // "all" or "everything" returns all sections (including modules and errorstats)
             "all" | "everything" => {
                 info_lines.extend(self.build_server_info());
                 info_lines.push(String::new());
