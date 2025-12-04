@@ -24,6 +24,11 @@ use crate::protocol::RespValue;
 use crate::storage::StorageEngine;
 use bytes::Bytes;
 
+#[cfg(feature = "cluster")]
+use crate::cluster::ClusterState;
+#[cfg(feature = "cluster")]
+use std::sync::{Arc, RwLock};
+
 /// Command executor with database context
 pub struct CommandExecutor {
     string_commands: StringCommands,
@@ -59,6 +64,35 @@ impl CommandExecutor {
             zset_commands: ZSetCommands::new(storage),
             #[cfg(feature = "cluster")]
             cluster_commands: crate::cluster::ClusterCommands::new(),
+        }
+    }
+
+    /// Create a command executor with shared cluster state.
+    ///
+    /// In cluster mode, all connections should share the same cluster state
+    /// to ensure consistent cluster metadata and node information.
+    #[cfg(feature = "cluster")]
+    pub fn with_shared_cluster_state(
+        storage: StorageEngine,
+        port: u16,
+        node_id: u64,
+        cluster_state: Arc<RwLock<ClusterState>>,
+    ) -> Self {
+        Self {
+            string_commands: StringCommands::new(storage.clone()),
+            json_commands: JsonCommands::new(storage.clone()),
+            database_commands: DatabaseCommands::new(storage.clone()),
+            key_commands: KeyCommands::new(storage.clone()),
+            server_commands: ServerCommands::with_port(port),
+            script_commands: ScriptCommands::new(storage.clone()),
+            list_commands: ListCommands::new(storage.clone()),
+            hash_commands: HashCommands::new(storage.clone()),
+            set_commands: SetCommands::new(storage.clone()),
+            zset_commands: ZSetCommands::new(storage),
+            cluster_commands: crate::cluster::ClusterCommands::with_shared_state(
+                Some(node_id),
+                cluster_state,
+            ),
         }
     }
 

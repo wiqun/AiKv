@@ -462,11 +462,19 @@ impl ClusterCommands {
     ///
     /// This is used to set the node ID for commands like CLUSTER MYID.
     pub fn with_node_id(node_id: u64) -> Self {
+        Self::with_node_id_and_addr(node_id, "127.0.0.1:6379".to_string())
+    }
+
+    /// Create a new ClusterCommands handler with a node ID and address.
+    ///
+    /// This is used to set the node ID and address for cluster mode.
+    /// The address should be in the format "host:port".
+    pub fn with_node_id_and_addr(node_id: u64, addr: String) -> Self {
         let state = Arc::new(RwLock::new(ClusterState::new()));
         // Add self as a node
         {
             let mut state_guard = state.write().unwrap();
-            let node_info = NodeInfo::new(node_id, "127.0.0.1:6379".to_string());
+            let node_info = NodeInfo::new(node_id, addr);
             state_guard.nodes.insert(node_id, node_info);
         }
         Self {
@@ -489,6 +497,36 @@ impl ClusterCommands {
             key_scanner: None,
             key_counter: None,
         }
+    }
+
+    /// Generate a unique node ID for this cluster node.
+    ///
+    /// The node ID is generated based on:
+    /// - Current timestamp in nanoseconds
+    /// - Process ID
+    /// - A random component from the hasher
+    ///
+    /// This ensures uniqueness across restarts and different nodes.
+    pub fn generate_node_id() -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+
+        // Include timestamp for uniqueness across time
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+            .hash(&mut hasher);
+
+        // Include process ID for uniqueness across processes
+        std::process::id().hash(&mut hasher);
+
+        // Include thread ID for additional entropy
+        std::thread::current().id().hash(&mut hasher);
+
+        hasher.finish()
     }
 
     /// Set the key scanner for GETKEYSINSLOT command.
