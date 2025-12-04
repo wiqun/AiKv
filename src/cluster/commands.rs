@@ -19,6 +19,9 @@ use bytes::Bytes;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+#[cfg(feature = "cluster")]
+use aidb::cluster::MultiRaftNode;
+
 /// Total number of slots in Redis Cluster (16384)
 const TOTAL_SLOTS: u16 = 16384;
 /// Total slots as usize for vector indexing
@@ -444,6 +447,9 @@ pub struct ClusterCommands {
     key_scanner: Option<Arc<KeyScanner>>,
     /// Optional key counter for COUNTKEYSINSLOT command
     key_counter: Option<Arc<KeyCounter>>,
+    /// Optional MultiRaftNode for cluster operations (when cluster feature is enabled)
+    #[cfg(feature = "cluster")]
+    multi_raft: Option<Arc<MultiRaftNode>>,
 }
 
 impl ClusterCommands {
@@ -455,6 +461,8 @@ impl ClusterCommands {
             state: Arc::new(RwLock::new(ClusterState::new())),
             key_scanner: None,
             key_counter: None,
+            #[cfg(feature = "cluster")]
+            multi_raft: None,
         }
     }
 
@@ -483,6 +491,8 @@ impl ClusterCommands {
             state,
             key_scanner: None,
             key_counter: None,
+            #[cfg(feature = "cluster")]
+            multi_raft: None,
         }
     }
 
@@ -496,7 +506,35 @@ impl ClusterCommands {
             state,
             key_scanner: None,
             key_counter: None,
+            #[cfg(feature = "cluster")]
+            multi_raft: None,
         }
+    }
+
+    /// Create a new ClusterCommands handler with shared state and MultiRaftNode.
+    ///
+    /// This allows the handler to interact with the AiDb cluster for operations
+    /// like CLUSTER MEET.
+    #[cfg(feature = "cluster")]
+    pub fn with_multi_raft(
+        node_id: Option<u64>,
+        state: Arc<RwLock<ClusterState>>,
+        multi_raft: Arc<MultiRaftNode>,
+    ) -> Self {
+        Self {
+            router: SlotRouter::new(),
+            node_id,
+            state,
+            key_scanner: None,
+            key_counter: None,
+            multi_raft: Some(multi_raft),
+        }
+    }
+
+    /// Set the MultiRaftNode for cluster operations.
+    #[cfg(feature = "cluster")]
+    pub fn set_multi_raft(&mut self, multi_raft: Arc<MultiRaftNode>) {
+        self.multi_raft = Some(multi_raft);
     }
 
     /// Generate a unique node ID for this cluster node.
@@ -906,6 +944,8 @@ cluster_stats_messages_received:0\r\n",
     /// CLUSTER MEET ip port [cluster-port]
     ///
     /// Add a node to the cluster by specifying its address.
+    /// When AiDb MultiRaft is available, this uses the MetaRaft consensus
+    /// to add the node to the cluster.
     ///
     /// # Arguments
     ///
@@ -934,34 +974,72 @@ cluster_stats_messages_received:0\r\n",
             port + 10000
         };
 
-        let addr = format!("{}:{}", ip, port);
+        // Data port address for Redis protocol
+        let data_addr = format!("{}:{}", ip, port);
+        // Cluster bus address for Raft RPC (gRPC)
+        let raft_addr = format!("{}:{}", ip, cluster_port);
 
-        // Generate a temporary node ID based on address hash for initial node tracking.
-        // Note: In a production cluster implementation with AiDb's MultiRaft integration,
-        // node IDs would be provided by the actual node through the cluster handshake
-        // or from a configuration. This hash-based approach is sufficient for the
-        // glue layer's slot and node management tracking.
-        let node_id = {
+        // Generate a deterministic node ID based on address hash.
+        // This ensures the same node gets the same ID across different nodes.
+        let target_node_id = {
             use std::collections::hash_map::DefaultHasher;
             use std::hash::{Hash, Hasher};
             let mut hasher = DefaultHasher::new();
-            // Include timestamp-like component to reduce collision probability
-            // when same address is used at different times
-            addr.hash(&mut hasher);
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-                .hash(&mut hasher);
+            data_addr.hash(&mut hasher);
             hasher.finish()
         };
 
-        // Add node to cluster state
-        let mut state = self.state.write().unwrap();
-        let mut node_info = NodeInfo::new(node_id, addr);
-        node_info.cluster_port = cluster_port;
-        state.nodes.insert(node_id, node_info);
-        state.config_epoch += 1;
+        // Add node to local cluster state for immediate visibility
+        {
+            let mut state = self.state.write().unwrap();
+            let mut node_info = NodeInfo::new(target_node_id, data_addr.clone());
+            node_info.cluster_port = cluster_port;
+            state.nodes.insert(target_node_id, node_info);
+            state.config_epoch += 1;
+        }
+
+        // If MultiRaftNode is available, use AiDb's cluster API to add the node
+        #[cfg(feature = "cluster")]
+        if let Some(ref multi_raft) = self.multi_raft {
+            // Add node address to the network factory for Raft RPC communication
+            multi_raft.add_node_address(target_node_id, raft_addr.clone());
+
+            // If MetaRaft is available, add node to cluster metadata via Raft consensus
+            if let Some(meta_raft) = multi_raft.meta_raft() {
+                let meta_raft = meta_raft.clone();
+                let data_addr_clone = data_addr.clone();
+                let raft_addr_clone = raft_addr.clone();
+
+                // Spawn async task to add node via Raft consensus.
+                // Note: Like Redis's CLUSTER MEET, we return OK immediately and let
+                // the actual cluster join happen asynchronously. Failures are logged
+                // but don't prevent the command from succeeding (the node is already
+                // added to local state for immediate visibility in CLUSTER NODES).
+                tokio::spawn(async move {
+                    match meta_raft.add_node(target_node_id, raft_addr_clone).await {
+                        Ok(_) => {
+                            tracing::info!(
+                                "CLUSTER MEET: Successfully added node {} ({}) to cluster via Raft consensus",
+                                data_addr_clone,
+                                target_node_id
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "CLUSTER MEET: Failed to add node {} via Raft consensus: {}. Node added to local state only.",
+                                data_addr_clone,
+                                e
+                            );
+                        }
+                    }
+                });
+            } else {
+                tracing::debug!(
+                    "CLUSTER MEET: MetaRaft not available, node {} added to local state and network factory only",
+                    data_addr
+                );
+            }
+        }
 
         Ok(RespValue::simple_string("OK"))
     }
