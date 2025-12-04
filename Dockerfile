@@ -22,7 +22,7 @@
 # ------------------------------------------------------------
 # Stage 1: Builder - Compile the Rust application
 # ------------------------------------------------------------
-FROM rust:1.75-bookworm AS builder
+FROM rust:1.82-bookworm AS builder
 
 # Build argument for enabling features (e.g., "cluster" for cluster support)
 ARG FEATURES=""
@@ -43,15 +43,17 @@ WORKDIR /app
 # Copy manifests first for better caching
 COPY Cargo.toml Cargo.lock ./
 
-# Create a dummy main.rs to build dependencies
-RUN mkdir -p src && \
+# Create dummy source and benchmark files to build dependencies
+RUN mkdir -p src benches && \
     echo 'fn main() { println!("Dummy"); }' > src/main.rs && \
-    echo 'pub fn dummy() {}' > src/lib.rs
+    echo 'pub fn dummy() {}' > src/lib.rs && \
+    echo 'fn main() {}' > benches/aikv_benchmark.rs && \
+    echo 'fn main() {}' > benches/comprehensive_benchmark.rs
 
 # Build dependencies only (this layer will be cached)
 # Use features if specified (e.g., cluster)
 RUN cargo build --release $CARGO_FEATURES \
-    && rm -rf src
+    && rm -rf src benches
 
 # Copy actual source code
 COPY src ./src
