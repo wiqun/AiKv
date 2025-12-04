@@ -83,8 +83,8 @@ Command line arguments override config file:
 
 ### 集群模式 / Cluster Mode
 
-> **注意**: 集群模式的配置支持尚未完全实现。
-> **Note**: Cluster mode configuration support is not yet fully implemented.
+> **重要**: 集群模式需要使用 `--features cluster` 编译。服务器必须报告 `cluster_enabled:1` 才能使用 `redis-cli --cluster create` 初始化集群。
+> **Important**: Cluster mode requires building with `--features cluster`. The server must report `cluster_enabled:1` for `redis-cli --cluster create` to work.
 
 #### 使用 Docker Compose 部署集群 / Deploy Cluster with Docker Compose
 
@@ -96,6 +96,13 @@ For quick cluster deployment, use the pre-configured Docker Compose file:
 # Start 6-node cluster (3 master + 3 replica)
 docker-compose -f docker-compose.cluster.yml up -d
 
+# 等待所有节点启动 / Wait for all nodes to start
+docker-compose -f docker-compose.cluster.yml ps
+
+# 验证节点已启用集群模式 / Verify cluster mode is enabled
+redis-cli -p 6379 INFO cluster
+# 应显示 cluster_enabled:1 / Should show cluster_enabled:1
+
 # 初始化集群 / Initialize cluster
 redis-cli --cluster create \
   127.0.0.1:6379 127.0.0.1:6380 127.0.0.1:6381 \
@@ -106,11 +113,26 @@ redis-cli --cluster create \
 redis-cli -c -p 6379 CLUSTER INFO
 ```
 
+#### 常见问题 / Common Issues
+
+如果看到错误 "Node is not configured as a cluster node"：
+If you see error "Node is not configured as a cluster node":
+
+1. 确保使用 `--features cluster` 编译 / Ensure built with `--features cluster`
+2. 运行 `redis-cli INFO cluster` 检查 `cluster_enabled` 值 / Run `redis-cli INFO cluster` to check `cluster_enabled` value
+3. 如果显示 `cluster_enabled:0`，需要重新编译 / If it shows `cluster_enabled:0`, rebuild is needed
+
 #### 手动部署 / Manual Deployment
 
 ```bash
-# 使用集群特性编译
+# 使用集群特性编译 (必需!)
+# Build with cluster feature (required!)
 cargo build --release --features cluster
+
+# 验证编译正确
+./target/release/aikv &
+redis-cli INFO cluster | grep cluster_enabled
+# 应输出: cluster_enabled:1
 
 # 复制并修改配置
 cp config/aikv-cluster.toml config.toml

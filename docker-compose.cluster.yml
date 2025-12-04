@@ -6,6 +6,10 @@
 #   - 3 master nodes (aikv1, aikv2, aikv3)
 #   - 3 replica nodes (aikv4, aikv5, aikv6)
 #
+# IMPORTANT: The Docker images are built with the 'cluster' feature
+# enabled (FEATURES=cluster). This enables cluster_enabled:1 in the
+# server INFO response, which is required for redis-cli --cluster create.
+#
 # Note: Full cluster functionality (gossip, raft) is not yet 
 # implemented. This configuration prepares the infrastructure
 # for future cluster features. See config/aikv-cluster.toml
@@ -17,6 +21,9 @@
 #
 #   # View logs
 #   docker-compose -f docker-compose.cluster.yml logs -f
+#
+#   # Verify cluster mode is enabled (should show cluster_enabled:1)
+#   redis-cli -p 6379 INFO cluster
 #
 #   # Initialize cluster (after all nodes are up)
 #   redis-cli --cluster create \
@@ -32,6 +39,12 @@
 #
 #   # Stop and remove volumes
 #   docker-compose -f docker-compose.cluster.yml down -v
+#
+# Troubleshooting:
+#   If you see "Node is not configured as a cluster node":
+#   - Ensure the image was built with FEATURES=cluster
+#   - Run: redis-cli INFO cluster | grep cluster_enabled
+#   - Should output: cluster_enabled:1
 #
 # ============================================================
 
