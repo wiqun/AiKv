@@ -1126,7 +1126,7 @@ impl AiDbStorageAdapter {
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
                     .as_nanos() as u64;
-                if now_ns.is_multiple_of(5) {
+                if now_ns % 5 == 0 {
                     return Ok(Some(key_str));
                 }
             }
