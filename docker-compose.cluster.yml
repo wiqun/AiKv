@@ -57,6 +57,8 @@ services:
     volumes:
       - aikv1-data:/app/data
       - aikv1-logs:/app/logs
+      # Custom configuration
+      - ./config/aikv-cluster.toml:/app/config/aikv.toml:ro
     environment:
       - RUST_LOG=info
       - AIKV_NODE_ID=n1
@@ -103,6 +105,8 @@ services:
     volumes:
       - aikv2-data:/app/data
       - aikv2-logs:/app/logs
+      # Custom configuration
+      - ./config/aikv-cluster.toml:/app/config/aikv.toml:ro
     environment:
       - RUST_LOG=info
       - AIKV_NODE_ID=n2
@@ -149,6 +153,8 @@ services:
     volumes:
       - aikv3-data:/app/data
       - aikv3-logs:/app/logs
+      # Custom configuration
+      - ./config/aikv-cluster.toml:/app/config/aikv.toml:ro
     environment:
       - RUST_LOG=info
       - AIKV_NODE_ID=n3
@@ -195,6 +201,8 @@ services:
     volumes:
       - aikv4-data:/app/data
       - aikv4-logs:/app/logs
+      # Custom configuration
+      - ./config/aikv-cluster.toml:/app/config/aikv.toml:ro
     environment:
       - RUST_LOG=info
       - AIKV_NODE_ID=n4
@@ -241,6 +249,8 @@ services:
     volumes:
       - aikv5-data:/app/data
       - aikv5-logs:/app/logs
+      # Custom configuration
+      - ./config/aikv-cluster.toml:/app/config/aikv.toml:ro
     environment:
       - RUST_LOG=info
       - AIKV_NODE_ID=n5
@@ -287,6 +297,8 @@ services:
     volumes:
       - aikv6-data:/app/data
       - aikv6-logs:/app/logs
+      # Custom configuration
+      - ./config/aikv-cluster.toml:/app/config/aikv.toml:ro
     environment:
       - RUST_LOG=info
       - AIKV_NODE_ID=n6
