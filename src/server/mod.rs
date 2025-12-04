@@ -13,6 +13,11 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing::{error, info};
 
+#[cfg(feature = "cluster")]
+use crate::cluster::{ClusterCommands, ClusterState, NodeInfo};
+#[cfg(feature = "cluster")]
+use std::sync::RwLock;
+
 /// AiKv server
 pub struct Server {
     addr: String,
@@ -20,6 +25,10 @@ pub struct Server {
     storage: StorageEngine,
     metrics: Arc<Metrics>,
     monitor_broadcaster: Arc<MonitorBroadcaster>,
+    #[cfg(feature = "cluster")]
+    node_id: u64,
+    #[cfg(feature = "cluster")]
+    cluster_state: Arc<RwLock<ClusterState>>,
 }
 
 impl Server {
@@ -39,12 +48,47 @@ impl Server {
                     .unwrap_or(6379)
             });
 
+        #[cfg(feature = "cluster")]
+        let (node_id, cluster_state) = {
+            // Generate a unique node ID for this cluster node
+            let node_id = ClusterCommands::generate_node_id();
+
+            // Create shared cluster state
+            let cluster_state = Arc::new(RwLock::new(ClusterState::new()));
+
+            // Register this node in the cluster state
+            // Use the actual bind address for the node's address
+            // For "0.0.0.0" we use "127.0.0.1" as the external address
+            let node_addr = if addr.starts_with("0.0.0.0:") {
+                format!("127.0.0.1:{}", port)
+            } else {
+                addr.clone()
+            };
+
+            {
+                let mut state_guard = cluster_state.write().unwrap();
+                let node_info = NodeInfo::new(node_id, node_addr);
+                state_guard.nodes.insert(node_id, node_info);
+            }
+
+            info!(
+                "Cluster mode enabled: node_id={:040x}, port={}",
+                node_id, port
+            );
+
+            (node_id, cluster_state)
+        };
+
         Self {
             addr,
             port,
             storage,
             metrics: Arc::new(Metrics::new()),
             monitor_broadcaster: Arc::new(MonitorBroadcaster::new()),
+            #[cfg(feature = "cluster")]
+            node_id,
+            #[cfg(feature = "cluster")]
+            cluster_state,
         }
     }
 
@@ -71,7 +115,17 @@ impl Server {
                     // Record connection metrics
                     self.metrics.connections.record_connection();
 
+                    #[cfg(feature = "cluster")]
+                    let executor = CommandExecutor::with_shared_cluster_state(
+                        self.storage.clone(),
+                        self.port,
+                        self.node_id,
+                        Arc::clone(&self.cluster_state),
+                    );
+
+                    #[cfg(not(feature = "cluster"))]
                     let executor = CommandExecutor::with_port(self.storage.clone(), self.port);
+
                     let metrics = Arc::clone(&self.metrics);
                     let monitor_broadcaster = Arc::clone(&self.monitor_broadcaster);
 
