@@ -1010,7 +1010,11 @@ cluster_stats_messages_received:0\r\n",
                 let data_addr_clone = data_addr.clone();
                 let raft_addr_clone = raft_addr.clone();
 
-                // Spawn async task to add node via Raft consensus
+                // Spawn async task to add node via Raft consensus.
+                // Note: Like Redis's CLUSTER MEET, we return OK immediately and let
+                // the actual cluster join happen asynchronously. Failures are logged
+                // but don't prevent the command from succeeding (the node is already
+                // added to local state for immediate visibility in CLUSTER NODES).
                 tokio::spawn(async move {
                     match meta_raft.add_node(target_node_id, raft_addr_clone).await {
                         Ok(_) => {
