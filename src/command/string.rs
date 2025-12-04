@@ -159,7 +159,7 @@ impl StringCommands {
 
     /// MSET key value \[key value ...\]
     pub fn mset(&self, args: &[Bytes], current_db: usize) -> Result<RespValue> {
-        if args.is_empty() || !args.len().is_multiple_of(2) {
+        if args.is_empty() || args.len() % 2 != 0 {
             return Err(AikvError::WrongArgCount("MSET".to_string()));
         }
 

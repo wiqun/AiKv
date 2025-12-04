@@ -55,11 +55,8 @@ RUN mkdir -p src benches && \
 RUN cargo build --release $CARGO_FEATURES \
     && rm -rf src benches
 
-# Copy actual source code
+# Copy actual source code (only what's needed for building the binary)
 COPY src ./src
-COPY benches ./benches
-COPY tests ./tests
-COPY examples ./examples
 
 # Touch main.rs to ensure rebuild
 RUN touch src/main.rs src/lib.rs

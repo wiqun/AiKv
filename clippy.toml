@@ -3,3 +3,8 @@
 
 # Cognitive complexity threshold
 cognitive-complexity-threshold = 30
+
+# Allow manual_is_multiple_of lint because is_multiple_of() is unstable
+# and not available in stable Rust (required for Docker build with rust:1.82)
+# See: https://github.com/rust-lang/rust/issues/128101
+msrv = "1.82"
