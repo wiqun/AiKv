@@ -50,6 +50,8 @@ pub async fn generate_with_engine(
     Ok(())
 }
 
+/// Generate single deployment with default "memory" engine.
+/// Kept for backward compatibility with existing code.
 #[allow(dead_code)]
 fn generate_single_deployment(_project_dir: &Path, output_dir: &Path) -> Result<()> {
     generate_single_deployment_with_engine(_project_dir, output_dir, "memory")
@@ -113,6 +115,8 @@ echo "✅ AiKv stopped"
     Ok(())
 }
 
+/// Generate cluster deployment with default "aidb" engine.
+/// Kept for backward compatibility with existing code.
 #[allow(dead_code)]
 fn generate_cluster_deployment(_project_dir: &Path, output_dir: &Path) -> Result<()> {
     generate_cluster_deployment_with_engine(_project_dir, output_dir, "aidb")
@@ -257,6 +261,8 @@ networks:
     .to_string()
 }
 
+/// Generate single config with default "memory" engine.
+/// Kept for backward compatibility with existing code.
 #[allow(dead_code)]
 fn generate_single_config() -> String {
     generate_single_config_with_engine("memory")
@@ -532,6 +538,8 @@ networks:
     .to_string()
 }
 
+/// Generate cluster node config with default "aidb" engine.
+/// Kept for backward compatibility with existing code.
 #[allow(dead_code)]
 fn generate_cluster_node_config(node_num: u8) -> String {
     generate_cluster_node_config_with_engine(node_num, "aidb")

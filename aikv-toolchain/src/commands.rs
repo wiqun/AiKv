@@ -7,7 +7,9 @@ use tokio::process::Command;
 
 /// Build result containing output logs
 pub struct CommandResult {
+    /// Whether the command completed successfully
     pub success: bool,
+    /// Log lines captured from the command output (stdout and stderr)
     pub logs: Vec<String>,
 }
 
