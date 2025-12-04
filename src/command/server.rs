@@ -1753,7 +1753,7 @@ impl ServerCommands {
                     // All remaining args from first_key are keys
                     let start = (cmd_info.first_key - 1) as usize;
                     for (i, arg) in cmd_args.iter().enumerate().skip(start) {
-                        if cmd_info.step == 1 || (i - start).is_multiple_of(cmd_info.step as usize)
+                        if cmd_info.step == 1 || (i - start) % cmd_info.step as usize == 0
                         {
                             keys.push(RespValue::bulk_string(arg.clone()));
                         }
