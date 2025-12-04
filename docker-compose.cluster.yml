@@ -45,6 +45,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        FEATURES: cluster
     image: aikv:cluster
     container_name: aikv1
     hostname: aikv1
@@ -90,6 +92,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        FEATURES: cluster
     image: aikv:cluster
     container_name: aikv2
     hostname: aikv2
@@ -135,6 +139,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        FEATURES: cluster
     image: aikv:cluster
     container_name: aikv3
     hostname: aikv3
@@ -180,6 +186,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        FEATURES: cluster
     image: aikv:cluster
     container_name: aikv4
     hostname: aikv4
@@ -225,6 +233,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        FEATURES: cluster
     image: aikv:cluster
     container_name: aikv5
     hostname: aikv5
@@ -270,6 +280,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        FEATURES: cluster
     image: aikv:cluster
     container_name: aikv6
     hostname: aikv6

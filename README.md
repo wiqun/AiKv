@@ -134,8 +134,11 @@ cargo build --release --features cluster
 ### 使用 Docker
 
 ```bash
-# 构建镜像
+# 构建镜像（单机版）
 docker build -t aikv:latest .
+
+# 构建镜像（集群版）
+docker build -t aikv:cluster --build-arg FEATURES=cluster .
 
 # 运行单节点容器
 docker run -d -p 6379:6379 --name aikv aikv:latest

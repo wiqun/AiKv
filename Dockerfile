@@ -2,11 +2,20 @@
 # AiKv Dockerfile - Multi-stage build for minimal image size
 # ============================================================
 #
-# Build: docker build -t aikv:latest .
-# Run:   docker run -d -p 6379:6379 aikv:latest
+# Build (standalone):
+#   docker build -t aikv:latest .
+#
+# Build (with cluster support):
+#   docker build -t aikv:cluster --build-arg FEATURES=cluster .
+#
+# Run:
+#   docker run -d -p 6379:6379 aikv:latest
 #
 # For development with hot reload:
 #   docker-compose -f docker-compose.dev.yml up
+#
+# For cluster deployment:
+#   docker-compose -f docker-compose.cluster.yml up
 #
 # ============================================================
 
@@ -14,6 +23,9 @@
 # Stage 1: Builder - Compile the Rust application
 # ------------------------------------------------------------
 FROM rust:1.75-bookworm AS builder
+
+# Build argument for enabling features (e.g., "cluster" for cluster support)
+ARG FEATURES=""
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
@@ -34,8 +46,12 @@ RUN mkdir -p src && \
     echo 'pub fn dummy() {}' > src/lib.rs
 
 # Build dependencies only (this layer will be cached)
-RUN cargo build --release && \
-    rm -rf src
+# Use features if specified (e.g., cluster)
+RUN if [ -n "$FEATURES" ]; then \
+        cargo build --release --features "$FEATURES"; \
+    else \
+        cargo build --release; \
+    fi && rm -rf src
 
 # Copy actual source code
 COPY src ./src
@@ -46,8 +62,12 @@ COPY examples ./examples
 # Touch main.rs to ensure rebuild
 RUN touch src/main.rs src/lib.rs
 
-# Build the actual application
-RUN cargo build --release --bin aikv
+# Build the actual application with specified features
+RUN if [ -n "$FEATURES" ]; then \
+        cargo build --release --features "$FEATURES" --bin aikv; \
+    else \
+        cargo build --release --bin aikv; \
+    fi
 
 # Strip the binary to reduce size
 RUN strip target/release/aikv
