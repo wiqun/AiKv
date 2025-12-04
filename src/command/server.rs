@@ -1210,7 +1210,14 @@ impl ServerCommands {
 
     /// Build the Cluster section info lines
     fn build_cluster_info(&self) -> Vec<String> {
-        vec!["# Cluster".to_string(), "cluster_enabled:0".to_string()]
+        #[cfg(feature = "cluster")]
+        {
+            vec!["# Cluster".to_string(), "cluster_enabled:1".to_string()]
+        }
+        #[cfg(not(feature = "cluster"))]
+        {
+            vec!["# Cluster".to_string(), "cluster_enabled:0".to_string()]
+        }
     }
 
     /// Build the Keyspace section info lines
