@@ -58,6 +58,11 @@ RUN cargo build --release $CARGO_FEATURES \
 # Copy actual source code (only what's needed for building the binary)
 COPY src ./src
 
+# Recreate dummy benchmark files (required for Cargo.toml parsing)
+RUN mkdir -p benches && \
+    echo 'fn main() {}' > benches/aikv_benchmark.rs && \
+    echo 'fn main() {}' > benches/comprehensive_benchmark.rs
+
 # Touch main.rs to ensure rebuild
 RUN touch src/main.rs src/lib.rs
 
