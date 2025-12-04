@@ -27,6 +27,9 @@ FROM rust:1.75-bookworm AS builder
 # Build argument for enabling features (e.g., "cluster" for cluster support)
 ARG FEATURES=""
 
+# Set features flag for cargo commands
+ENV CARGO_FEATURES="${FEATURES:+--features $FEATURES}"
+
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
     cmake \
@@ -47,11 +50,7 @@ RUN mkdir -p src && \
 
 # Build dependencies only (this layer will be cached)
 # Use features if specified (e.g., cluster)
-RUN if [ -n "$FEATURES" ]; then \
-        cargo build --release --features "$FEATURES"; \
-    else \
-        cargo build --release; \
-    fi && rm -rf src
+RUN cargo build --release $CARGO_FEATURES && rm -rf src
 
 # Copy actual source code
 COPY src ./src
@@ -63,11 +62,7 @@ COPY examples ./examples
 RUN touch src/main.rs src/lib.rs
 
 # Build the actual application with specified features
-RUN if [ -n "$FEATURES" ]; then \
-        cargo build --release --features "$FEATURES" --bin aikv; \
-    else \
-        cargo build --release --bin aikv; \
-    fi
+RUN cargo build --release $CARGO_FEATURES --bin aikv
 
 # Strip the binary to reduce size
 RUN strip target/release/aikv
