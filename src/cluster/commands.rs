@@ -1070,7 +1070,7 @@ cluster_stats_messages_received:0\r\n",
         ))))
     }
 
-    /// CLUSTER MEET ip port [cluster-port]
+    /// CLUSTER MEET ip port [cluster-port] [node-id]
     ///
     /// Add a node to the cluster by specifying its address.
     /// When MetaRaftClient is available, this uses the MetaRaft consensus
@@ -1078,7 +1078,9 @@ cluster_stats_messages_received:0\r\n",
     ///
     /// # Arguments
     ///
-    /// * `args` - Should contain at least: ip, port. Optionally: cluster-port
+    /// * `args` - Should contain at least: ip, port. Optionally: cluster-port, node-id
+    ///   - If node-id is provided, it will be used instead of generating a deterministic ID
+    ///   - node-id should be a 40-character hex string (e.g., from CLUSTER MYID)
     ///
     /// # Returns
     ///
@@ -1093,7 +1095,7 @@ cluster_stats_messages_received:0\r\n",
             .parse::<u16>()
             .map_err(|_| AikvError::InvalidArgument("Invalid port number".to_string()))?;
 
-        let cluster_port = if args.len() > 2 {
+        let cluster_port = if args.len() > 2 && args[2].iter().all(|&b| b.is_ascii_digit()) {
             String::from_utf8_lossy(&args[2])
                 .parse::<u16>()
                 .map_err(|_| {
@@ -1108,9 +1110,31 @@ cluster_stats_messages_received:0\r\n",
         // Cluster bus address for Raft RPC (gRPC)
         let raft_addr = format!("{}:{}", ip, cluster_port);
 
-        // Generate a deterministic node ID based on address hash.
-        // This ensures the same node gets the same ID across different nodes.
-        let target_node_id = {
+        // Determine the node ID to use
+        // If a node-id is provided as the last argument (40-char hex string), use it
+        // Otherwise, generate a deterministic ID based on address hash
+        //
+        // Note: Node IDs are stored as u64 (8 bytes = 16 hex digits), but formatted
+        // as 40-character hex strings with leading zeros for Redis compatibility.
+        // Parsing a 40-char hex string into u64 works correctly - the leading zeros
+        // are simply ignored by from_str_radix.
+        let target_node_id = if args.len() >= 3 {
+            let last_arg = String::from_utf8_lossy(&args[args.len() - 1]);
+            // Check if last arg looks like a node ID (40 hex chars)
+            if last_arg.len() == 40 && last_arg.chars().all(|c| c.is_ascii_hexdigit()) {
+                // Parse the provided node ID (40-char hex with leading zeros -> u64)
+                u64::from_str_radix(&last_arg, 16)
+                    .map_err(|_| AikvError::InvalidArgument("Invalid node ID format".to_string()))?
+            } else {
+                // Not a valid node ID, generate deterministic ID
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+                let mut hasher = DefaultHasher::new();
+                data_addr.hash(&mut hasher);
+                hasher.finish()
+            }
+        } else {
+            // No optional args, generate deterministic ID
             use std::collections::hash_map::DefaultHasher;
             use std::hash::{Hash, Hasher};
             let mut hasher = DefaultHasher::new();
@@ -1896,8 +1920,12 @@ cluster_stats_messages_received:0\r\n",
             )),
             RespValue::bulk_string(Bytes::from("CLUSTER MYID")),
             RespValue::bulk_string(Bytes::from("    Return the node ID.")),
-            RespValue::bulk_string(Bytes::from("CLUSTER MEET <ip> <port> [<bus-port>]")),
-            RespValue::bulk_string(Bytes::from("    Add a node to the cluster.")),
+            RespValue::bulk_string(Bytes::from(
+                "CLUSTER MEET <ip> <port> [<bus-port>] [<node-id>]",
+            )),
+            RespValue::bulk_string(Bytes::from(
+                "    Add a node to the cluster. Optionally specify node-id (40-char hex).",
+            )),
             RespValue::bulk_string(Bytes::from("CLUSTER FORGET <node-id>")),
             RespValue::bulk_string(Bytes::from("    Remove a node from the cluster.")),
             RespValue::bulk_string(Bytes::from("CLUSTER ADDSLOTS <slot> [<slot> ...]")),
@@ -2346,6 +2374,49 @@ mod tests {
             Bytes::from("16380"),
         ]);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_cluster_meet_with_node_id() {
+        let cmd = ClusterCommands::with_node_id(1);
+
+        // Test MEET with explicit node ID
+        let target_node_id = 999u64;
+        let result = cmd.execute(&[
+            Bytes::from("MEET"),
+            Bytes::from("192.168.1.100"),
+            Bytes::from("6380"),
+            Bytes::from(format!("{:040x}", target_node_id)),
+        ]);
+        assert!(result.is_ok());
+
+        // Verify node was added with the specified ID
+        let state = cmd.state();
+        let state = state.read().unwrap();
+        assert!(state.nodes.contains_key(&target_node_id));
+        let node_info = state.nodes.get(&target_node_id).unwrap();
+        assert_eq!(node_info.addr, "192.168.1.100:6380");
+    }
+
+    #[test]
+    fn test_cluster_meet_with_cluster_port_and_node_id() {
+        let cmd = ClusterCommands::with_node_id(1);
+
+        // Test MEET with both cluster port and node ID
+        // When the last arg is a 40-char hex, it should be treated as node ID
+        let target_node_id = 888u64;
+        let result = cmd.execute(&[
+            Bytes::from("MEET"),
+            Bytes::from("192.168.1.100"),
+            Bytes::from("6380"),
+            Bytes::from(format!("{:040x}", target_node_id)),
+        ]);
+        assert!(result.is_ok());
+
+        // Verify node was added with the specified ID
+        let state = cmd.state();
+        let state = state.read().unwrap();
+        assert!(state.nodes.contains_key(&target_node_id));
     }
 
     #[test]

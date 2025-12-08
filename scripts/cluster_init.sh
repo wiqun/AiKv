@@ -196,6 +196,7 @@ print_info "Step 3: Forming cluster (CLUSTER MEET)..."
 # Use first master as the meet point
 first_master="${MASTERS[0]}"
 IFS=':' read -r first_host first_port <<< "${first_master}"
+first_master_id="${NODE_IDS[${first_master}]}"
 
 MEET_FAILURES=0
 MAX_MEET_RETRIES=2
@@ -206,14 +207,16 @@ for node in "${ALL_NODES[@]}"; do
     fi
     
     IFS=':' read -r host port <<< "${node}"
+    node_id="${NODE_IDS[${node}]}"
     
     # Execute MEET command on the first master to add this node
+    # Pass the node's actual ID so it's stored correctly
     print_info "Meeting ${node} from ${first_master}..."
     retry_count=0
     meet_success=false
     
     while [ ${retry_count} -lt ${MAX_MEET_RETRIES} ]; do
-        if redis_exec ${first_host} ${first_port} CLUSTER MEET ${host} ${port} | grep -q "OK"; then
+        if redis_exec ${first_host} ${first_port} CLUSTER MEET ${host} ${port} ${node_id} | grep -q "OK"; then
             print_success "Successfully met ${node}"
             meet_success=true
             break
@@ -232,8 +235,9 @@ for node in "${ALL_NODES[@]}"; do
     fi
     
     # Also execute MEET in reverse direction to ensure bidirectional connection
+    # Pass the first master's actual ID
     print_info "Meeting ${first_master} from ${node}..."
-    if redis_exec ${host} ${port} CLUSTER MEET ${first_host} ${first_port} | grep -q "OK"; then
+    if redis_exec ${host} ${port} CLUSTER MEET ${first_host} ${first_port} ${first_master_id} | grep -q "OK"; then
         print_success "Reverse MEET successful"
     else
         print_warn "Reverse CLUSTER MEET failed, but this is expected if forward MEET succeeded"
@@ -258,11 +262,12 @@ for i in "${!ALL_NODES[@]}"; do
         
         node1="${ALL_NODES[$i]}"
         node2="${ALL_NODES[$j]}"
+        node2_id="${NODE_IDS[${node2}]}"
         
         IFS=':' read -r host1 port1 <<< "${node1}"
         IFS=':' read -r host2 port2 <<< "${node2}"
         
-        redis_exec ${host1} ${port1} CLUSTER MEET ${host2} ${port2} > /dev/null 2>&1 || true
+        redis_exec ${host1} ${port1} CLUSTER MEET ${host2} ${port2} ${node2_id} > /dev/null 2>&1 || true
     done
 done
 
