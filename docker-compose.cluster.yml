@@ -26,6 +26,10 @@
 #   redis-cli -p 6379 INFO cluster
 #
 #   # Initialize cluster (after all nodes are up)
+#   # Recommended: Use the dedicated initialization script
+#   ./scripts/cluster_init.sh
+#
+#   # Alternative: Use redis-cli (may take longer due to state sync)
 #   redis-cli --cluster create \
 #     127.0.0.1:6379 127.0.0.1:6380 127.0.0.1:6381 \
 #     127.0.0.1:6382 127.0.0.1:6383 127.0.0.1:6384 \

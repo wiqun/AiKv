@@ -648,6 +648,75 @@ impl ClusterCommands {
         Arc::clone(&self.state)
     }
 
+    /// Synchronize cluster state from MetaRaft.
+    ///
+    /// This method reads the cluster view from MetaRaft and updates the local
+    /// cluster state. This ensures all nodes have a consistent view of the cluster
+    /// after CLUSTER MEET operations.
+    ///
+    /// # Returns
+    ///
+    /// Ok(()) if synchronization succeeded, Err if MetaRaft is not available
+    #[cfg(feature = "cluster")]
+    pub fn sync_from_metaraft(&self) -> Result<()> {
+        let meta_client = self.meta_raft_client.as_ref().ok_or_else(|| {
+            AikvError::InvalidCommand("MetaRaft client not available".to_string())
+        })?;
+
+        let cluster_view = meta_client.get_cluster_view();
+        let mut state = self.state.write().map_err(|e| {
+            AikvError::Storage(format!("Failed to acquire cluster state write lock: {}", e))
+        })?;
+
+        // Update nodes from cluster view
+        for (node_id, node_info) in cluster_view.nodes {
+            if let Some(existing_node) = state.nodes.get_mut(&node_id) {
+                // Update existing node
+                existing_node.is_connected = node_info.is_online;
+                existing_node.is_master = node_info.is_master;
+            } else {
+                // Add new node
+                let mut new_node = NodeInfo::new(node_id, node_info.data_addr.clone());
+                new_node.is_connected = node_info.is_online;
+                new_node.is_master = node_info.is_master;
+                state.nodes.insert(node_id, new_node);
+            }
+        }
+
+        // Update slot assignments from cluster view
+        // MetaRaft guarantees this vector has exactly TOTAL_SLOTS_USIZE elements
+        debug_assert_eq!(
+            cluster_view.slot_assignments.len(),
+            TOTAL_SLOTS_USIZE,
+            "MetaRaft slot assignments should always have {} elements",
+            TOTAL_SLOTS_USIZE
+        );
+        for (slot_idx, node_id_opt) in cluster_view.slot_assignments.iter().enumerate() {
+            state.slot_assignments[slot_idx] = *node_id_opt;
+        }
+
+        // Update config epoch
+        if cluster_view.config_epoch > state.config_epoch {
+            state.config_epoch = cluster_view.config_epoch;
+        }
+
+        tracing::debug!(
+            "Synchronized cluster state from MetaRaft: {} nodes, {} slots assigned",
+            state.nodes.len(),
+            state.assigned_slots_count()
+        );
+
+        Ok(())
+    }
+
+    /// Synchronize cluster state from MetaRaft (stub for non-cluster builds).
+    #[cfg(not(feature = "cluster"))]
+    pub fn sync_from_metaraft(&self) -> Result<()> {
+        Err(AikvError::InvalidCommand(
+            "Cluster feature not enabled".to_string(),
+        ))
+    }
+
     /// Get the slot router for key-to-slot calculations.
     pub fn router(&self) -> &SlotRouter {
         &self.router
@@ -764,6 +833,12 @@ impl ClusterCommands {
     ///
     /// Returns information about the cluster state.
     fn info(&self, _args: &[Bytes]) -> Result<RespValue> {
+        // Sync from MetaRaft if available to get latest cluster state
+        #[cfg(feature = "cluster")]
+        {
+            let _ = self.sync_from_metaraft();
+        }
+
         let state = self.state.read().unwrap();
 
         let assigned_slots = state.assigned_slots_count();
@@ -810,6 +885,12 @@ cluster_stats_messages_received:0\r\n",
     ///
     /// Returns the cluster nodes information in Redis format.
     fn nodes(&self, _args: &[Bytes]) -> Result<RespValue> {
+        // Sync from MetaRaft if available to get latest cluster state
+        #[cfg(feature = "cluster")]
+        {
+            let _ = self.sync_from_metaraft();
+        }
+
         let state = self.state.read().unwrap();
         let my_node_id = self.node_id.unwrap_or(0);
         let mut output = String::new();
@@ -1055,6 +1136,7 @@ cluster_stats_messages_received:0\r\n",
                 let data_addr_clone = data_addr.clone();
                 let raft_addr_clone = raft_addr.clone();
 
+                // Spawn async task for Raft proposal
                 tokio::spawn(async move {
                     match meta_client
                         .propose_node_join(target_node_id, raft_addr_clone)
@@ -1076,6 +1158,10 @@ cluster_stats_messages_received:0\r\n",
                         }
                     }
                 });
+
+                // Attempt to synchronize state from MetaRaft after MEET
+                // This helps ensure consistency across nodes
+                let _ = self.sync_from_metaraft();
             } else if let Some(ref multi_raft) = self.multi_raft {
                 // Fallback to direct MultiRaftNode usage
                 multi_raft.add_node_address(target_node_id, raft_addr.clone());

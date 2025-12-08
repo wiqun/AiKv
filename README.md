@@ -385,6 +385,34 @@ docker-compose -f docker-compose.cluster.yml logs -f
 
 ### 初始化集群
 
+AiKv 提供两种集群初始化方式：
+
+#### 方式 1: 使用专用初始化脚本 (推荐)
+
+由于 AiKv 使用 AiDb 的共识算法而非 Redis 的 gossip 协议，推荐使用专门的初始化脚本：
+
+```bash
+# 使用默认配置 (3 主 3 从)
+./scripts/cluster_init.sh
+
+# 或者指定自定义节点
+./scripts/cluster_init.sh \
+  -m 127.0.0.1:6379,127.0.0.1:6380,127.0.0.1:6381 \
+  -r 127.0.0.1:6382,127.0.0.1:6383,127.0.0.1:6384
+```
+
+该脚本会：
+- 建立节点之间的 CLUSTER MEET 连接
+- 分配 16384 个哈希槽到主节点
+- 设置副本关系
+- 验证集群状态
+
+详细用法请参考 [scripts/README.md](scripts/README.md)
+
+#### 方式 2: 使用 redis-cli (备用)
+
+也可以使用标准的 redis-cli 工具，但可能需要更长的等待时间以确保状态同步：
+
 ```bash
 # 使用 redis-cli 创建集群 (3 主 3 从)
 redis-cli --cluster create \
@@ -392,6 +420,11 @@ redis-cli --cluster create \
   127.0.0.1:6382 127.0.0.1:6383 127.0.0.1:6384 \
   --cluster-replicas 1
 ```
+
+> **注意**: 由于 AiKv 使用 AiDb 的 Multi-Raft 共识而非 Redis gossip 协议，
+> redis-cli 的自动化流程可能需要较长时间等待节点状态同步。
+> 如遇到问题，建议使用方式 1 的专用脚本。
+
 
 ### 停止集群
 
