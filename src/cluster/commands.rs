@@ -670,7 +670,10 @@ impl ClusterCommands {
 
         // Update nodes from cluster view
         for (node_id, node_info) in cluster_view.nodes {
-            // Check if this node has local slot assignments
+            // Check if this node has local slot assignments (from ADDSLOTS)
+            // Note: This is a linear scan over all slots. For typical cluster sizes
+            // (6-10 nodes), this is fast enough. Future optimization: maintain a
+            // reverse lookup map (node_id -> assigned_slots) in ClusterState.
             let node_has_slots = state
                 .slot_assignments
                 .iter()
@@ -689,6 +692,7 @@ impl ClusterCommands {
                     existing_node.is_master = true;
                 }
                 // If this node has a master_id, it's definitely a replica
+                // This ensures state consistency even if MetaRaft reports conflicting info
                 else if existing_node.master_id.is_some() {
                     existing_node.is_master = false;
                 }
