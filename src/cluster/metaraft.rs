@@ -48,6 +48,9 @@ use aidb::cluster::MetaRaftNode;
 /// Type alias for node ID
 pub type NodeId = u64;
 
+/// Constant for unassigned slot group (group ID 0 means no assignment)
+const UNASSIGNED_GROUP: u64 = 0;
+
 /// Cluster view containing all cluster state from MetaRaft.
 #[derive(Debug, Clone, Default)]
 pub struct ClusterView {
@@ -186,12 +189,16 @@ impl MetaRaftClient {
     /// # Arguments
     ///
     /// * `target_node_id` - ID of the node to add
-    /// * `data_addr` - Node's Redis protocol address
-    /// * `raft_addr` - Node's Raft RPC address
+    /// * `raft_addr` - Node's Raft RPC address (used for Raft consensus communication)
     ///
     /// # Returns
     ///
     /// Ok(()) if the proposal was accepted, Err if it failed
+    ///
+    /// # Note
+    ///
+    /// The data address (Redis protocol) is stored separately in `ClusterState`.
+    /// This method only registers the Raft RPC address with the MetaRaft cluster.
     pub async fn propose_node_join(
         &self,
         target_node_id: NodeId,
@@ -242,6 +249,12 @@ impl MetaRaftClient {
     /// # Returns
     ///
     /// ClusterView containing nodes, slot assignments, and config epoch
+    ///
+    /// # Note
+    ///
+    /// The `data_addr` and `raft_addr` fields in `ClusterNodeInfo` are currently
+    /// set to the same value from MetaRaft. In a production setup, these would
+    /// be tracked separately (Redis port vs gRPC port).
     pub fn get_cluster_view(&self) -> ClusterView {
         let meta = self.meta_raft.get_cluster_meta();
 
@@ -251,8 +264,18 @@ impl MetaRaftClient {
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
 
+        // Collect which nodes own slots (masters)
+        let mut nodes_with_slots: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        for &group_id in meta.slots.iter() {
+            if group_id != UNASSIGNED_GROUP {
+                nodes_with_slots.insert(group_id);
+            }
+        }
+
         for (node_id, node_info) in &meta.nodes {
             let is_online = matches!(node_info.status, aidb::cluster::NodeStatus::Online);
+            // A node is a master if it owns any slots
+            let is_master = nodes_with_slots.contains(node_id);
             nodes.insert(
                 *node_id,
                 ClusterNodeInfo {
@@ -260,7 +283,7 @@ impl MetaRaftClient {
                     data_addr: node_info.addr.clone(),
                     raft_addr: node_info.addr.clone(),
                     is_online,
-                    is_master: true, // Default to master, updated based on slot ownership
+                    is_master,
                     last_heartbeat: now,
                 },
             );
@@ -270,7 +293,13 @@ impl MetaRaftClient {
         let slot_assignments = meta
             .slots
             .iter()
-            .map(|&group_id| if group_id == 0 { None } else { Some(group_id) })
+            .map(|&group_id| {
+                if group_id == UNASSIGNED_GROUP {
+                    None
+                } else {
+                    Some(group_id)
+                }
+            })
             .collect();
 
         ClusterView {
@@ -293,9 +322,19 @@ impl MetaRaftClient {
 
     /// Start the background heartbeat task.
     ///
-    /// This spawns a task that periodically logs heartbeat activity.
-    /// Node liveness is actually tracked by the Raft consensus mechanism
-    /// through the leader heartbeat in OpenRaft.
+    /// This spawns a task that periodically checks cluster health.
+    ///
+    /// # Implementation Note
+    ///
+    /// Node liveness in AiKv clusters is primarily tracked by the Raft consensus
+    /// mechanism through OpenRaft's built-in leader heartbeat. This task serves
+    /// as an application-level health monitor that can be used to:
+    /// - Log diagnostic information
+    /// - Trigger application-specific health checks
+    /// - Monitor cluster state changes
+    ///
+    /// For actual failure detection and leader election, AiKv relies entirely
+    /// on OpenRaft's Raft protocol implementation.
     pub fn start_heartbeat(&self) {
         if self
             .heartbeat_running
@@ -305,12 +344,14 @@ impl MetaRaftClient {
             return;
         }
 
+        let meta_raft = Arc::clone(&self.meta_raft);
         let node_id = self.node_id;
         let interval = self.config.heartbeat_interval;
         let running = Arc::clone(&self.heartbeat_running);
 
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(interval);
+            let mut last_leader: Option<NodeId> = None;
 
             loop {
                 ticker.tick().await;
@@ -320,8 +361,23 @@ impl MetaRaftClient {
                     break;
                 }
 
-                // Log heartbeat activity
-                // Note: Actual node liveness is tracked by Raft's leader heartbeat mechanism
+                // Check for leader changes (useful for monitoring)
+                let current_leader = meta_raft.get_leader().await;
+                if current_leader != last_leader {
+                    if let Some(leader) = current_leader {
+                        tracing::info!(
+                            "Cluster leader changed: {:?} -> {} (self={})",
+                            last_leader,
+                            leader,
+                            if leader == node_id { "yes" } else { "no" }
+                        );
+                    } else {
+                        tracing::warn!("Cluster has no leader");
+                    }
+                    last_leader = current_leader;
+                }
+
+                // Trace-level heartbeat for debugging
                 tracing::trace!("Heartbeat tick for node {}", node_id);
             }
         });
