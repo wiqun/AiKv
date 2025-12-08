@@ -1123,9 +1123,8 @@ cluster_stats_messages_received:0\r\n",
             // Check if last arg looks like a node ID (40 hex chars)
             if last_arg.len() == 40 && last_arg.chars().all(|c| c.is_ascii_hexdigit()) {
                 // Parse the provided node ID (40-char hex with leading zeros -> u64)
-                u64::from_str_radix(&last_arg, 16).map_err(|_| {
-                    AikvError::InvalidArgument("Invalid node ID format".to_string())
-                })?
+                u64::from_str_radix(&last_arg, 16)
+                    .map_err(|_| AikvError::InvalidArgument("Invalid node ID format".to_string()))?
             } else {
                 // Not a valid node ID, generate deterministic ID
                 use std::collections::hash_map::DefaultHasher;
