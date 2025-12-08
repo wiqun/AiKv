@@ -113,7 +113,7 @@ use aidb::cluster::{
 
 | Redis 命令 | AiDb API | 说明 |
 |-----------|----------|------|
-| `CLUSTER MEET ip port` | `meta_raft.add_node(node_id, addr)` | 添加新节点到集群 |
+| `CLUSTER MEET ip port [cluster-port] [node-id]` | `meta_raft.add_node(node_id, addr)` | 添加新节点到集群。可选的 node-id 参数确保使用节点的实际 ID |
 | `CLUSTER FORGET node_id` | `meta_raft.remove_node(node_id)` | 从集群移除节点 |
 
 ### Slot 管理命令

@@ -1113,11 +1113,16 @@ cluster_stats_messages_received:0\r\n",
         // Determine the node ID to use
         // If a node-id is provided as the last argument (40-char hex string), use it
         // Otherwise, generate a deterministic ID based on address hash
+        //
+        // Note: Node IDs are stored as u64 (8 bytes = 16 hex digits), but formatted
+        // as 40-character hex strings with leading zeros for Redis compatibility.
+        // Parsing a 40-char hex string into u64 works correctly - the leading zeros
+        // are simply ignored by from_str_radix.
         let target_node_id = if args.len() >= 3 {
             let last_arg = String::from_utf8_lossy(&args[args.len() - 1]);
             // Check if last arg looks like a node ID (40 hex chars)
             if last_arg.len() == 40 && last_arg.chars().all(|c| c.is_ascii_hexdigit()) {
-                // Parse the provided node ID
+                // Parse the provided node ID (40-char hex with leading zeros -> u64)
                 u64::from_str_radix(&last_arg, 16).map_err(|_| {
                     AikvError::InvalidArgument("Invalid node ID format".to_string())
                 })?
