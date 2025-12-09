@@ -368,13 +368,15 @@ for node in "${ALL_NODES[@]}"; do
     IFS=':' read -r host port <<< "${node}"
     # Node IDs in CLUSTER NODES output are 40-character hex strings at line start
     # Use grep -E for extended regex with better portability
-    node_count=$(redis_exec ${host} ${port} CLUSTER NODES 2>/dev/null | grep -cE "^[0-9a-f]{${NODE_ID_LENGTH}}" || echo "0")
+    # Construct regex pattern without variable expansion for portability
+    node_count=$(redis_exec ${host} ${port} CLUSTER NODES 2>/dev/null | grep -cE "^[0-9a-f]{40}" || echo "0")
     expected_count=${#ALL_NODES[@]}
     
     if [ "${node_count}" -eq "${expected_count}" ]; then
         print_success "Node ${node} knows about ${node_count}/${expected_count} nodes"
     elif [ "${node_count}" -gt "${expected_count}" ]; then
-        print_warn "Node ${node} reports ${node_count}/${expected_count} nodes (possible duplicates or metadata inconsistency)"
+        print_error "Node ${node} reports ${node_count}/${expected_count} nodes (possible duplicates or metadata inconsistency)"
+        CONVERGENCE_FAILURES=$((CONVERGENCE_FAILURES + 1))
     else
         print_error "Node ${node} only knows about ${node_count}/${expected_count} nodes"
         CONVERGENCE_FAILURES=$((CONVERGENCE_FAILURES + 1))
