@@ -23,6 +23,12 @@ MASTERS=()
 REPLICAS=()
 REDIS_CLI="${REDIS_CLI:-redis-cli}"
 
+# Retry and timing configuration
+MAX_SYNC_RETRIES=3
+MAX_MEET_RETRIES=2
+METARAFT_CONVERGENCE_WAIT=2  # seconds to wait for MetaRaft convergence
+NODE_ID_LENGTH=40  # Redis node IDs are SHA-1 hashes (40 hex chars)
+
 # Print functions
 print_info() {
     echo -e "${BLUE}[INFO]${NC} $1"
@@ -199,7 +205,6 @@ IFS=':' read -r first_host first_port <<< "${first_master}"
 first_master_id="${NODE_IDS[${first_master}]}"
 
 MEET_FAILURES=0
-MAX_MEET_RETRIES=2
 
 for node in "${ALL_NODES[@]}"; do
     if [ "${node}" == "${first_master}" ]; then
@@ -276,7 +281,7 @@ echo
 
 # Wait for cluster to stabilize
 print_info "Waiting for cluster to stabilize..."
-sleep 2
+sleep ${METARAFT_CONVERGENCE_WAIT}
 
 # Step 4: Assign hash slots to masters
 print_info "Step 4: Assigning hash slots to masters..."
@@ -319,7 +324,6 @@ print_info "Step 4.5: Synchronizing cluster metadata..."
 # This ensures all nodes have the latest cluster view from MetaRaft
 # before we proceed to set up replication relationships
 SYNC_FAILURES=0
-MAX_SYNC_RETRIES=3
 for node in "${ALL_NODES[@]}"; do
     IFS=':' read -r host port <<< "${node}"
     print_info "Syncing metadata on ${node}..."
@@ -355,7 +359,7 @@ fi
 # Give MetaRaft time to propagate all node information
 # Wait and verify nodes know about each other
 print_info "Waiting for MetaRaft convergence..."
-sleep 2
+sleep ${METARAFT_CONVERGENCE_WAIT}
 
 # Verify convergence by checking if nodes know about each other
 print_info "Verifying cluster convergence..."
@@ -364,7 +368,7 @@ for node in "${ALL_NODES[@]}"; do
     IFS=':' read -r host port <<< "${node}"
     # Node IDs in CLUSTER NODES output are 40-character hex strings at line start
     # Use grep -E for extended regex with better portability
-    node_count=$(redis_exec ${host} ${port} CLUSTER NODES 2>/dev/null | grep -cE "^[0-9a-f]{40}" || echo "0")
+    node_count=$(redis_exec ${host} ${port} CLUSTER NODES 2>/dev/null | grep -cE "^[0-9a-f]{${NODE_ID_LENGTH}}" || echo "0")
     expected_count=${#ALL_NODES[@]}
     
     if [ "${node_count}" -eq "${expected_count}" ]; then
@@ -414,23 +418,23 @@ for i in "${!MASTERS[@]}"; do
         print_info "Setting ${replica} as replica of ${master} (ID: ${master_id})..."
         
         # One final sync before REPLICATE to ensure replica has master's metadata
-        # Retry up to 3 times since this is critical for REPLICATE to succeed
+        # Retry up to MAX_SYNC_RETRIES times since this is critical for REPLICATE to succeed
         sync_retry=0
         sync_ok=false
-        while [ ${sync_retry} -lt 3 ]; do
+        while [ ${sync_retry} -lt ${MAX_SYNC_RETRIES} ]; do
             if redis_exec ${host} ${port} CLUSTER NODES > /dev/null 2>&1; then
                 sync_ok=true
                 break
             fi
             sync_retry=$((sync_retry + 1))
-            if [ ${sync_retry} -lt 3 ]; then
-                print_warn "Failed to sync metadata on ${replica} (attempt ${sync_retry}/3), retrying..."
+            if [ ${sync_retry} -lt ${MAX_SYNC_RETRIES} ]; then
+                print_warn "Failed to sync metadata on ${replica} (attempt ${sync_retry}/${MAX_SYNC_RETRIES}), retrying..."
                 sleep 1
             fi
         done
         
         if [ "${sync_ok}" = false ]; then
-            print_error "Failed to sync metadata on ${replica} after 3 attempts"
+            print_error "Failed to sync metadata on ${replica} after ${MAX_SYNC_RETRIES} attempts"
             print_error "Cannot proceed with REPLICATE as master metadata may be missing"
             exit 1
         fi
