@@ -1303,9 +1303,10 @@ cluster_stats_messages_received:0\r\n",
                     }
                 });
 
-                // Attempt to synchronize state from MetaRaft after MEET
-                // This helps ensure consistency across nodes
-                let _ = self.sync_from_metaraft();
+                // Note: sync_from_metaraft() is not called here to avoid race condition.
+                // The async task above may not have completed yet, so immediate sync
+                // could create inconsistencies. Read operations like CLUSTER INFO and
+                // CLUSTER NODES will sync when needed to ensure eventual consistency.
             } else if let Some(ref multi_raft) = self.multi_raft {
                 // Fallback to direct MultiRaftNode usage
                 multi_raft.add_node_address(target_node_id, raft_addr.clone());
