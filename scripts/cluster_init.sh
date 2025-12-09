@@ -318,21 +318,58 @@ print_info "Step 4.5: Synchronizing cluster metadata..."
 # Execute CLUSTER NODES on each node to trigger sync_from_metaraft()
 # This ensures all nodes have the latest cluster view from MetaRaft
 # before we proceed to set up replication relationships
+SYNC_FAILURES=0
+MAX_SYNC_RETRIES=3
 for node in "${ALL_NODES[@]}"; do
     IFS=':' read -r host port <<< "${node}"
     print_info "Syncing metadata on ${node}..."
     
-    # CLUSTER NODES automatically calls sync_from_metaraft() to get latest state
-    if redis_exec ${host} ${port} CLUSTER NODES > /dev/null 2>&1; then
-        print_success "Metadata synced on ${node}"
-    else
-        print_warn "Failed to sync metadata on ${node}, but continuing..."
+    retry_count=0
+    sync_success=false
+    while [ ${retry_count} -lt ${MAX_SYNC_RETRIES} ]; do
+        # CLUSTER NODES automatically calls sync_from_metaraft() to get latest state
+        if redis_exec ${host} ${port} CLUSTER NODES > /dev/null 2>&1; then
+            print_success "Metadata synced on ${node}"
+            sync_success=true
+            break
+        else
+            retry_count=$((retry_count + 1))
+            if [ ${retry_count} -lt ${MAX_SYNC_RETRIES} ]; then
+                print_warn "Metadata sync attempt ${retry_count} failed, retrying..."
+                sleep 1
+            fi
+        fi
+    done
+    
+    if [ "${sync_success}" = false ]; then
+        print_error "Failed to sync metadata on ${node} after ${MAX_SYNC_RETRIES} attempts"
+        SYNC_FAILURES=$((SYNC_FAILURES + 1))
     fi
 done
 
+if [ ${SYNC_FAILURES} -gt 0 ]; then
+    print_error "${SYNC_FAILURES} node(s) failed to sync metadata"
+    exit 1
+fi
+
 # Give MetaRaft time to propagate all node information
+# Wait and verify nodes know about each other
 print_info "Waiting for MetaRaft convergence..."
 sleep 2
+
+# Verify convergence by checking if nodes know about each other
+print_info "Verifying cluster convergence..."
+for node in "${ALL_NODES[@]}"; do
+    IFS=':' read -r host port <<< "${node}"
+    node_count=$(redis_exec ${host} ${port} CLUSTER NODES 2>/dev/null | grep -c "^[0-9a-f]" || echo "0")
+    expected_count=${#ALL_NODES[@]}
+    
+    if [ "${node_count}" -ge "${expected_count}" ]; then
+        print_success "Node ${node} knows about ${node_count}/${expected_count} nodes"
+    else
+        print_warn "Node ${node} only knows about ${node_count}/${expected_count} nodes (may need more time)"
+    fi
+done
 echo
 
 # Step 5: Set up replication
