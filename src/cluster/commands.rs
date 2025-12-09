@@ -758,9 +758,8 @@ impl ClusterCommands {
         );
         
         // Preserve local slot assignments that haven't been synced to MetaRaft yet
-        // Only update a slot if:
-        // 1. MetaRaft has an assignment for it (Some), OR
-        // 2. Local state has no assignment (None)
+        // Only update a slot if MetaRaft has an assignment for it (Some).
+        // If local has an assignment but MetaRaft doesn't, preserve the local assignment.
         //
         // This prevents MetaRaft from clearing locally assigned slots before they're synced
         let mut slots_preserved = 0;
@@ -1902,12 +1901,11 @@ cluster_stats_messages_received:0\r\n",
         }
 
         // Remove slot assignments from this node (replicas don't own slots)
-        let slots_removed = state.slot_assignments.iter_mut()
-            .filter(|slot| **slot == Some(my_node_id))
-            .count();
+        let mut slots_removed = 0;
         for slot in state.slot_assignments.iter_mut() {
             if *slot == Some(my_node_id) {
                 *slot = None;
+                slots_removed += 1;
             }
         }
         if slots_removed > 0 {
