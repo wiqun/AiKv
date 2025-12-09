@@ -27,7 +27,7 @@ REDIS_CLI="${REDIS_CLI:-redis-cli}"
 MAX_SYNC_RETRIES=3
 MAX_MEET_RETRIES=2
 METARAFT_CONVERGENCE_WAIT=2  # seconds to wait for MetaRaft convergence
-NODE_ID_LENGTH=40  # Redis node IDs are SHA-1 hashes (40 hex chars)
+NODE_ID_LENGTH=40  # Redis node IDs are SHA-1 hashes (40 hex chars) - for documentation only, used as literal in grep
 
 # Print functions
 print_info() {
@@ -367,8 +367,8 @@ CONVERGENCE_FAILURES=0
 for node in "${ALL_NODES[@]}"; do
     IFS=':' read -r host port <<< "${node}"
     # Node IDs in CLUSTER NODES output are 40-character hex strings at line start
-    # Use grep -E for extended regex with better portability
-    # Construct regex pattern without variable expansion for portability
+    # Use grep -E with literal {40} for portability (variable expansion in regex patterns
+    # is not supported consistently across all shell environments)
     node_count=$(redis_exec ${host} ${port} CLUSTER NODES 2>/dev/null | grep -cE "^[0-9a-f]{40}" || echo "0")
     expected_count=${#ALL_NODES[@]}
     
