@@ -670,10 +670,36 @@ impl ClusterCommands {
 
         // Update nodes from cluster view
         for (node_id, node_info) in cluster_view.nodes {
+            // Check if this node has local slot assignments (from ADDSLOTS)
+            // Note: This is a linear scan over all slots. For typical cluster sizes
+            // (6-10 nodes), this is fast enough. Future optimization: maintain a
+            // reverse lookup map (node_id -> assigned_slots) in ClusterState.
+            let node_has_slots = state
+                .slot_assignments
+                .iter()
+                .any(|slot| slot.as_ref() == Some(&node_id));
+
             if let Some(existing_node) = state.nodes.get_mut(&node_id) {
                 // Update existing node
                 existing_node.is_connected = node_info.is_online;
-                existing_node.is_master = node_info.is_master;
+
+                // Preserve local state that hasn't been synced to MetaRaft yet:
+                // 1. Explicit replication relationships set by CLUSTER REPLICATE
+                // 2. Master status for nodes with local slot assignments (from ADDSLOTS)
+
+                // If this node has local slot assignments, it's a master
+                if node_has_slots {
+                    existing_node.is_master = true;
+                }
+                // If this node has a master_id, it's definitely a replica
+                // This ensures state consistency even if MetaRaft reports conflicting info
+                else if existing_node.master_id.is_some() {
+                    existing_node.is_master = false;
+                }
+                // Otherwise, only update is_master if node has no local replication state
+                else if existing_node.replica_ids.is_empty() {
+                    existing_node.is_master = node_info.is_master;
+                }
             } else {
                 // Add new node
                 let mut new_node = NodeInfo::new(node_id, node_info.data_addr.clone());
