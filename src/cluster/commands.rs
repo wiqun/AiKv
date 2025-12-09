@@ -663,10 +663,17 @@ impl ClusterCommands {
             AikvError::InvalidCommand("MetaRaft client not available".to_string())
         })?;
 
+        tracing::debug!("sync_from_metaraft: Starting cluster state synchronization from MetaRaft");
+
         let cluster_view = meta_client.get_cluster_view();
         let mut state = self.state.write().map_err(|e| {
             AikvError::Storage(format!("Failed to acquire cluster state write lock: {}", e))
         })?;
+
+        tracing::debug!(
+            "sync_from_metaraft: Retrieved cluster view with {} nodes",
+            cluster_view.nodes.len()
+        );
 
         // Update nodes from cluster view
         for (node_id, node_info) in cluster_view.nodes {
@@ -681,6 +688,8 @@ impl ClusterCommands {
 
             if let Some(existing_node) = state.nodes.get_mut(&node_id) {
                 // Update existing node
+                let old_is_master = existing_node.is_master;
+
                 existing_node.is_connected = node_info.is_online;
 
                 // Preserve local state that hasn't been synced to MetaRaft yet:
@@ -700,12 +709,46 @@ impl ClusterCommands {
                 else if existing_node.replica_ids.is_empty() {
                     existing_node.is_master = node_info.is_master;
                 }
+
+                if old_is_master != existing_node.is_master {
+                    let has_master_id = existing_node.master_id.is_some();
+                    let has_replica_ids = !existing_node.replica_ids.is_empty();
+                    tracing::info!(
+                        "sync_from_metaraft: Node {:016x} role changed from {} to {} (has_slots: {}, has_master_id: {}, has_replica_ids: {}, metaraft_says_master: {})",
+                        node_id,
+                        if old_is_master { "master" } else { "slave" },
+                        if existing_node.is_master { "master" } else { "slave" },
+                        node_has_slots,
+                        has_master_id,
+                        has_replica_ids,
+                        node_info.is_master
+                    );
+                } else {
+                    tracing::debug!(
+                        "sync_from_metaraft: Node {:016x} role unchanged: {} (has_slots: {}, has_master_id: {}, has_replica_ids: {}, metaraft_says_master: {})",
+                        node_id,
+                        if existing_node.is_master { "master" } else { "slave" },
+                        node_has_slots,
+                        existing_node.master_id.is_some(),
+                        !existing_node.replica_ids.is_empty(),
+                        node_info.is_master
+                    );
+                }
             } else {
                 // Add new node
                 let mut new_node = NodeInfo::new(node_id, node_info.data_addr.clone());
                 new_node.is_connected = node_info.is_online;
                 new_node.is_master = node_info.is_master;
                 state.nodes.insert(node_id, new_node);
+                tracing::info!(
+                    "sync_from_metaraft: Added new node {:016x} as {}",
+                    node_id,
+                    if node_info.is_master {
+                        "master"
+                    } else {
+                        "slave"
+                    }
+                );
             }
         }
 
@@ -717,8 +760,59 @@ impl ClusterCommands {
             "MetaRaft slot assignments should always have {} elements",
             TOTAL_SLOTS_USIZE
         );
-        for (slot_idx, node_id_opt) in cluster_view.slot_assignments.iter().enumerate() {
-            state.slot_assignments[slot_idx] = *node_id_opt;
+
+        // Preserve local slot assignments that haven't been synced to MetaRaft yet
+        // Only update a slot if MetaRaft has an assignment for it (Some).
+        // If local has an assignment but MetaRaft doesn't, preserve the local assignment.
+        //
+        // This prevents MetaRaft from clearing locally assigned slots before they're synced
+        let mut slots_preserved = 0;
+        let mut slots_updated = 0;
+        for (slot_idx, &metaraft_node_id_opt) in cluster_view.slot_assignments.iter().enumerate() {
+            let local_node_id_opt = state.slot_assignments[slot_idx];
+
+            match (local_node_id_opt, metaraft_node_id_opt) {
+                // Local has assignment, MetaRaft has no assignment -> preserve local
+                (Some(local_id), None) => {
+                    tracing::debug!(
+                        "sync_from_metaraft: Preserving local slot {} assignment to node {:016x}",
+                        slot_idx,
+                        local_id
+                    );
+                    slots_preserved += 1;
+                    // Keep local assignment
+                }
+                // MetaRaft has assignment -> use it (overwrites local if different)
+                (_, Some(metaraft_id)) => {
+                    if local_node_id_opt != metaraft_node_id_opt {
+                        tracing::debug!(
+                            "sync_from_metaraft: Updating slot {} assignment from {:?} to {:016x}",
+                            slot_idx,
+                            local_node_id_opt.map(|id| format!("{:016x}", id)),
+                            metaraft_id
+                        );
+                        slots_updated += 1;
+                    }
+                    state.slot_assignments[slot_idx] = metaraft_node_id_opt;
+                }
+                // Both None -> no change
+                (None, None) => {
+                    // Both unassigned, no change needed
+                }
+            }
+        }
+
+        if slots_preserved > 0 {
+            tracing::info!(
+                "sync_from_metaraft: Preserved {} local slot assignments not yet in MetaRaft",
+                slots_preserved
+            );
+        }
+        if slots_updated > 0 {
+            tracing::info!(
+                "sync_from_metaraft: Updated {} slot assignments from MetaRaft",
+                slots_updated
+            );
         }
 
         // Update config epoch
@@ -1730,6 +1824,12 @@ cluster_stats_messages_received:0\r\n",
             AikvError::InvalidCommand("Node ID not set for this cluster node".to_string())
         })?;
 
+        tracing::info!(
+            "CLUSTER REPLICATE: Node {:016x} attempting to replicate master {:016x}",
+            my_node_id,
+            master_node_id
+        );
+
         // Cannot replicate self
         if master_node_id == my_node_id {
             return Err(AikvError::InvalidArgument(
@@ -1741,6 +1841,10 @@ cluster_stats_messages_received:0\r\n",
 
         // Check if master node exists
         if !state.nodes.contains_key(&master_node_id) {
+            tracing::error!(
+                "CLUSTER REPLICATE: Master node {:016x} not found in cluster state",
+                master_node_id
+            );
             return Err(AikvError::InvalidArgument(format!(
                 "Unknown node {}",
                 master_node_id_str
@@ -1748,7 +1852,26 @@ cluster_stats_messages_received:0\r\n",
         }
 
         // Check if target node is actually a master
+        let master_node = state.nodes.get(&master_node_id).unwrap();
+        let has_slots = state
+            .slot_assignments
+            .iter()
+            .any(|slot| slot.as_ref() == Some(&master_node_id));
+
+        tracing::info!(
+            "CLUSTER REPLICATE: Master node {:016x} status - is_master: {}, has_slots: {}, master_id: {:?}",
+            master_node_id,
+            master_node.is_master,
+            has_slots,
+            master_node.master_id
+        );
+
         if !state.is_master(master_node_id) {
+            tracing::error!(
+                "CLUSTER REPLICATE: Node {:016x} is not a master (is_master={})",
+                master_node_id,
+                master_node.is_master
+            );
             return Err(AikvError::InvalidArgument(format!(
                 "Node {} is not a master",
                 master_node_id_str
@@ -1757,6 +1880,10 @@ cluster_stats_messages_received:0\r\n",
 
         // If this node is already a replica, remove the old relationship
         if state.is_replica(my_node_id) {
+            tracing::info!(
+                "CLUSTER REPLICATE: Node {:016x} is already a replica, removing old relationship",
+                my_node_id
+            );
             state.remove_replica(my_node_id);
         }
 
@@ -1764,6 +1891,11 @@ cluster_stats_messages_received:0\r\n",
         // In a production implementation, the replicas would be reassigned
         // For now, we just remove them
         if let Some(replicas) = state.replica_map.remove(&my_node_id) {
+            tracing::info!(
+                "CLUSTER REPLICATE: Node {:016x} has {} replicas, promoting them to masters",
+                my_node_id,
+                replicas.len()
+            );
             for replica_id in replicas {
                 if let Some(replica) = state.nodes.get_mut(&replica_id) {
                     replica.master_id = None;
@@ -1773,14 +1905,29 @@ cluster_stats_messages_received:0\r\n",
         }
 
         // Remove slot assignments from this node (replicas don't own slots)
+        let mut slots_removed = 0;
         for slot in state.slot_assignments.iter_mut() {
             if *slot == Some(my_node_id) {
                 *slot = None;
+                slots_removed += 1;
             }
+        }
+        if slots_removed > 0 {
+            tracing::info!(
+                "CLUSTER REPLICATE: Removed {} slot assignments from node {:016x}",
+                slots_removed,
+                my_node_id
+            );
         }
 
         // Set up the new replication relationship
         state.add_replica(master_node_id, my_node_id);
+
+        tracing::info!(
+            "CLUSTER REPLICATE: Successfully set node {:016x} as replica of master {:016x}",
+            my_node_id,
+            master_node_id
+        );
 
         Ok(RespValue::simple_string("OK"))
     }

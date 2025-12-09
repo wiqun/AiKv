@@ -339,10 +339,15 @@ for i in "${!MASTERS[@]}"; do
         
         print_info "Setting ${replica} as replica of ${master} (ID: ${master_id})..."
         
-        if redis_exec ${host} ${port} CLUSTER REPLICATE ${master_id} | grep -q "OK"; then
+        output=$(redis_exec ${host} ${port} CLUSTER REPLICATE ${master_id})
+        exit_code=$?
+        
+        if echo "${output}" | grep -q "OK"; then
             print_success "${replica} is now a replica of ${master}"
         else
             print_error "Failed to set up replication for ${replica}"
+            print_error "Command output: ${output}"
+            print_error "Exit code: ${exit_code}"
             exit 1
         fi
         
