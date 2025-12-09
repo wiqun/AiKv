@@ -682,11 +682,11 @@ impl ClusterCommands {
             if let Some(existing_node) = state.nodes.get_mut(&node_id) {
                 // Update existing node
                 existing_node.is_connected = node_info.is_online;
-                
+
                 // Preserve local state that hasn't been synced to MetaRaft yet:
                 // 1. Explicit replication relationships set by CLUSTER REPLICATE
                 // 2. Master status for nodes with local slot assignments (from ADDSLOTS)
-                
+
                 // If this node has local slot assignments, it's a master
                 if node_has_slots {
                     existing_node.is_master = true;
