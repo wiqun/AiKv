@@ -361,11 +361,14 @@ sleep 2
 print_info "Verifying cluster convergence..."
 for node in "${ALL_NODES[@]}"; do
     IFS=':' read -r host port <<< "${node}"
-    node_count=$(redis_exec ${host} ${port} CLUSTER NODES 2>/dev/null | grep -c "^[0-9a-f]" || echo "0")
+    # Node IDs in CLUSTER NODES output are 40-character hex strings at line start
+    node_count=$(redis_exec ${host} ${port} CLUSTER NODES 2>/dev/null | grep -c "^[0-9a-f]\{40\}" || echo "0")
     expected_count=${#ALL_NODES[@]}
     
-    if [ "${node_count}" -ge "${expected_count}" ]; then
+    if [ "${node_count}" -eq "${expected_count}" ]; then
         print_success "Node ${node} knows about ${node_count}/${expected_count} nodes"
+    elif [ "${node_count}" -gt "${expected_count}" ]; then
+        print_warn "Node ${node} reports ${node_count}/${expected_count} nodes (possible duplicates or metadata inconsistency)"
     else
         print_warn "Node ${node} only knows about ${node_count}/${expected_count} nodes (may need more time)"
     fi
@@ -399,7 +402,9 @@ for i in "${!MASTERS[@]}"; do
         print_info "Setting ${replica} as replica of ${master} (ID: ${master_id})..."
         
         # One final sync before REPLICATE to ensure replica has master's metadata
-        redis_exec ${host} ${port} CLUSTER NODES > /dev/null 2>&1 || true
+        if ! redis_exec ${host} ${port} CLUSTER NODES > /dev/null 2>&1; then
+            print_warn "Failed to sync metadata on ${replica} before REPLICATE, but continuing..."
+        fi
         
         output=$(redis_exec ${host} ${port} CLUSTER REPLICATE ${master_id})
         exit_code=$?
