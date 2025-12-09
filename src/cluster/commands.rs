@@ -743,7 +743,11 @@ impl ClusterCommands {
                 tracing::info!(
                     "sync_from_metaraft: Added new node {:016x} as {}",
                     node_id,
-                    if node_info.is_master { "master" } else { "slave" }
+                    if node_info.is_master {
+                        "master"
+                    } else {
+                        "slave"
+                    }
                 );
             }
         }
@@ -756,7 +760,7 @@ impl ClusterCommands {
             "MetaRaft slot assignments should always have {} elements",
             TOTAL_SLOTS_USIZE
         );
-        
+
         // Preserve local slot assignments that haven't been synced to MetaRaft yet
         // Only update a slot if MetaRaft has an assignment for it (Some).
         // If local has an assignment but MetaRaft doesn't, preserve the local assignment.
@@ -766,7 +770,7 @@ impl ClusterCommands {
         let mut slots_updated = 0;
         for (slot_idx, &metaraft_node_id_opt) in cluster_view.slot_assignments.iter().enumerate() {
             let local_node_id_opt = state.slot_assignments[slot_idx];
-            
+
             match (local_node_id_opt, metaraft_node_id_opt) {
                 // Local has assignment, MetaRaft has no assignment -> preserve local
                 (Some(local_id), None) => {
@@ -797,7 +801,7 @@ impl ClusterCommands {
                 }
             }
         }
-        
+
         if slots_preserved > 0 {
             tracing::info!(
                 "sync_from_metaraft: Preserved {} local slot assignments not yet in MetaRaft",
@@ -1853,7 +1857,7 @@ cluster_stats_messages_received:0\r\n",
             .slot_assignments
             .iter()
             .any(|slot| slot.as_ref() == Some(&master_node_id));
-        
+
         tracing::info!(
             "CLUSTER REPLICATE: Master node {:016x} status - is_master: {}, has_slots: {}, master_id: {:?}",
             master_node_id,
@@ -1918,7 +1922,7 @@ cluster_stats_messages_received:0\r\n",
 
         // Set up the new replication relationship
         state.add_replica(master_node_id, my_node_id);
-        
+
         tracing::info!(
             "CLUSTER REPLICATE: Successfully set node {:016x} as replica of master {:016x}",
             my_node_id,
