@@ -32,3 +32,7 @@ config.local.toml
 # Added by cargo
 
 /target
+# Cluster refactoring backup files
+src/cluster/*.old
+src/cluster/*.backup
+
