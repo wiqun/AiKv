@@ -1294,7 +1294,7 @@ cluster_stats_messages_received:0\r\n",
                     let result = meta_client
                         .propose_node_join(target_node_id, raft_addr_clone)
                         .await;
-                    
+
                     match &result {
                         Ok(_) => {
                             tracing::info!(
@@ -1311,7 +1311,7 @@ cluster_stats_messages_received:0\r\n",
                             );
                         }
                     }
-                    
+
                     // Send result back - warn if channel is closed (shouldn't happen in normal operation)
                     if tx.send(result).is_err() {
                         tracing::warn!(
@@ -1346,7 +1346,7 @@ cluster_stats_messages_received:0\r\n",
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                         return Err(AikvError::Storage(
-                            "Internal error: async task failed to respond".to_string()
+                            "Internal error: async task failed to respond".to_string(),
                         ));
                     }
                 }
@@ -1367,7 +1367,7 @@ cluster_stats_messages_received:0\r\n",
                             // Discard MetaResponse content - we only need success/failure for consensus confirmation
                             .map(|_| ())
                             .map_err(|e| AikvError::Storage(format!("Failed to add node: {}", e)));
-                        
+
                         match &result {
                             Ok(_) => {
                                 tracing::info!(
@@ -1384,7 +1384,7 @@ cluster_stats_messages_received:0\r\n",
                                 );
                             }
                         }
-                        
+
                         // Send result back - warn if channel is closed (shouldn't happen in normal operation)
                         if tx.send(result).is_err() {
                             tracing::warn!(
@@ -1392,7 +1392,7 @@ cluster_stats_messages_received:0\r\n",
                             );
                         }
                     });
-                    
+
                     // Wait for completion with timeout
                     match rx.recv_timeout(Duration::from_secs(RAFT_PROPOSAL_TIMEOUT_SECS)) {
                         Ok(Ok(_)) => {
@@ -1411,7 +1411,7 @@ cluster_stats_messages_received:0\r\n",
                         }
                         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                             return Err(AikvError::Storage(
-                                "Internal error: async task failed to respond".to_string()
+                                "Internal error: async task failed to respond".to_string(),
                             ));
                         }
                     }
@@ -1487,7 +1487,7 @@ cluster_stats_messages_received:0\r\n",
 
                 tokio::spawn(async move {
                     let result = meta_client.propose_node_leave(node_id).await;
-                    
+
                     match &result {
                         Ok(_) => {
                             tracing::info!(
@@ -1503,7 +1503,7 @@ cluster_stats_messages_received:0\r\n",
                             );
                         }
                     }
-                    
+
                     // Send result back - warn if channel is closed
                     if tx.send(result).is_err() {
                         tracing::warn!(
@@ -1531,7 +1531,7 @@ cluster_stats_messages_received:0\r\n",
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                         return Err(AikvError::Storage(
-                            "Internal error: async task failed to respond".to_string()
+                            "Internal error: async task failed to respond".to_string(),
                         ));
                     }
                 }
@@ -1548,7 +1548,7 @@ cluster_stats_messages_received:0\r\n",
                             // Discard MetaResponse content - we only need success/failure for consensus confirmation
                             .map(|_| ())
                             .map_err(|e| AikvError::Storage(format!("Failed to remove node: {}", e)));
-                        
+
                         match &result {
                             Ok(_) => {
                                 tracing::info!(
@@ -1564,7 +1564,7 @@ cluster_stats_messages_received:0\r\n",
                                 );
                             }
                         }
-                        
+
                         // Send result back - warn if channel is closed
                         if tx.send(result).is_err() {
                             tracing::warn!(
@@ -1572,7 +1572,7 @@ cluster_stats_messages_received:0\r\n",
                             );
                         }
                     });
-                    
+
                     // Wait for completion with timeout
                     match rx.recv_timeout(Duration::from_secs(RAFT_PROPOSAL_TIMEOUT_SECS)) {
                         Ok(Ok(_)) => {
@@ -1589,7 +1589,7 @@ cluster_stats_messages_received:0\r\n",
                         }
                         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                             return Err(AikvError::Storage(
-                                "Internal error: async task failed to respond".to_string()
+                                "Internal error: async task failed to respond".to_string(),
                             ));
                         }
                     }

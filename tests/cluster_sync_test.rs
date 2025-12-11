@@ -34,7 +34,7 @@ mod cluster_sync_tests {
                 // Without MetaRaft, it returns immediately after local state update
                 // We can't assert exact timing without knowing if MetaRaft is configured
                 println!("CLUSTER MEET completed in {:?}", elapsed);
-                
+
                 // Verify it didn't hang indefinitely at least
                 assert!(
                     elapsed < Duration::from_secs(10),
@@ -46,14 +46,17 @@ mod cluster_sync_tests {
                 // Error is expected without a real MetaRaft cluster
                 let err_msg = format!("{:?}", e);
                 println!("CLUSTER MEET error: {}", err_msg);
-                
+
                 // Could be timeout or MetaRaft not available
                 assert!(
-                    err_msg.contains("timeout") || err_msg.contains("MetaRaft") || err_msg.contains("not available") || err_msg.contains("Storage"),
+                    err_msg.contains("timeout")
+                        || err_msg.contains("MetaRaft")
+                        || err_msg.contains("not available")
+                        || err_msg.contains("Storage"),
                     "Expected timeout or MetaRaft error, got: {}",
                     err_msg
                 );
-                
+
                 // If it times out, it should be around 5 seconds (RAFT_PROPOSAL_TIMEOUT_SECS)
                 if err_msg.contains("timeout") || err_msg.contains("Timeout") {
                     assert!(
@@ -136,7 +139,9 @@ mod cluster_sync_tests {
             Err(e) => {
                 let err_msg = format!("{:?}", e);
                 assert!(
-                    err_msg.contains("timeout") || err_msg.contains("MetaRaft") || err_msg.contains("not available"),
+                    err_msg.contains("timeout")
+                        || err_msg.contains("MetaRaft")
+                        || err_msg.contains("not available"),
                     "Expected timeout or MetaRaft error, got: {}",
                     err_msg
                 );
@@ -189,22 +194,22 @@ mod cluster_sync_tests {
     fn test_raft_constants_defined() {
         // Verify the constants are defined with expected values
         // This is a compile-time check that the constants exist
-        
+
         // Note: These constants are private, so we test indirectly through behavior
         // The timeout is 5 seconds, so a CLUSTER MEET without MetaRaft should
         // fail within that timeframe
-        
+
         let cmd = ClusterCommands::with_node_id(1);
         let start = Instant::now();
-        
+
         let _ = cmd.execute(&[
             Bytes::from("MEET"),
             Bytes::from("127.0.0.1"),
             Bytes::from("6380"),
         ]);
-        
+
         let elapsed = start.elapsed();
-        
+
         // Should complete within 6 seconds (5s timeout + 1s buffer)
         assert!(
             elapsed < Duration::from_secs(6),
@@ -220,10 +225,7 @@ mod cluster_sync_tests {
         let start = Instant::now();
 
         // Missing port argument - should fail immediately
-        let result = cmd.execute(&[
-            Bytes::from("MEET"),
-            Bytes::from("127.0.0.1"),
-        ]);
+        let result = cmd.execute(&[Bytes::from("MEET"), Bytes::from("127.0.0.1")]);
 
         let elapsed = start.elapsed();
 
@@ -313,7 +315,6 @@ mod cluster_sync_tests {
         // Parse the result to verify node is present
         if let Ok(resp) = result {
             let output = format!("{:?}", resp);
-            let target_id_str = format!("{:040x}", target_id);
             // The output should contain the node ID
             // Note: Exact format depends on implementation
             println!("CLUSTER NODES output: {}", output);
