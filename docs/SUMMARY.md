@@ -2,7 +2,7 @@
 
 ## 项目完成情况
 
-本项目已成功实现了基于 AiDb v0.4.1 的 Redis 协议兼容层，包含完整的开发文档和实现代码。
+本项目已成功实现了基于 AiDb v0.5.0 的 Redis 协议兼容层，包含完整的开发文档和实现代码。
 
 ## 已完成的工作
 
@@ -83,7 +83,7 @@ CLUSTER KEYSLOT, INFO, NODES, SLOTS, MYID, MEET, FORGET, ADDSLOTS, DELSLOTS, SET
    - 适合缓存场景
 
 2. **AiDb 存储** (AiDbStorageAdapter)
-   - 基于 AiDb v0.4.1 LSM-Tree 引擎
+   - 基于 AiDb v0.5.0 LSM-Tree 引擎
    - WAL + SSTable 持久化
    - Bloom Filter 加速查询
    - Snappy 压缩支持

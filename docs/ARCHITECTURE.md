@@ -2,7 +2,7 @@
 
 ## 概述
 
-AiKv 是一个基于 [AiDb v0.4.1](https://github.com/Genuineh/AiDb) 的高性能 Redis 协议兼容层实现。本文档详细描述了 AiKv 的系统架构、核心组件和设计原则。
+AiKv 是一个基于 [AiDb v0.5.0](https://github.com/Genuineh/AiDb) 的高性能 Redis 协议兼容层实现。本文档详细描述了 AiKv 的系统架构、核心组件和设计原则。
 
 ## 设计目标
 

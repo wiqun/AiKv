@@ -2,8 +2,8 @@
 
 **目的**: 为 AiKv 开发者提供完整的 API 参考文档，帮助实现 Redis Cluster 协议胶水层。
 
-**AiDb 版本**: v0.4.1  
-**创建时间**: 2025-11-25
+**AiDb 版本**: v0.5.0  
+**创建时间**: 2025-12-11
 
 ---
 
@@ -20,7 +20,7 @@
 
 ## 📖 概述
 
-AiDb v0.4.1 的 MultiRaft 实现已经完整，所有必要的 API 都已通过 `aidb::cluster` 模块导出。AiKv 可以直接组合使用这些 API 来实现 Redis Cluster 协议的适配。
+AiDb v0.5.0 的 MultiRaft 实现已经完整，所有必要的 API 都已通过 `aidb::cluster` 模块导出。AiKv 可以直接组合使用这些 API 来实现 Redis Cluster 协议的适配。
 
 ### 设计理念
 
@@ -47,7 +47,7 @@ default = []
 cluster = ["aidb/raft-cluster"]
 
 [dependencies]
-aidb = { git = "https://github.com/Genuineh/AiDb", tag = "v0.4.1" }
+aidb = { git = "https://github.com/Genuineh/AiDb", tag = "v0.5.0" }
 ```
 
 使用时启用 feature:

@@ -2,7 +2,7 @@
 
 ## 项目概述
 
-AiKv 是基于 [AiDb v0.4.1](https://github.com/Genuineh/AiDb) 的 Redis 协议兼容层实现。本项目旨在提供一个高性能、轻量级的键值存储服务，同时兼容 Redis 协议，使得现有的 Redis 客户端可以无缝连接。
+AiKv 是基于 [AiDb v0.5.0](https://github.com/Genuineh/AiDb) 的 Redis 协议兼容层实现。本项目旨在提供一个高性能、轻量级的键值存储服务，同时兼容 Redis 协议，使得现有的 Redis 客户端可以无缝连接。
 
 **目标**: 发布全球第一个 100% Redis Cluster 协议兼容 + 完全 Rust 原生 + 基于 Multi-Raft 的生产级分布式 KV 引擎 (v1.0.0 - 2026.03.31)
 
@@ -20,7 +20,7 @@ AiKv 是基于 [AiDb v0.4.1](https://github.com/Genuineh/AiDb) 的 Redis 协议�
 ## 技术栈
 
 - **语言**: Rust (使用 Rust 2021 edition)
-- **依赖存储引擎**: AiDb v0.4.1
+- **依赖存储引擎**: AiDb v0.5.0
 - **协议**: Redis RESP2/RESP3 协议
 - **网络**: Tokio 异步运行时
 - **脚本**: Lua 5.4 (mlua)
@@ -49,7 +49,7 @@ AiKv 是基于 [AiDb v0.4.1](https://github.com/Genuineh/AiDb) 的 Redis 协议�
 │  └─────┬─────┘  │
 │        │        │
 │  ┌─────┴─────┐  │
-│  │   AiDb    │  │  存储引擎 (v0.4.1 + Multi-Raft)
+│  │   AiDb    │  │  存储引擎 (v0.5.0 + Multi-Raft)
 │  │  Engine   │  │
 │  └───────────┘  │
 └─────────────────┘

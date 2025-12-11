@@ -2,12 +2,12 @@
 
 ## Overview
 
-This document describes the integration of AiDb v0.4.1 storage engine into AiKv, completing Priority 4 task from the TODO list.
+This document describes the integration of AiDb v0.5.0 storage engine into AiKv, completing Priority 4 task from the TODO list.
 
 ## What was Done
 
 ### 1. AiDb Integration
-- **Dependency Addition**: Added AiDb v0.4.1 as a Git dependency in `Cargo.toml`
+- **Dependency Addition**: Added AiDb v0.5.0 as a Git dependency in `Cargo.toml`
 - **Storage Adapter Implementation**: Created `AiDbStorageAdapter` in `src/storage/aidb_adapter.rs`
 - **Code Reorganization**: Renamed original adapter to `memory_adapter.rs` for clarity
 
@@ -162,7 +162,6 @@ The AiDb integration is complete and production-ready. It provides a solid found
 
 All code passes `cargo clippy` checks and is formatted according to project standards. The integration successfully completes Priority 4 from the TODO list.
 
----
-**Last Updated**: 2025-11-26
-**Version**: AiKv v0.1.0 with AiDb v0.4.1
+**Last Updated**: 2025-12-11
+**Version**: AiKv v0.1.0 with AiDb v0.5.0
 **Status**: ✅ Complete

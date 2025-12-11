@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **AiDb v0.5.0 Upgrade (2025-12-11)**
+  - Upgraded AiDb dependency from v0.4.1 to v0.5.0
+  - AiDb v0.5.0 improvements:
+    - Added `rmp-serde` dependency for improved MessagePack serialization in raft-cluster
+    - Enhanced Raft consensus serialization performance
+    - Stability improvements for production environments
+  - Updated all documentation references to v0.5.0
+  - All 118 library tests pass
+  - All 93 cluster tests pass
+  - Backward compatible - no API changes required
+
 ### Added
 - **P2: Server 命令补全 (2025-12-01)**
   - `COMMAND` - 获取所有命令的详细信息（名称、参数数量、标志、键位置等）

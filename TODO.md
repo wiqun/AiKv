@@ -40,7 +40,7 @@
 
 ### 核心能力
 
-- ✅ **双存储引擎**: 内存 + AiDb v0.4.1 LSM-Tree 持久化
+- ✅ **双存储引擎**: 内存 + AiDb v0.5.0 LSM-Tree 持久化
 - ✅ **多数据库**: 16 个数据库，完整 TTL 支持
 - ✅ **架构重构**: 存储层 100% 完成，代码减少 67%
 - ✅ **CI/CD**: GitHub Actions 流水线 + 安全检查
@@ -314,7 +314,7 @@ AiDb MetaRaftNode (Group 0) ──────────────┘
 
 ### v0.2.0 ✅ Multi-Raft 集成 (已完成)
 
-- [x] `cluster` feature 和 AiDb v0.4.1 集成
+- [x] `cluster` feature 和 AiDb v0.5.0 集成
 - [x] `MultiRaftNode` / `MetaRaftNode` 封装
 - [x] 3 节点启动验证
 
@@ -412,7 +412,7 @@ AiDb MetaRaftNode (Group 0) ──────────────┘
 **Lua 脚本 (6 个)**: EVAL, EVALSHA, SCRIPT LOAD/EXISTS/FLUSH/KILL (含事务性回滚)
 
 ### 存储引擎
-- ✅ 双存储引擎: 内存 + AiDb v0.4.1 LSM-Tree
+- ✅ 双存储引擎: 内存 + AiDb v0.5.0 LSM-Tree
 - ✅ 多数据库支持 (16 个)
 - ✅ TTL/过期管理
 - ✅ 完整数据类型序列化
