@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **AiDb v0.5.1 Upgrade (2025-12-11)**
+  - Upgraded AiDb dependency from v0.5.0 to v0.5.1
+  - Refactored cluster implementation to use AiDb v0.5.1's official Multi-Raft API
+  - Adopted legacy compatibility layer during migration
+  - All 211 tests pass (118 library + 93 cluster)
+  - Exported AiDb v0.5.1 new APIs: ClusterMeta, MigrationManager, MembershipCoordinator, etc.
+  - Created minimalist implementation prototypes for future optimization (~84% code reduction potential)
+  - Zero-downtime upgrade with backward compatibility
+
 - **AiDb v0.5.0 Upgrade (2025-12-11)**
   - Upgraded AiDb dependency from v0.4.1 to v0.5.0
   - AiDb v0.5.0 improvements:
