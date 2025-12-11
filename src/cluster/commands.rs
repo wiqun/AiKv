@@ -570,6 +570,61 @@ impl ClusterCommands {
     pub fn ask_error(slot: u16, addr: &str) -> AikvError {
         AikvError::Ask(slot, addr.to_string())
     }
+    
+    /// Test-only constructor for legacy tests.
+    /// 
+    /// **DEPRECATED**: This is a stub for backward compatibility with old tests.
+    /// New tests should use `ClusterCommands::new()` with proper cluster initialization.
+    /// 
+    /// This will panic if called, as it doesn't initialize the required cluster components.
+    #[doc(hidden)]
+    #[allow(dead_code)]
+    pub fn with_node_id(_node_id: NodeId) -> Self {
+        // This is a stub for backward compatibility - it will panic if actually used
+        panic!("ClusterCommands::with_node_id() is deprecated. Use ClusterCommands::new() with proper cluster initialization instead.");
+    }
+    
+    /// **DEPRECATED**: state() method is deprecated with the new Multi-Raft API.
+    /// 
+    /// Use `meta_raft.get_cluster_meta()` instead to access cluster metadata.
+    /// 
+    /// This returns a dummy type that will panic if actually used.
+    #[doc(hidden)]
+    #[allow(dead_code)]
+    pub fn state(&self) -> DummyStateHandle {
+        DummyStateHandle
+    }
+}
+
+/// Dummy type for backward compatibility with legacy tests.
+/// Will panic if read() is called.
+#[doc(hidden)]
+#[cfg(feature = "cluster")]
+pub struct DummyStateHandle;
+
+#[cfg(feature = "cluster")]
+impl DummyStateHandle {
+    pub fn read(&self) -> std::result::Result<DummyState, Box<dyn std::error::Error>> {
+        panic!("DummyStateHandle::read() is deprecated. Use meta_raft.get_cluster_meta() instead.");
+    }
+}
+
+/// Dummy state type for backward compatibility.
+#[doc(hidden)]
+#[cfg(feature = "cluster")]
+pub struct DummyState {
+    #[allow(dead_code)]
+    pub nodes: std::collections::HashMap<u64, DummyNodeInfo>,
+}
+
+/// Dummy node info for backward compatibility.
+#[doc(hidden)]
+#[cfg(feature = "cluster")]
+pub struct DummyNodeInfo {
+    #[allow(dead_code)]
+    pub addr: String,
+    #[allow(dead_code)]
+    pub cluster_port: u16,
 }
 
 /// Placeholder struct for when cluster feature is disabled

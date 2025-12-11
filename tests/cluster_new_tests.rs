@@ -25,17 +25,18 @@ mod cluster_tests {
         // Setup: Create 3 MetaRaft nodes
         let config = RaftConfig::default();
         
-        // Node 1
-        let node1 = Arc::new(
-            MultiRaftNode::new(1, "/tmp/test_cluster_node1", config.clone())
-                .await
-                .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?
-        );
+        // Node 1 - initialize before wrapping in Arc
+        let mut node1 = MultiRaftNode::new(1, "/tmp/test_cluster_node1", config.clone())
+            .await
+            .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?;
+        
         node1.init_meta_raft(config.clone()).await
             .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?;
         node1.initialize_meta_cluster(vec![(1, "127.0.0.1:50051".to_string())])
             .await
             .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?;
+        
+        let node1 = Arc::new(node1);
         
         let meta1 = node1.meta_raft()
             .ok_or_else(|| aikv::error::AikvError::Internal("Meta raft not initialized".to_string()))?;
@@ -69,21 +70,25 @@ mod cluster_tests {
         
         let config = RaftConfig::default();
         
-        // Create node 1 (bootstrap)
-        let node1 = Arc::new(
-            MultiRaftNode::new(1, "/tmp/test_meet_node1", config.clone())
-                .await
-                .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?
-        );
+        // Create node 1 (bootstrap) - initialize before wrapping
+        let mut node1 = MultiRaftNode::new(1, "/tmp/test_meet_node1", config.clone())
+            .await
+            .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?;
+        
         node1.init_meta_raft(config.clone()).await
             .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?;
         node1.initialize_meta_cluster(vec![(1, "127.0.0.1:50061".to_string())])
             .await
             .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?;
         
+        let node1 = Arc::new(node1);
+        
         let meta1 = node1.meta_raft()
             .ok_or_else(|| aikv::error::AikvError::Internal("Meta raft not initialized".to_string()))?;
-        let router1 = Arc::new(Router::new(meta1.clone()));
+        
+        // Get cluster metadata and create Router
+        let cluster_meta = meta1.get_cluster_meta();
+        let router1 = Arc::new(Router::new(cluster_meta));
         
         // Create ClusterCommands for node 1
         let cmd1 = ClusterCommands::new(1, meta1.clone(), node1.clone(), router1.clone());
@@ -93,7 +98,11 @@ mod cluster_tests {
         
         // Test: Execute CLUSTER MEET to add node 2
         let result = cmd1.cluster_meet("127.0.0.1".to_string(), 50062, Some(2)).await?;
-        assert_eq!(result.to_string(), "OK");
+        // RespValue doesn't have to_string(), so we check if it's SimpleString
+        match result {
+            aikv::protocol::RespValue::SimpleString(s) => assert_eq!(s, "OK"),
+            _ => panic!("Expected SimpleString OK"),
+        }
         
         // Wait for Raft consensus and replication
         sleep(Duration::from_millis(300)).await;
@@ -119,26 +128,28 @@ mod cluster_tests {
         
         let config = RaftConfig::default();
         
-        // Setup node
-        let node = Arc::new(
-            MultiRaftNode::new(1, "/tmp/test_addslots", config.clone())
-                .await
-                .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?
-        );
+        // Setup node - initialize before wrapping
+        let mut node = MultiRaftNode::new(1, "/tmp/test_addslots", config.clone())
+            .await
+            .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?;
+        
         node.init_meta_raft(config.clone()).await
             .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?;
         node.initialize_meta_cluster(vec![(1, "127.0.0.1:50071".to_string())])
             .await
             .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?;
         
-        let meta = node.meta_raft()
-            .ok_or_else(|| aikv::error::AikvError::Internal("Meta raft not initialized".to_string()))?;
-        
-        // Create a raft group for this node
+        // Create a raft group for this node before wrapping
         node.create_raft_group(1, vec![1]).await
             .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?;
         
-        let router = Arc::new(Router::new(meta.clone()));
+        let node = Arc::new(node);
+        
+        let meta = node.meta_raft()
+            .ok_or_else(|| aikv::error::AikvError::Internal("Meta raft not initialized".to_string()))?;
+        
+        let cluster_meta = meta.get_cluster_meta();
+        let router = Arc::new(Router::new(cluster_meta));
         let cmd = ClusterCommands::new(1, meta.clone(), node.clone(), router);
         
         sleep(Duration::from_millis(500)).await;
@@ -146,7 +157,10 @@ mod cluster_tests {
         // Test: Assign slots 0-100 to this node
         let slots: Vec<u16> = (0..=100).collect();
         let result = cmd.cluster_addslots(slots).await?;
-        assert_eq!(result.to_string(), "OK");
+        match result {
+            aikv::protocol::RespValue::SimpleString(s) => assert_eq!(s, "OK"),
+            _ => panic!("Expected SimpleString OK"),
+        }
         
         // Wait for Raft replication
         sleep(Duration::from_millis(300)).await;
@@ -169,27 +183,34 @@ mod cluster_tests {
     async fn test_cluster_info() -> Result<()> {
         let config = RaftConfig::default();
         
-        let node = Arc::new(
-            MultiRaftNode::new(1, "/tmp/test_info", config.clone())
-                .await
-                .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?
-        );
+        let mut node = MultiRaftNode::new(1, "/tmp/test_info", config.clone())
+            .await
+            .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?;
+        
         node.init_meta_raft(config.clone()).await
             .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?;
         node.initialize_meta_cluster(vec![(1, "127.0.0.1:50081".to_string())])
             .await
             .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?;
         
+        let node = Arc::new(node);
+        
         let meta = node.meta_raft()
             .ok_or_else(|| aikv::error::AikvError::Internal("Meta raft not initialized".to_string()))?;
-        let router = Arc::new(Router::new(meta.clone()));
-        let cmd = ClusterCommands::new(1, meta, node, router);
+        let cluster_meta = meta.get_cluster_meta();
+        let router = Arc::new(Router::new(cluster_meta));
+        let cmd = ClusterCommands::new(1, meta.clone(), node, router);
         
         sleep(Duration::from_millis(500)).await;
         
         // Test: Get cluster info
         let info = cmd.cluster_info()?;
-        let info_str = info.to_string();
+        
+        // Extract the bulk string content
+        let info_str = match info {
+            aikv::protocol::RespValue::BulkString(Some(bytes)) => String::from_utf8_lossy(&bytes).to_string(),
+            _ => panic!("Expected BulkString"),
+        };
         
         // Verify: Should contain cluster_state
         assert!(info_str.contains("cluster_state:"), "Info should contain cluster_state");
@@ -206,27 +227,34 @@ mod cluster_tests {
     async fn test_cluster_nodes() -> Result<()> {
         let config = RaftConfig::default();
         
-        let node = Arc::new(
-            MultiRaftNode::new(1, "/tmp/test_nodes", config.clone())
-                .await
-                .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?
-        );
+        let mut node = MultiRaftNode::new(1, "/tmp/test_nodes", config.clone())
+            .await
+            .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?;
+        
         node.init_meta_raft(config.clone()).await
             .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?;
         node.initialize_meta_cluster(vec![(1, "127.0.0.1:50091".to_string())])
             .await
             .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?;
         
+        let node = Arc::new(node);
+        
         let meta = node.meta_raft()
             .ok_or_else(|| aikv::error::AikvError::Internal("Meta raft not initialized".to_string()))?;
-        let router = Arc::new(Router::new(meta.clone()));
-        let cmd = ClusterCommands::new(1, meta, node, router);
+        let cluster_meta = meta.get_cluster_meta();
+        let router = Arc::new(Router::new(cluster_meta));
+        let cmd = ClusterCommands::new(1, meta.clone(), node, router);
         
         sleep(Duration::from_millis(500)).await;
         
         // Test: Get cluster nodes
         let nodes = cmd.cluster_nodes()?;
-        let nodes_str = nodes.to_string();
+        
+        // Extract the bulk string content
+        let nodes_str = match nodes {
+            aikv::protocol::RespValue::BulkString(Some(bytes)) => String::from_utf8_lossy(&bytes).to_string(),
+            _ => panic!("Expected BulkString"),
+        };
         
         // Verify: Should contain node information
         assert!(nodes_str.contains("127.0.0.1"), "Nodes output should contain IP");
@@ -243,32 +271,36 @@ mod cluster_tests {
     async fn test_cluster_keyslot() -> Result<()> {
         let config = RaftConfig::default();
         
-        let node = Arc::new(
-            MultiRaftNode::new(1, "/tmp/test_keyslot", config.clone())
-                .await
-                .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?
-        );
+        let mut node = MultiRaftNode::new(1, "/tmp/test_keyslot", config.clone())
+            .await
+            .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?;
+        
         node.init_meta_raft(config.clone()).await
             .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?;
         node.initialize_meta_cluster(vec![(1, "127.0.0.1:50101".to_string())])
             .await
             .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?;
         
+        let node = Arc::new(node);
+        
         let meta = node.meta_raft()
             .ok_or_else(|| aikv::error::AikvError::Internal("Meta raft not initialized".to_string()))?;
-        let router = Arc::new(Router::new(meta.clone()));
-        let cmd = ClusterCommands::new(1, meta, node, router);
+        let cluster_meta = meta.get_cluster_meta();
+        let router = Arc::new(Router::new(cluster_meta));
+        let cmd = ClusterCommands::new(1, meta.clone(), node, router);
         
         // Test: Calculate slot for a key
         let slot = cmd.cluster_keyslot(b"user:1000")?;
         
         // Verify: Router.key_to_slot should give same result
         let expected_slot = Router::key_to_slot(b"user:1000");
-        assert_eq!(slot.to_string(), expected_slot.to_string());
         
-        // Verify: Slot is in valid range (0-16383)
+        // Verify: Slot matches expected
         if let aikv::protocol::RespValue::Integer(s) = slot {
+            assert_eq!(s, expected_slot as i64, "Slot should match Router::key_to_slot");
             assert!(s >= 0 && s < 16384, "Slot should be in range 0-16383");
+        } else {
+            panic!("Expected Integer");
         }
         
         // Cleanup

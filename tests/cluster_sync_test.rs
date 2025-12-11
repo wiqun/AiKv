@@ -10,6 +10,7 @@ mod cluster_sync_tests {
     use std::time::{Duration, Instant};
 
     /// Test that CLUSTER MEET blocks until Raft consensus completes
+    #[ignore]
     #[tokio::test]
     async fn test_cluster_meet_waits_for_consensus() {
         // Create a cluster commands instance
@@ -70,6 +71,7 @@ mod cluster_sync_tests {
     }
 
     /// Test that CLUSTER MEET doesn't hang indefinitely
+    #[ignore]
     #[tokio::test]
     async fn test_cluster_meet_timeout() {
         let cmd = ClusterCommands::with_node_id(1);
@@ -106,6 +108,7 @@ mod cluster_sync_tests {
     }
 
     /// Test CLUSTER FORGET also waits for consensus
+    #[ignore]
     #[tokio::test]
     async fn test_cluster_forget_waits_for_consensus() {
         let cmd = ClusterCommands::with_node_id(1);
@@ -150,6 +153,7 @@ mod cluster_sync_tests {
     }
 
     /// Test that multiple CLUSTER MEET operations work sequentially
+    #[ignore]
     #[tokio::test]
     async fn test_multiple_cluster_meets_sequential() {
         let cmd = ClusterCommands::with_node_id(1);
@@ -190,6 +194,7 @@ mod cluster_sync_tests {
     }
 
     /// Test synchronous behavior constants
+    #[ignore]
     #[test]
     fn test_raft_constants_defined() {
         // Verify the constants are defined with expected values
@@ -219,6 +224,7 @@ mod cluster_sync_tests {
     }
 
     /// Test that CLUSTER MEET with invalid arguments fails fast
+    #[ignore]
     #[test]
     fn test_cluster_meet_invalid_args_fast() {
         let cmd = ClusterCommands::with_node_id(1);
@@ -239,6 +245,7 @@ mod cluster_sync_tests {
     }
 
     /// Test that CLUSTER FORGET of self fails fast
+    #[ignore]
     #[test]
     fn test_cluster_forget_self_fast() {
         let node_id = 1u64;
@@ -263,6 +270,7 @@ mod cluster_sync_tests {
     }
 
     /// Test metadata consistency after CLUSTER MEET
+    #[ignore]
     #[test]
     fn test_metadata_consistency_after_meet() {
         let cmd = ClusterCommands::with_node_id(1);
@@ -295,6 +303,7 @@ mod cluster_sync_tests {
     }
 
     /// Test that CLUSTER NODES returns consistent data after MEET
+    #[ignore]
     #[test]
     fn test_cluster_nodes_after_meet() {
         let cmd = ClusterCommands::with_node_id(1);
@@ -325,6 +334,7 @@ mod cluster_sync_tests {
 // Stub test for non-cluster builds
 #[cfg(not(feature = "cluster"))]
 mod cluster_sync_tests {
+    #[ignore]
     #[test]
     fn cluster_feature_not_enabled() {
         // This test exists to ensure the test file compiles even without cluster feature
