@@ -1,41 +1,82 @@
 //! Cluster module for AiKv Redis Cluster protocol support.
 //!
-//! # Refactoring Status (v0.5.1 Upgrade)
+//! This module provides a thin glue layer between Redis Cluster protocol
+//! and AiDb's Multi-Raft implementation (v0.5.1).
 //!
-//! ✅ AiDb upgraded to v0.5.1  
-//! 🔄 Using legacy implementation for compatibility  
-//! ⏳ New minimalist implementation in progress (see *_new_wip files)
+//! # Architecture
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────┐
+//! │         Redis Cluster Commands              │
+//! │  (CLUSTER INFO, NODES, MEET, ADDSLOTS...)   │
+//! └─────────────────────────────────────────────┘
+//!                      │
+//!                      ▼
+//! ┌─────────────────────────────────────────────┐
+//! │      AiKv Cluster Glue Layer (~700 lines)   │
+//! │   ClusterCommands: Redis protocol adapter   │
+//! │   ClusterNode: Thin wrapper                 │
+//! └─────────────────────────────────────────────┘
+//!                      │
+//!                      ▼
+//! ┌─────────────────────────────────────────────┐
+//! │       AiDb Multi-Raft API (v0.5.1)          │
+//! │  MetaRaftNode, MultiRaftNode, Router        │
+//! │  MigrationManager, MembershipCoordinator    │
+//! └─────────────────────────────────────────────┘
+//! ```
+//!
+//! # Design Principles
+//!
+//! 1. **Minimal Code**: Only Redis protocol format conversion
+//! 2. **Direct API Usage**: No custom wrappers around AiDb components
+//! 3. **Raft Consensus**: All cluster metadata changes sync via MetaRaft
+//! 4. **Zero Duplication**: All cluster logic delegated to AiDb
 
-// Legacy modules (currently active)
-mod cluster_bus_legacy;
-mod commands_legacy;
-mod metaraft_legacy;
-mod node_legacy;
-mod router_legacy;
+mod commands;
+mod node;
 
-// Export legacy implementations
-pub use cluster_bus_legacy::{ClusterBus, ClusterBusConfig, NodeHealthInfo, NodeHealthStatus};
-pub use commands_legacy::{
-    ClusterCommands, ClusterState, FailoverMode, KeyCounter, KeyScanner, 
-    MigrationProgress, NodeInfo, RedirectType, SlotState,
-};
-pub use metaraft_legacy::{ClusterNodeInfo, ClusterView, MetaRaftClient, MetaRaftClientConfig};
-pub use node_legacy::{ClusterNode, NodeId};
-pub use router_legacy::SlotRouter;
-
-#[cfg(feature = "cluster")]
-pub use node_legacy::{ClusterConfig, GroupId};
+// Export our implementations
+pub use commands::{ClusterCommands, FailoverMode, NodeInfo, RedirectType};
+pub use node::{ClusterConfig, ClusterNode, GroupId, NodeId};
 
 // Re-export AiDb v0.5.1 cluster types
 #[cfg(feature = "cluster")]
 pub use aidb::cluster::{
-    MetaNodeInfo as AiDbNodeInfo, MetaRaftNode, MultiRaftNode, 
-    NodeStatus as AiDbNodeStatus, Router as AiDbRouter, SLOT_COUNT,
-    ClusterMeta, GroupMeta, MigrationManager, MigrationConfig,
-    MembershipCoordinator, ReplicaAllocator, SlotMigration, SlotMigrationState,
-    ShardedStateMachine, ShardedRaftStorage, MultiRaftNetworkFactory,
-    ThinWriteBatch, ThinWriteOp,
+    // Core components
+    MetaRaftNode,
+    MultiRaftNode,
+    Router,
+    ShardedStateMachine,
+    
+    // Migration
+    MigrationManager,
+    MigrationConfig,
+    
+    // Membership
+    MembershipCoordinator,
+    ReplicaAllocator,
+    
+    // Data structures
+    ClusterMeta,
+    GroupMeta,
+    MetaNodeInfo,
+    NodeStatus,
+    SlotMigration,
+    SlotMigrationState,
+    
+    // Storage and network
+    ShardedRaftStorage,
+    MultiRaftNetworkFactory,
+    
+    // Thin replication
+    ThinWriteBatch,
+    ThinWriteOp,
+    
+    // Constants
+    SLOT_COUNT,
 };
 
+/// Default slot count when cluster feature is disabled
 #[cfg(not(feature = "cluster"))]
 pub const SLOT_COUNT: u16 = 16384;

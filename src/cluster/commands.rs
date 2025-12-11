@@ -175,7 +175,7 @@ impl ClusterCommands {
             meta.config_version,
         );
         
-        Ok(RespValue::BulkString(Bytes::from(info)))
+        Ok(RespValue::BulkString(Some(Bytes::from(info))))
     }
 
     /// Handle CLUSTER NODES command.
@@ -242,7 +242,7 @@ impl ClusterCommands {
         }
         
         let result = lines.join("\r\n");
-        Ok(RespValue::BulkString(Bytes::from(result)))
+        Ok(RespValue::BulkString(Some(Bytes::from(result))))
     }
 
     /// Handle CLUSTER SLOTS command.
@@ -291,7 +291,7 @@ impl ClusterCommands {
             slots_info.push(self.format_slot_range(&meta, range_start, TOTAL_SLOTS - 1, group));
         }
         
-        Ok(RespValue::Array(slots_info))
+        Ok(RespValue::Array(Some(slots_info)))
     }
 
     /// Format a slot range for CLUSTER SLOTS response
@@ -325,11 +325,11 @@ impl ClusterCommands {
     /// Format node info for CLUSTER SLOTS response
     fn format_node_info(&self, node_id: NodeId, node_info: &MetaNodeInfo) -> RespValue {
         let (ip, port) = self.parse_addr(&node_info.addr);
-        RespValue::Array(vec![
-            RespValue::BulkString(Bytes::from(ip)),
+        RespValue::Array(Some(vec![
+            RespValue::BulkString(Some(Bytes::from(ip))),
             RespValue::Integer(port),
-            RespValue::BulkString(Bytes::from(format!("{:040x}", node_id))),
-        ])
+            RespValue::BulkString(Some(Bytes::from(format!("{:040x}", node_id)))),
+        ]))
     }
 
     /// Parse address into (ip, port)
@@ -355,7 +355,7 @@ impl ClusterCommands {
     ///
     /// Maps to: node_id
     pub fn cluster_myid(&self) -> Result<RespValue> {
-        Ok(RespValue::BulkString(Bytes::from(format!("{:040x}", self.node_id))))
+        Ok(RespValue::BulkString(Some(Bytes::from(format!("{:040x}", self.node_id)))))
     }
 
     /// Handle CLUSTER KEYSLOT command.
@@ -387,21 +387,22 @@ impl ClusterCommands {
             hasher.finish()
         });
         
-        // Add node via MetaRaft
+        // Add node via MetaRaft - this will sync to all nodes via Raft consensus
         self.meta_raft.add_node(node_id, addr).await
             .map_err(|e| AikvError::Internal(format!("Failed to add node: {}", e)))?;
         
-        Ok(RespValue::SimpleString(Bytes::from("OK")))
+        Ok(RespValue::SimpleString("OK".to_string()))
     }
 
     /// Handle CLUSTER FORGET command.
     ///
     /// Maps to: `meta_raft.remove_node(node_id)`
     pub async fn cluster_forget(&self, node_id: NodeId) -> Result<RespValue> {
+        // Remove node via MetaRaft - this will sync to all nodes via Raft consensus
         self.meta_raft.remove_node(node_id).await
             .map_err(|e| AikvError::Internal(format!("Failed to remove node: {}", e)))?;
         
-        Ok(RespValue::SimpleString(Bytes::from("OK")))
+        Ok(RespValue::SimpleString("OK".to_string()))
     }
 
     /// Handle CLUSTER ADDSLOTS command.
@@ -419,7 +420,7 @@ impl ClusterCommands {
             .map(|(gid, _)| *gid)
             .ok_or_else(|| AikvError::Internal("Node does not belong to any group".to_string()))?;
         
-        // Assign each slot to this node's group
+        // Assign each slot to this node's group - sync via Raft consensus
         for slot in slots {
             if slot >= TOTAL_SLOTS {
                 return Err(AikvError::Invalid(format!("Invalid slot: {}", slot)));
@@ -429,13 +430,14 @@ impl ClusterCommands {
                 .map_err(|e| AikvError::Internal(format!("Failed to assign slot {}: {}", slot, e)))?;
         }
         
-        Ok(RespValue::SimpleString(Bytes::from("OK")))
+        Ok(RespValue::SimpleString("OK".to_string()))
     }
 
     /// Handle CLUSTER DELSLOTS command.
     ///
     /// Maps to: `meta_raft.update_slots(start, end, 0)` where 0 means unassigned
     pub async fn cluster_delslots(&self, slots: Vec<u16>) -> Result<RespValue> {
+        // Delete slots via MetaRaft - sync to all nodes via Raft consensus
         for slot in slots {
             if slot >= TOTAL_SLOTS {
                 return Err(AikvError::Invalid(format!("Invalid slot: {}", slot)));
@@ -445,7 +447,7 @@ impl ClusterCommands {
                 .map_err(|e| AikvError::Internal(format!("Failed to delete slot {}: {}", slot, e)))?;
         }
         
-        Ok(RespValue::SimpleString(Bytes::from("OK")))
+        Ok(RespValue::SimpleString("OK".to_string()))
     }
 
     /// Handle CLUSTER GETKEYSINSLOT command.
@@ -460,7 +462,7 @@ impl ClusterCommands {
         
         // TODO: Implement using ShardedStateMachine.scan_slot_keys_sync()
         // For now, return empty array
-        Ok(RespValue::Array(vec![]))
+        Ok(RespValue::Array(Some(vec![])))
     }
 
     /// Handle CLUSTER COUNTKEYSINSLOT command.
