@@ -113,8 +113,8 @@ use aidb::cluster::{
 
 | Redis 命令 | AiDb API | 说明 |
 |-----------|----------|------|
-| `CLUSTER MEET ip port [cluster-port] [node-id]` | `meta_raft.add_node(node_id, addr)` | 添加新节点到集群。可选的 node-id 参数确保使用节点的实际 ID |
-| `CLUSTER FORGET node_id` | `meta_raft.remove_node(node_id)` | 从集群移除节点 |
+| `CLUSTER MEET ip port [cluster-port] [node-id]` | `meta_raft.add_node(node_id, addr)` | 添加新节点到集群。**同步等待** Raft 共识完成（超时 5 秒）。可选的 node-id 参数确保使用节点的实际 ID |
+| `CLUSTER FORGET node_id` | `meta_raft.remove_node(node_id)` | 从集群移除节点。**同步等待** Raft 共识完成（超时 5 秒） |
 
 ### Slot 管理命令
 
@@ -622,6 +622,8 @@ enum RedirectAction {
 5. **元数据缓存**: `Router` 维护本地元数据缓存，可通过 `refresh_metadata()` 手动刷新或使用 `start_watching()` 自动同步。
 
 6. **Feature 依赖**: 所有集群 API 需要启用 `cluster` feature (`aidb/raft-cluster`)。
+
+7. **🆕 同步 Raft 共识**: `CLUSTER MEET` 和 `CLUSTER FORGET` 命令会 **同步等待** Raft 共识完成（超时 5 秒），确保命令返回 OK 时集群元数据已同步到所有节点。这解决了元数据收敛延迟问题。
 
 ---
 

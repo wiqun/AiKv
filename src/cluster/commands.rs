@@ -18,6 +18,7 @@ use crate::protocol::RespValue;
 use bytes::Bytes;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 #[cfg(feature = "cluster")]
 use aidb::cluster::MultiRaftNode;
@@ -29,6 +30,11 @@ use crate::cluster::metaraft::MetaRaftClient;
 const TOTAL_SLOTS: u16 = 16384;
 /// Total slots as usize for vector indexing
 const TOTAL_SLOTS_USIZE: usize = 16384;
+/// Timeout for waiting for Raft proposals in cluster commands (seconds)
+const RAFT_PROPOSAL_TIMEOUT_SECS: u64 = 5;
+/// Delay after successful Raft proposal to allow follower replication (milliseconds)
+/// This gives follower nodes time to apply committed entries to their state machines
+const RAFT_REPLICATION_DELAY_MS: u64 = 200;
 
 /// Slot state enumeration for CLUSTER SETSLOT command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1280,12 +1286,16 @@ cluster_stats_messages_received:0\r\n",
                 let data_addr_clone = data_addr.clone();
                 let raft_addr_clone = raft_addr.clone();
 
+                // Create a channel to wait for the async task to complete
+                let (tx, rx) = std::sync::mpsc::sync_channel::<Result<()>>(1);
+
                 // Spawn async task for Raft proposal
                 tokio::spawn(async move {
-                    match meta_client
+                    let result = meta_client
                         .propose_node_join(target_node_id, raft_addr_clone)
-                        .await
-                    {
+                        .await;
+
+                    match &result {
                         Ok(_) => {
                             tracing::info!(
                                 "CLUSTER MEET: Node {} ({}) added via MetaRaftClient",
@@ -1301,12 +1311,45 @@ cluster_stats_messages_received:0\r\n",
                             );
                         }
                     }
+
+                    // Send result back - warn if channel is closed (shouldn't happen in normal operation)
+                    if tx.send(result).is_err() {
+                        tracing::warn!(
+                            "CLUSTER MEET: Failed to send result back - receiver may have been dropped"
+                        );
+                    }
                 });
 
-                // Note: sync_from_metaraft() is not called here to avoid race condition.
-                // The async task above may not have completed yet, so immediate sync
-                // could create inconsistencies. Read operations like CLUSTER INFO and
-                // CLUSTER NODES will sync when needed to ensure eventual consistency.
+                // Wait for the async task to complete with a timeout (blocking receive)
+                // This ensures CLUSTER MEET doesn't return OK until Raft consensus is reached
+                //
+                // Note: This waits for the leader to commit the entry. Follower nodes may
+                // still need a short time to apply the entry to their local state machines.
+                // We add a small delay after successful completion to improve convergence.
+                match rx.recv_timeout(Duration::from_secs(RAFT_PROPOSAL_TIMEOUT_SECS)) {
+                    Ok(Ok(_)) => {
+                        tracing::debug!("CLUSTER MEET: Raft proposal completed successfully");
+                        // Give followers time to apply the committed entry
+                        std::thread::sleep(Duration::from_millis(RAFT_REPLICATION_DELAY_MS));
+                    }
+                    Ok(Err(e)) => {
+                        return Err(AikvError::Storage(format!(
+                            "Failed to add node to cluster: {}",
+                            e
+                        )));
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        return Err(AikvError::Storage(format!(
+                            "Timeout waiting for cluster consensus ({}s)",
+                            RAFT_PROPOSAL_TIMEOUT_SECS
+                        )));
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        return Err(AikvError::Storage(
+                            "Internal error: async task failed to respond".to_string(),
+                        ));
+                    }
+                }
             } else if let Some(ref multi_raft) = self.multi_raft {
                 // Fallback to direct MultiRaftNode usage
                 multi_raft.add_node_address(target_node_id, raft_addr.clone());
@@ -1316,8 +1359,16 @@ cluster_stats_messages_received:0\r\n",
                     let data_addr_clone = data_addr.clone();
                     let raft_addr_clone = raft_addr.clone();
 
+                    // Create a channel to wait for the async task to complete
+                    let (tx, rx) = std::sync::mpsc::sync_channel::<Result<()>>(1);
+
                     tokio::spawn(async move {
-                        match meta_raft.add_node(target_node_id, raft_addr_clone).await {
+                        let result = meta_raft.add_node(target_node_id, raft_addr_clone).await
+                            // Discard MetaResponse content - we only need success/failure for consensus confirmation
+                            .map(|_| ())
+                            .map_err(|e| AikvError::Storage(format!("Failed to add node: {}", e)));
+
+                        match &result {
                             Ok(_) => {
                                 tracing::info!(
                                     "CLUSTER MEET: Node {} ({}) added via MetaRaft",
@@ -1333,7 +1384,37 @@ cluster_stats_messages_received:0\r\n",
                                 );
                             }
                         }
+
+                        // Send result back - warn if channel is closed (shouldn't happen in normal operation)
+                        if tx.send(result).is_err() {
+                            tracing::warn!(
+                                "CLUSTER MEET: Failed to send result back - receiver may have been dropped"
+                            );
+                        }
                     });
+
+                    // Wait for completion with timeout
+                    match rx.recv_timeout(Duration::from_secs(RAFT_PROPOSAL_TIMEOUT_SECS)) {
+                        Ok(Ok(_)) => {
+                            tracing::debug!("CLUSTER MEET: Raft proposal completed successfully (via MultiRaft)");
+                            // Give followers time to apply the committed entry
+                            std::thread::sleep(Duration::from_millis(RAFT_REPLICATION_DELAY_MS));
+                        }
+                        Ok(Err(e)) => {
+                            return Err(e);
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                            return Err(AikvError::Storage(format!(
+                                "Timeout waiting for cluster consensus ({}s)",
+                                RAFT_PROPOSAL_TIMEOUT_SECS
+                            )));
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                            return Err(AikvError::Storage(
+                                "Internal error: async task failed to respond".to_string(),
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -1401,8 +1482,13 @@ cluster_stats_messages_received:0\r\n",
                 let meta_client = Arc::clone(meta_client);
                 let node_id_str_clone = node_id_str.clone();
 
+                // Create a channel to wait for the async task to complete
+                let (tx, rx) = std::sync::mpsc::sync_channel::<Result<()>>(1);
+
                 tokio::spawn(async move {
-                    match meta_client.propose_node_leave(node_id).await {
+                    let result = meta_client.propose_node_leave(node_id).await;
+
+                    match &result {
                         Ok(_) => {
                             tracing::info!(
                                 "CLUSTER FORGET: Node {} removed via MetaRaftClient",
@@ -1417,14 +1503,53 @@ cluster_stats_messages_received:0\r\n",
                             );
                         }
                     }
+
+                    // Send result back - warn if channel is closed
+                    if tx.send(result).is_err() {
+                        tracing::warn!(
+                            "CLUSTER FORGET: Failed to send result back - receiver may have been dropped"
+                        );
+                    }
                 });
+
+                // Wait for the async task to complete with a timeout
+                match rx.recv_timeout(Duration::from_secs(RAFT_PROPOSAL_TIMEOUT_SECS)) {
+                    Ok(Ok(_)) => {
+                        tracing::debug!("CLUSTER FORGET: Raft proposal completed successfully");
+                    }
+                    Ok(Err(e)) => {
+                        return Err(AikvError::Storage(format!(
+                            "Failed to remove node from cluster: {}",
+                            e
+                        )));
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        return Err(AikvError::Storage(format!(
+                            "Timeout waiting for cluster consensus ({}s)",
+                            RAFT_PROPOSAL_TIMEOUT_SECS
+                        )));
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        return Err(AikvError::Storage(
+                            "Internal error: async task failed to respond".to_string(),
+                        ));
+                    }
+                }
             } else if let Some(ref multi_raft) = self.multi_raft {
                 if let Some(meta_raft) = multi_raft.meta_raft() {
                     let meta_raft = meta_raft.clone();
                     let node_id_str_clone = node_id_str.clone();
 
+                    // Create a channel to wait for the async task to complete
+                    let (tx, rx) = std::sync::mpsc::sync_channel::<Result<()>>(1);
+
                     tokio::spawn(async move {
-                        match meta_raft.remove_node(node_id).await {
+                        let result = meta_raft.remove_node(node_id).await
+                            // Discard MetaResponse content - we only need success/failure for consensus confirmation
+                            .map(|_| ())
+                            .map_err(|e| AikvError::Storage(format!("Failed to remove node: {}", e)));
+
+                        match &result {
                             Ok(_) => {
                                 tracing::info!(
                                     "CLUSTER FORGET: Node {} removed via MetaRaft",
@@ -1439,7 +1564,35 @@ cluster_stats_messages_received:0\r\n",
                                 );
                             }
                         }
+
+                        // Send result back - warn if channel is closed
+                        if tx.send(result).is_err() {
+                            tracing::warn!(
+                                "CLUSTER FORGET: Failed to send result back - receiver may have been dropped"
+                            );
+                        }
                     });
+
+                    // Wait for completion with timeout
+                    match rx.recv_timeout(Duration::from_secs(RAFT_PROPOSAL_TIMEOUT_SECS)) {
+                        Ok(Ok(_)) => {
+                            tracing::debug!("CLUSTER FORGET: Raft proposal completed successfully (via MultiRaft)");
+                        }
+                        Ok(Err(e)) => {
+                            return Err(e);
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                            return Err(AikvError::Storage(format!(
+                                "Timeout waiting for cluster consensus ({}s)",
+                                RAFT_PROPOSAL_TIMEOUT_SECS
+                            )));
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                            return Err(AikvError::Storage(
+                                "Internal error: async task failed to respond".to_string(),
+                            ));
+                        }
+                    }
                 }
             }
         }
