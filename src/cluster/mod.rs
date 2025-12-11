@@ -1,7 +1,7 @@
 //! Cluster module for AiKv Redis Cluster protocol support.
 //!
-//! This module provides the Redis Cluster protocol adaptation layer,
-//! wrapping AiDb's MultiRaft API to provide Redis Cluster compatibility.
+//! This module provides a thin glue layer between Redis Cluster protocol
+//! and AiDb's Multi-Raft implementation (v0.5.1).
 //!
 //! # Feature Flag
 //!
@@ -14,87 +14,83 @@
 //!
 //! # Architecture
 //!
-//! The cluster module acts as a thin glue layer between Redis Cluster protocol
-//! and AiDb's MultiRaft implementation:
-//!
 //! ```text
 //! ┌─────────────────────────────────────────────┐
 //! │         Redis Cluster Commands              │
-//! │  (CLUSTER KEYSLOT, INFO, NODES, etc.)       │
+//! │  (CLUSTER INFO, NODES, MEET, ADDSLOTS...)   │
 //! └─────────────────────────────────────────────┘
 //!                      │
 //!                      ▼
 //! ┌─────────────────────────────────────────────┐
-//! │         AiKv Cluster Glue Layer             │
-//! │  (ClusterNode, SlotRouter, Commands)        │
+//! │      AiKv Cluster Glue Layer (~500 lines)   │
+//! │   ClusterCommands: Redis protocol adapter   │
+//! │   ClusterNode: Thin wrapper                 │
 //! └─────────────────────────────────────────────┘
 //!                      │
 //!                      ▼
 //! ┌─────────────────────────────────────────────┐
-//! │         AiDb MultiRaft API                  │
-//! │  (Router, MultiRaftNode, MetaRaftNode)      │
+//! │       AiDb Multi-Raft API (v0.5.1)          │
+//! │  MetaRaftNode, MultiRaftNode, Router        │
+//! │  MigrationManager, MembershipCoordinator    │
 //! └─────────────────────────────────────────────┘
 //! ```
 //!
-//! # Cluster Bus (v0.3.0)
+//! # Design Principle
 //!
-//! This module includes the Cluster Bus for inter-node communication:
-//! - Heartbeat detection via `MetaRaftNode` leader heartbeat
-//! - Failure detection via `NodeStatus::Online/Offline` + election timeout
-//! - Health monitoring with configurable thresholds
+//! - **Minimal Code**: Only Redis protocol format conversion (~500-1000 lines)
+//! - **Zero Duplication**: All cluster logic delegated to AiDb
+//! - **Direct API Usage**: No custom wrappers around AiDb components
 //!
-//! # Stage C: Slot Migration
+//! # Key Components
 //!
-//! This module includes support for online slot migration:
-//! - `CLUSTER GETKEYSINSLOT` - Get keys belonging to a specific slot
-//! - `CLUSTER COUNTKEYSINSLOT` - Count keys in a slot
-//! - Migration state management (`MIGRATING`/`IMPORTING`)
-//! - `-ASK` redirection logic
-//! - Migration progress tracking
-//!
-//! # Stage D: High Availability
-//!
-//! This module includes support for high availability:
-//! - `CLUSTER REPLICATE` - Configure a node as a replica
-//! - `CLUSTER FAILOVER` - Manual failover trigger
-//! - `CLUSTER REPLICAS` - List replicas of a master
-//! - `READONLY` / `READWRITE` - Enable/disable readonly mode for replicas
-//! - Membership coordinator integration
-//!
-//! # Multi-Raft Integration (v0.2.0)
-//!
-//! The cluster module now integrates with AiDb's Multi-Raft implementation:
-//! - `MultiRaftNode` for managing multiple Raft groups
-//! - `MetaRaftNode` for cluster metadata consensus
-//! - Automatic key-to-slot-to-group routing
-//! - Support for 3-node cluster startup
+//! - `ClusterCommands`: Maps Redis CLUSTER commands to AiDb API calls
+//! - `ClusterNode`: Minimal wrapper around MultiRaftNode for initialization
+//! - Re-exports from AiDb: MetaRaftNode, MultiRaftNode, Router, ClusterMeta, etc.
 
-mod cluster_bus;
 mod commands;
-mod metaraft;
 mod node;
-mod router;
 
-pub use cluster_bus::{ClusterBus, ClusterBusConfig, NodeHealthInfo, NodeHealthStatus};
-pub use commands::{
-    ClusterCommands, ClusterState, FailoverMode, KeyCounter, KeyScanner, MigrationProgress,
-    NodeInfo, RedirectType, SlotState,
-};
-pub use metaraft::{ClusterNodeInfo, ClusterView, MetaRaftClient, MetaRaftClientConfig};
-pub use node::{ClusterNode, NodeId};
-pub use router::SlotRouter;
+// Use the new implementations
+pub use commands::{ClusterCommands, FailoverMode, NodeInfo, RedirectType};
+pub use node::{ClusterConfig, ClusterNode, GroupId, NodeId};
 
-// Re-export ClusterConfig when cluster feature is enabled
-#[cfg(feature = "cluster")]
-pub use node::{ClusterConfig, GroupId};
-
-// Re-export AiDb cluster types when cluster feature is enabled
+// Re-export AiDb cluster types directly (no custom wrappers)
 #[cfg(feature = "cluster")]
 pub use aidb::cluster::{
-    MetaNodeInfo as AiDbNodeInfo, MetaRaftNode, MultiRaftNode, NodeStatus as AiDbNodeStatus,
-    Router as AiDbRouter, SLOT_COUNT,
+    // Core components
+    MetaRaftNode,
+    MultiRaftNode,
+    Router,
+    ShardedStateMachine,
+    
+    // Migration
+    MigrationManager,
+    MigrationConfig,
+    
+    // Membership
+    MembershipCoordinator,
+    ReplicaAllocator,
+    
+    // Data structures
+    ClusterMeta,
+    GroupMeta,
+    MetaNodeInfo,
+    NodeStatus,
+    SlotMigration,
+    SlotMigrationState,
+    
+    // Storage and network
+    ShardedRaftStorage,
+    MultiRaftNetworkFactory,
+    
+    // Thin replication
+    ThinWriteBatch,
+    ThinWriteOp,
+    
+    // Constants
+    SLOT_COUNT,
 };
 
-/// Default slot count for Redis Cluster (16384 slots)
+/// Default slot count when cluster feature is disabled
 #[cfg(not(feature = "cluster"))]
 pub const SLOT_COUNT: u16 = 16384;

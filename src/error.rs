@@ -35,6 +35,21 @@ pub enum AikvError {
     #[error("Script error: {0}")]
     Script(String),
 
+    #[error("Internal error: {0}")]
+    Internal(String),
+
+    #[error("Invalid: {0}")]
+    Invalid(String),
+
+    #[error("MOVED {0} {1}")]
+    Moved(u16, String),
+
+    #[error("ASK {0} {1}")]
+    Ask(u16, String),
+
+    #[error("Cluster support is not enabled")]
+    ClusterDisabled,
+
     #[error("Unknown error: {0}")]
     Unknown(String),
 }

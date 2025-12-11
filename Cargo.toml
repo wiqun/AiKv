@@ -44,6 +44,7 @@ openraft = { version = "0.9", features = ["serde"], optional = true }
 # Lua scripting
 mlua = { version = "0.10", features = ["lua54", "async", "send", "vendored"] }
 sha1 = "0.10"
+rand = "0.8"
 
 [dev-dependencies]
 redis = "0.24"
