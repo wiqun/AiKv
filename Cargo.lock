@@ -24,8 +24,8 @@ dependencies = [
 
 [[package]]
 name = "aidb"
-version = "0.5.0"
-source = "git+https://github.com/Genuineh/AiDb?tag=v0.5.0#0d4fabf2bbff8c7d3d345659f67fd19ecab17ba4"
+version = "0.5.1"
+source = "git+https://github.com/Genuineh/AiDb?tag=v0.5.1#743047669e7ea278deb429d1d9a6c188aa07b926"
 dependencies = [
  "anyhow",
  "async-trait",
