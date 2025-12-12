@@ -14,7 +14,7 @@ use std::sync::Arc;
 #[cfg(feature = "cluster")]
 use aidb::cluster::{
     ClusterMeta, GroupId, MetaNodeInfo, MetaRaftNode, MigrationManager, MultiRaftNode, NodeId,
-    NodeStatus, Router, ShardedStateMachine, SLOT_COUNT,
+    NodeStatus, Router,
 };
 
 /// Redis Cluster has 16384 slots
@@ -88,16 +88,18 @@ impl NodeInfo {
 pub struct ClusterCommands {
     /// This node's ID
     node_id: NodeId,
-    
+
     /// Reference to MetaRaftNode for cluster metadata
     meta_raft: Arc<MetaRaftNode>,
-    
+
     /// Reference to MultiRaftNode for data operations
+    #[allow(dead_code)]
     multi_raft: Arc<MultiRaftNode>,
-    
+
     /// Router for key-to-slot-to-group mapping
+    #[allow(dead_code)]
     router: Arc<Router>,
-    
+
     /// Optional migration manager for slot migration
     migration_manager: Option<Arc<MigrationManager>>,
 }
@@ -137,23 +139,25 @@ impl ClusterCommands {
     /// Maps to: `meta_raft.get_cluster_meta()`
     pub fn cluster_info(&self) -> Result<RespValue> {
         let meta: ClusterMeta = self.meta_raft.get_cluster_meta();
-        
+
         // Count assigned slots
         let assigned_slots = meta.slots.iter().filter(|&&g| g > 0).count();
-        
+
         // Count online nodes
         let known_nodes = meta.nodes.len();
-        let online_nodes = meta.nodes.values()
+        let online_nodes = meta
+            .nodes
+            .values()
             .filter(|n| matches!(n.status, NodeStatus::Online))
             .count();
-        
+
         // Determine cluster state
         let cluster_state = if assigned_slots == TOTAL_SLOTS as usize && online_nodes > 0 {
             "ok"
         } else {
             "fail"
         };
-        
+
         let info = format!(
             "cluster_state:{}\r\n\
              cluster_slots_assigned:{}\r\n\
@@ -174,7 +178,7 @@ impl ClusterCommands {
             meta.config_version,
             meta.config_version,
         );
-        
+
         Ok(RespValue::BulkString(Some(Bytes::from(info))))
     }
 
@@ -184,14 +188,14 @@ impl ClusterCommands {
     pub fn cluster_nodes(&self) -> Result<RespValue> {
         let meta: ClusterMeta = self.meta_raft.get_cluster_meta();
         let mut lines = Vec::new();
-        
+
         for (node_id, node_info) in &meta.nodes {
             let status = match node_info.status {
                 NodeStatus::Online => "connected",
                 NodeStatus::Offline => "disconnected",
                 _ => "handshake",
             };
-            
+
             // Find slots for this node by checking which groups it belongs to
             let mut slot_ranges = Vec::new();
             for (group_id, group_meta) in &meta.groups {
@@ -216,16 +220,20 @@ impl ClusterCommands {
                     }
                 }
             }
-            
+
             // Check if this node is a master or replica
             let role = if meta.groups.values().any(|g| g.leader == Some(*node_id)) {
                 "master"
             } else {
                 "slave"
             };
-            
+
             // Format: <id> <ip:port@cport> <flags> <master> <ping-sent> <pong-recv> <config-epoch> <link-state> <slot> <slot> ...
-            let myself_flag = if *node_id == self.node_id { "myself," } else { "" };
+            let myself_flag = if *node_id == self.node_id {
+                "myself,"
+            } else {
+                ""
+            };
             let node_line = format!(
                 "{:040x} {}@{} {}{} - 0 0 {} {} {}",
                 node_id,
@@ -237,10 +245,10 @@ impl ClusterCommands {
                 status,
                 slot_ranges.join(" ")
             );
-            
+
             lines.push(node_line);
         }
-        
+
         let result = lines.join("\r\n");
         Ok(RespValue::BulkString(Some(Bytes::from(result))))
     }
@@ -251,23 +259,28 @@ impl ClusterCommands {
     pub fn cluster_slots(&self) -> Result<RespValue> {
         let meta: ClusterMeta = self.meta_raft.get_cluster_meta();
         let mut slots_info = Vec::new();
-        
+
         // Group consecutive slots by group_id
         let mut current_group: Option<GroupId> = None;
         let mut range_start: u16 = 0;
-        
+
         for (slot, &group_id) in meta.slots.iter().enumerate() {
             if group_id == 0 {
                 // Unassigned slot
                 if current_group.is_some() {
                     if let Some(group) = current_group {
-                        slots_info.push(self.format_slot_range(&meta, range_start, (slot - 1) as u16, group));
+                        slots_info.push(self.format_slot_range(
+                            &meta,
+                            range_start,
+                            (slot - 1) as u16,
+                            group,
+                        ));
                     }
                     current_group = None;
                 }
                 continue;
             }
-            
+
             match current_group {
                 None => {
                     // Start new range
@@ -276,7 +289,12 @@ impl ClusterCommands {
                 }
                 Some(cg) if cg != group_id => {
                     // Different group, output previous range and start new one
-                    slots_info.push(self.format_slot_range(&meta, range_start, (slot - 1) as u16, cg));
+                    slots_info.push(self.format_slot_range(
+                        &meta,
+                        range_start,
+                        (slot - 1) as u16,
+                        cg,
+                    ));
                     current_group = Some(group_id);
                     range_start = slot as u16;
                 }
@@ -285,22 +303,28 @@ impl ClusterCommands {
                 }
             }
         }
-        
+
         // Output last range if any
         if let Some(group) = current_group {
             slots_info.push(self.format_slot_range(&meta, range_start, TOTAL_SLOTS - 1, group));
         }
-        
+
         Ok(RespValue::Array(Some(slots_info)))
     }
 
     /// Format a slot range for CLUSTER SLOTS response
-    fn format_slot_range(&self, meta: &ClusterMeta, start: u16, end: u16, group_id: GroupId) -> RespValue {
+    fn format_slot_range(
+        &self,
+        meta: &ClusterMeta,
+        start: u16,
+        end: u16,
+        group_id: GroupId,
+    ) -> RespValue {
         let mut elements = vec![
             RespValue::Integer(start as i64),
             RespValue::Integer(end as i64),
         ];
-        
+
         if let Some(group_meta) = meta.groups.get(&group_id) {
             // Add master node first
             if let Some(leader_id) = group_meta.leader {
@@ -308,7 +332,7 @@ impl ClusterCommands {
                     elements.push(self.format_node_info(leader_id, node_info));
                 }
             }
-            
+
             // Add replica nodes
             for &replica_id in &group_meta.replicas {
                 if Some(replica_id) != group_meta.leader {
@@ -318,8 +342,8 @@ impl ClusterCommands {
                 }
             }
         }
-        
-        RespValue::Array(elements)
+
+        RespValue::Array(Some(elements))
     }
 
     /// Format node info for CLUSTER SLOTS response
@@ -355,7 +379,10 @@ impl ClusterCommands {
     ///
     /// Maps to: node_id
     pub fn cluster_myid(&self) -> Result<RespValue> {
-        Ok(RespValue::BulkString(Some(Bytes::from(format!("{:040x}", self.node_id)))))
+        Ok(RespValue::BulkString(Some(Bytes::from(format!(
+            "{:040x}",
+            self.node_id
+        )))))
     }
 
     /// Handle CLUSTER KEYSLOT command.
@@ -375,9 +402,14 @@ impl ClusterCommands {
     /// * `ip` - IP address of the node to add
     /// * `port` - Port of the node to add
     /// * `node_id_opt` - Optional pre-assigned node ID
-    pub async fn cluster_meet(&self, ip: String, port: u16, node_id_opt: Option<NodeId>) -> Result<RespValue> {
+    pub async fn cluster_meet(
+        &self,
+        ip: String,
+        port: u16,
+        node_id_opt: Option<NodeId>,
+    ) -> Result<RespValue> {
         let addr = format!("{}:{}", ip, port);
-        
+
         // Generate node ID if not provided
         let node_id = node_id_opt.unwrap_or_else(|| {
             use std::collections::hash_map::DefaultHasher;
@@ -386,11 +418,13 @@ impl ClusterCommands {
             addr.hash(&mut hasher);
             hasher.finish()
         });
-        
+
         // Add node via MetaRaft - this will sync to all nodes via Raft consensus
-        self.meta_raft.add_node(node_id, addr).await
+        self.meta_raft
+            .add_node(node_id, addr)
+            .await
             .map_err(|e| AikvError::Internal(format!("Failed to add node: {}", e)))?;
-        
+
         Ok(RespValue::SimpleString("OK".to_string()))
     }
 
@@ -399,9 +433,11 @@ impl ClusterCommands {
     /// Maps to: `meta_raft.remove_node(node_id)`
     pub async fn cluster_forget(&self, node_id: NodeId) -> Result<RespValue> {
         // Remove node via MetaRaft - this will sync to all nodes via Raft consensus
-        self.meta_raft.remove_node(node_id).await
+        self.meta_raft
+            .remove_node(node_id)
+            .await
             .map_err(|e| AikvError::Internal(format!("Failed to remove node: {}", e)))?;
-        
+
         Ok(RespValue::SimpleString("OK".to_string()))
     }
 
@@ -413,23 +449,29 @@ impl ClusterCommands {
     /// The group_id is determined by finding which group this node belongs to.
     pub async fn cluster_addslots(&self, slots: Vec<u16>) -> Result<RespValue> {
         let meta = self.meta_raft.get_cluster_meta();
-        
+
         // Find the group that this node belongs to
-        let group_id = meta.groups.iter()
+        let group_id = meta
+            .groups
+            .iter()
             .find(|(_, g)| g.replicas.contains(&self.node_id))
             .map(|(gid, _)| *gid)
             .ok_or_else(|| AikvError::Internal("Node does not belong to any group".to_string()))?;
-        
+
         // Assign each slot to this node's group - sync via Raft consensus
         for slot in slots {
             if slot >= TOTAL_SLOTS {
                 return Err(AikvError::Invalid(format!("Invalid slot: {}", slot)));
             }
-            
-            self.meta_raft.update_slots(slot, slot + 1, group_id).await
-                .map_err(|e| AikvError::Internal(format!("Failed to assign slot {}: {}", slot, e)))?;
+
+            self.meta_raft
+                .update_slots(slot, slot + 1, group_id)
+                .await
+                .map_err(|e| {
+                    AikvError::Internal(format!("Failed to assign slot {}: {}", slot, e))
+                })?;
         }
-        
+
         Ok(RespValue::SimpleString("OK".to_string()))
     }
 
@@ -442,11 +484,15 @@ impl ClusterCommands {
             if slot >= TOTAL_SLOTS {
                 return Err(AikvError::Invalid(format!("Invalid slot: {}", slot)));
             }
-            
-            self.meta_raft.update_slots(slot, slot + 1, 0).await
-                .map_err(|e| AikvError::Internal(format!("Failed to delete slot {}: {}", slot, e)))?;
+
+            self.meta_raft
+                .update_slots(slot, slot + 1, 0)
+                .await
+                .map_err(|e| {
+                    AikvError::Internal(format!("Failed to delete slot {}: {}", slot, e))
+                })?;
         }
-        
+
         Ok(RespValue::SimpleString("OK".to_string()))
     }
 
@@ -455,11 +501,11 @@ impl ClusterCommands {
     /// Maps to: `state_machine.scan_slot_keys_sync(group, slot)`
     ///
     /// Note: This requires access to ShardedStateMachine which we'll need to add
-    pub fn cluster_getkeysinslot(&self, slot: u16, count: usize) -> Result<RespValue> {
+    pub fn cluster_getkeysinslot(&self, slot: u16, _count: usize) -> Result<RespValue> {
         if slot >= TOTAL_SLOTS {
             return Err(AikvError::Invalid(format!("Invalid slot: {}", slot)));
         }
-        
+
         // TODO: Implement using ShardedStateMachine.scan_slot_keys_sync()
         // For now, return empty array
         Ok(RespValue::Array(Some(vec![])))
@@ -470,7 +516,7 @@ impl ClusterCommands {
         if slot >= TOTAL_SLOTS {
             return Err(AikvError::Invalid(format!("Invalid slot: {}", slot)));
         }
-        
+
         // TODO: Implement using ShardedStateMachine
         // For now, return 0
         Ok(RespValue::Integer(0))
@@ -480,16 +526,86 @@ impl ClusterCommands {
     /// This is a utility function for server initialization.
     pub fn generate_node_id() -> NodeId {
         use std::time::{SystemTime, UNIX_EPOCH};
-        
+
         // Use a combination of timestamp and random number
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos() as u64;
-        
+
         // Mix with random bits
         let random: u64 = rand::random();
         timestamp ^ random
+    }
+
+    /// Execute a CLUSTER subcommand.
+    ///
+    /// This is the main dispatcher for CLUSTER commands.
+    pub fn execute(&self, args: &[Bytes]) -> Result<RespValue> {
+        if args.is_empty() {
+            return Err(AikvError::WrongArgCount("CLUSTER".to_string()));
+        }
+
+        let subcommand = String::from_utf8_lossy(&args[0]).to_uppercase();
+        match subcommand.as_str() {
+            "INFO" => self.cluster_info(),
+            "NODES" => self.cluster_nodes(),
+            "SLOTS" => self.cluster_slots(),
+            "MYID" => self.cluster_myid(),
+            "KEYSLOT" => {
+                if args.len() != 2 {
+                    return Err(AikvError::WrongArgCount("CLUSTER KEYSLOT".to_string()));
+                }
+                self.cluster_keyslot(&args[1])
+            }
+            "GETKEYSINSLOT" => {
+                if args.len() != 3 {
+                    return Err(AikvError::WrongArgCount(
+                        "CLUSTER GETKEYSINSLOT".to_string(),
+                    ));
+                }
+                let slot = String::from_utf8_lossy(&args[1])
+                    .parse::<u16>()
+                    .map_err(|_| AikvError::Invalid("Invalid slot".to_string()))?;
+                let count = String::from_utf8_lossy(&args[2])
+                    .parse::<usize>()
+                    .map_err(|_| AikvError::Invalid("Invalid count".to_string()))?;
+                self.cluster_getkeysinslot(slot, count)
+            }
+            "COUNTKEYSINSLOT" => {
+                if args.len() != 2 {
+                    return Err(AikvError::WrongArgCount(
+                        "CLUSTER COUNTKEYSINSLOT".to_string(),
+                    ));
+                }
+                let slot = String::from_utf8_lossy(&args[1])
+                    .parse::<u16>()
+                    .map_err(|_| AikvError::Invalid("Invalid slot".to_string()))?;
+                self.cluster_countkeysinslot(slot)
+            }
+            _ => Err(AikvError::InvalidCommand(format!(
+                "Unknown CLUSTER subcommand: {}",
+                subcommand
+            ))),
+        }
+    }
+
+    /// Handle READONLY command.
+    ///
+    /// Sets connection to read-only mode for replica reads.
+    pub fn readonly(&self) -> Result<RespValue> {
+        // For now, just return OK
+        // In a full implementation, this would set a flag on the connection
+        Ok(RespValue::SimpleString("OK".to_string()))
+    }
+
+    /// Handle READWRITE command.
+    ///
+    /// Sets connection back to read-write mode (default).
+    pub fn readwrite(&self) -> Result<RespValue> {
+        // For now, just return OK
+        // In a full implementation, this would clear the read-only flag
+        Ok(RespValue::SimpleString("OK".to_string()))
     }
 }
 

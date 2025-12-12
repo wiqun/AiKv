@@ -43,36 +43,36 @@ pub use node::{ClusterConfig, ClusterNode, GroupId, NodeId};
 // Re-export AiDb v0.5.1 cluster types
 #[cfg(feature = "cluster")]
 pub use aidb::cluster::{
-    // Core components
-    MetaRaftNode,
-    MultiRaftNode,
-    Router,
-    ShardedStateMachine,
-    
-    // Migration
-    MigrationManager,
-    MigrationConfig,
-    
-    // Membership
-    MembershipCoordinator,
-    ReplicaAllocator,
-    
     // Data structures
     ClusterMeta,
     GroupMeta,
+    // Membership
+    MembershipCoordinator,
     MetaNodeInfo,
+    // Core components
+    MetaRaftNode,
+    MigrationConfig,
+
+    // Migration
+    MigrationManager,
+    MultiRaftNetworkFactory,
+
+    MultiRaftNode,
     NodeStatus,
-    SlotMigration,
-    SlotMigrationState,
-    
+    ReplicaAllocator,
+
+    Router,
     // Storage and network
     ShardedRaftStorage,
-    MultiRaftNetworkFactory,
-    
+    ShardedStateMachine,
+
+    SlotMigration,
+    SlotMigrationState,
+
     // Thin replication
     ThinWriteBatch,
     ThinWriteOp,
-    
+
     // Constants
     SLOT_COUNT,
 };

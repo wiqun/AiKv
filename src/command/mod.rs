@@ -24,11 +24,6 @@ use crate::protocol::RespValue;
 use crate::storage::StorageEngine;
 use bytes::Bytes;
 
-#[cfg(feature = "cluster")]
-use crate::cluster::ClusterState;
-#[cfg(feature = "cluster")]
-use std::sync::{Arc, RwLock};
-
 /// Command executor with database context
 pub struct CommandExecutor {
     string_commands: StringCommands,
@@ -42,7 +37,7 @@ pub struct CommandExecutor {
     set_commands: SetCommands,
     zset_commands: ZSetCommands,
     #[cfg(feature = "cluster")]
-    cluster_commands: crate::cluster::ClusterCommands,
+    cluster_commands: Option<crate::cluster::ClusterCommands>,
 }
 
 impl CommandExecutor {
@@ -63,37 +58,17 @@ impl CommandExecutor {
             set_commands: SetCommands::new(storage.clone()),
             zset_commands: ZSetCommands::new(storage),
             #[cfg(feature = "cluster")]
-            cluster_commands: crate::cluster::ClusterCommands::new(),
+            cluster_commands: None, // Will be set later when cluster is initialized
         }
     }
 
-    /// Create a command executor with shared cluster state.
+    /// Set cluster commands after initialization.
     ///
-    /// In cluster mode, all connections should share the same cluster state
-    /// to ensure consistent cluster metadata and node information.
+    /// This allows setting the cluster commands after the CommandExecutor is created,
+    /// once the cluster node components are fully initialized.
     #[cfg(feature = "cluster")]
-    pub fn with_shared_cluster_state(
-        storage: StorageEngine,
-        port: u16,
-        node_id: u64,
-        cluster_state: Arc<RwLock<ClusterState>>,
-    ) -> Self {
-        Self {
-            string_commands: StringCommands::new(storage.clone()),
-            json_commands: JsonCommands::new(storage.clone()),
-            database_commands: DatabaseCommands::new(storage.clone()),
-            key_commands: KeyCommands::new(storage.clone()),
-            server_commands: ServerCommands::with_port(port),
-            script_commands: ScriptCommands::new(storage.clone()),
-            list_commands: ListCommands::new(storage.clone()),
-            hash_commands: HashCommands::new(storage.clone()),
-            set_commands: SetCommands::new(storage.clone()),
-            zset_commands: ZSetCommands::new(storage),
-            cluster_commands: crate::cluster::ClusterCommands::with_shared_state(
-                Some(node_id),
-                cluster_state,
-            ),
-        }
+    pub fn set_cluster_commands(&mut self, cluster_commands: crate::cluster::ClusterCommands) {
+        self.cluster_commands = Some(cluster_commands);
     }
 
     pub fn execute(
@@ -275,11 +250,38 @@ impl CommandExecutor {
 
             // Cluster commands (only available with cluster feature)
             #[cfg(feature = "cluster")]
-            "CLUSTER" => self.cluster_commands.execute(args),
+            "CLUSTER" => {
+                if let Some(ref cluster_commands) = self.cluster_commands {
+                    cluster_commands.execute(args)
+                } else {
+                    Err(AikvError::Internal(
+                        "Cluster not initialized. Please initialize cluster node first."
+                            .to_string(),
+                    ))
+                }
+            }
             #[cfg(feature = "cluster")]
-            "READONLY" => self.cluster_commands.readonly(),
+            "READONLY" => {
+                if let Some(ref cluster_commands) = self.cluster_commands {
+                    cluster_commands.readonly()
+                } else {
+                    Err(AikvError::Internal(
+                        "Cluster not initialized. Please initialize cluster node first."
+                            .to_string(),
+                    ))
+                }
+            }
             #[cfg(feature = "cluster")]
-            "READWRITE" => self.cluster_commands.readwrite(),
+            "READWRITE" => {
+                if let Some(ref cluster_commands) = self.cluster_commands {
+                    cluster_commands.readwrite()
+                } else {
+                    Err(AikvError::Internal(
+                        "Cluster not initialized. Please initialize cluster node first."
+                            .to_string(),
+                    ))
+                }
+            }
 
             // Utility commands
             "PING" => {

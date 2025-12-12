@@ -36,7 +36,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 toml = "0.8"
 
 # Storage engine
-aidb = { git = "https://github.com/Genuineh/AiDb", tag = "v0.5.1" }
+aidb = { git = "https://github.com/Genuineh/AiDb", tag = "v0.5.2" }
 
 # Raft consensus (optional, for cluster mode)
 openraft = { version = "0.9", features = ["serde"], optional = true }
