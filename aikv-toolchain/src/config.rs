@@ -134,35 +134,21 @@ Build with: cargo build --release --features cluster
 ✅ port = 6379
    Description: Data port
 
-🚧 cluster_port = 16379
-   Description: Cluster bus port (data_port + 10000)
-   Status: Planned
-
-[cluster] Section (Planned)
----------------------------
-🚧 enabled = true
+[cluster] Section
+-----------------
+✅ enabled = true
    Description: Enable cluster mode
+   Status: Implemented
 
-🚧 node_id = "node1"
-   Description: Unique node identifier
+✅ raft_address = "127.0.0.1:50051"
+   Description: Raft RPC address (gRPC) for cluster communication
+   Note: Each node must use a unique port
+   Status: Implemented
 
-🚧 node_name = "aikv-node-1"
-   Description: Node name for logging/monitoring
-
-🚧 data_dir = "./cluster-data"
-   Description: Cluster data directory
-
-🚧 peers = ["192.168.1.101:16379", ...]
-   Description: Initial cluster peer list
-
-🚧 is_bootstrap = false
-   Description: Is this the bootstrap node
-
-🚧 role = "master"
-   Description: Node role (master/replica)
-
-🚧 master_id = "node1"
-   Description: Master node ID (for replicas)
+✅ is_bootstrap = false
+   Description: Whether this is the bootstrap node (first node in cluster)
+   Note: Set to true for the first node only
+   Status: Implemented
 
 [storage] Section
 -----------------
@@ -173,10 +159,11 @@ Build with: cargo build --release --features cluster
 ✅ data_dir = "./data"
    Description: Data directory
 
-[raft] Section (Planned)
-------------------------
+[raft] Section (Future)
+-----------------------
 🚧 heartbeat_interval = 100
    Description: Heartbeat interval in ms
+   Status: Planned (uses openraft defaults)
 
 🚧 election_timeout_min = 300
 🚧 election_timeout_max = 500

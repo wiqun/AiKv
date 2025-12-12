@@ -74,7 +74,7 @@ enum Commands {
         output: PathBuf,
 
         /// Configuration template
-        #[arg(short, long)]
+        #[arg(long)]
         template: Option<String>,
     },
 
