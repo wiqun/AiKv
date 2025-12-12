@@ -447,16 +447,29 @@ impl ClusterCommands {
     ///
     /// Note: For Redis compatibility, we need to assign slots to a group.
     /// The group_id is determined by finding which group this node belongs to.
+    /// If the node doesn't belong to any group yet, we create one automatically.
     pub async fn cluster_addslots(&self, slots: Vec<u16>) -> Result<RespValue> {
         let meta = self.meta_raft.get_cluster_meta();
 
-        // Find the group that this node belongs to
-        let group_id = meta
+        // Find the group that this node belongs to, or create one if it doesn't exist
+        let group_id = if let Some((gid, _)) = meta
             .groups
             .iter()
             .find(|(_, g)| g.replicas.contains(&self.node_id))
-            .map(|(gid, _)| *gid)
-            .ok_or_else(|| AikvError::Internal("Node does not belong to any group".to_string()))?;
+        {
+            *gid
+        } else {
+            // Auto-create a group for this node using its node_id as the group_id
+            // This matches Redis behavior where each master initially forms its own group
+            let group_id = self.node_id;
+            self.meta_raft
+                .create_group(group_id, vec![self.node_id])
+                .await
+                .map_err(|e| {
+                    AikvError::Internal(format!("Failed to create group for node: {}", e))
+                })?;
+            group_id
+        };
 
         // Assign each slot to this node's group - sync via Raft consensus
         for slot in slots {

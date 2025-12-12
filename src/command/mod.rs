@@ -311,4 +311,9 @@ impl CommandExecutor {
     pub fn server_commands(&self) -> &ServerCommands {
         &self.server_commands
     }
+
+    #[cfg(feature = "cluster")]
+    pub fn cluster_commands(&self) -> Option<&crate::cluster::ClusterCommands> {
+        self.cluster_commands.as_ref()
+    }
 }

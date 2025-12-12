@@ -276,6 +276,45 @@ impl Connection {
                     self.broadcast_to_monitors(&command_upper, &args);
                 }
 
+                // Handle async CLUSTER commands before synchronous execution
+                #[cfg(feature = "cluster")]
+                if command_upper == "CLUSTER" && !args.is_empty() {
+                    let subcommand = String::from_utf8_lossy(&args[0]).to_uppercase();
+                    // These are async cluster management commands
+                    if matches!(subcommand.as_str(), "MEET" | "FORGET" | "ADDSLOTS" | "DELSLOTS" | "REPLICATE") {
+                        if let Some(cluster_cmds) = self.executor.cluster_commands() {
+                            let result = self.handle_async_cluster_command(cluster_cmds, &subcommand, &args[1..]).await;
+                            
+                            // Record metrics
+                            if let Some(ref metrics) = self.metrics {
+                                let duration = start.elapsed();
+                                match &result {
+                                    Ok(_) => {
+                                        metrics.commands.record_command(&format!("CLUSTER {}", subcommand), duration);
+                                        debug!(
+                                            command = %format!("CLUSTER {}", subcommand),
+                                            duration_us = duration.as_micros(),
+                                            client = %self.client_addr,
+                                            db = self.current_db,
+                                            "Async cluster command executed"
+                                        );
+                                    }
+                                    Err(_) => {
+                                        metrics.commands.record_error(&format!("CLUSTER {}", subcommand));
+                                    }
+                                }
+                            }
+                            
+                            return match result {
+                                Ok(resp) => resp,
+                                Err(e) => RespValue::error(format!("ERR {}", e)),
+                            };
+                        } else {
+                            return RespValue::error("ERR Cluster not initialized. Please initialize cluster node first.");
+                        }
+                    }
+                }
+
                 let result =
                     self.executor
                         .execute(&command, &args, &mut self.current_db, self.client_id);
@@ -324,6 +363,111 @@ impl Connection {
                     &args_str,
                 );
             }
+        }
+    }
+
+    /// Handle async cluster commands
+    #[cfg(feature = "cluster")]
+    async fn handle_async_cluster_command(
+        &self,
+        cluster_cmds: &crate::cluster::ClusterCommands,
+        subcommand: &str,
+        args: &[Bytes],
+    ) -> Result<RespValue> {
+        use crate::error::AikvError;
+        
+        match subcommand {
+            "MEET" => {
+                // CLUSTER MEET ip port [node-id]
+                if args.len() < 2 || args.len() > 3 {
+                    return Err(AikvError::WrongArgCount("CLUSTER MEET".to_string()));
+                }
+                
+                let ip = String::from_utf8_lossy(&args[0]).to_string();
+                let port = String::from_utf8_lossy(&args[1])
+                    .parse::<u16>()
+                    .map_err(|_| AikvError::Invalid("Invalid port".to_string()))?;
+                
+                let node_id = if args.len() == 3 {
+                    let id_str = String::from_utf8_lossy(&args[2]);
+                    Some(u64::from_str_radix(&id_str, 16)
+                        .map_err(|_| AikvError::Invalid("Invalid node ID".to_string()))?)
+                } else {
+                    None
+                };
+                
+                cluster_cmds.cluster_meet(ip, port, node_id).await
+            }
+            "FORGET" => {
+                // CLUSTER FORGET node-id
+                if args.len() != 1 {
+                    return Err(AikvError::WrongArgCount("CLUSTER FORGET".to_string()));
+                }
+                
+                let id_str = String::from_utf8_lossy(&args[0]);
+                let node_id = u64::from_str_radix(&id_str, 16)
+                    .map_err(|_| AikvError::Invalid("Invalid node ID".to_string()))?;
+                
+                cluster_cmds.cluster_forget(node_id).await
+            }
+            "ADDSLOTS" => {
+                // CLUSTER ADDSLOTS slot [slot ...]
+                if args.is_empty() {
+                    return Err(AikvError::WrongArgCount("CLUSTER ADDSLOTS".to_string()));
+                }
+                
+                let mut slots = Vec::new();
+                for arg in args {
+                    let slot = String::from_utf8_lossy(arg)
+                        .parse::<u16>()
+                        .map_err(|_| AikvError::Invalid("Invalid slot".to_string()))?;
+                    
+                    if slot >= 16384 {
+                        return Err(AikvError::Invalid(format!("Slot out of range: {}", slot)));
+                    }
+                    slots.push(slot);
+                }
+                
+                cluster_cmds.cluster_addslots(slots).await
+            }
+            "DELSLOTS" => {
+                // CLUSTER DELSLOTS slot [slot ...]
+                if args.is_empty() {
+                    return Err(AikvError::WrongArgCount("CLUSTER DELSLOTS".to_string()));
+                }
+                
+                let mut slots = Vec::new();
+                for arg in args {
+                    let slot = String::from_utf8_lossy(arg)
+                        .parse::<u16>()
+                        .map_err(|_| AikvError::Invalid("Invalid slot".to_string()))?;
+                    
+                    if slot >= 16384 {
+                        return Err(AikvError::Invalid(format!("Slot out of range: {}", slot)));
+                    }
+                    slots.push(slot);
+                }
+                
+                cluster_cmds.cluster_delslots(slots).await
+            }
+            "REPLICATE" => {
+                // CLUSTER REPLICATE node-id
+                if args.len() != 1 {
+                    return Err(AikvError::WrongArgCount("CLUSTER REPLICATE".to_string()));
+                }
+                
+                let id_str = String::from_utf8_lossy(&args[0]);
+                let _master_id = u64::from_str_radix(&id_str, 16)
+                    .map_err(|_| AikvError::Invalid("Invalid node ID".to_string()))?;
+                
+                // Find cluster_replicate method
+                // For now return error as this method doesn't exist yet
+                Err(AikvError::InvalidCommand("CLUSTER REPLICATE not yet implemented".to_string()))
+            }
+            _ => Err(AikvError::InvalidCommand(format!(
+                "Unknown async CLUSTER subcommand: {}",
+                subcommand
+            ))),
         }
     }
 
