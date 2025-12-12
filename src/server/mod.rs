@@ -24,6 +24,7 @@ pub struct Server {
     metrics: Arc<Metrics>,
     monitor_broadcaster: Arc<MonitorBroadcaster>,
     #[cfg(feature = "cluster")]
+    #[allow(dead_code)]
     node_id: u64,
 }
 

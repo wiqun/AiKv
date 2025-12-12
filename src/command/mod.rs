@@ -255,7 +255,8 @@ impl CommandExecutor {
                     cluster_commands.execute(args)
                 } else {
                     Err(AikvError::Internal(
-                        "Cluster not initialized. Please initialize cluster node first.".to_string()
+                        "Cluster not initialized. Please initialize cluster node first."
+                            .to_string(),
                     ))
                 }
             }
@@ -265,7 +266,8 @@ impl CommandExecutor {
                     cluster_commands.readonly()
                 } else {
                     Err(AikvError::Internal(
-                        "Cluster not initialized. Please initialize cluster node first.".to_string()
+                        "Cluster not initialized. Please initialize cluster node first."
+                            .to_string(),
                     ))
                 }
             }
@@ -275,7 +277,8 @@ impl CommandExecutor {
                     cluster_commands.readwrite()
                 } else {
                     Err(AikvError::Internal(
-                        "Cluster not initialized. Please initialize cluster node first.".to_string()
+                        "Cluster not initialized. Please initialize cluster node first."
+                            .to_string(),
                     ))
                 }
             }
