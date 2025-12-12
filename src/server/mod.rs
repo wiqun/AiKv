@@ -82,12 +82,12 @@ impl Server {
 
     /// Initialize cluster components (cluster feature only)
     #[cfg(feature = "cluster")]
-    pub async fn initialize_cluster(&mut self, data_dir: &str, raft_addr: &str, is_bootstrap: bool) -> Result<()> {
+    pub async fn initialize_cluster(&mut self, data_dir: &str, raft_addr: &str, is_bootstrap: bool, peers: &[String]) -> Result<()> {
         use openraft::Config as RaftConfig;
 
         info!(
-            "Initializing cluster: node_id={:040x}, raft_addr={}, bootstrap={}",
-            self.node_id, raft_addr, is_bootstrap
+            "Initializing cluster: node_id={:040x}, raft_addr={}, bootstrap={}, peers={:?}",
+            self.node_id, raft_addr, is_bootstrap, peers
         );
 
         let raft_config = RaftConfig::default();
@@ -109,8 +109,27 @@ impl Server {
 
         // If bootstrap node, initialize MetaRaft cluster
         if is_bootstrap {
+            // Build peer list for MetaRaft initialization
+            let meta_peers = if !peers.is_empty() {
+                // Use pre-configured peers for multi-master setup
+                // Parse peers to extract or generate node IDs
+                // For now, we use incremental node IDs based on port order
+                let mut peer_nodes = Vec::new();
+                for (_idx, peer_addr) in peers.iter().enumerate() {
+                    // Generate consistent node ID based on peer address hash
+                    let node_id = ClusterCommands::generate_node_id_from_addr(peer_addr);
+                    peer_nodes.push((node_id, peer_addr.clone()));
+                }
+                info!("Multi-master bootstrap with {} peers: {:?}", peer_nodes.len(), peer_nodes);
+                peer_nodes
+            } else {
+                // Single-node bootstrap (legacy behavior)
+                info!("Single-node bootstrap (legacy mode)");
+                vec![(self.node_id, raft_addr.to_string())]
+            };
+
             multi_raft
-                .initialize_meta_cluster(vec![(self.node_id, raft_addr.to_string())])
+                .initialize_meta_cluster(meta_peers)
                 .await
                 .map_err(|e| {
                     crate::error::AikvError::Internal(format!("Failed to bootstrap MetaRaft: {}", e))

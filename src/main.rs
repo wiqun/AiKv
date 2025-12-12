@@ -81,6 +81,10 @@ struct ClusterConfigSection {
     /// Whether this is the bootstrap node (first node in cluster)
     #[serde(default)]
     is_bootstrap: bool,
+    /// Pre-configured peer addresses for multi-master MetaRaft bootstrap
+    /// Example: ["127.0.0.1:50051", "127.0.0.1:50052", "127.0.0.1:50053"]
+    #[serde(default)]
+    peers: Vec<String>,
 }
 
 #[cfg(feature = "cluster")]
@@ -417,6 +421,7 @@ async fn main() {
                 &storage_config.data_dir,
                 &cluster_config.raft_address,
                 cluster_config.is_bootstrap,
+                &cluster_config.peers,
             )
             .await
         {

@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 #[cfg(feature = "cluster")]
 use aidb::cluster::{
-    ClusterMeta, GroupId, MembershipCoordinator, MetaNodeInfo, MetaRaftNode, MigrationManager,
+    ClusterMeta, GroupId, MetaNodeInfo, MetaRaftNode, MigrationManager,
     MultiRaftNode, NodeId, NodeStatus, Router,
 };
 
@@ -595,6 +595,17 @@ impl ClusterCommands {
         // Mix with random bits
         let random: u64 = rand::random();
         timestamp ^ random
+    }
+
+    /// Generate a consistent node ID from a peer address.
+    /// This ensures all nodes agree on each other's IDs in multi-master setup.
+    pub fn generate_node_id_from_addr(addr: &str) -> NodeId {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+        addr.hash(&mut hasher);
+        hasher.finish()
     }
 
     /// Execute a CLUSTER subcommand.

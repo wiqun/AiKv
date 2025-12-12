@@ -49,6 +49,14 @@ raft_address = "127.0.0.1:50051"
 # Is this the bootstrap node (set to true for the first node)
 is_bootstrap = false
 
+# ✅ 预配置的对等节点地址（用于多主节点 MetaRaft 引导）
+# Pre-configured peer addresses for multi-master MetaRaft bootstrap
+# 仅在引导节点上配置，列出所有主节点的 Raft 地址
+# Only configure on bootstrap node, list all master node Raft addresses
+# 示例 / Example:
+# peers = ["127.0.0.1:50051", "127.0.0.1:50052", "127.0.0.1:50053"]
+peers = []
+
 # 🚧 以下配置项尚未实现 / The following options are not yet implemented:
 
 # ============================================================
