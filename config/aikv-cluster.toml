@@ -35,44 +35,21 @@ port = 6379
 # tcp_buffer_size = 65536      # TCP 缓冲区大小 / TCP buffer size
 
 # ============================================================
-# 🚧 集群配置 / Cluster Configuration (Not yet implemented)
+# 集群配置 / Cluster Configuration
 # ============================================================
-# [cluster]
-# # 启用集群模式 / Enable cluster mode
-# enabled = true
-#
-# # 节点 ID（每个节点必须唯一）
-# # Node ID (must be unique for each node)
-# node_id = "node1"
-#
-# # 节点名称（用于日志和监控）
-# # Node name (for logging and monitoring)
-# node_name = "aikv-node-1"
-#
-# # 集群数据目录 / Cluster data directory
-# data_dir = "./cluster-data"
-#
-# # 初始集群节点列表（cluster_port 地址）
-# # Initial cluster peer list (cluster_port addresses)
-# peers = [
-#     # "192.168.1.101:16379",
-#     # "192.168.1.102:16379",
-#     # "192.168.1.103:16379",
-# ]
-#
-# # 是否为引导节点（第一个启动的节点设为 true）
-# # Is this the bootstrap node (set to true for the first node)
-# is_bootstrap = false
-#
-# # 节点角色 / Node role
-# # 可选值 / Options:
-# #   - "master"  : 主节点，可读写
-# #   - "replica" : 从节点，只读（需指定 master_id）
-# role = "master"
-#
-# # 主节点 ID（当 role = "replica" 时需要设置）
-# # Master node ID (required when role = "replica")
-# # master_id = "node1"
+[cluster]
+# ✅ 启用集群模式 / Enable cluster mode
+enabled = true
+
+# ✅ Raft 通信地址（gRPC）/ Raft communication address (gRPC)
+# 每个节点必须使用不同的端口 / Each node must use a different port
+raft_address = "127.0.0.1:50051"
+
+# ✅ 是否为引导节点（第一个启动的节点设为 true）
+# Is this the bootstrap node (set to true for the first node)
+is_bootstrap = false
+
+# 🚧 以下配置项尚未实现 / The following options are not yet implemented:
 
 # ============================================================
 # 存储配置 / Storage Configuration

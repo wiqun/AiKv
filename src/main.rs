@@ -68,6 +68,26 @@ fn default_log_level() -> String {
     "info".to_string()
 }
 
+/// Cluster section of the configuration file
+#[cfg(feature = "cluster")]
+#[derive(Deserialize, Default)]
+struct ClusterConfigSection {
+    /// Enable cluster mode
+    #[serde(default)]
+    enabled: bool,
+    /// Raft address for cluster communication
+    #[serde(default = "default_raft_addr")]
+    raft_address: String,
+    /// Whether this is the bootstrap node (first node in cluster)
+    #[serde(default)]
+    is_bootstrap: bool,
+}
+
+#[cfg(feature = "cluster")]
+fn default_raft_addr() -> String {
+    "127.0.0.1:50051".to_string()
+}
+
 /// Root configuration structure
 #[derive(Deserialize, Default)]
 struct Config {
@@ -77,6 +97,9 @@ struct Config {
     storage: StorageConfig,
     #[serde(default)]
     logging: LoggingConfig,
+    #[cfg(feature = "cluster")]
+    #[serde(default)]
+    cluster: ClusterConfigSection,
 }
 
 /// Command line arguments structure
@@ -243,6 +266,36 @@ fn parse_args() -> CliArgs {
 }
 
 /// Load configuration from file and merge with CLI arguments
+#[cfg(feature = "cluster")]
+fn load_config(cli: &CliArgs) -> (String, u16, StorageConfig, LoggingConfig, ClusterConfigSection) {
+    let mut config = Config::default();
+
+    // Load from config file if specified
+    if let Some(ref path) = cli.config_path {
+        match fs::read_to_string(path) {
+            Ok(content) => match toml::from_str::<Config>(&content) {
+                Ok(cfg) => config = cfg,
+                Err(e) => {
+                    eprintln!("Failed to parse config file '{}': {}", path, e);
+                    std::process::exit(1);
+                }
+            },
+            Err(e) => {
+                eprintln!("Failed to read config file '{}': {}", path, e);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // CLI arguments override config file
+    let host = cli.host.clone().unwrap_or(config.server.host);
+    let port = cli.port.unwrap_or(config.server.port);
+
+    (host, port, config.storage, config.logging, config.cluster)
+}
+
+/// Load configuration from file and merge with CLI arguments
+#[cfg(not(feature = "cluster"))]
 fn load_config(cli: &CliArgs) -> (String, u16, StorageConfig, LoggingConfig) {
     let mut config = Config::default();
 
@@ -316,6 +369,9 @@ async fn main() {
     }
 
     // Load configuration
+    #[cfg(feature = "cluster")]
+    let (host, port, storage_config, logging_config, cluster_config) = load_config(&cli);
+    #[cfg(not(feature = "cluster"))]
     let (host, port, storage_config, logging_config) = load_config(&cli);
 
     // Initialize logging with configured level
@@ -350,7 +406,24 @@ async fn main() {
     let storage = create_storage_engine(&storage_config);
 
     // Create and run server
-    let server = Server::new(addr, storage);
+    let mut server = Server::new(addr, storage);
+
+    // Initialize cluster if enabled
+    #[cfg(feature = "cluster")]
+    if cluster_config.enabled {
+        info!("Cluster mode enabled in configuration");
+        if let Err(e) = server
+            .initialize_cluster(
+                &storage_config.data_dir,
+                &cluster_config.raft_address,
+                cluster_config.is_bootstrap,
+            )
+            .await
+        {
+            eprintln!("Failed to initialize cluster: {}", e);
+            std::process::exit(1);
+        }
+    }
 
     if let Err(e) = server.run().await {
         eprintln!("Server error: {}", e);
