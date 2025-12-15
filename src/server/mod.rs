@@ -53,15 +53,9 @@ impl Server {
 
         #[cfg(feature = "cluster")]
         let node_id = {
-            // Generate a unique node ID for this cluster node
-            let node_id = ClusterCommands::generate_node_id();
-
-            info!(
-                "Cluster mode enabled: node_id={:040x}, port={}",
-                node_id, port
-            );
-
-            node_id
+            // Node ID will be set during initialize_cluster based on raft_address
+            // This ensures consistent node IDs across restarts
+            0
         };
 
         Self {
@@ -85,6 +79,11 @@ impl Server {
     #[cfg(feature = "cluster")]
     pub async fn initialize_cluster(&mut self, data_dir: &str, raft_addr: &str, is_bootstrap: bool, peers: &[String]) -> Result<()> {
         use openraft::Config as RaftConfig;
+
+        // Generate consistent node ID from raft address
+        // This ensures the same node always gets the same ID across restarts
+        let node_id = ClusterCommands::generate_node_id_from_addr(raft_addr);
+        self.node_id = node_id;
 
         info!(
             "Initializing cluster: node_id={:040x}, raft_addr={}, bootstrap={}, peers={:?}",
