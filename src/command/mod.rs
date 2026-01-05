@@ -46,12 +46,18 @@ impl CommandExecutor {
     }
 
     pub fn with_port(storage: StorageEngine, port: u16) -> Self {
+        // Check if cluster feature is enabled at compile time
+        #[cfg(feature = "cluster")]
+        let cluster_enabled = true;
+        #[cfg(not(feature = "cluster"))]
+        let cluster_enabled = false;
+
         Self {
             string_commands: StringCommands::new(storage.clone()),
             json_commands: JsonCommands::new(storage.clone()),
             database_commands: DatabaseCommands::new(storage.clone()),
             key_commands: KeyCommands::new(storage.clone()),
-            server_commands: ServerCommands::with_port(port),
+            server_commands: ServerCommands::with_port_and_cluster(port, cluster_enabled),
             script_commands: ScriptCommands::new(storage.clone()),
             list_commands: ListCommands::new(storage.clone()),
             hash_commands: HashCommands::new(storage.clone()),
@@ -254,10 +260,9 @@ impl CommandExecutor {
                 if let Some(ref cluster_commands) = self.cluster_commands {
                     cluster_commands.execute(args)
                 } else {
-                    Err(AikvError::Internal(
-                        "Cluster not initialized. Please initialize cluster node first."
-                            .to_string(),
-                    ))
+                    // Return fallback responses for read-only cluster commands when not initialized
+                    // This helps Redis UI clients detect cluster mode properly
+                    Self::handle_cluster_fallback(args)
                 }
             }
             #[cfg(feature = "cluster")]
@@ -265,10 +270,8 @@ impl CommandExecutor {
                 if let Some(ref cluster_commands) = self.cluster_commands {
                     cluster_commands.readonly()
                 } else {
-                    Err(AikvError::Internal(
-                        "Cluster not initialized. Please initialize cluster node first."
-                            .to_string(),
-                    ))
+                    // READONLY is safe to acknowledge even without cluster
+                    Ok(RespValue::simple_string("OK"))
                 }
             }
             #[cfg(feature = "cluster")]
@@ -276,10 +279,17 @@ impl CommandExecutor {
                 if let Some(ref cluster_commands) = self.cluster_commands {
                     cluster_commands.readwrite()
                 } else {
-                    Err(AikvError::Internal(
-                        "Cluster not initialized. Please initialize cluster node first."
-                            .to_string(),
-                    ))
+                    // READWRITE is safe to acknowledge even without cluster
+                    Ok(RespValue::simple_string("OK"))
+                }
+            }
+            #[cfg(feature = "cluster")]
+            "ASKING" => {
+                if let Some(ref cluster_commands) = self.cluster_commands {
+                    cluster_commands.asking()
+                } else {
+                    // ASKING is safe to acknowledge even without cluster
+                    Ok(RespValue::simple_string("OK"))
                 }
             }
 
@@ -315,5 +325,75 @@ impl CommandExecutor {
     #[cfg(feature = "cluster")]
     pub fn cluster_commands(&self) -> Option<&crate::cluster::ClusterCommands> {
         self.cluster_commands.as_ref()
+    }
+
+    /// Handle cluster commands when cluster is not yet initialized.
+    /// Returns fallback responses for read-only commands to help Redis clients
+    /// detect cluster mode properly.
+    #[cfg(feature = "cluster")]
+    fn handle_cluster_fallback(args: &[Bytes]) -> Result<RespValue> {
+        if args.is_empty() {
+            return Err(AikvError::WrongArgCount("CLUSTER".to_string()));
+        }
+
+        let subcommand = String::from_utf8_lossy(&args[0]).to_uppercase();
+        match subcommand.as_str() {
+            "INFO" => {
+                // Return minimal cluster info indicating cluster is not ready
+                let info = "cluster_state:fail\r\n\
+                           cluster_slots_assigned:0\r\n\
+                           cluster_slots_ok:0\r\n\
+                           cluster_slots_pfail:0\r\n\
+                           cluster_slots_fail:0\r\n\
+                           cluster_known_nodes:1\r\n\
+                           cluster_size:0\r\n\
+                           cluster_current_epoch:0\r\n\
+                           cluster_my_epoch:0\r\n\
+                           cluster_stats_messages_sent:0\r\n\
+                           cluster_stats_messages_received:0";
+                Ok(RespValue::BulkString(Some(Bytes::from(info))))
+            }
+            "NODES" => {
+                // Return empty nodes list - node not yet configured
+                Ok(RespValue::BulkString(Some(Bytes::from(""))))
+            }
+            "SLOTS" => {
+                // Return empty slots array
+                Ok(RespValue::Array(Some(vec![])))
+            }
+            "SHARDS" => {
+                // Return empty shards array
+                Ok(RespValue::Array(Some(vec![])))
+            }
+            "MYID" => {
+                // Return a placeholder node ID (all zeros)
+                Ok(RespValue::BulkString(Some(Bytes::from(
+                    "0000000000000000000000000000000000000000",
+                ))))
+            }
+            "MYSHARDID" => {
+                // Return a placeholder shard ID
+                Ok(RespValue::BulkString(Some(Bytes::from(
+                    "0000000000000000000000000000000000000000",
+                ))))
+            }
+            "KEYSLOT" => {
+                if args.len() != 2 {
+                    return Err(AikvError::WrongArgCount("CLUSTER KEYSLOT".to_string()));
+                }
+                // Calculate slot even without cluster - this is a pure function
+                let slot = crate::cluster::Router::key_to_slot(&args[1]);
+                Ok(RespValue::Integer(slot as i64))
+            }
+            "SAVECONFIG" => Ok(RespValue::simple_string("OK")),
+            "BUMPEPOCH" => Ok(RespValue::BulkString(Some(Bytes::from("BUMPED 0")))),
+            "SET-CONFIG-EPOCH" => Ok(RespValue::simple_string("OK")),
+            "COUNT-FAILURE-REPORTS" => Ok(RespValue::Integer(0)),
+            "COUNTKEYSINSLOT" => Ok(RespValue::Integer(0)),
+            "GETKEYSINSLOT" => Ok(RespValue::Array(Some(vec![]))),
+            _ => Err(AikvError::Internal(
+                "Cluster not initialized. Please initialize cluster node first.".to_string(),
+            )),
+        }
     }
 }

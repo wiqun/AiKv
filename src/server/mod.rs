@@ -107,8 +107,35 @@ impl Server {
             .await
             .map_err(|e| crate::error::AikvError::Internal(format!("Failed to init MetaRaft: {}", e)))?;
 
-        // If bootstrap node, initialize MetaRaft cluster
-        if is_bootstrap {
+        // Check if the cluster is already initialized by checking Raft metrics
+        // If there's already a committed vote or log entries, the cluster was previously initialized
+        let already_initialized = {
+            if let Some(meta_raft) = multi_raft.meta_raft() {
+                let raft = meta_raft.raft();
+                let metrics = raft.metrics().borrow().clone();
+                
+                // Check if there are any voters in the membership (excluding empty membership)
+                let has_voters = !metrics.membership_config.membership().voter_ids().collect::<Vec<_>>().is_empty();
+                
+                // Check if there's any committed log
+                let has_committed_log = metrics.last_applied.is_some();
+                
+                if has_voters || has_committed_log {
+                    info!(
+                        "MetaRaft already initialized: has_voters={}, has_committed_log={}, membership={:?}",
+                        has_voters, has_committed_log, metrics.membership_config.membership()
+                    );
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+
+        // If bootstrap node and not already initialized, initialize MetaRaft cluster
+        if is_bootstrap && !already_initialized {
             // For multi-master setup with pre-configured peers, we need a different approach:
             // All nodes must start BEFORE bootstrap can add them as voters
             // For now, bootstrap as single node and peers will be added dynamically via CLUSTER MEET
@@ -139,10 +166,43 @@ impl Server {
             }
             
             info!("Cluster bootstrap complete");
+        } else if is_bootstrap && already_initialized {
+            info!("Skipping cluster bootstrap - MetaRaft already initialized from persisted state");
         }
 
         // Wrap in Arc after initialization
         let multi_raft = Arc::new(multi_raft);
+
+        // Start Raft network listener in background (gRPC server)
+        let raft_addr_clone = raft_addr.to_string();
+        let multi_raft_clone = multi_raft.clone();
+        tokio::spawn(async move {
+            info!("Starting Raft gRPC listener on {}", raft_addr_clone);
+
+            // Extract port from raft address (which may be a hostname like "aikv1:50051")
+            // and bind to 0.0.0.0:PORT to accept connections from all interfaces
+            let port = raft_addr_clone
+                .rsplit(':')
+                .next()
+                .and_then(|p| p.parse::<u16>().ok())
+                .unwrap_or(50051);
+            
+            let bind_addr: SocketAddr = format!("0.0.0.0:{}", port)
+                .parse()
+                .expect("Failed to create bind address");
+            
+            info!("Binding Raft gRPC server to {} (advertised as {})", bind_addr, raft_addr_clone);
+
+            // Build the Raft gRPC service that dispatches to the MultiRaftNode
+            let svc = aidb::cluster::raft_network::raft_rpc::raft_service_server::RaftServiceServer::new(
+                crate::cluster::raft_service::MultiRaftService::new(multi_raft_clone),
+            );
+
+            if let Err(e) = tonic::transport::Server::builder().add_service(svc).serve(bind_addr).await {
+                error!("Raft listener failed: {}", e);
+                std::process::exit(1);
+            }
+        });
 
         // Get MetaRaftNode reference
         let meta_raft = multi_raft

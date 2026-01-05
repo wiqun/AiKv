@@ -281,7 +281,7 @@ impl Connection {
                 if command_upper == "CLUSTER" && !args.is_empty() {
                     let subcommand = String::from_utf8_lossy(&args[0]).to_uppercase();
                     // These are async cluster management commands
-                    if matches!(subcommand.as_str(), "MEET" | "FORGET" | "ADDSLOTS" | "DELSLOTS" | "REPLICATE" | "METARAFT") {
+                    if matches!(subcommand.as_str(), "MEET" | "FORGET" | "ADDSLOTS" | "ADDSLOTSRANGE" | "DELSLOTS" | "REPLICATE" | "ADDREPLICATION" | "METARAFT") {
                         if let Some(cluster_cmds) = self.executor.cluster_commands() {
                             let result = self.handle_async_cluster_command(cluster_cmds, &subcommand, &args[1..]).await;
                             
@@ -430,6 +430,36 @@ impl Connection {
                 
                 cluster_cmds.cluster_addslots(slots).await
             }
+            "ADDSLOTSRANGE" => {
+                // CLUSTER ADDSLOTSRANGE start end [node_id]
+                // Efficiently add a range of slots to the specified node (or current node if not specified)
+                if args.len() < 2 || args.len() > 3 {
+                    return Err(AikvError::WrongArgCount("CLUSTER ADDSLOTSRANGE".to_string()));
+                }
+                
+                let start = String::from_utf8_lossy(&args[0])
+                    .parse::<u16>()
+                    .map_err(|_| AikvError::Invalid("Invalid start slot".to_string()))?;
+                let end = String::from_utf8_lossy(&args[1])
+                    .parse::<u16>()
+                    .map_err(|_| AikvError::Invalid("Invalid end slot".to_string()))?;
+                
+                if start > end || end >= 16384 {
+                    return Err(AikvError::Invalid(format!("Invalid slot range: {}-{}", start, end)));
+                }
+                
+                let target_node_id = if args.len() == 3 {
+                    let id_str = String::from_utf8_lossy(&args[2]);
+                    // Try decimal first, then hex
+                    id_str.parse::<u64>()
+                        .or_else(|_| u64::from_str_radix(&id_str, 16))
+                        .map_err(|_| AikvError::Invalid("Invalid node ID".to_string()))?
+                } else {
+                    0 // 0 means current node
+                };
+                
+                cluster_cmds.cluster_addslotsrange(start, end, target_node_id).await
+            }
             "DELSLOTS" => {
                 // CLUSTER DELSLOTS slot [slot ...]
                 if args.is_empty() {
@@ -461,6 +491,25 @@ impl Connection {
                     .map_err(|_| AikvError::Invalid("Invalid node ID".to_string()))?;
                 
                 cluster_cmds.cluster_replicate(master_id).await
+            }
+            "ADDREPLICATION" => {
+                // CLUSTER ADDREPLICATION replica_node_id master_node_id
+                // This command is sent to the leader to add a replica to a master's group
+                if args.len() != 2 {
+                    return Err(AikvError::WrongArgCount("CLUSTER ADDREPLICATION".to_string()));
+                }
+                
+                let replica_id_str = String::from_utf8_lossy(&args[0]);
+                let replica_id = replica_id_str.parse::<u64>()
+                    .or_else(|_| u64::from_str_radix(&replica_id_str, 16))
+                    .map_err(|_| AikvError::Invalid("Invalid replica node ID".to_string()))?;
+                
+                let master_id_str = String::from_utf8_lossy(&args[1]);
+                let master_id = master_id_str.parse::<u64>()
+                    .or_else(|_| u64::from_str_radix(&master_id_str, 16))
+                    .map_err(|_| AikvError::Invalid("Invalid master node ID".to_string()))?;
+                
+                cluster_cmds.cluster_add_replication(replica_id, master_id).await
             }
             "METARAFT" => {
                 // CLUSTER METARAFT subcommand [args...]
@@ -504,8 +553,16 @@ impl Connection {
                         if args.len() != 1 {
                             return Err(AikvError::WrongArgCount("CLUSTER METARAFT MEMBERS".to_string()));
                         }
-                        
+
                         cluster_cmds.cluster_metaraft_members().await
+                    }
+                    "STATUS" => {
+                        // CLUSTER METARAFT STATUS
+                        if args.len() != 1 {
+                            return Err(AikvError::WrongArgCount("CLUSTER METARAFT STATUS".to_string()));
+                        }
+
+                        cluster_cmds.cluster_metaraft_status().await
                     }
                     _ => Err(AikvError::InvalidCommand(format!(
                         "Unknown CLUSTER METARAFT subcommand: {}",

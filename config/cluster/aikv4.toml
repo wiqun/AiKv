@@ -1,0 +1,18 @@
+# AiKv Node 4 Configuration (Replica)
+[server]
+host = "0.0.0.0"
+port = 6382
+
+[cluster]
+enabled = true
+raft_address = "aikv4:50054"
+is_bootstrap = false
+peers = []
+
+[storage]
+engine = "aidb"
+data_dir = "./data"
+databases = 16
+
+[logging]
+level = "info"

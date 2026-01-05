@@ -5,11 +5,13 @@
 //! - Build AiKv (single-node and cluster modes)
 //! - Build Docker images
 //! - Generate deployment configurations
+//! - **Cluster management: start, init, status, stop**
 //! - View configuration documentation
 //! - Run benchmarks
 //! - Display optimization suggestions
 
 mod app;
+mod cluster;
 mod commands;
 mod config;
 mod deploy;
@@ -78,6 +80,12 @@ enum Commands {
         template: Option<String>,
     },
 
+    /// Cluster management commands
+    Cluster {
+        #[command(subcommand)]
+        action: ClusterAction,
+    },
+
     /// Show configuration documentation
     Config {
         /// Show cluster configuration
@@ -104,6 +112,48 @@ enum Commands {
 
     /// Check project status
     Status,
+}
+
+#[derive(Subcommand)]
+enum ClusterAction {
+    /// One-click cluster setup: generate files, build image, start, and initialize
+    Setup {
+        /// Output directory for deployment files
+        #[arg(short, long, default_value = "./deploy")]
+        output: PathBuf,
+    },
+
+    /// Start the cluster (requires deploy files to exist)
+    Start {
+        /// Deployment directory
+        #[arg(short, long, default_value = "./deploy")]
+        deploy_dir: PathBuf,
+
+        /// Seconds to wait for nodes to be ready
+        #[arg(short, long, default_value = "10")]
+        wait: u64,
+    },
+
+    /// Initialize cluster with MetaRaft membership and slot assignment
+    Init {
+        /// Deployment directory
+        #[arg(short, long, default_value = "./deploy")]
+        deploy_dir: PathBuf,
+    },
+
+    /// Show cluster status
+    Status,
+
+    /// Stop the cluster
+    Stop {
+        /// Deployment directory
+        #[arg(short, long, default_value = "./deploy")]
+        deploy_dir: PathBuf,
+
+        /// Also remove data volumes
+        #[arg(short, long)]
+        volumes: bool,
+    },
 }
 
 #[tokio::main]
@@ -144,6 +194,25 @@ async fn main() -> Result<()> {
             template,
         }) => {
             deploy::generate(&cli.project_dir, &deploy_type, &output, template.as_deref()).await?;
+        }
+        Some(Commands::Cluster { action }) => {
+            match action {
+                ClusterAction::Setup { output } => {
+                    cluster::one_click_setup(&cli.project_dir, &output).await?;
+                }
+                ClusterAction::Start { deploy_dir, wait } => {
+                    cluster::start_cluster(&deploy_dir, wait).await?;
+                }
+                ClusterAction::Init { deploy_dir } => {
+                    cluster::init_cluster(&deploy_dir).await?;
+                }
+                ClusterAction::Status => {
+                    cluster::show_cluster_status().await?;
+                }
+                ClusterAction::Stop { deploy_dir, volumes } => {
+                    cluster::stop_cluster(&deploy_dir, volumes).await?;
+                }
+            }
         }
         Some(Commands::Config {
             cluster,

@@ -24,11 +24,12 @@ dependencies = [
 
 [[package]]
 name = "aidb"
-version = "0.5.2"
-source = "git+https://github.com/Genuineh/AiDb?tag=v0.5.2#8efc1749301cc75a86e970528b0f6cec61eb42aa"
+version = "0.6.1"
+source = "git+https://github.com/Genuineh/AiDb?tag=v0.6.1#414b9dfe4177527e3353d37bae1c1edd077b73a1"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.13.1",
  "bincode",
  "bytes",
  "crc",
@@ -69,6 +70,7 @@ dependencies = [
  "openraft",
  "rand",
  "redis",
+ "rmp-serde",
  "serde",
  "serde_json",
  "sha1",
@@ -76,6 +78,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "toml",
+ "tonic",
  "tracing",
  "tracing-subscriber",
 ]
@@ -258,6 +261,12 @@ dependencies = [
  "tower-layer",
  "tower-service",
 ]
+
+[[package]]
+name = "base64"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e1b586273c5702936fe7b7d6896644d8be71e6314cfe09d3167c95f712589e8"
 
 [[package]]
 name = "base64"
@@ -2467,7 +2476,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "axum",
- "base64",
+ "base64 0.21.7",
  "bytes",
  "h2",
  "http",

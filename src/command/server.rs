@@ -53,6 +53,8 @@ pub struct ServerCommands {
     last_save_time: Arc<AtomicU64>,
     /// Shutdown flag
     shutdown_requested: Arc<AtomicBool>,
+    /// Whether cluster mode is enabled
+    cluster_enabled: bool,
 }
 
 /// All supported commands with their metadata
@@ -962,10 +964,14 @@ fn generate_run_id() -> String {
 
 impl ServerCommands {
     pub fn new() -> Self {
-        Self::with_port(6379)
+        Self::with_port_and_cluster(6379, false)
     }
 
     pub fn with_port(port: u16) -> Self {
+        Self::with_port_and_cluster(port, false)
+    }
+
+    pub fn with_port_and_cluster(port: u16, cluster_enabled: bool) -> Self {
         let mut default_config = HashMap::new();
         default_config.insert("server".to_string(), "aikv".to_string());
         default_config.insert("version".to_string(), AIKV_VERSION.to_string());
@@ -991,6 +997,7 @@ impl ServerCommands {
             slow_query_log: Arc::new(SlowQueryLog::new()),
             last_save_time: Arc::new(AtomicU64::new(now)),
             shutdown_requested: Arc::new(AtomicBool::new(false)),
+            cluster_enabled,
         }
     }
 
@@ -1024,7 +1031,7 @@ impl ServerCommands {
             "redis_git_sha1:00000000".to_string(),
             "redis_git_dirty:0".to_string(),
             format!("redis_build_id:aikv{}", AIKV_VERSION.replace('.', "")),
-            "redis_mode:standalone".to_string(),
+            format!("redis_mode:{}", if self.cluster_enabled { "cluster" } else { "standalone" }),
             format!(
                 "os:{} {} {}",
                 std::env::consts::OS,

@@ -116,8 +116,27 @@ impl ClusterNode {
             crate::error::AikvError::Internal(format!("Failed to init MetaRaft: {}", e))
         })?;
 
-        // If bootstrap node, initialize MetaRaft cluster
-        if self.config.is_bootstrap {
+        // Check if the cluster is already initialized by checking Raft metrics
+        // If there's already a committed vote or log entries, the cluster was previously initialized
+        let already_initialized = {
+            if let Some(meta_raft) = multi_raft.meta_raft() {
+                let raft = meta_raft.raft();
+                let metrics = raft.metrics().borrow().clone();
+                
+                // Check if there are any voters in the membership (excluding empty membership)
+                let has_voters = !metrics.membership_config.membership().voter_ids().collect::<Vec<_>>().is_empty();
+                
+                // Check if there's any committed log
+                let has_committed_log = metrics.last_applied.is_some();
+                
+                has_voters || has_committed_log
+            } else {
+                false
+            }
+        };
+
+        // If bootstrap node and not already initialized, initialize MetaRaft cluster
+        if self.config.is_bootstrap && !already_initialized {
             multi_raft
                 .initialize_meta_cluster(self.config.initial_members.clone())
                 .await
