@@ -18,9 +18,11 @@ use aidb::cluster::raft_network::raft_rpc as rpc;
 #[cfg(feature = "cluster")]
 use aidb::cluster::raft_storage::TypeConfig;
 
+use openraft::raft::{
+    AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, VoteRequest,
+};
 #[cfg(feature = "cluster")]
-use openraft::{LogId, LeaderId, Raft};
-use openraft::raft::{AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, VoteRequest};
+use openraft::{LeaderId, LogId, Raft};
 
 #[cfg(feature = "cluster")]
 use tonic::{Request, Response, Status};
@@ -41,8 +43,11 @@ pub struct MultiRaftService {
 impl MultiRaftService {
     pub fn new(multi: Arc<MultiRaftNode>) -> Self {
         // Get MetaRaftNode from MultiRaftNode if available
-        let meta = multi.meta_raft().map(|m| m.clone());
-        Self { multi, meta }
+        let meta = multi.meta_raft().cloned();
+        Self {
+            multi,
+            meta,
+        }
     }
 
     /// Get the Raft instance for a given group ID.
@@ -68,21 +73,22 @@ impl rpc::raft_service_server::RaftService for MultiRaftService {
         let req = request.into_inner();
 
         // Lookup target Raft instance by group_id (0 = MetaRaft, 1+ = data groups)
-        let group_id = req.group_id as u64;
+        let group_id = req.group_id;
         let raft = self
             .get_raft(group_id)
-            .ok_or_else(|| Status::not_found(format!("Group {} not found", group_id)))?;
+            .ok_or_else(|| Status::not_found(format!("Group {group_id} not found")))?;
 
         // Convert entries
         let mut entries = Vec::new();
         for entry in req.entries {
-            let payload: openraft::EntryPayload<TypeConfig> =
-                rmp_serde::from_slice(&entry.payload).map_err(|e| {
-                    Status::internal(format!("Failed to deserialize entry payload: {}", e))
-                })?;
+            let payload: openraft::EntryPayload<TypeConfig> = rmp_serde::from_slice(&entry.payload)
+                .map_err(|e| Status::internal(format!("Failed to deserialize entry payload: {e}")))?;
 
             entries.push(openraft::Entry {
-                log_id: openraft::LogId::new(LeaderId::new(entry.log_term, entry.log_leader_id), entry.log_index),
+                log_id: openraft::LogId::new(
+                    LeaderId::new(entry.log_term, entry.log_leader_id),
+                    entry.log_index,
+                ),
                 payload,
             });
         }
@@ -120,10 +126,10 @@ impl rpc::raft_service_server::RaftService for MultiRaftService {
         let append_resp = raft
             .append_entries(append_req)
             .await
-            .map_err(|e| Status::internal(format!("AppendEntries failed: {}", e)))?;
+            .map_err(|e| Status::internal(format!("AppendEntries failed: {e}")))?;
 
         let response = match append_resp {
-            AppendEntriesResponse::Success => rpc::AppendEntriesResponse {
+            AppendEntriesResponse::Success | AppendEntriesResponse::PartialSuccess(_) => rpc::AppendEntriesResponse {
                 vote_term: 0,
                 vote_node_id: 0,
                 vote_committed: false,
@@ -131,14 +137,7 @@ impl rpc::raft_service_server::RaftService for MultiRaftService {
                 conflict_index: None,
                 conflict_term: None,
             },
-            AppendEntriesResponse::PartialSuccess(_) => rpc::AppendEntriesResponse {
-                vote_term: 0,
-                vote_node_id: 0,
-                vote_committed: false,
-                success: true,
-                conflict_index: None,
-                conflict_term: None,
-            },
+
             AppendEntriesResponse::Conflict => rpc::AppendEntriesResponse {
                 vote_term: 0,
                 vote_node_id: 0,
@@ -167,10 +166,10 @@ impl rpc::raft_service_server::RaftService for MultiRaftService {
         let req = request.into_inner();
 
         // Lookup target Raft instance by group_id (0 = MetaRaft, 1+ = data groups)
-        let group_id = req.group_id as u64;
+        let group_id = req.group_id;
         let raft = self
             .get_raft(group_id)
-            .ok_or_else(|| Status::not_found(format!("Group {} not found", group_id)))?;
+            .ok_or_else(|| Status::not_found(format!("Group {group_id} not found")))?;
 
         let meta = req
             .meta
@@ -186,10 +185,16 @@ impl rpc::raft_service_server::RaftService for MultiRaftService {
             None
         };
 
-        let last_membership: openraft::StoredMembership<_, openraft::BasicNode> = rmp_serde::from_slice(&meta.last_membership)
-            .map_err(|e| Status::internal(format!("Failed to deserialize membership: {}", e)))?;
+        let last_membership: openraft::StoredMembership<_, openraft::BasicNode> =
+            rmp_serde::from_slice(&meta.last_membership).map_err(|e| {
+                Status::internal(format!("Failed to deserialize membership: {}", e))
+            })?;
 
-        let snapshot_meta = openraft::SnapshotMeta { last_log_id, last_membership, snapshot_id: meta.snapshot_id };
+        let snapshot_meta = openraft::SnapshotMeta {
+            last_log_id,
+            last_membership,
+            snapshot_id: meta.snapshot_id,
+        };
 
         let install_req = InstallSnapshotRequest {
             vote: openraft::Vote {
@@ -223,20 +228,32 @@ impl rpc::raft_service_server::RaftService for MultiRaftService {
         let req = request.into_inner();
 
         // Lookup target Raft instance by group_id (0 = MetaRaft, 1+ = data groups)
-        let group_id = req.group_id as u64;
+        let group_id = req.group_id;
         let raft = self
             .get_raft(group_id)
-            .ok_or_else(|| Status::not_found(format!("Group {} not found", group_id)))?;
+            .ok_or_else(|| Status::not_found(format!("Group {group_id} not found")))?;
 
         let last_log_id = if req.last_log_index > 0 {
-            Some(LogId::new(LeaderId::new(req.last_log_term, req.last_log_leader_id), req.last_log_index))
+            Some(LogId::new(
+                LeaderId::new(req.last_log_term, req.last_log_leader_id),
+                req.last_log_index,
+            ))
         } else {
             None
         };
 
-        let vote_req = VoteRequest { vote: openraft::Vote { leader_id: LeaderId::new(req.vote_term, req.vote_node_id), committed: req.vote_committed }, last_log_id };
+        let vote_req = VoteRequest {
+            vote: openraft::Vote {
+                leader_id: LeaderId::new(req.vote_term, req.vote_node_id),
+                committed: req.vote_committed,
+            },
+            last_log_id,
+        };
 
-        let vote_resp = raft.vote(vote_req).await.map_err(|e| Status::internal(format!("Vote failed: {}", e)))?;
+        let vote_resp = raft
+            .vote(vote_req)
+            .await
+            .map_err(|e| Status::internal(format!("Vote failed: {}", e)))?;
 
         let response = rpc::VoteResponse {
             vote_term: vote_resp.vote.leader_id.term,

@@ -159,9 +159,7 @@ mod metaraft_tests {
         sleep(CLUSTER_STABILIZATION_DELAY).await;
 
         // Change membership to include all three nodes as voters
-        node1
-            .change_meta_membership(vec![1, 2, 3], true)
-            .await?;
+        node1.change_meta_membership(vec![1, 2, 3], true).await?;
 
         // Wait for membership change to complete
         sleep(CLUSTER_STABILIZATION_DELAY).await;

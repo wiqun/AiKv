@@ -8,10 +8,10 @@ use crate::command::CommandExecutor;
 use crate::error::Result;
 use crate::observability::Metrics;
 use crate::storage::StorageEngine;
-use tracing::warn;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
+use tracing::warn;
 use tracing::{error, info};
 
 #[cfg(feature = "cluster")]
@@ -77,7 +77,13 @@ impl Server {
 
     /// Initialize cluster components (cluster feature only)
     #[cfg(feature = "cluster")]
-    pub async fn initialize_cluster(&mut self, data_dir: &str, raft_addr: &str, is_bootstrap: bool, peers: &[String]) -> Result<()> {
+    pub async fn initialize_cluster(
+        &mut self,
+        data_dir: &str,
+        raft_addr: &str,
+        is_bootstrap: bool,
+        peers: &[String],
+    ) -> Result<()> {
         use openraft::Config as RaftConfig;
 
         // Generate consistent node ID from raft address
@@ -99,13 +105,14 @@ impl Server {
             raft_config.clone(),
         )
         .await
-        .map_err(|e| crate::error::AikvError::Internal(format!("Failed to create MultiRaftNode: {}", e)))?;
+        .map_err(|e| {
+            crate::error::AikvError::Internal(format!("Failed to create MultiRaftNode: {}", e))
+        })?;
 
         // Initialize MetaRaft
-        multi_raft
-            .init_meta_raft(raft_config)
-            .await
-            .map_err(|e| crate::error::AikvError::Internal(format!("Failed to init MetaRaft: {}", e)))?;
+        multi_raft.init_meta_raft(raft_config).await.map_err(|e| {
+            crate::error::AikvError::Internal(format!("Failed to init MetaRaft: {}", e))
+        })?;
 
         // Check if the cluster is already initialized by checking Raft metrics
         // If there's already a committed vote or log entries, the cluster was previously initialized
@@ -113,13 +120,18 @@ impl Server {
             if let Some(meta_raft) = multi_raft.meta_raft() {
                 let raft = meta_raft.raft();
                 let metrics = raft.metrics().borrow().clone();
-                
+
                 // Check if there are any voters in the membership (excluding empty membership)
-                let has_voters = !metrics.membership_config.membership().voter_ids().collect::<Vec<_>>().is_empty();
-                
+                let has_voters = !metrics
+                    .membership_config
+                    .membership()
+                    .voter_ids()
+                    .collect::<Vec<_>>()
+                    .is_empty();
+
                 // Check if there's any committed log
                 let has_committed_log = metrics.last_applied.is_some();
-                
+
                 if has_voters || has_committed_log {
                     info!(
                         "MetaRaft already initialized: has_voters={}, has_committed_log={}, membership={:?}",
@@ -140,19 +152,22 @@ impl Server {
             // All nodes must start BEFORE bootstrap can add them as voters
             // For now, bootstrap as single node and peers will be added dynamically via CLUSTER MEET
             // TODO: Implement proper multi-node bootstrap once all nodes are confirmed running
-            
+
             if !peers.is_empty() && peers.len() > 1 {
                 // Multi-master mode: bootstrap with just this node first
                 // Other peers will be added as MetaRaft voters when they join via CLUSTER MEET
                 info!("Multi-master mode: Bootstrapping with this node only. Peers will be added when they join: {:?}", peers);
                 warn!("Multi-node bootstrap requires all peers to be running. For now, bootstrapping as single node.");
                 warn!("Use dynamic membership via CLUSTER MEET to add other masters as MetaRaft voters.");
-                
+
                 multi_raft
                     .initialize_meta_cluster(vec![(self.node_id, raft_addr.to_string())])
                     .await
                     .map_err(|e| {
-                        crate::error::AikvError::Internal(format!("Failed to bootstrap MetaRaft: {}", e))
+                        crate::error::AikvError::Internal(format!(
+                            "Failed to bootstrap MetaRaft: {}",
+                            e
+                        ))
                     })?;
             } else {
                 // Single-node bootstrap (standard behavior)
@@ -161,10 +176,13 @@ impl Server {
                     .initialize_meta_cluster(vec![(self.node_id, raft_addr.to_string())])
                     .await
                     .map_err(|e| {
-                        crate::error::AikvError::Internal(format!("Failed to bootstrap MetaRaft: {}", e))
+                        crate::error::AikvError::Internal(format!(
+                            "Failed to bootstrap MetaRaft: {}",
+                            e
+                        ))
                     })?;
             }
-            
+
             info!("Cluster bootstrap complete");
         } else if is_bootstrap && already_initialized {
             info!("Skipping cluster bootstrap - MetaRaft already initialized from persisted state");
@@ -186,28 +204,36 @@ impl Server {
                 .next()
                 .and_then(|p| p.parse::<u16>().ok())
                 .unwrap_or(50051);
-            
+
             let bind_addr: SocketAddr = format!("0.0.0.0:{}", port)
                 .parse()
                 .expect("Failed to create bind address");
-            
-            info!("Binding Raft gRPC server to {} (advertised as {})", bind_addr, raft_addr_clone);
 
-            // Build the Raft gRPC service that dispatches to the MultiRaftNode
-            let svc = aidb::cluster::raft_network::raft_rpc::raft_service_server::RaftServiceServer::new(
-                crate::cluster::raft_service::MultiRaftService::new(multi_raft_clone),
+            info!(
+                "Binding Raft gRPC server to {} (advertised as {})",
+                bind_addr, raft_addr_clone
             );
 
-            if let Err(e) = tonic::transport::Server::builder().add_service(svc).serve(bind_addr).await {
+            // Build the Raft gRPC service that dispatches to the MultiRaftNode
+            let svc =
+                aidb::cluster::raft_network::raft_rpc::raft_service_server::RaftServiceServer::new(
+                    crate::cluster::raft_service::MultiRaftService::new(multi_raft_clone),
+                );
+
+            if let Err(e) = tonic::transport::Server::builder()
+                .add_service(svc)
+                .serve(bind_addr)
+                .await
+            {
                 error!("Raft listener failed: {}", e);
                 std::process::exit(1);
             }
         });
 
         // Get MetaRaftNode reference
-        let meta_raft = multi_raft
-            .meta_raft()
-            .ok_or_else(|| crate::error::AikvError::Internal("MetaRaft not initialized".to_string()))?;
+        let meta_raft = multi_raft.meta_raft().ok_or_else(|| {
+            crate::error::AikvError::Internal("MetaRaft not initialized".to_string())
+        })?;
 
         // Get initial cluster metadata from MetaRaft
         let cluster_meta = meta_raft.get_cluster_meta();
@@ -251,8 +277,9 @@ impl Server {
                     let mut executor = CommandExecutor::with_port(self.storage.clone(), self.port);
 
                     #[cfg(feature = "cluster")]
-                    if let (Some(meta_raft), Some(multi_raft), Some(router)) = 
-                        (&self.meta_raft, &self.multi_raft, &self.router) {
+                    if let (Some(meta_raft), Some(multi_raft), Some(router)) =
+                        (&self.meta_raft, &self.multi_raft, &self.router)
+                    {
                         // Create ClusterCommands for this connection
                         let cluster_commands = ClusterCommands::new(
                             self.node_id,

@@ -27,8 +27,8 @@ use tracing::{debug, info};
 
 #[cfg(feature = "cluster")]
 use aidb::cluster::{
-    ClusterMeta, GroupId, MetaNodeInfo, MetaRaftNode, MigrationManager,
-    MultiRaftNode, NodeId, NodeStatus, Router,
+    ClusterMeta, GroupId, MetaNodeInfo, MetaRaftNode, MigrationManager, MultiRaftNode, NodeId,
+    NodeStatus, Router,
 };
 
 #[cfg(feature = "cluster")]
@@ -173,11 +173,11 @@ impl ClusterCommands {
         // Cluster is OK if all slots are assigned and all groups with slots have leaders
         let all_groups_have_leaders = meta.groups.iter().all(|(gid, g)| {
             // Check if this group owns any slots
-            let owns_slots = meta.slots.iter().any(|&s| s == *gid);
+            let owns_slots = meta.slots.contains(gid);
             // If it owns slots, it must have a leader
             !owns_slots || g.leader.is_some()
         });
-        
+
         let cluster_state = if assigned_slots == TOTAL_SLOTS as usize && all_groups_have_leaders {
             "ok"
         } else {
@@ -591,7 +591,12 @@ impl ClusterCommands {
                 .update_slots(start, end, group_id)
                 .await
                 .map_err(|e| {
-                    AikvError::Internal(format!("Failed to assign slots {}-{}: {}", start, end - 1, e))
+                    AikvError::Internal(format!(
+                        "Failed to assign slots {}-{}: {}",
+                        start,
+                        end - 1,
+                        e
+                    ))
                 })?;
         }
 
@@ -614,7 +619,7 @@ impl ClusterCommands {
         target_node_id: NodeId,
     ) -> Result<RespValue> {
         let meta = self.meta_raft.get_cluster_meta();
-        
+
         // Determine the actual node_id to use
         let node_id = if target_node_id == 0 {
             self.node_id
@@ -649,9 +654,7 @@ impl ClusterCommands {
             self.meta_raft
                 .update_group_leader(group_id, node_id)
                 .await
-                .map_err(|e| {
-                    AikvError::Internal(format!("Failed to set group leader: {}", e))
-                })?;
+                .map_err(|e| AikvError::Internal(format!("Failed to set group leader: {}", e)))?;
             group_id
         };
 
@@ -705,12 +708,14 @@ impl ClusterCommands {
         // Find the group that the master belongs to
         // Groups are created with group_id == node_id, so we check:
         // 1. group_id matches master_id directly
-        // 2. leader field matches master_id  
+        // 2. leader field matches master_id
         // 3. replicas list contains master_id
         let group_id = meta
             .groups
             .iter()
-            .find(|(gid, g)| **gid == master_id || g.leader == Some(master_id) || g.replicas.contains(&master_id))
+            .find(|(gid, g)| {
+                **gid == master_id || g.leader == Some(master_id) || g.replicas.contains(&master_id)
+            })
             .map(|(gid, _)| *gid)
             .ok_or_else(|| {
                 AikvError::Internal(format!(
@@ -720,15 +725,16 @@ impl ClusterCommands {
             })?;
 
         // Get current group members
-        let group = meta.groups.get(&group_id).ok_or_else(|| {
-            AikvError::Internal(format!("Group {} not found", group_id))
-        })?;
+        let group = meta
+            .groups
+            .get(&group_id)
+            .ok_or_else(|| AikvError::Internal(format!("Group {} not found", group_id)))?;
 
         // Add this node to the group's replicas if not already present
         let mut new_replicas = group.replicas.clone();
         if !new_replicas.contains(&self.node_id) {
             new_replicas.push(self.node_id);
-            
+
             // Update group membership via MetaRaft
             self.meta_raft
                 .update_group_members(group_id, new_replicas)
@@ -763,12 +769,14 @@ impl ClusterCommands {
         // Find the group that the master belongs to
         // Groups are created with group_id == node_id, so we check:
         // 1. group_id matches master_id directly
-        // 2. leader field matches master_id  
+        // 2. leader field matches master_id
         // 3. replicas list contains master_id
         let group_id = meta
             .groups
             .iter()
-            .find(|(gid, g)| **gid == master_id || g.leader == Some(master_id) || g.replicas.contains(&master_id))
+            .find(|(gid, g)| {
+                **gid == master_id || g.leader == Some(master_id) || g.replicas.contains(&master_id)
+            })
             .map(|(gid, _)| *gid)
             .ok_or_else(|| {
                 AikvError::Internal(format!(
@@ -778,15 +786,16 @@ impl ClusterCommands {
             })?;
 
         // Get current group members
-        let group = meta.groups.get(&group_id).ok_or_else(|| {
-            AikvError::Internal(format!("Group {} not found", group_id))
-        })?;
+        let group = meta
+            .groups
+            .get(&group_id)
+            .ok_or_else(|| AikvError::Internal(format!("Group {} not found", group_id)))?;
 
         // Add the replica to the group's replicas if not already present
         let mut new_replicas = group.replicas.clone();
         if !new_replicas.contains(&replica_id) {
             new_replicas.push(replica_id);
-            
+
             // Update group membership via MetaRaft
             self.meta_raft
                 .update_group_members(group_id, new_replicas)
@@ -962,13 +971,21 @@ impl ClusterCommands {
 
         // Find which group this node belongs to
         for (group_id, group_meta) in &meta.groups {
-            if group_meta.leader == Some(self.node_id) || group_meta.replicas.contains(&self.node_id) {
-                return Ok(RespValue::BulkString(Some(Bytes::from(format!("{:040x}", group_id)))));
+            if group_meta.leader == Some(self.node_id)
+                || group_meta.replicas.contains(&self.node_id)
+            {
+                return Ok(RespValue::BulkString(Some(Bytes::from(format!(
+                    "{:040x}",
+                    group_id
+                )))));
             }
         }
 
         // Node not assigned to any shard yet - return node_id as shard id
-        Ok(RespValue::BulkString(Some(Bytes::from(format!("{:040x}", self.node_id)))))
+        Ok(RespValue::BulkString(Some(Bytes::from(format!(
+            "{:040x}",
+            self.node_id
+        )))))
     }
 
     /// Handle CLUSTER SET-CONFIG-EPOCH command.
@@ -989,7 +1006,7 @@ impl ClusterCommands {
         let mut replicas = Vec::new();
 
         // Find the group where this node is leader
-        for (_group_id, group_meta) in &meta.groups {
+        for group_meta in meta.groups.values() {
             if group_meta.leader == Some(master_id) {
                 // Found the group, list all replicas (excluding the leader)
                 for &replica_id in &group_meta.replicas {
@@ -1006,7 +1023,7 @@ impl ClusterCommands {
                         };
                         let data_addr = Self::extract_data_address(&node_info.addr);
                         let cluster_port = Self::extract_cluster_port_from_data_port(&data_addr);
-                        
+
                         // Format: <id> <ip:port@cport> slave <master-id> <ping-sent> <pong-recv> <config-epoch> <link-state>
                         let line = format!(
                             "{:040x} {}@{} slave {:040x} 0 0 {} {}",
@@ -1101,7 +1118,7 @@ impl ClusterCommands {
             // This would require clearing the storage and MetaRaft state
             // For now, just clear slot assignments for this node
             let meta = self.meta_raft.get_cluster_meta();
-            
+
             for (group_id, group_meta) in &meta.groups {
                 if group_meta.leader == Some(self.node_id) {
                     // Clear slots for groups where this node is leader
@@ -1138,7 +1155,10 @@ impl ClusterCommands {
         // In our implementation, epochs are managed by MetaRaft
         // Just return the current epoch
         let meta = self.meta_raft.get_cluster_meta();
-        Ok(RespValue::BulkString(Some(Bytes::from(format!("BUMPED {}", meta.config_version)))))
+        Ok(RespValue::BulkString(Some(Bytes::from(format!(
+            "BUMPED {}",
+            meta.config_version
+        )))))
     }
 
     /// Handle CLUSTER FLUSHSLOTS command.
@@ -1146,7 +1166,7 @@ impl ClusterCommands {
     /// Deletes all slots from this node.
     pub async fn cluster_flushslots(&self) -> Result<RespValue> {
         let meta = self.meta_raft.get_cluster_meta();
-        
+
         // Find groups where this node is leader and clear their slots
         for (group_id, group_meta) in &meta.groups {
             if group_meta.leader == Some(self.node_id) {
@@ -1162,7 +1182,7 @@ impl ClusterCommands {
                 }
             }
         }
-        
+
         Ok(RespValue::SimpleString("OK".to_string()))
     }
 
@@ -1382,14 +1402,14 @@ impl ClusterCommands {
         self.meta_raft.add_node_address(node_id, grpc_addr.clone());
 
         // BasicNode.addr MUST also have http:// scheme for Raft replication
-        let node = BasicNode { addr: grpc_addr };
+        let node = BasicNode {
+            addr: grpc_addr,
+        };
 
         self.meta_raft
             .add_learner(node_id, node)
             .await
-            .map_err(|e| {
-                AikvError::Internal(format!("Failed to add MetaRaft learner: {}", e))
-            })?;
+            .map_err(|e| AikvError::Internal(format!("Failed to add MetaRaft learner: {}", e)))?;
 
         Ok(RespValue::SimpleString("OK".to_string()))
     }
@@ -1415,18 +1435,19 @@ impl ClusterCommands {
     /// ```
     pub async fn cluster_metaraft_promote(&self, new_voters: Vec<NodeId>) -> Result<RespValue> {
         use std::collections::BTreeSet;
-        
+
         // Get current voters from metrics
         let raft = self.meta_raft.raft();
         let metrics = raft.metrics().borrow().clone();
-        let current_voters: BTreeSet<NodeId> = metrics.membership_config.membership().voter_ids().collect();
-        
+        let current_voters: BTreeSet<NodeId> =
+            metrics.membership_config.membership().voter_ids().collect();
+
         // Merge current voters with new voters to promote
         let mut all_voters: BTreeSet<NodeId> = current_voters;
         for voter in new_voters {
             all_voters.insert(voter);
         }
-        
+
         info!("Promoting to voter set: {:?}", all_voters);
 
         self.meta_raft
@@ -1666,11 +1687,11 @@ impl ClusterCommands {
         // Check if all groups have leaders
         for (group_id, group_meta) in &meta.groups {
             // Check if this group owns any slots
-            let owns_slots = meta.slots.iter().any(|&s| s == *group_id);
+            let owns_slots = meta.slots.contains(group_id);
             if owns_slots && group_meta.leader.is_none() {
                 return Err(AikvError::Internal(format!(
-                    "CLUSTERDOWN The cluster is down. Group {} has no leader",
-                    group_id
+                    "CLUSTERDOWN The cluster is down. Group {group_id} has no leader",
+                    group_id = group_id
                 )));
             }
         }

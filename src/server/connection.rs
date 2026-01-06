@@ -281,16 +281,31 @@ impl Connection {
                 if command_upper == "CLUSTER" && !args.is_empty() {
                     let subcommand = String::from_utf8_lossy(&args[0]).to_uppercase();
                     // These are async cluster management commands
-                    if matches!(subcommand.as_str(), "MEET" | "FORGET" | "ADDSLOTS" | "ADDSLOTSRANGE" | "DELSLOTS" | "REPLICATE" | "ADDREPLICATION" | "METARAFT") {
+                    if matches!(
+                        subcommand.as_str(),
+                        "MEET"
+                            | "FORGET"
+                            | "ADDSLOTS"
+                            | "ADDSLOTSRANGE"
+                            | "DELSLOTS"
+                            | "REPLICATE"
+                            | "ADDREPLICATION"
+                            | "METARAFT"
+                    ) {
                         if let Some(cluster_cmds) = self.executor.cluster_commands() {
-                            let result = self.handle_async_cluster_command(cluster_cmds, &subcommand, &args[1..]).await;
-                            
+                            let result = self
+                                .handle_async_cluster_command(cluster_cmds, &subcommand, &args[1..])
+                                .await;
+
                             // Record metrics
                             if let Some(ref metrics) = self.metrics {
                                 let duration = start.elapsed();
                                 match &result {
                                     Ok(_) => {
-                                        metrics.commands.record_command(&format!("CLUSTER {}", subcommand), duration);
+                                        metrics.commands.record_command(
+                                            &format!("CLUSTER {}", subcommand),
+                                            duration,
+                                        );
                                         debug!(
                                             command = %format!("CLUSTER {}", subcommand),
                                             duration_us = duration.as_micros(),
@@ -300,11 +315,13 @@ impl Connection {
                                         );
                                     }
                                     Err(_) => {
-                                        metrics.commands.record_error(&format!("CLUSTER {}", subcommand));
+                                        metrics
+                                            .commands
+                                            .record_error(&format!("CLUSTER {}", subcommand));
                                     }
                                 }
                             }
-                            
+
                             return match result {
                                 Ok(resp) => resp,
                                 Err(e) => Self::format_error_response(e),
@@ -358,7 +375,9 @@ impl Connection {
             // Cluster redirection errors - format without "ERR " prefix
             AikvError::Moved(slot, addr) => RespValue::error(format!("MOVED {} {}", slot, addr)),
             AikvError::Ask(slot, addr) => RespValue::error(format!("ASK {} {}", slot, addr)),
-            AikvError::CrossSlot => RespValue::error("CROSSSLOT Keys in request don't hash to the same slot"),
+            AikvError::CrossSlot => {
+                RespValue::error("CROSSSLOT Keys in request don't hash to the same slot")
+            }
             // All other errors use the standard "ERR " prefix
             _ => RespValue::error(format!("ERR {}", e)),
         }
@@ -391,27 +410,29 @@ impl Connection {
         args: &[Bytes],
     ) -> Result<RespValue> {
         use crate::error::AikvError;
-        
+
         match subcommand {
             "MEET" => {
                 // CLUSTER MEET ip port [node-id]
                 if args.len() < 2 || args.len() > 3 {
                     return Err(AikvError::WrongArgCount("CLUSTER MEET".to_string()));
                 }
-                
+
                 let ip = String::from_utf8_lossy(&args[0]).to_string();
                 let port = String::from_utf8_lossy(&args[1])
                     .parse::<u16>()
                     .map_err(|_| AikvError::Invalid("Invalid port".to_string()))?;
-                
+
                 let node_id = if args.len() == 3 {
                     let id_str = String::from_utf8_lossy(&args[2]);
-                    Some(u64::from_str_radix(&id_str, 16)
-                        .map_err(|_| AikvError::Invalid("Invalid node ID".to_string()))?)
+                    Some(
+                        u64::from_str_radix(&id_str, 16)
+                            .map_err(|_| AikvError::Invalid("Invalid node ID".to_string()))?,
+                    )
                 } else {
                     None
                 };
-                
+
                 cluster_cmds.cluster_meet(ip, port, node_id).await
             }
             "FORGET" => {
@@ -419,11 +440,11 @@ impl Connection {
                 if args.len() != 1 {
                     return Err(AikvError::WrongArgCount("CLUSTER FORGET".to_string()));
                 }
-                
+
                 let id_str = String::from_utf8_lossy(&args[0]);
                 let node_id = u64::from_str_radix(&id_str, 16)
                     .map_err(|_| AikvError::Invalid("Invalid node ID".to_string()))?;
-                
+
                 cluster_cmds.cluster_forget(node_id).await
             }
             "ADDSLOTS" => {
@@ -431,69 +452,77 @@ impl Connection {
                 if args.is_empty() {
                     return Err(AikvError::WrongArgCount("CLUSTER ADDSLOTS".to_string()));
                 }
-                
+
                 let mut slots = Vec::new();
                 for arg in args {
                     let slot = String::from_utf8_lossy(arg)
                         .parse::<u16>()
                         .map_err(|_| AikvError::Invalid("Invalid slot".to_string()))?;
-                    
+
                     if slot >= 16384 {
                         return Err(AikvError::Invalid(format!("Slot out of range: {}", slot)));
                     }
                     slots.push(slot);
                 }
-                
+
                 cluster_cmds.cluster_addslots(slots).await
             }
             "ADDSLOTSRANGE" => {
                 // CLUSTER ADDSLOTSRANGE start end [node_id]
                 // Efficiently add a range of slots to the specified node (or current node if not specified)
                 if args.len() < 2 || args.len() > 3 {
-                    return Err(AikvError::WrongArgCount("CLUSTER ADDSLOTSRANGE".to_string()));
+                    return Err(AikvError::WrongArgCount(
+                        "CLUSTER ADDSLOTSRANGE".to_string(),
+                    ));
                 }
-                
+
                 let start = String::from_utf8_lossy(&args[0])
                     .parse::<u16>()
                     .map_err(|_| AikvError::Invalid("Invalid start slot".to_string()))?;
                 let end = String::from_utf8_lossy(&args[1])
                     .parse::<u16>()
                     .map_err(|_| AikvError::Invalid("Invalid end slot".to_string()))?;
-                
+
                 if start > end || end >= 16384 {
-                    return Err(AikvError::Invalid(format!("Invalid slot range: {}-{}", start, end)));
+                    return Err(AikvError::Invalid(format!(
+                        "Invalid slot range: {}-{}",
+                        start, end
+                    )));
                 }
-                
+
                 let target_node_id = if args.len() == 3 {
                     let id_str = String::from_utf8_lossy(&args[2]);
                     // Try decimal first, then hex
-                    id_str.parse::<u64>()
+                    id_str
+                        .parse::<u64>()
                         .or_else(|_| u64::from_str_radix(&id_str, 16))
                         .map_err(|_| AikvError::Invalid("Invalid node ID".to_string()))?
                 } else {
                     0 // 0 means current node
                 };
-                
-                cluster_cmds.cluster_addslotsrange(start, end, target_node_id).await
+
+                cluster_cmds
+                    .cluster_addslotsrange(start, end, target_node_id)
+                    .await
             }
             "DELSLOTS" => {
                 // CLUSTER DELSLOTS slot [slot ...]
                 if args.is_empty() {
                     return Err(AikvError::WrongArgCount("CLUSTER DELSLOTS".to_string()));
                 }
-                
+
                 let mut slots = Vec::new();
                 for arg in args {
                     let slot = String::from_utf8_lossy(arg)
                         .parse::<u16>()
                         .map_err(|_| AikvError::Invalid("Invalid slot".to_string()))?;
-                    
+
                     if slot >= 16384 {
                         return Err(AikvError::Invalid(format!("Slot out of range: {}", slot)));
                     }
                     slots.push(slot);
                 }
-                
+
                 cluster_cmds.cluster_delslots(slots).await
             }
             "REPLICATE" => {
@@ -501,75 +530,101 @@ impl Connection {
                 if args.len() != 1 {
                     return Err(AikvError::WrongArgCount("CLUSTER REPLICATE".to_string()));
                 }
-                
+
                 let id_str = String::from_utf8_lossy(&args[0]);
                 let master_id = u64::from_str_radix(&id_str, 16)
                     .map_err(|_| AikvError::Invalid("Invalid node ID".to_string()))?;
-                
+
                 cluster_cmds.cluster_replicate(master_id).await
             }
             "ADDREPLICATION" => {
                 // CLUSTER ADDREPLICATION replica_node_id master_node_id
                 // This command is sent to the leader to add a replica to a master's group
                 if args.len() != 2 {
-                    return Err(AikvError::WrongArgCount("CLUSTER ADDREPLICATION".to_string()));
+                    return Err(AikvError::WrongArgCount(
+                        "CLUSTER ADDREPLICATION".to_string(),
+                    ));
                 }
-                
+
                 let replica_id_str = String::from_utf8_lossy(&args[0]);
-                let replica_id = replica_id_str.parse::<u64>()
+                let replica_id = replica_id_str
+                    .parse::<u64>()
                     .or_else(|_| u64::from_str_radix(&replica_id_str, 16))
                     .map_err(|_| AikvError::Invalid("Invalid replica node ID".to_string()))?;
-                
+
                 let master_id_str = String::from_utf8_lossy(&args[1]);
-                let master_id = master_id_str.parse::<u64>()
+                let master_id = master_id_str
+                    .parse::<u64>()
                     .or_else(|_| u64::from_str_radix(&master_id_str, 16))
                     .map_err(|_| AikvError::Invalid("Invalid master node ID".to_string()))?;
-                
-                cluster_cmds.cluster_add_replication(replica_id, master_id).await
+
+                cluster_cmds
+                    .cluster_add_replication(replica_id, master_id)
+                    .await
             }
             "METARAFT" => {
                 // CLUSTER METARAFT subcommand [args...]
                 if args.is_empty() {
                     return Err(AikvError::WrongArgCount("CLUSTER METARAFT".to_string()));
                 }
-                
+
                 let metaraft_subcmd = String::from_utf8_lossy(&args[0]).to_uppercase();
                 match metaraft_subcmd.as_str() {
                     "ADDLEARNER" => {
                         // CLUSTER METARAFT ADDLEARNER node_id addr
                         if args.len() != 3 {
-                            return Err(AikvError::WrongArgCount("CLUSTER METARAFT ADDLEARNER".to_string()));
+                            return Err(AikvError::WrongArgCount(
+                                "CLUSTER METARAFT ADDLEARNER".to_string(),
+                            ));
                         }
-                        
+
                         let node_id_str = String::from_utf8_lossy(&args[1]);
-                        let node_id = node_id_str.parse::<u64>()
+                        let node_id = node_id_str
+                            .parse::<u64>()
                             .or_else(|_| u64::from_str_radix(&node_id_str, 16))
-                            .map_err(|_| AikvError::Invalid("Invalid node ID: must be a positive integer or hex string".to_string()))?;
+                            .map_err(|_| {
+                                AikvError::Invalid(
+                                    "Invalid node ID: must be a positive integer or hex string"
+                                        .to_string(),
+                                )
+                            })?;
                         let addr = String::from_utf8_lossy(&args[2]).to_string();
-                        
-                        cluster_cmds.cluster_metaraft_addlearner(node_id, addr).await
+
+                        cluster_cmds
+                            .cluster_metaraft_addlearner(node_id, addr)
+                            .await
                     }
                     "PROMOTE" => {
                         // CLUSTER METARAFT PROMOTE node_id [node_id ...]
                         if args.len() < 2 {
-                            return Err(AikvError::WrongArgCount("CLUSTER METARAFT PROMOTE".to_string()));
+                            return Err(AikvError::WrongArgCount(
+                                "CLUSTER METARAFT PROMOTE".to_string(),
+                            ));
                         }
-                        
+
                         let mut voters = Vec::new();
                         for arg in &args[1..] {
                             let node_id_str = String::from_utf8_lossy(arg);
-                            let node_id = node_id_str.parse::<u64>()
+                            let node_id = node_id_str
+                                .parse::<u64>()
                                 .or_else(|_| u64::from_str_radix(&node_id_str, 16))
-                                .map_err(|_| AikvError::Invalid("Invalid node ID: must be a positive integer or hex string".to_string()))?;
+                                .map_err(|_| {
+                                    AikvError::Invalid(
+                                        "Invalid node ID: must be a positive integer or hex string"
+                                            .to_string(),
+                                    )
+                                })?;
                             voters.push(node_id);
                         }
-                        
+
                         cluster_cmds.cluster_metaraft_promote(voters).await
                     }
                     "MEMBERS" => {
                         // CLUSTER METARAFT MEMBERS
                         if args.len() != 1 {
-                            return Err(AikvError::WrongArgCount("CLUSTER METARAFT MEMBERS".to_string()));
+                            return Err(AikvError::WrongArgCount(
+                                "CLUSTER METARAFT MEMBERS".to_string(),
+                            ));
                         }
 
                         cluster_cmds.cluster_metaraft_members().await
@@ -577,7 +632,9 @@ impl Connection {
                     "STATUS" => {
                         // CLUSTER METARAFT STATUS
                         if args.len() != 1 {
-                            return Err(AikvError::WrongArgCount("CLUSTER METARAFT STATUS".to_string()));
+                            return Err(AikvError::WrongArgCount(
+                                "CLUSTER METARAFT STATUS".to_string(),
+                            ));
                         }
 
                         cluster_cmds.cluster_metaraft_status().await

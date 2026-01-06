@@ -1031,7 +1031,14 @@ impl ServerCommands {
             "redis_git_sha1:00000000".to_string(),
             "redis_git_dirty:0".to_string(),
             format!("redis_build_id:aikv{}", AIKV_VERSION.replace('.', "")),
-            format!("redis_mode:{}", if self.cluster_enabled { "cluster" } else { "standalone" }),
+            format!(
+                "redis_mode:{}",
+                if self.cluster_enabled {
+                    "cluster"
+                } else {
+                    "standalone"
+                }
+            ),
             format!(
                 "os:{} {} {}",
                 std::env::consts::OS,
@@ -1392,10 +1399,20 @@ impl ServerCommands {
 
         // Built-in cluster configuration values (read-only, derived from runtime state)
         let builtin_configs: Vec<(&str, String)> = vec![
-            ("cluster-enabled", if self.cluster_enabled { "yes".to_string() } else { "no".to_string() }),
+            (
+                "cluster-enabled",
+                if self.cluster_enabled {
+                    "yes".to_string()
+                } else {
+                    "no".to_string()
+                },
+            ),
             ("cluster-node-timeout", "15000".to_string()),
             ("cluster-announce-port", self.tcp_port.to_string()),
-            ("cluster-announce-bus-port", (self.tcp_port + 10000).to_string()),
+            (
+                "cluster-announce-bus-port",
+                (self.tcp_port + 10000).to_string(),
+            ),
         ];
 
         // Support wildcard matching

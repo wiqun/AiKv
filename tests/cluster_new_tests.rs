@@ -396,7 +396,7 @@ mod cluster_tests {
                 s, expected_slot as i64,
                 "Slot should match Router::key_to_slot"
             );
-            assert!(s >= 0 && s < 16384, "Slot should be in range 0-16383");
+            assert!((0i64..16384i64).contains(&s), "Slot should be in range 0-16383");
         } else {
             panic!("Expected Integer");
         }
@@ -478,7 +478,10 @@ mod cluster_tests {
 
         // Test 1: Before slots are assigned, check_slot_ownership should fail
         let result = cluster_commands.check_slot_ownership(0);
-        assert!(result.is_err(), "Slot 0 should not be owned before assignment");
+        assert!(
+            result.is_err(),
+            "Slot 0 should not be owned before assignment"
+        );
 
         // Create a group for node 1 and assign slots 0-5460
         meta_raft
@@ -499,14 +502,20 @@ mod cluster_tests {
 
         // Test 2: After slots are assigned, check_slot_ownership should succeed for owned slots
         let result = cluster_commands.check_slot_ownership(0);
-        assert!(result.is_ok(), "Slot 0 should be owned by this node after assignment");
+        assert!(
+            result.is_ok(),
+            "Slot 0 should be owned by this node after assignment"
+        );
 
         let result = cluster_commands.check_slot_ownership(5460);
         assert!(result.is_ok(), "Slot 5460 should be owned by this node");
 
         // Test 3: Slots not assigned to this node should return error
         let result = cluster_commands.check_slot_ownership(5461);
-        assert!(result.is_err(), "Slot 5461 should not be owned by this node");
+        assert!(
+            result.is_err(),
+            "Slot 5461 should not be owned by this node"
+        );
 
         // Cleanup
         let _ = tokio::fs::remove_dir_all("/tmp/test_moved_redirect").await;
@@ -559,10 +568,16 @@ mod cluster_tests {
 
         // Test: check_key_slot should succeed for any key when all slots are owned
         let result = cluster_commands.check_key_slot(b"user:1000");
-        assert!(result.is_ok(), "Key 'user:1000' should be handled by this node");
+        assert!(
+            result.is_ok(),
+            "Key 'user:1000' should be handled by this node"
+        );
 
         let result = cluster_commands.check_key_slot(b"product:123");
-        assert!(result.is_ok(), "Key 'product:123' should be handled by this node");
+        assert!(
+            result.is_ok(),
+            "Key 'product:123' should be handled by this node"
+        );
 
         // Cleanup
         let _ = tokio::fs::remove_dir_all("/tmp/test_check_key_slot").await;
@@ -623,16 +638,19 @@ mod cluster_tests {
         // Since we assigned all slots to node 1, any set of keys should work
         let keys: Vec<&[u8]> = vec![b"key1"];
         let result = cluster_commands.check_keys_slot(&keys);
-        assert!(result.is_ok(), "Single key should succeed when slot is owned");
+        assert!(
+            result.is_ok(),
+            "Single key should succeed when slot is owned"
+        );
 
         // Test 3: Keys in different slots should fail with CrossSlot error
         let keys: Vec<&[u8]> = vec![b"key1", b"key2", b"key3"];
-        
+
         // Calculate slots to verify they're different
         let slot1 = Router::key_to_slot(b"key1");
         let slot2 = Router::key_to_slot(b"key2");
         let slot3 = Router::key_to_slot(b"key3");
-        
+
         // If any slots are different, check_keys_slot should return CrossSlot error
         if slot1 != slot2 || slot2 != slot3 {
             let result = cluster_commands.check_keys_slot(&keys);
@@ -679,7 +697,10 @@ mod cluster_tests {
 
         // Test 1: Before slots are assigned, get_slot_owner should return None
         let owner = cluster_commands.get_slot_owner(0);
-        assert!(owner.is_none(), "Slot 0 should have no owner before assignment");
+        assert!(
+            owner.is_none(),
+            "Slot 0 should have no owner before assignment"
+        );
 
         // First, add the node to the cluster so it's in the nodes map
         meta_raft

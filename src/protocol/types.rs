@@ -481,11 +481,11 @@ mod tests {
         let binary_data: Vec<u8> = vec![0xFF, 0xFE, 0x00, 0x01, 0x80, 0x90];
         let val = RespValue::bulk_string(Bytes::from(binary_data.clone()));
         let serialized = val.serialize();
-        
+
         // Should be: $6\r\n<6 bytes of binary data>\r\n
         let expected_len = 4 + binary_data.len() + 2; // "$6\r\n" + data + "\r\n"
         assert_eq!(serialized.len(), expected_len);
-        
+
         // Verify the structure
         assert_eq!(&serialized[0..4], b"$6\r\n");
         assert_eq!(&serialized[4..10], binary_data.as_slice());
@@ -497,18 +497,18 @@ mod tests {
         // Test nested arrays with binary data
         let binary1: Vec<u8> = vec![0xFF, 0x00];
         let binary2: Vec<u8> = vec![0x80, 0x81, 0x82];
-        
+
         let val = RespValue::array(vec![
             RespValue::bulk_string(Bytes::from(binary1)),
             RespValue::bulk_string(Bytes::from(binary2)),
         ]);
-        
+
         let serialized = val.serialize();
-        
+
         // Should be: *2\r\n$2\r\n<2 bytes>\r\n$3\r\n<3 bytes>\r\n
         // Total: 4 + 4 + 2 + 2 + 4 + 3 + 2 = 21 bytes
         assert_eq!(serialized.len(), 21);
-        
+
         // Verify structure
         assert_eq!(&serialized[0..4], b"*2\r\n");
         assert_eq!(&serialized[4..8], b"$2\r\n");

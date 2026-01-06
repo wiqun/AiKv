@@ -122,13 +122,18 @@ impl ClusterNode {
             if let Some(meta_raft) = multi_raft.meta_raft() {
                 let raft = meta_raft.raft();
                 let metrics = raft.metrics().borrow().clone();
-                
+
                 // Check if there are any voters in the membership (excluding empty membership)
-                let has_voters = !metrics.membership_config.membership().voter_ids().collect::<Vec<_>>().is_empty();
-                
+                let has_voters = !metrics
+                    .membership_config
+                    .membership()
+                    .voter_ids()
+                    .collect::<Vec<_>>()
+                    .is_empty();
+
                 // Check if there's any committed log
                 let has_committed_log = metrics.last_applied.is_some();
-                
+
                 has_voters || has_committed_log
             } else {
                 false
@@ -250,14 +255,13 @@ impl ClusterNode {
             crate::error::AikvError::Internal("MetaRaft not initialized".to_string())
         })?;
 
-        let node = BasicNode { addr };
+        let node = BasicNode {
+            addr,
+        };
 
-        meta_raft
-            .add_learner(node_id, node)
-            .await
-            .map_err(|e| {
-                crate::error::AikvError::Internal(format!("Failed to add MetaRaft learner: {}", e))
-            })?;
+        meta_raft.add_learner(node_id, node).await.map_err(|e| {
+            crate::error::AikvError::Internal(format!("Failed to add MetaRaft learner: {}", e))
+        })?;
 
         Ok(())
     }
