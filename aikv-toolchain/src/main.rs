@@ -2,6 +2,7 @@
 //!
 //! A comprehensive toolchain for building, deploying, and managing AiKv.
 //! Features:
+//! - **One-click cluster setup**: `cluster setup` does everything
 //! - Build AiKv (single-node and cluster modes)
 //! - Build Docker images
 //! - Generate deployment configurations
@@ -24,11 +25,18 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 /// AiKv Toolchain - Project Management CLI/TUI
+///
+/// One-click deployment tool for AiKv cluster.
+/// 
+/// Quick start:
+///   aikv-tool cluster setup    # Deploy a 6-node cluster in one command!
+///   aikv-tool cluster status   # Check cluster health
+///   aikv-tool cluster stop     # Stop the cluster
 #[derive(Parser)]
 #[command(name = "aikv-tool")]
 #[command(author = "Jerry")]
-#[command(version = "0.1.0")]
-#[command(about = "AiKv project management toolchain with TUI interface", long_about = None)]
+#[command(version = "0.2.0")]
+#[command(about = "AiKv 一键部署工具 - 傻瓜式集群管理", long_about = None)]
 struct Cli {
     /// Path to AiKv project root (defaults to current directory)
     #[arg(short, long, default_value = ".")]
@@ -80,7 +88,9 @@ enum Commands {
         template: Option<String>,
     },
 
-    /// Cluster management commands
+    /// Cluster management commands (RECOMMENDED)
+    /// 
+    /// Use 'aikv-tool cluster setup' for one-click deployment!
     Cluster {
         #[command(subcommand)]
         action: ClusterAction,
@@ -112,11 +122,39 @@ enum Commands {
 
     /// Check project status
     Status,
+    
+    /// Quick alias for 'cluster setup' - one-click deploy
+    #[command(name = "up", about = "Quick alias for 'cluster setup' - deploy cluster in one command")]
+    Up {
+        /// Output directory for deployment files
+        #[arg(short, long, default_value = "./deploy")]
+        output: PathBuf,
+    },
+    
+    /// Quick alias for 'cluster stop' - stop the cluster
+    #[command(name = "down", about = "Quick alias for 'cluster stop' - stop the cluster")]
+    Down {
+        /// Deployment directory
+        #[arg(short, long, default_value = "./deploy")]
+        deploy_dir: PathBuf,
+
+        /// Also remove data volumes
+        #[arg(short, long)]
+        volumes: bool,
+    },
 }
 
 #[derive(Subcommand)]
 enum ClusterAction {
-    /// One-click cluster setup: generate files, build image, start, and initialize
+    /// 🚀 One-click cluster setup: generate files, build image, start, and initialize
+    /// 
+    /// This is the RECOMMENDED way to deploy AiKv cluster!
+    /// It will automatically:
+    ///   1. Generate deployment configuration files
+    ///   2. Build Docker image with cluster feature
+    ///   3. Start all 6 containers
+    ///   4. Initialize MetaRaft membership
+    ///   5. Assign slots and configure replication
     Setup {
         /// Output directory for deployment files
         #[arg(short, long, default_value = "./deploy")]
@@ -153,6 +191,28 @@ enum ClusterAction {
         /// Also remove data volumes
         #[arg(short, long)]
         volumes: bool,
+    },
+    
+    /// Restart the cluster (stop + start + init)
+    Restart {
+        /// Deployment directory
+        #[arg(short, long, default_value = "./deploy")]
+        deploy_dir: PathBuf,
+    },
+    
+    /// View cluster logs
+    Logs {
+        /// Deployment directory
+        #[arg(short, long, default_value = "./deploy")]
+        deploy_dir: PathBuf,
+        
+        /// Follow log output
+        #[arg(short, long)]
+        follow: bool,
+        
+        /// Number of lines to show (default: 100)
+        #[arg(short, long, default_value = "100")]
+        lines: u32,
     },
 }
 
@@ -212,7 +272,20 @@ async fn main() -> Result<()> {
                 ClusterAction::Stop { deploy_dir, volumes } => {
                     cluster::stop_cluster(&deploy_dir, volumes).await?;
                 }
+                ClusterAction::Restart { deploy_dir } => {
+                    cluster::restart_cluster(&deploy_dir).await?;
+                }
+                ClusterAction::Logs { deploy_dir, follow, lines } => {
+                    cluster::show_logs(&deploy_dir, follow, lines).await?;
+                }
             }
+        }
+        // Quick aliases
+        Some(Commands::Up { output }) => {
+            cluster::one_click_setup(&cli.project_dir, &output).await?;
+        }
+        Some(Commands::Down { deploy_dir, volumes }) => {
+            cluster::stop_cluster(&deploy_dir, volumes).await?;
         }
         Some(Commands::Config {
             cluster,

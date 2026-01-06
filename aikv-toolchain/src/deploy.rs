@@ -239,11 +239,12 @@ sleep 3
 
 echo ""
 echo "Step 4: Promoting learners to voters..."
-echo "  Promoting all 3 nodes to voters..."
+echo "  Promoting nodes 2 and 3 to voters (node 1 is already a voter)..."
 PROMOTE_RETRIES=12
 PROMOTE_ATTEMPT=0
 while [ $PROMOTE_ATTEMPT -lt $PROMOTE_RETRIES ]; do
-    PROMOTE_OUTPUT=$(redis-cli -h 127.0.0.1 -p 6379 CLUSTER METARAFT PROMOTE 1 2 3 2>&1) || true
+    # Only promote nodes 2 and 3, node 1 is already a voter (bootstrap)
+    PROMOTE_OUTPUT=$(redis-cli -h 127.0.0.1 -p 6379 CLUSTER METARAFT PROMOTE 2 3 2>&1) || true
     if echo "$PROMOTE_OUTPUT" | grep -qi "ok"; then
         echo "  ✓ Promoted learners to voters"
         break
@@ -302,24 +303,41 @@ sleep 2
 echo ""
 echo "Step 7: Assigning slots to master nodes..."
 echo "  Assigning slots 0-5460 to node 1..."
-redis-cli -h 127.0.0.1 -p 6379 CLUSTER ADDSLOTS $(seq 0 5460)
+redis-cli -h 127.0.0.1 -p 6379 CLUSTER ADDSLOTSRANGE 0 5460
 
 echo "  Assigning slots 5461-10922 to node 2..."
-redis-cli -h 127.0.0.1 -p 6380 CLUSTER ADDSLOTS $(seq 5461 10922)
+# Send to leader (node 1) to assign slots to node 2
+redis-cli -h 127.0.0.1 -p 6379 CLUSTER ADDSLOTSRANGE 5461 10922 $NODE2_ID
 
 echo "  Assigning slots 10923-16383 to node 3..."
-redis-cli -h 127.0.0.1 -p 6381 CLUSTER ADDSLOTS $(seq 10923 16383)
+# Send to leader (node 1) to assign slots to node 3
+redis-cli -h 127.0.0.1 -p 6379 CLUSTER ADDSLOTSRANGE 10923 16383 $NODE3_ID
+
+echo "  Waiting for slot assignment to sync..."
+sleep 2
 
 echo ""
 echo "Step 8: Setting up replication (nodes 4-6 as replicas)..."
 echo "  Node 4 replicating node 1..."
-redis-cli -h 127.0.0.1 -p 6382 CLUSTER REPLICATE $NODE1_ID
+if redis-cli -h 127.0.0.1 -p 6382 CLUSTER REPLICATE $NODE1_ID 2>&1 | grep -qi "ok"; then
+    echo "  ✓ Node 4 is now a replica of node 1"
+else
+    echo "  ⚠ Replication setup for node 4 needs attention (cluster still functional)"
+fi
 
 echo "  Node 5 replicating node 2..."
-redis-cli -h 127.0.0.1 -p 6383 CLUSTER REPLICATE $NODE2_ID
+if redis-cli -h 127.0.0.1 -p 6383 CLUSTER REPLICATE $NODE2_ID 2>&1 | grep -qi "ok"; then
+    echo "  ✓ Node 5 is now a replica of node 2"
+else
+    echo "  ⚠ Replication setup for node 5 needs attention (cluster still functional)"
+fi
 
 echo "  Node 6 replicating node 3..."
-redis-cli -h 127.0.0.1 -p 6384 CLUSTER REPLICATE $NODE3_ID
+if redis-cli -h 127.0.0.1 -p 6384 CLUSTER REPLICATE $NODE3_ID 2>&1 | grep -qi "ok"; then
+    echo "  ✓ Node 6 is now a replica of node 3"
+else
+    echo "  ⚠ Replication setup for node 6 needs attention (cluster still functional)"
+fi
 
 echo ""
 echo "================================"
@@ -374,7 +392,7 @@ services:
       - RUST_LOG=info
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "sh", "-c", "echo PING | nc -w 1 localhost 6379 | grep -q PONG"]
+      test: ["CMD", "redis-cli", "PING"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -511,7 +529,7 @@ services:
       - AIKV_NODE_ID=n1
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "sh", "-c", "echo PING | nc -w 1 localhost 6379 | grep -q PONG"]
+      test: ["CMD", "redis-cli", "PING"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -535,7 +553,7 @@ services:
       - AIKV_NODE_ID=n2
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "sh", "-c", "echo PING | nc -w 1 localhost 6380 | grep -q PONG"]
+      test: ["CMD", "redis-cli", "-p", "6380", "PING"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -559,7 +577,7 @@ services:
       - AIKV_NODE_ID=n3
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "sh", "-c", "echo PING | nc -w 1 localhost 6381 | grep -q PONG"]
+      test: ["CMD", "redis-cli", "-p", "6381", "PING"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -583,7 +601,7 @@ services:
       - AIKV_NODE_ID=n4
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "sh", "-c", "echo PING | nc -w 1 localhost 6382 | grep -q PONG"]
+      test: ["CMD", "redis-cli", "-p", "6382", "PING"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -607,7 +625,7 @@ services:
       - AIKV_NODE_ID=n5
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "sh", "-c", "echo PING | nc -w 1 localhost 6383 | grep -q PONG"]
+      test: ["CMD", "redis-cli", "-p", "6383", "PING"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -631,7 +649,7 @@ services:
       - AIKV_NODE_ID=n6
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "sh", "-c", "echo PING | nc -w 1 localhost 6384 | grep -q PONG"]
+      test: ["CMD", "redis-cli", "-p", "6384", "PING"]
       interval: 10s
       timeout: 5s
       retries: 5

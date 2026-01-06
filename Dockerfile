@@ -77,10 +77,11 @@ RUN strip target/release/aikv
 # ------------------------------------------------------------
 FROM debian:bookworm-slim AS runtime
 
-# Install runtime dependencies
+# Install runtime dependencies (including netcat for health checks)
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     libssl3 \
+    redis-tools \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user for security
@@ -108,9 +109,9 @@ USER aikv
 # Expose default port
 EXPOSE 6379
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-    CMD echo "PING" | nc -w 1 localhost 6379 | grep -q "PONG" || exit 1
+# Health check using redis-cli
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD redis-cli PING | grep -q "PONG" || exit 1
 
 # Default command
 ENTRYPOINT ["/app/aikv"]

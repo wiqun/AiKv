@@ -1369,7 +1369,7 @@ impl ServerCommands {
             return Err(AikvError::WrongArgCount("CONFIG GET".to_string()));
         }
 
-        let parameter = String::from_utf8_lossy(&args[0]).to_string();
+        let parameter = String::from_utf8_lossy(&args[0]).to_lowercase();
         let config = self
             .config
             .read()
@@ -1377,15 +1377,54 @@ impl ServerCommands {
 
         let mut results = Vec::new();
 
+        // Helper function to check if pattern matches key (supports * wildcard)
+        let matches_pattern = |pattern: &str, key: &str| -> bool {
+            if pattern == "*" {
+                return true;
+            }
+            // Simple glob matching for patterns like "cluster*"
+            if let Some(prefix) = pattern.strip_suffix('*') {
+                key.starts_with(prefix)
+            } else {
+                pattern == key
+            }
+        };
+
+        // Built-in cluster configuration values (read-only, derived from runtime state)
+        let builtin_configs: Vec<(&str, String)> = vec![
+            ("cluster-enabled", if self.cluster_enabled { "yes".to_string() } else { "no".to_string() }),
+            ("cluster-node-timeout", "15000".to_string()),
+            ("cluster-announce-port", self.tcp_port.to_string()),
+            ("cluster-announce-bus-port", (self.tcp_port + 10000).to_string()),
+        ];
+
         // Support wildcard matching
         if parameter == "*" {
+            // Add built-in configs first
+            for (key, value) in &builtin_configs {
+                results.push(RespValue::bulk_string(key.to_string()));
+                results.push(RespValue::bulk_string(value.clone()));
+            }
+            // Add user-defined configs
             for (key, value) in config.iter() {
                 results.push(RespValue::bulk_string(key.clone()));
                 results.push(RespValue::bulk_string(value.clone()));
             }
-        } else if let Some(value) = config.get(&parameter) {
-            results.push(RespValue::bulk_string(parameter.clone()));
-            results.push(RespValue::bulk_string(value.clone()));
+        } else {
+            // Check built-in configs first
+            for (key, value) in &builtin_configs {
+                if matches_pattern(&parameter, key) {
+                    results.push(RespValue::bulk_string(key.to_string()));
+                    results.push(RespValue::bulk_string(value.clone()));
+                }
+            }
+            // Check user-defined configs
+            for (key, value) in config.iter() {
+                if matches_pattern(&parameter, key) {
+                    results.push(RespValue::bulk_string(key.clone()));
+                    results.push(RespValue::bulk_string(value.clone()));
+                }
+            }
         }
 
         Ok(RespValue::array(results))

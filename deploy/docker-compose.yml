@@ -21,7 +21,7 @@ services:
       - AIKV_NODE_ID=n1
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "sh", "-c", "echo PING | nc -w 1 localhost 6379 | grep -q PONG"]
+      test: ["CMD", "redis-cli", "PING"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -45,7 +45,7 @@ services:
       - AIKV_NODE_ID=n2
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "sh", "-c", "echo PING | nc -w 1 localhost 6380 | grep -q PONG"]
+      test: ["CMD", "redis-cli", "-p", "6380", "PING"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -69,7 +69,7 @@ services:
       - AIKV_NODE_ID=n3
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "sh", "-c", "echo PING | nc -w 1 localhost 6381 | grep -q PONG"]
+      test: ["CMD", "redis-cli", "-p", "6381", "PING"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -93,7 +93,7 @@ services:
       - AIKV_NODE_ID=n4
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "sh", "-c", "echo PING | nc -w 1 localhost 6382 | grep -q PONG"]
+      test: ["CMD", "redis-cli", "-p", "6382", "PING"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -117,7 +117,7 @@ services:
       - AIKV_NODE_ID=n5
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "sh", "-c", "echo PING | nc -w 1 localhost 6383 | grep -q PONG"]
+      test: ["CMD", "redis-cli", "-p", "6383", "PING"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -141,7 +141,7 @@ services:
       - AIKV_NODE_ID=n6
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "sh", "-c", "echo PING | nc -w 1 localhost 6384 | grep -q PONG"]
+      test: ["CMD", "redis-cli", "-p", "6384", "PING"]
       interval: 10s
       timeout: 5s
       retries: 5

@@ -29,40 +29,32 @@ done
 
 echo ""
 echo "Step 2: Getting node IDs from each node..."
-# Get hex node IDs (40-char format: 24 zeros + 16 hex digits)
-NODE1_ID_HEX=$(redis-cli -h 127.0.0.1 -p 6379 CLUSTER MYID)
-NODE2_ID_HEX=$(redis-cli -h 127.0.0.1 -p 6380 CLUSTER MYID)
-NODE3_ID_HEX=$(redis-cli -h 127.0.0.1 -p 6381 CLUSTER MYID)
-
-# Extract last 16 hex chars (the actual u64 value) for ADDLEARNER/PROMOTE commands
-# These commands now accept hex format directly
-NODE1_ID=${NODE1_ID_HEX: -16}
-NODE2_ID=${NODE2_ID_HEX: -16}
-NODE3_ID=${NODE3_ID_HEX: -16}
-
-echo "  Node 1 ID: $NODE1_ID_HEX (hex: $NODE1_ID)"
-echo "  Node 2 ID: $NODE2_ID_HEX (hex: $NODE2_ID)"
-echo "  Node 3 ID: $NODE3_ID_HEX (hex: $NODE3_ID)"
+NODE1_ID=$(redis-cli -h 127.0.0.1 -p 6379 CLUSTER MYID)
+NODE2_ID=$(redis-cli -h 127.0.0.1 -p 6380 CLUSTER MYID)
+NODE3_ID=$(redis-cli -h 127.0.0.1 -p 6381 CLUSTER MYID)
+echo "  Node 1 ID: $NODE1_ID"
+echo "  Node 2 ID: $NODE2_ID"
+echo "  Node 3 ID: $NODE3_ID"
 
 echo ""
 echo "Step 3: Adding nodes 2 and 3 as MetaRaft learners..."
 echo "  Adding node 2 (ID: $NODE2_ID)..."
-redis-cli -h 127.0.0.1 -p 6379 CLUSTER METARAFT ADDLEARNER $NODE2_ID aikv2:50052
+redis-cli -h 127.0.0.1 -p 6379 CLUSTER METARAFT ADDLEARNER 2 aikv2:50052
 
 echo "  Adding node 3 (ID: $NODE3_ID)..."
-redis-cli -h 127.0.0.1 -p 6379 CLUSTER METARAFT ADDLEARNER $NODE3_ID aikv3:50053
+redis-cli -h 127.0.0.1 -p 6379 CLUSTER METARAFT ADDLEARNER 3 aikv3:50053
 
 echo "  Waiting for learners to sync logs..."
 sleep 3
 
 echo ""
 echo "Step 4: Promoting learners to voters..."
-echo "  Promoting nodes 2 and 3 to voters (node 1 is already the bootstrap voter)..."
+echo "  Promoting nodes 2 and 3 to voters (node 1 is already a voter)..."
 PROMOTE_RETRIES=12
 PROMOTE_ATTEMPT=0
 while [ $PROMOTE_ATTEMPT -lt $PROMOTE_RETRIES ]; do
-    # Only promote nodes 2 and 3 - node 1 is already the bootstrap voter
-    PROMOTE_OUTPUT=$(redis-cli -h 127.0.0.1 -p 6379 CLUSTER METARAFT PROMOTE $NODE2_ID $NODE3_ID 2>&1) || true
+    # Only promote nodes 2 and 3, node 1 is already a voter (bootstrap)
+    PROMOTE_OUTPUT=$(redis-cli -h 127.0.0.1 -p 6379 CLUSTER METARAFT PROMOTE 2 3 2>&1) || true
     if echo "$PROMOTE_OUTPUT" | grep -qi "ok"; then
         echo "  ✓ Promoted learners to voters"
         break
@@ -97,60 +89,65 @@ redis-cli -h 127.0.0.1 -p 6379 CLUSTER METARAFT MEMBERS
 
 echo ""
 echo "Step 6: Adding nodes to cluster metadata..."
-echo "  Adding node 1 (the leader itself) to cluster nodes..."
-redis-cli -h 127.0.0.1 -p 6379 CLUSTER MEET 127.0.0.1 6379 $NODE1_ID_HEX
-
 echo "  Meeting node 2..."
-redis-cli -h 127.0.0.1 -p 6379 CLUSTER MEET 127.0.0.1 6380 $NODE2_ID_HEX
+redis-cli -h 127.0.0.1 -p 6379 CLUSTER MEET 127.0.0.1 6380 $NODE2_ID
 
 echo "  Meeting node 3..."
-redis-cli -h 127.0.0.1 -p 6379 CLUSTER MEET 127.0.0.1 6381 $NODE3_ID_HEX
+redis-cli -h 127.0.0.1 -p 6379 CLUSTER MEET 127.0.0.1 6381 $NODE3_ID
 
 echo "  Meeting node 4..."
-NODE4_ID_HEX=$(redis-cli -h 127.0.0.1 -p 6382 CLUSTER MYID)
-redis-cli -h 127.0.0.1 -p 6379 CLUSTER MEET 127.0.0.1 6382 $NODE4_ID_HEX
+NODE4_ID=$(redis-cli -h 127.0.0.1 -p 6382 CLUSTER MYID)
+redis-cli -h 127.0.0.1 -p 6379 CLUSTER MEET 127.0.0.1 6382 $NODE4_ID
 
 echo "  Meeting node 5..."
-NODE5_ID_HEX=$(redis-cli -h 127.0.0.1 -p 6383 CLUSTER MYID)
-redis-cli -h 127.0.0.1 -p 6379 CLUSTER MEET 127.0.0.1 6383 $NODE5_ID_HEX
+NODE5_ID=$(redis-cli -h 127.0.0.1 -p 6383 CLUSTER MYID)
+redis-cli -h 127.0.0.1 -p 6379 CLUSTER MEET 127.0.0.1 6383 $NODE5_ID
 
 echo "  Meeting node 6..."
-NODE6_ID_HEX=$(redis-cli -h 127.0.0.1 -p 6384 CLUSTER MYID)
-redis-cli -h 127.0.0.1 -p 6379 CLUSTER MEET 127.0.0.1 6384 $NODE6_ID_HEX
+NODE6_ID=$(redis-cli -h 127.0.0.1 -p 6384 CLUSTER MYID)
+redis-cli -h 127.0.0.1 -p 6379 CLUSTER MEET 127.0.0.1 6384 $NODE6_ID
 
 echo "  Waiting for cluster metadata to sync..."
 sleep 2
 
 echo ""
-echo "Step 7: Assigning slots to master nodes (via MetaRaft leader)..."
-# All slot assignments must go through the leader (node 1)
+echo "Step 7: Assigning slots to master nodes..."
 echo "  Assigning slots 0-5460 to node 1..."
 redis-cli -h 127.0.0.1 -p 6379 CLUSTER ADDSLOTSRANGE 0 5460
 
 echo "  Assigning slots 5461-10922 to node 2..."
+# Send to leader (node 1) to assign slots to node 2
 redis-cli -h 127.0.0.1 -p 6379 CLUSTER ADDSLOTSRANGE 5461 10922 $NODE2_ID
 
 echo "  Assigning slots 10923-16383 to node 3..."
+# Send to leader (node 1) to assign slots to node 3
 redis-cli -h 127.0.0.1 -p 6379 CLUSTER ADDSLOTSRANGE 10923 16383 $NODE3_ID
+
+echo "  Waiting for slot assignment to sync..."
+sleep 2
 
 echo ""
 echo "Step 8: Setting up replication (nodes 4-6 as replicas)..."
-# Get node 4-6 IDs
-NODE4_ID_HEX=$(redis-cli -h 127.0.0.1 -p 6382 CLUSTER MYID)
-NODE4_ID=${NODE4_ID_HEX: -16}
-NODE5_ID_HEX=$(redis-cli -h 127.0.0.1 -p 6383 CLUSTER MYID)
-NODE5_ID=${NODE5_ID_HEX: -16}
-NODE6_ID_HEX=$(redis-cli -h 127.0.0.1 -p 6384 CLUSTER MYID)
-NODE6_ID=${NODE6_ID_HEX: -16}
-
 echo "  Node 4 replicating node 1..."
-redis-cli -h 127.0.0.1 -p 6379 CLUSTER ADDREPLICATION $NODE4_ID $NODE1_ID
+if redis-cli -h 127.0.0.1 -p 6382 CLUSTER REPLICATE $NODE1_ID 2>&1 | grep -qi "ok"; then
+    echo "  ✓ Node 4 is now a replica of node 1"
+else
+    echo "  ⚠ Replication setup for node 4 needs attention (cluster still functional)"
+fi
 
 echo "  Node 5 replicating node 2..."
-redis-cli -h 127.0.0.1 -p 6379 CLUSTER ADDREPLICATION $NODE5_ID $NODE2_ID
+if redis-cli -h 127.0.0.1 -p 6383 CLUSTER REPLICATE $NODE2_ID 2>&1 | grep -qi "ok"; then
+    echo "  ✓ Node 5 is now a replica of node 2"
+else
+    echo "  ⚠ Replication setup for node 5 needs attention (cluster still functional)"
+fi
 
 echo "  Node 6 replicating node 3..."
-redis-cli -h 127.0.0.1 -p 6379 CLUSTER ADDREPLICATION $NODE6_ID $NODE3_ID
+if redis-cli -h 127.0.0.1 -p 6384 CLUSTER REPLICATE $NODE3_ID 2>&1 | grep -qi "ok"; then
+    echo "  ✓ Node 6 is now a replica of node 3"
+else
+    echo "  ⚠ Replication setup for node 6 needs attention (cluster still functional)"
+fi
 
 echo ""
 echo "================================"
