@@ -5,12 +5,25 @@
 //!
 //! Key principle: Minimal code - only Redis protocol format conversion.
 //! All cluster logic is delegated to AiDb's MetaRaftNode, MultiRaftNode, Router, etc.
+//!
+//! ## MOVED Redirection
+//!
+//! This module implements Redis Cluster's MOVED redirection protocol. When a client
+//! sends a command to the wrong node (based on the key's slot), the server returns:
+//!
+//! ```text
+//! -MOVED <slot> <ip>:<port>
+//! ```
+//!
+//! This tells the client which node owns the slot and where to retry the command.
+//! The client should update its slot-to-node mapping and redirect future requests
+//! for that slot to the correct node.
 
 use crate::error::{AikvError, Result};
 use crate::protocol::RespValue;
 use bytes::Bytes;
 use std::sync::Arc;
-use tracing::info;
+use tracing::{debug, info};
 
 #[cfg(feature = "cluster")]
 use aidb::cluster::{
@@ -1476,6 +1489,211 @@ impl ClusterCommands {
     /// Create error response for -ASK redirection
     pub fn ask_error(slot: u16, addr: &str) -> AikvError {
         AikvError::Ask(slot, addr.to_string())
+    }
+
+    /// Check if a key should be handled by this node.
+    ///
+    /// Returns `Ok(())` if the key belongs to this node, or an error with
+    /// MOVED/ASK redirection information if the key should be handled elsewhere.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to check
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - Key belongs to this node
+    /// * `Err(AikvError::Moved(slot, addr))` - Key belongs to another node
+    /// * `Err(AikvError::Ask(slot, addr))` - Key is being migrated
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Before executing a command, check if the key belongs to this node
+    /// cluster_commands.check_key_slot(b"user:1000")?;
+    /// // If no error, proceed with the command
+    /// ```
+    pub fn check_key_slot(&self, key: &[u8]) -> Result<()> {
+        let slot = Router::key_to_slot(key);
+        self.check_slot_ownership(slot)
+    }
+
+    /// Check if a slot should be handled by this node.
+    ///
+    /// Returns `Ok(())` if the slot belongs to this node, or an error with
+    /// MOVED/ASK redirection information if the slot should be handled elsewhere.
+    ///
+    /// # Arguments
+    ///
+    /// * `slot` - The slot number to check (0-16383)
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - Slot belongs to this node
+    /// * `Err(AikvError::Moved(slot, addr))` - Slot belongs to another node
+    /// * `Err(AikvError::Ask(slot, addr))` - Slot is being migrated
+    pub fn check_slot_ownership(&self, slot: u16) -> Result<()> {
+        let meta: ClusterMeta = self.meta_raft.get_cluster_meta();
+
+        // Check if slot is assigned to any group
+        if slot as usize >= meta.slots.len() {
+            return Err(AikvError::Invalid(format!("Invalid slot: {}", slot)));
+        }
+
+        let assigned_group = meta.slots[slot as usize];
+
+        // Slot not assigned to any group
+        if assigned_group == 0 {
+            return Err(AikvError::Internal(format!(
+                "CLUSTERDOWN Hash slot {} not served",
+                slot
+            )));
+        }
+
+        // Check if this node owns the slot (is the leader of the assigned group)
+        if let Some(group_meta) = meta.groups.get(&assigned_group) {
+            // Check if this node is the leader of the group
+            if group_meta.leader == Some(self.node_id) {
+                // This node owns the slot
+                return Ok(());
+            }
+
+            // Check if this node is a replica (can handle READONLY requests)
+            // For now, we always redirect to the leader for write operations
+            if group_meta.replicas.contains(&self.node_id) {
+                // This node is a replica, redirect to the leader
+                if let Some(leader_id) = group_meta.leader {
+                    if let Some(leader_info) = meta.nodes.get(&leader_id) {
+                        let data_addr = Self::extract_data_address(&leader_info.addr);
+                        return Err(Self::moved_error(slot, &data_addr));
+                    }
+                }
+            }
+
+            // Slot belongs to another node, find the leader and redirect
+            if let Some(leader_id) = group_meta.leader {
+                if let Some(leader_info) = meta.nodes.get(&leader_id) {
+                    let data_addr = Self::extract_data_address(&leader_info.addr);
+                    debug!(
+                        slot = slot,
+                        target = %data_addr,
+                        "Redirecting key to owner node"
+                    );
+                    return Err(Self::moved_error(slot, &data_addr));
+                }
+            }
+        }
+
+        // Fallback: slot is assigned but group info is missing
+        Err(AikvError::Internal(format!(
+            "CLUSTERDOWN Hash slot {} not served (group {} not found)",
+            slot, assigned_group
+        )))
+    }
+
+    /// Check if multiple keys all belong to this node.
+    ///
+    /// For multi-key commands (like MGET, MSET), all keys must belong to the same
+    /// slot, or the command must be rejected. This method checks if all keys
+    /// belong to this node.
+    ///
+    /// # Arguments
+    ///
+    /// * `keys` - The keys to check
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - All keys belong to this node
+    /// * `Err(AikvError::Moved(slot, addr))` - Keys belong to another node
+    /// * `Err(AikvError::CrossSlot)` - Keys span multiple slots (not supported)
+    pub fn check_keys_slot(&self, keys: &[&[u8]]) -> Result<()> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+
+        // Calculate slot for first key
+        let first_slot = Router::key_to_slot(keys[0]);
+
+        // Verify all keys are in the same slot
+        for key in &keys[1..] {
+            let slot = Router::key_to_slot(key);
+            if slot != first_slot {
+                return Err(AikvError::CrossSlot);
+            }
+        }
+
+        // Check if the slot belongs to this node
+        self.check_slot_ownership(first_slot)
+    }
+
+    /// Get the slot number for a key.
+    ///
+    /// This is a convenience wrapper around `Router::key_to_slot()`.
+    pub fn get_key_slot(key: &[u8]) -> u16 {
+        Router::key_to_slot(key)
+    }
+
+    /// Check if cluster is fully operational (all slots assigned and served).
+    ///
+    /// Returns `Ok(())` if the cluster is operational, or an error describing
+    /// what's wrong.
+    pub fn check_cluster_state(&self) -> Result<()> {
+        let meta: ClusterMeta = self.meta_raft.get_cluster_meta();
+
+        // Check if all slots are assigned
+        let assigned_slots = meta.slots.iter().filter(|&&g| g > 0).count();
+        if assigned_slots != TOTAL_SLOTS as usize {
+            return Err(AikvError::Internal(format!(
+                "CLUSTERDOWN The cluster is down. Only {} of {} slots are assigned",
+                assigned_slots, TOTAL_SLOTS
+            )));
+        }
+
+        // Check if all groups have leaders
+        for (group_id, group_meta) in &meta.groups {
+            // Check if this group owns any slots
+            let owns_slots = meta.slots.iter().any(|&s| s == *group_id);
+            if owns_slots && group_meta.leader.is_none() {
+                return Err(AikvError::Internal(format!(
+                    "CLUSTERDOWN The cluster is down. Group {} has no leader",
+                    group_id
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Get the node address that owns a specific slot.
+    ///
+    /// Returns `Some((node_id, addr))` if the slot is assigned, `None` otherwise.
+    pub fn get_slot_owner(&self, slot: u16) -> Option<(NodeId, String)> {
+        let meta: ClusterMeta = self.meta_raft.get_cluster_meta();
+
+        if slot as usize >= meta.slots.len() {
+            return None;
+        }
+
+        let assigned_group = meta.slots[slot as usize];
+        if assigned_group == 0 {
+            return None;
+        }
+
+        if let Some(group_meta) = meta.groups.get(&assigned_group) {
+            if let Some(leader_id) = group_meta.leader {
+                if let Some(leader_info) = meta.nodes.get(&leader_id) {
+                    let data_addr = Self::extract_data_address(&leader_info.addr);
+                    return Some((leader_id, data_addr));
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Get this node's ID.
+    pub fn node_id(&self) -> NodeId {
+        self.node_id
     }
 }
 

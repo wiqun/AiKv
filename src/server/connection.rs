@@ -307,7 +307,7 @@ impl Connection {
                             
                             return match result {
                                 Ok(resp) => resp,
-                                Err(e) => RespValue::error(format!("ERR {}", e)),
+                                Err(e) => Self::format_error_response(e),
                             };
                         } else {
                             return RespValue::error("ERR Cluster not initialized. Please initialize cluster node first.");
@@ -341,10 +341,26 @@ impl Connection {
 
                 match result {
                     Ok(resp) => resp,
-                    Err(e) => RespValue::error(format!("ERR {}", e)),
+                    Err(e) => Self::format_error_response(e),
                 }
             }
             _ => RespValue::error("ERR invalid command format"),
+        }
+    }
+
+    /// Format an error into a RESP error response.
+    ///
+    /// Cluster-specific errors (MOVED, ASK, CROSSSLOT) have special formats
+    /// that Redis clients expect.
+    fn format_error_response(e: crate::error::AikvError) -> RespValue {
+        use crate::error::AikvError;
+        match e {
+            // Cluster redirection errors - format without "ERR " prefix
+            AikvError::Moved(slot, addr) => RespValue::error(format!("MOVED {} {}", slot, addr)),
+            AikvError::Ask(slot, addr) => RespValue::error(format!("ASK {} {}", slot, addr)),
+            AikvError::CrossSlot => RespValue::error("CROSSSLOT Keys in request don't hash to the same slot"),
+            // All other errors use the standard "ERR " prefix
+            _ => RespValue::error(format!("ERR {}", e)),
         }
     }
 

@@ -446,4 +446,276 @@ mod cluster_tests {
 
         Ok(())
     }
+
+    /// Test MOVED redirection for keys that belong to another node
+    #[tokio::test]
+    async fn test_moved_redirection_check_slot_ownership() -> Result<()> {
+        // Cleanup before test
+        let _ = tokio::fs::remove_dir_all("/tmp/test_moved_redirect").await;
+
+        // Create a cluster node
+        let raft_config = RaftConfig::default();
+        let mut node = MultiRaftNode::new(1, "/tmp/test_moved_redirect", raft_config.clone())
+            .await
+            .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?;
+
+        node.init_meta_raft(raft_config.clone())
+            .await
+            .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?;
+
+        // Bootstrap as single node
+        node.initialize_meta_cluster(vec![(1, "127.0.0.1:50001".to_string())])
+            .await
+            .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?;
+
+        let node = Arc::new(node);
+        let meta_raft = node.meta_raft().unwrap();
+        let cluster_meta = meta_raft.get_cluster_meta();
+        let router = Arc::new(Router::new(cluster_meta));
+
+        // Create ClusterCommands for this node
+        let cluster_commands = ClusterCommands::new(1, meta_raft.clone(), node.clone(), router);
+
+        // Test 1: Before slots are assigned, check_slot_ownership should fail
+        let result = cluster_commands.check_slot_ownership(0);
+        assert!(result.is_err(), "Slot 0 should not be owned before assignment");
+
+        // Create a group for node 1 and assign slots 0-5460
+        meta_raft
+            .create_group(1, vec![1])
+            .await
+            .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?;
+        meta_raft
+            .update_group_leader(1, 1)
+            .await
+            .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?;
+        meta_raft
+            .update_slots(0, 5461, 1)
+            .await
+            .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?;
+
+        // Wait for Raft to apply
+        sleep(Duration::from_millis(100)).await;
+
+        // Test 2: After slots are assigned, check_slot_ownership should succeed for owned slots
+        let result = cluster_commands.check_slot_ownership(0);
+        assert!(result.is_ok(), "Slot 0 should be owned by this node after assignment");
+
+        let result = cluster_commands.check_slot_ownership(5460);
+        assert!(result.is_ok(), "Slot 5460 should be owned by this node");
+
+        // Test 3: Slots not assigned to this node should return error
+        let result = cluster_commands.check_slot_ownership(5461);
+        assert!(result.is_err(), "Slot 5461 should not be owned by this node");
+
+        // Cleanup
+        let _ = tokio::fs::remove_dir_all("/tmp/test_moved_redirect").await;
+
+        Ok(())
+    }
+
+    /// Test check_key_slot calculates slot correctly and checks ownership
+    #[tokio::test]
+    async fn test_check_key_slot() -> Result<()> {
+        // Cleanup before test
+        let _ = tokio::fs::remove_dir_all("/tmp/test_check_key_slot").await;
+
+        // Create a cluster node
+        let raft_config = RaftConfig::default();
+        let mut node = MultiRaftNode::new(1, "/tmp/test_check_key_slot", raft_config.clone())
+            .await
+            .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?;
+
+        node.init_meta_raft(raft_config.clone())
+            .await
+            .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?;
+
+        node.initialize_meta_cluster(vec![(1, "127.0.0.1:50002".to_string())])
+            .await
+            .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?;
+
+        let node = Arc::new(node);
+        let meta_raft = node.meta_raft().unwrap();
+        let cluster_meta = meta_raft.get_cluster_meta();
+        let router = Arc::new(Router::new(cluster_meta));
+
+        let cluster_commands = ClusterCommands::new(1, meta_raft.clone(), node.clone(), router);
+
+        // Create a group and assign all slots to node 1
+        meta_raft
+            .create_group(1, vec![1])
+            .await
+            .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?;
+        meta_raft
+            .update_group_leader(1, 1)
+            .await
+            .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?;
+        meta_raft
+            .update_slots(0, 16384, 1)
+            .await
+            .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?;
+
+        sleep(Duration::from_millis(100)).await;
+
+        // Test: check_key_slot should succeed for any key when all slots are owned
+        let result = cluster_commands.check_key_slot(b"user:1000");
+        assert!(result.is_ok(), "Key 'user:1000' should be handled by this node");
+
+        let result = cluster_commands.check_key_slot(b"product:123");
+        assert!(result.is_ok(), "Key 'product:123' should be handled by this node");
+
+        // Cleanup
+        let _ = tokio::fs::remove_dir_all("/tmp/test_check_key_slot").await;
+
+        Ok(())
+    }
+
+    /// Test check_keys_slot validates all keys are in the same slot
+    #[tokio::test]
+    async fn test_check_keys_slot_cross_slot() -> Result<()> {
+        // Cleanup before test
+        let _ = tokio::fs::remove_dir_all("/tmp/test_cross_slot").await;
+
+        // Create a cluster node
+        let raft_config = RaftConfig::default();
+        let mut node = MultiRaftNode::new(1, "/tmp/test_cross_slot", raft_config.clone())
+            .await
+            .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?;
+
+        node.init_meta_raft(raft_config.clone())
+            .await
+            .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?;
+
+        node.initialize_meta_cluster(vec![(1, "127.0.0.1:50003".to_string())])
+            .await
+            .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?;
+
+        let node = Arc::new(node);
+        let meta_raft = node.meta_raft().unwrap();
+
+        // Assign all slots to node 1 BEFORE creating ClusterCommands
+        meta_raft
+            .create_group(1, vec![1])
+            .await
+            .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?;
+        meta_raft
+            .update_group_leader(1, 1)
+            .await
+            .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?;
+        meta_raft
+            .update_slots(0, 16384, 1)
+            .await
+            .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?;
+
+        sleep(Duration::from_millis(100)).await;
+
+        // Create ClusterCommands AFTER assigning slots so Router has correct metadata
+        let cluster_meta = meta_raft.get_cluster_meta();
+        let router = Arc::new(Router::new(cluster_meta));
+        let cluster_commands = ClusterCommands::new(1, meta_raft.clone(), node.clone(), router);
+
+        // Test 1: Same key multiple times (obviously same slot) should succeed
+        let keys: Vec<&[u8]> = vec![b"mykey", b"mykey", b"mykey"];
+        let result = cluster_commands.check_keys_slot(&keys);
+        assert!(result.is_ok(), "Same key should be in same slot");
+
+        // Test 2: Different keys should succeed if all slots are owned by this node
+        // Since we assigned all slots to node 1, any set of keys should work
+        let keys: Vec<&[u8]> = vec![b"key1"];
+        let result = cluster_commands.check_keys_slot(&keys);
+        assert!(result.is_ok(), "Single key should succeed when slot is owned");
+
+        // Test 3: Keys in different slots should fail with CrossSlot error
+        let keys: Vec<&[u8]> = vec![b"key1", b"key2", b"key3"];
+        
+        // Calculate slots to verify they're different
+        let slot1 = Router::key_to_slot(b"key1");
+        let slot2 = Router::key_to_slot(b"key2");
+        let slot3 = Router::key_to_slot(b"key3");
+        
+        // If any slots are different, check_keys_slot should return CrossSlot error
+        if slot1 != slot2 || slot2 != slot3 {
+            let result = cluster_commands.check_keys_slot(&keys);
+            assert!(result.is_err(), "Keys in different slots should fail");
+            if let Err(aikv::error::AikvError::CrossSlot) = result {
+                // Expected
+            } else {
+                panic!("Expected CrossSlot error, got {:?}", result);
+            }
+        }
+
+        // Cleanup
+        let _ = tokio::fs::remove_dir_all("/tmp/test_cross_slot").await;
+
+        Ok(())
+    }
+
+    /// Test get_slot_owner returns correct node info
+    #[tokio::test]
+    async fn test_get_slot_owner() -> Result<()> {
+        // Cleanup before test
+        let _ = tokio::fs::remove_dir_all("/tmp/test_slot_owner").await;
+
+        // Create a cluster node
+        let raft_config = RaftConfig::default();
+        let mut node = MultiRaftNode::new(1, "/tmp/test_slot_owner", raft_config.clone())
+            .await
+            .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?;
+
+        node.init_meta_raft(raft_config.clone())
+            .await
+            .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?;
+
+        node.initialize_meta_cluster(vec![(1, "127.0.0.1:50004".to_string())])
+            .await
+            .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?;
+
+        let node = Arc::new(node);
+        let meta_raft = node.meta_raft().unwrap();
+        let cluster_meta = meta_raft.get_cluster_meta();
+        let router = Arc::new(Router::new(cluster_meta));
+
+        let cluster_commands = ClusterCommands::new(1, meta_raft.clone(), node.clone(), router);
+
+        // Test 1: Before slots are assigned, get_slot_owner should return None
+        let owner = cluster_commands.get_slot_owner(0);
+        assert!(owner.is_none(), "Slot 0 should have no owner before assignment");
+
+        // First, add the node to the cluster so it's in the nodes map
+        meta_raft
+            .add_node(1, "127.0.0.1:50004".to_string())
+            .await
+            .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?;
+
+        // Assign slots to node 1
+        meta_raft
+            .create_group(1, vec![1])
+            .await
+            .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?;
+        meta_raft
+            .update_group_leader(1, 1)
+            .await
+            .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?;
+        meta_raft
+            .update_slots(0, 5461, 1)
+            .await
+            .map_err(|e| aikv::error::AikvError::Internal(e.to_string()))?;
+
+        sleep(Duration::from_millis(100)).await;
+
+        // Test 2: After assignment, get_slot_owner should return the owner
+        let owner = cluster_commands.get_slot_owner(0);
+        assert!(owner.is_some(), "Slot 0 should have owner after assignment");
+        let (node_id, _addr) = owner.unwrap();
+        assert_eq!(node_id, 1, "Slot 0 should be owned by node 1");
+
+        // Test 3: Unassigned slot should return None
+        let owner = cluster_commands.get_slot_owner(10000);
+        assert!(owner.is_none(), "Slot 10000 should have no owner");
+
+        // Cleanup
+        let _ = tokio::fs::remove_dir_all("/tmp/test_slot_owner").await;
+
+        Ok(())
+    }
 }

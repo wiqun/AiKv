@@ -15,7 +15,7 @@ mod metaraft_tests {
     use tokio::time::{sleep, Duration};
 
     /// Time to wait for cluster to stabilize after operations
-    const CLUSTER_STABILIZATION_DELAY: Duration = CLUSTER_STABILIZATION_DELAY;
+    const CLUSTER_STABILIZATION_DELAY: Duration = Duration::from_millis(200);
 
     /// Test adding a node as a MetaRaft learner
     #[tokio::test]

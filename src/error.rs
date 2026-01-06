@@ -47,6 +47,9 @@ pub enum AikvError {
     #[error("ASK {0} {1}")]
     Ask(u16, String),
 
+    #[error("CROSSSLOT Keys in request don't hash to the same slot")]
+    CrossSlot,
+
     #[error("Cluster support is not enabled")]
     ClusterDisabled,
 

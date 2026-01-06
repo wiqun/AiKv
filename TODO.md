@@ -341,11 +341,19 @@ AiDb MetaRaftNode (Group 0) ──────────────┘
 - [x] `MultiRaftNode` / `MetaRaftNode` 封装
 - [x] 3 节点启动验证
 
-### v0.3.0 - 槽路由 (周 3-4)
+### v0.3.0 - 槽路由 (周 3-4) - 已完成
 
-- [ ] 16384 槽映射
-- [ ] `-MOVED` 重定向
-- [ ] `Router::key_to_slot()` 集成
+- [x] 16384 槽映射 ✅
+- [x] `-MOVED` 重定向 ✅
+- [x] `Router::key_to_slot()` 集成 ✅
+
+**实现说明:**
+- 在 `ClusterCommands` 中添加了 `check_key_slot()` 和 `check_keys_slot()` 方法用于检查键的槽是否属于当前节点
+- 在 `CommandExecutor::execute()` 中集成了槽路由检查，所有数据命令执行前会检查键的归属
+- 对于单键命令 (GET, SET, LPUSH 等)，检查该键的槽是否属于当前节点
+- 对于多键命令 (MGET, MSET, SUNION 等)，检查所有键是否在同一个槽，并且槽属于当前节点
+- 如果键不属于当前节点，返回 `-MOVED slot ip:port` 错误，告诉客户端正确的节点地址
+- 如果多键命令的键在不同槽，返回 `-CROSSSLOT` 错误
 
 ### v0.4.0 - CLUSTER 命令完善 (周 5-6)
 
