@@ -97,6 +97,9 @@ redis-cli -h 127.0.0.1 -p 6379 CLUSTER METARAFT MEMBERS
 
 echo ""
 echo "Step 6: Adding nodes to cluster metadata..."
+echo "  Adding node 1 (the leader itself) to cluster nodes..."
+redis-cli -h 127.0.0.1 -p 6379 CLUSTER MEET 127.0.0.1 6379 $NODE1_ID_HEX
+
 echo "  Meeting node 2..."
 redis-cli -h 127.0.0.1 -p 6379 CLUSTER MEET 127.0.0.1 6380 $NODE2_ID_HEX
 
