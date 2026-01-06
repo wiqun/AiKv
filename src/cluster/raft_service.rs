@@ -82,7 +82,9 @@ impl rpc::raft_service_server::RaftService for MultiRaftService {
         let mut entries = Vec::new();
         for entry in req.entries {
             let payload: openraft::EntryPayload<TypeConfig> = rmp_serde::from_slice(&entry.payload)
-                .map_err(|e| Status::internal(format!("Failed to deserialize entry payload: {e}")))?;
+                .map_err(|e| {
+                    Status::internal(format!("Failed to deserialize entry payload: {e}"))
+                })?;
 
             entries.push(openraft::Entry {
                 log_id: openraft::LogId::new(
@@ -129,14 +131,16 @@ impl rpc::raft_service_server::RaftService for MultiRaftService {
             .map_err(|e| Status::internal(format!("AppendEntries failed: {e}")))?;
 
         let response = match append_resp {
-            AppendEntriesResponse::Success | AppendEntriesResponse::PartialSuccess(_) => rpc::AppendEntriesResponse {
-                vote_term: 0,
-                vote_node_id: 0,
-                vote_committed: false,
-                success: true,
-                conflict_index: None,
-                conflict_term: None,
-            },
+            AppendEntriesResponse::Success | AppendEntriesResponse::PartialSuccess(_) => {
+                rpc::AppendEntriesResponse {
+                    vote_term: 0,
+                    vote_node_id: 0,
+                    vote_committed: false,
+                    success: true,
+                    conflict_index: None,
+                    conflict_term: None,
+                }
+            }
 
             AppendEntriesResponse::Conflict => rpc::AppendEntriesResponse {
                 vote_term: 0,

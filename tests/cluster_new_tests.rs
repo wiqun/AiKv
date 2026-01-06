@@ -396,7 +396,10 @@ mod cluster_tests {
                 s, expected_slot as i64,
                 "Slot should match Router::key_to_slot"
             );
-            assert!((0i64..16384i64).contains(&s), "Slot should be in range 0-16383");
+            assert!(
+                (0i64..16384i64).contains(&s),
+                "Slot should be in range 0-16383"
+            );
         } else {
             panic!("Expected Integer");
         }
