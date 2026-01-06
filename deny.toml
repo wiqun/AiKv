@@ -3,6 +3,16 @@
 
 [advisories]
 version = 2
+# Temporary exception for RUSTSEC-2026-0001 (rkyv OOM issue). This is a tracked
+# technical debt item and should be removed once upstream patches rust_decimal/
+# openraft to depend on a safe rkyv >= 0.8.13.
+[[advisories.allow]]
+id = "RUSTSEC-2026-0001"
+url = "https://rustsec.org/advisories/RUSTSEC-2026-0001"
+reason = "Transient transitive dependency (rkyv) pulled in via rust_decimal -> byte-unit -> openraft; no safe upgrade available yet. Tracked in repo issue."
+expiry = "2026-02-06"
+
+# Row for the advisory database
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 ignore = []
