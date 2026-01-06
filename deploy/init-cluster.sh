@@ -89,6 +89,9 @@ redis-cli -h 127.0.0.1 -p 6379 CLUSTER METARAFT MEMBERS
 
 echo ""
 echo "Step 6: Adding nodes to cluster metadata..."
+echo "  Registering node 1 (self)..."
+redis-cli -h 127.0.0.1 -p 6379 CLUSTER MEET 127.0.0.1 6379 $NODE1_ID
+
 echo "  Meeting node 2..."
 redis-cli -h 127.0.0.1 -p 6379 CLUSTER MEET 127.0.0.1 6380 $NODE2_ID
 
@@ -128,22 +131,22 @@ sleep 2
 
 echo ""
 echo "Step 8: Setting up replication (nodes 4-6 as replicas)..."
-echo "  Node 4 replicating node 1..."
-if redis-cli -h 127.0.0.1 -p 6382 CLUSTER REPLICATE $NODE1_ID 2>&1 | grep -qi "ok"; then
+echo "  Adding node 4 as replica of node 1..."
+if redis-cli -h 127.0.0.1 -p 6379 CLUSTER ADDREPLICATION $NODE4_ID $NODE1_ID 2>&1 | grep -qi "ok"; then
     echo "  ✓ Node 4 is now a replica of node 1"
 else
     echo "  ⚠ Replication setup for node 4 needs attention (cluster still functional)"
 fi
 
-echo "  Node 5 replicating node 2..."
-if redis-cli -h 127.0.0.1 -p 6383 CLUSTER REPLICATE $NODE2_ID 2>&1 | grep -qi "ok"; then
+echo "  Adding node 5 as replica of node 2..."
+if redis-cli -h 127.0.0.1 -p 6379 CLUSTER ADDREPLICATION $NODE5_ID $NODE2_ID 2>&1 | grep -qi "ok"; then
     echo "  ✓ Node 5 is now a replica of node 2"
 else
     echo "  ⚠ Replication setup for node 5 needs attention (cluster still functional)"
 fi
 
-echo "  Node 6 replicating node 3..."
-if redis-cli -h 127.0.0.1 -p 6384 CLUSTER REPLICATE $NODE3_ID 2>&1 | grep -qi "ok"; then
+echo "  Adding node 6 as replica of node 3..."
+if redis-cli -h 127.0.0.1 -p 6379 CLUSTER ADDREPLICATION $NODE6_ID $NODE3_ID 2>&1 | grep -qi "ok"; then
     echo "  ✓ Node 6 is now a replica of node 3"
 else
     echo "  ⚠ Replication setup for node 6 needs attention (cluster still functional)"

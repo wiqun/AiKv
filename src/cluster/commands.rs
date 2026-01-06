@@ -703,10 +703,14 @@ impl ClusterCommands {
         let meta = self.meta_raft.get_cluster_meta();
 
         // Find the group that the master belongs to
+        // Groups are created with group_id == node_id, so we check:
+        // 1. group_id matches master_id directly
+        // 2. leader field matches master_id  
+        // 3. replicas list contains master_id
         let group_id = meta
             .groups
             .iter()
-            .find(|(_, g)| g.leader == Some(master_id) || g.replicas.contains(&master_id))
+            .find(|(gid, g)| **gid == master_id || g.leader == Some(master_id) || g.replicas.contains(&master_id))
             .map(|(gid, _)| *gid)
             .ok_or_else(|| {
                 AikvError::Internal(format!(
@@ -757,10 +761,14 @@ impl ClusterCommands {
         let meta = self.meta_raft.get_cluster_meta();
 
         // Find the group that the master belongs to
+        // Groups are created with group_id == node_id, so we check:
+        // 1. group_id matches master_id directly
+        // 2. leader field matches master_id  
+        // 3. replicas list contains master_id
         let group_id = meta
             .groups
             .iter()
-            .find(|(_, g)| g.leader == Some(master_id) || g.replicas.contains(&master_id))
+            .find(|(gid, g)| **gid == master_id || g.leader == Some(master_id) || g.replicas.contains(&master_id))
             .map(|(gid, _)| *gid)
             .ok_or_else(|| {
                 AikvError::Internal(format!(
