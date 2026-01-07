@@ -593,7 +593,7 @@ impl ZSetCommands {
             // Sort by score (ascending)
             let mut sorted: Vec<(Vec<u8>, f64)> =
                 zset.iter().map(|(k, v)| (k.clone(), *v)).collect();
-            sorted.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+            sorted.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
             let to_pop = count.min(sorted.len());
             let popped: Vec<(Vec<u8>, f64)> = sorted.into_iter().take(to_pop).collect();
@@ -649,7 +649,7 @@ impl ZSetCommands {
             // Sort by score (descending)
             let mut sorted: Vec<(Vec<u8>, f64)> =
                 zset.iter().map(|(k, v)| (k.clone(), *v)).collect();
-            sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+            sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
             let to_pop = count.min(sorted.len());
             let popped: Vec<(Vec<u8>, f64)> = sorted.into_iter().take(to_pop).collect();
