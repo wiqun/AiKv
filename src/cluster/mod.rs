@@ -36,6 +36,10 @@
 mod commands;
 mod node;
 
+// Multi-group Raft gRPC server adapter
+#[cfg(feature = "cluster")]
+pub mod raft_service;
+
 // Export our implementations
 pub use commands::{ClusterCommands, FailoverMode, NodeInfo, RedirectType};
 pub use node::{ClusterConfig, ClusterNode, GroupId, NodeId};

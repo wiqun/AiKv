@@ -139,6 +139,14 @@ use aidb::cluster::{
 | `CLUSTER MEET ip port [node-id]` | `meta_raft.add_node(node_id, addr)` | ✅ | 添加新节点到集群。**同步等待** Raft 共识完成（超时 5 秒）。可选的 node-id 参数确保使用节点的实际 ID |
 | `CLUSTER FORGET node_id` | `meta_raft.remove_node(node_id)` | ✅ | 从集群移除节点。**同步等待** Raft 共识完成（超时 5 秒） |
 
+### MetaRaft 成员管理命令 ✅ (新增)
+
+| Redis 命令 | AiDb API | 实现状态 | 说明 |
+|-----------|----------|---------|------|
+| `CLUSTER METARAFT ADDLEARNER node_id addr` | `meta_raft.add_learner(node_id, BasicNode{addr})` | ✅ | 添加节点为 MetaRaft learner。Learner 接收日志但不参与投票 |
+| `CLUSTER METARAFT PROMOTE node_id [...]` | `meta_raft.change_membership(voters, true)` | ✅ | 将 learner 提升为 voter。需提供完整的 voter 列表 |
+| `CLUSTER METARAFT MEMBERS` | `meta_raft.raft().metrics()` | ✅ | 列出所有 MetaRaft 成员及其角色（voter/learner） |
+
 ### Slot 管理命令 ✅
 
 | Redis 命令 | AiDb API | 实现状态 | 说明 |

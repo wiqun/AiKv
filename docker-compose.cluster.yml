@@ -71,11 +71,11 @@ services:
     ports:
       - "6379:6379"
       - "16379:16379"
+      - "50051:50051"
     volumes:
       - aikv1-data:/app/data
       - aikv1-logs:/app/logs
-      # Custom configuration
-      - ./config/aikv-cluster.toml:/app/config/aikv.toml:ro
+      - ./config/cluster/aikv1.toml:/app/config/aikv.toml:ro
     environment:
       - RUST_LOG=info
       - AIKV_NODE_ID=n1
@@ -119,11 +119,11 @@ services:
     ports:
       - "6380:6380"
       - "16380:16380"
+      - "50052:50052"
     volumes:
       - aikv2-data:/app/data
       - aikv2-logs:/app/logs
-      # Custom configuration
-      - ./config/aikv-cluster.toml:/app/config/aikv.toml:ro
+      - ./config/cluster/aikv2.toml:/app/config/aikv.toml:ro
     environment:
       - RUST_LOG=info
       - AIKV_NODE_ID=n2
@@ -167,11 +167,11 @@ services:
     ports:
       - "6381:6381"
       - "16381:16381"
+      - "50053:50053"
     volumes:
       - aikv3-data:/app/data
       - aikv3-logs:/app/logs
-      # Custom configuration
-      - ./config/aikv-cluster.toml:/app/config/aikv.toml:ro
+      - ./config/cluster/aikv3.toml:/app/config/aikv.toml:ro
     environment:
       - RUST_LOG=info
       - AIKV_NODE_ID=n3
@@ -215,11 +215,11 @@ services:
     ports:
       - "6382:6382"
       - "16382:16382"
+      - "50054:50054"
     volumes:
       - aikv4-data:/app/data
       - aikv4-logs:/app/logs
-      # Custom configuration
-      - ./config/aikv-cluster.toml:/app/config/aikv.toml:ro
+      - ./config/cluster/aikv4.toml:/app/config/aikv.toml:ro
     environment:
       - RUST_LOG=info
       - AIKV_NODE_ID=n4
@@ -263,11 +263,11 @@ services:
     ports:
       - "6383:6383"
       - "16383:16383"
+      - "50055:50055"
     volumes:
       - aikv5-data:/app/data
       - aikv5-logs:/app/logs
-      # Custom configuration
-      - ./config/aikv-cluster.toml:/app/config/aikv.toml:ro
+      - ./config/cluster/aikv5.toml:/app/config/aikv.toml:ro
     environment:
       - RUST_LOG=info
       - AIKV_NODE_ID=n5
@@ -311,11 +311,11 @@ services:
     ports:
       - "6384:6384"
       - "16384:16384"
+      - "50056:50056"
     volumes:
       - aikv6-data:/app/data
       - aikv6-logs:/app/logs
-      # Custom configuration
-      - ./config/aikv-cluster.toml:/app/config/aikv.toml:ro
+      - ./config/cluster/aikv6.toml:/app/config/aikv.toml:ro
     environment:
       - RUST_LOG=info
       - AIKV_NODE_ID=n6

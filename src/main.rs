@@ -271,7 +271,15 @@ fn parse_args() -> CliArgs {
 
 /// Load configuration from file and merge with CLI arguments
 #[cfg(feature = "cluster")]
-fn load_config(cli: &CliArgs) -> (String, u16, StorageConfig, LoggingConfig, ClusterConfigSection) {
+fn load_config(
+    cli: &CliArgs,
+) -> (
+    String,
+    u16,
+    StorageConfig,
+    LoggingConfig,
+    ClusterConfigSection,
+) {
     let mut config = Config::default();
 
     // Load from config file if specified

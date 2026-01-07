@@ -1,0 +1,18 @@
+# AiKv Node 2 Configuration (Master)
+[server]
+host = "0.0.0.0"
+port = 6380
+
+[cluster]
+enabled = true
+raft_address = "aikv2:50052"
+is_bootstrap = false
+peers = []
+
+[storage]
+engine = "aidb"
+data_dir = "./data"
+databases = 16
+
+[logging]
+level = "info"

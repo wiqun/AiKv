@@ -4,6 +4,28 @@
 
 本文档提供了 AiKv Redis 协议兼容层的详细部署步骤和配置说明。
 
+## 🚀 快速部署（推荐）
+
+**最简单的部署方式是使用 aikv-tool:**
+
+```bash
+# 1. 安装 aikv-tool
+cd aikv-toolchain && cargo install --path . && cd ..
+
+# 2. 一键部署集群 (6 节点: 3 主 3 从)
+aikv-tool cluster setup
+
+# 3. 验证集群
+aikv-tool cluster status
+
+# 4. 开始使用
+redis-cli -c -h 127.0.0.1 -p 6379
+```
+
+**一条命令完成所有部署工作！** 详见下方 [使用 aikv-tool 部署](#使用-aikv-tool-部署) 章节。
+
+---
+
 ## 系统要求
 
 ### 最低要求
@@ -342,67 +364,99 @@ docker-compose down
 docker-compose logs -f
 ```
 
-### 5. Docker Compose 集群部署
+### 5. 使用 aikv-tool 部署（推荐）
 
-项目提供了预配置的集群 Docker Compose 文件，用于快速部署 6 节点集群（3 主 3 从）。
+aikv-tool 是 AiKv 官方的一站式部署工具，大大简化了部署流程。
 
-#### 使用预配置的集群文件
+#### 安装 aikv-tool
 
 ```bash
-# 进入项目目录
-cd AiKv
-
-# 使用集群配置启动
-docker-compose -f docker-compose.cluster.yml up -d
-
-# 查看集群节点状态
-docker-compose -f docker-compose.cluster.yml ps
-
-# 查看集群日志
-docker-compose -f docker-compose.cluster.yml logs -f
+cd aikv-toolchain
+cargo install --path .
+cd ..
 ```
 
-#### 初始化集群
-
-启动所有节点后，使用 redis-cli 初始化集群：
+#### 一键部署集群
 
 ```bash
-# 创建集群 (3 主 3 从)
-redis-cli --cluster create \
-  127.0.0.1:6379 127.0.0.1:6380 127.0.0.1:6381 \
-  127.0.0.1:6382 127.0.0.1:6383 127.0.0.1:6384 \
-  --cluster-replicas 1
+# 这一条命令完成所有工作！
+aikv-tool cluster setup
+```
 
-# 验证集群状态
+该命令会自动：
+1. ✅ 生成 Docker Compose 和节点配置文件
+2. ✅ 构建带集群功能的 Docker 镜像
+3. ✅ 启动 6 个节点容器
+4. ✅ 初始化 MetaRaft 成员
+5. ✅ 分配 16384 槽位
+6. ✅ 配置主从复制
+
+#### 集群管理命令
+
+```bash
+aikv-tool cluster setup      # 一键部署
+aikv-tool cluster start      # 启动集群
+aikv-tool cluster stop       # 停止集群
+aikv-tool cluster stop -v    # 停止并清理数据
+aikv-tool cluster restart    # 重启集群
+aikv-tool cluster status     # 查看状态
+aikv-tool cluster logs       # 查看日志
+aikv-tool cluster logs -f    # 实时日志
+
+# 快捷方式
+aikv-tool up                 # = cluster setup
+aikv-tool down               # = cluster stop
+```
+
+#### 部署单节点
+
+```bash
+aikv-tool deploy -t single -o ./my-deploy
+cd my-deploy
+./start.sh
+```
+
+#### 其他功能
+
+```bash
+aikv-tool build --release    # 编译 release 版本
+aikv-tool docker             # 构建 Docker 镜像
+aikv-tool status             # 查看项目状态
+aikv-tool tui                # 交互式界面
+```
+
+### 6. Docker Compose 集群部署（手动方式）
+
+如果你更喜欢手动控制部署过程：
+
+```bash
+# 使用 aikv-tool 生成部署文件
+aikv-tool deploy -t cluster -o ./deploy
+
+# 构建镜像
+aikv-tool docker --cluster --tag cluster
+
+# 启动容器
+cd deploy
+docker-compose up -d
+
+# 等待节点就绪
+sleep 10
+
+# 初始化集群
+./init-cluster.sh
+
+# 验证
 redis-cli -c -p 6379 CLUSTER INFO
-
-# 查看集群节点
-redis-cli -c -p 6379 CLUSTER NODES
 ```
 
-#### 集群管理
+#### 手动停止和清理
 
 ```bash
-# 停止集群
-docker-compose -f docker-compose.cluster.yml down
-
-# 停止并删除数据卷
-docker-compose -f docker-compose.cluster.yml down -v
-
-# 重启某个节点
-docker-compose -f docker-compose.cluster.yml restart aikv1
-
-# 使用 redis-cli 工具容器
-docker-compose -f docker-compose.cluster.yml --profile tools run redis-cli
+cd deploy
+docker-compose down      # 停止
+docker-compose down -v   # 停止并清理数据
 ```
-
-#### Docker Compose 文件说明
-
-| 文件 | 说明 |
-|-----|-----|
-| `docker-compose.yml` | 单节点生产配置 |
-| `docker-compose.dev.yml` | 单节点开发配置 |
-| `docker-compose.cluster.yml` | 6 节点集群配置 |
 
 ## 监控和维护
 
