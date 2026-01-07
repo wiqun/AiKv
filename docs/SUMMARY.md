@@ -2,7 +2,7 @@
 
 ## 项目完成情况
 
-本项目已成功实现了基于 AiDb v0.5.0 的 Redis 协议兼容层，包含完整的开发文档和实现代码。
+本项目已成功实现了基于 AiDb v0.6.1 的 Redis 协议兼容层，包含完整的开发文档和实现代码。
 
 ## 已完成的工作
 
@@ -83,20 +83,21 @@ CLUSTER KEYSLOT, INFO, NODES, SLOTS, MYID, MEET, FORGET, ADDSLOTS, DELSLOTS, SET
    - 适合缓存场景
 
 2. **AiDb 存储** (AiDbStorageAdapter)
-   - 基于 AiDb v0.5.0 LSM-Tree 引擎
+   - 基于 AiDb v0.6.1 LSM-Tree 引擎
    - WAL + SSTable 持久化
    - Bloom Filter 加速查询
    - Snappy 压缩支持
-   - Multi-Raft 支持（规划中）
+   - Multi-Raft 支持（已集成）
 
 #### 存储层特性
 - 多数据库支持（16 个数据库）
 - 键过期机制（TTL 支持）
 - 完整数据类型序列化（bincode）
+- WriteBatch 原子批量写入
 
 ### 6. 测试覆盖 ✅
 
-- **单元测试**: 96 个测试全部通过
+- **单元测试**: 177 个测试全部通过
 - **集成测试**: 完整的测试套件
 - **性能基准**: Criterion 基准测试
 - **测试类型**: protocol, command, storage, integration
@@ -126,9 +127,10 @@ CLUSTER KEYSLOT, INFO, NODES, SLOTS, MYID, MEET, FORGET, ADDSLOTS, DELSLOTS, SET
 - Sorted Set: 12 个
 - Database: 6 个
 - Key: 17 个
-- Server: 9 个
+- Server: 16 个
 - Script: 6 个
-- **总计**: 100+ 个命令
+- Cluster: 17 个
+- **总计**: 120+ 个命令
 
 ## 技术亮点
 
@@ -197,6 +199,17 @@ OK
 
 详细计划请参考 [TODO.md](../TODO.md)
 
+## 下一步重点 (v0.7.0)
+
+### 核心稳定性
+- **自动故障转移**: 主节点失联时自动提升副本
+- **WAIT 命令**: 同步复制确认
+
+### 命令完整性
+- **阻塞命令**: BLPOP, BRPOP, BLMOVE
+- **排序命令**: SORT, SORT_RO
+- **集合运算**: ZUNION, ZINTER, ZDIFF
+
 ## 相关文件
 
 - **开发计划**: docs/DEVELOPMENT_PLAN.md
@@ -209,6 +222,7 @@ OK
 
 ---
 
-**最后更新**: 2025-11-26
-**项目版本**: v0.1.0 (进行中)
+**最后更新**: 2026-01-07
+**项目版本**: v0.2.0-dev
+**存储引擎**: AiDb v0.6.1
 **许可证**: MIT

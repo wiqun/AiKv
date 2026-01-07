@@ -1,7 +1,7 @@
 # AiKv 项目待办事项 (TODO)
 
-> **最后更新**: 2025-11-27  
-> **当前版本**: v0.1.0  
+> **最后更新**: 2026-01-07  
+> **当前版本**: v0.2.0-dev  
 > **目标版本**: v1.0.0 (2026.03.31)
 
 ---
@@ -36,11 +36,11 @@
 | **Lua 脚本命令** | 6 个 + 事务性 | ✅ 完成 |
 | **Cluster 命令** | 17 个 (框架) | ✅ 完成 |
 | **Cluster Bus** | 心跳 + 故障检测 | ✅ 完成 |
-| **单元测试** | 100+ 个 | ✅ 全部通过 |
+| **单元测试** | 177+ 个 | ✅ 全部通过 |
 
 ### 核心能力
 
-- ✅ **双存储引擎**: 内存 + AiDb v0.5.0 LSM-Tree 持久化
+- ✅ **双存储引擎**: 内存 + AiDb v0.6.1 LSM-Tree 持久化
 - ✅ **多数据库**: 16 个数据库，完整 TTL 支持
 - ✅ **架构重构**: 存储层 100% 完成，代码减少 67%
 - ✅ **CI/CD**: GitHub Actions 流水线 + 安全检查
@@ -175,9 +175,100 @@ AiDb MetaRaftNode (Group 0) ──────────────┘
 **Sorted Set 命令** (3 个待完成):
 - [ ] `ZUNION`, `ZINTER`, `ZDIFF` - 集合运算
 
+### 🔴 P0: 自动故障转移 (v0.7.0 核心)
+
+> 这是生产环境必备功能，使 AiKv 成为真正的高可用系统
+
+- [ ] 节点健康检测定时任务 (基于 OpenRaft heartbeat)
+- [ ] 主节点失联时自动触发 failover
+- [ ] 副本自动提升为新主节点
+- [ ] 配置 `cluster-node-timeout` 参数 (默认 15s)
+- [ ] 故障转移事件日志和通知
+- [ ] 测试：杀进程 → 观察自动切换 < 10s
+
+### 🔴 P0: WAIT 命令实现
+
+> 支持同步复制确认，确保数据安全
+
+- [ ] `WAIT numreplicas timeout` - 等待指定数量副本确认
+- [ ] 返回成功同步的副本数量
+- [ ] 超时处理
+
+### 🔴 P0: Lua 脚本增强 (Key 级锁 + 并行化)
+
+> 目标: 同 key 串行化，不同 keys 并行化，提高并发性能
+> 方案: 利用 AiDb 的 WriteBatch 先写入缓冲区不刷入磁盘，最后原子批量刷入
+
+**已完成功能:**
+- [x] 写缓冲区机制 (ScriptTransaction)
+- [x] 自动回滚 (脚本失败时丢弃缓冲区)
+- [x] AiDb WriteBatch 原子批量提交
+- [x] 读自己的写 (read-your-own-writes)
+
+**待实现功能:**
+
+#### 1. Key 级锁机制
+- [ ] 实现 `KeyLockManager` - 管理 key 级别的读写锁
+- [ ] EVAL/EVALSHA 执行前根据 KEYS 参数加锁
+- [ ] 同一 key 的脚本串行执行
+- [ ] 不同 keys 的脚本可以并行执行
+- [ ] 锁超时机制 (防止死锁)
+- [ ] 锁等待队列 (公平调度)
+
+#### 2. Lua 脚本命令扩展
+当前只支持 GET/SET/DEL/EXISTS，需要扩展支持：
+- [ ] String: INCR, DECR, INCRBY, DECRBY, INCRBYFLOAT, APPEND, STRLEN
+- [ ] Hash: HGET, HSET, HDEL, HGETALL, HMGET, HMSET, HINCRBY, HEXISTS, HLEN
+- [ ] List: LPUSH, RPUSH, LPOP, RPOP, LLEN, LRANGE, LINDEX
+- [ ] Set: SADD, SREM, SMEMBERS, SISMEMBER, SCARD
+- [ ] ZSet: ZADD, ZREM, ZSCORE, ZRANK, ZRANGE, ZCARD
+
+#### 3. 复杂类型事务支持
+- [ ] 扩展 BatchOp 支持复杂类型 (List, Hash, Set, ZSet)
+- [ ] 复杂类型的读写缓冲
+- [ ] 批量提交时序列化处理
+
 ---
 
 ## 待完成项 - 中期计划
+
+### 🟠 P1: 基础数据类型命令补全
+
+> 目标: 达到 Redis 核心命令完整覆盖
+
+#### String 命令补全 (12 个待实现)
+- [ ] `INCR` - 键值加 1
+- [ ] `DECR` - 键值减 1
+- [ ] `INCRBY` - 键值加指定整数
+- [ ] `DECRBY` - 键值减指定整数
+- [ ] `INCRBYFLOAT` - 键值加指定浮点数
+- [ ] `GETRANGE` - 获取子字符串
+- [ ] `SETRANGE` - 覆盖子字符串
+- [ ] `GETEX` - 获取并设置过期时间
+- [ ] `GETDEL` - 获取并删除
+- [ ] `SETNX` - 不存在时设置 (等同于 SET NX)
+- [ ] `SETEX` - 设置带过期时间 (等同于 SET EX)
+- [ ] `PSETEX` - 设置带毫秒过期时间
+
+#### List 命令补全 (5 个待实现)
+- [ ] `LPOS` - 查找元素位置
+- [ ] `LMPOP` - 从多个列表弹出
+- [ ] `LMOVE` - 列表间移动元素 (部分已实现)
+- [ ] `BLPOP`, `BRPOP` - 阻塞弹出
+- [ ] `BLMOVE` - 阻塞移动
+
+#### Set 命令补全 (2 个待实现)
+- [ ] `SSCAN` - 迭代集合成员
+- [ ] `SMOVE` - 移动成员到另一个集合
+
+#### Sorted Set 命令补全 (10 个待实现)
+- [ ] `ZSCAN` - 迭代有序集合成员
+- [ ] `ZPOPMIN`, `ZPOPMAX` - 弹出最小/最大分数成员
+- [ ] `BZPOPMIN`, `BZPOPMAX` - 阻塞弹出
+- [ ] `ZRANGEBYLEX`, `ZREVRANGEBYLEX` - 按字典序范围查询
+- [ ] `ZLEXCOUNT` - 字典序范围计数
+- [ ] `ZMPOP` - 从多个有序集合弹出
+- [ ] `ZUNION`, `ZINTER`, `ZDIFF` - 集合运算
 
 ### 🟡 P2: 事务支持 (v0.8.0)
 
@@ -355,45 +446,74 @@ AiDb MetaRaftNode (Group 0) ──────────────┘
 - 如果键不属于当前节点，返回 `-MOVED slot ip:port` 错误，告诉客户端正确的节点地址
 - 如果多键命令的键在不同槽，返回 `-CROSSSLOT` 错误
 
-### v0.4.0 - CLUSTER 命令完善 (周 5-6)
+### v0.4.0 - CLUSTER 命令完善 (周 5-6) - 已完成 ✅
 
-- [ ] 完善集群信息命令
-- [ ] 节点管理命令
-- [ ] Slot 管理命令
+- [x] 完善集群信息命令 ✅
+- [x] 节点管理命令 ✅
+- [x] Slot 管理命令 ✅
 
-### v0.5.0 - 在线迁移 (周 7-9)
+### v0.5.0 - 在线迁移 (周 7-9) - 大部分完成
 
 - [x] `CLUSTER GETKEYSINSLOT` ✅
 - [x] `CLUSTER SETSLOT ... MIGRATING/IMPORTING` ✅
 - [x] `-ASK` 重定向 ✅
-- [ ] `MIGRATE` 命令 (网络层)
+- [ ] `MIGRATE` 命令 (完整网络层迁移)
 
-### v0.6.0 - 高可用 (周 10-12)
+### v0.6.0 - 高可用 (周 10-12) - 已完成 ✅
 
 - [x] `CLUSTER REPLICATE` ✅
 - [x] `CLUSTER FAILOVER` ✅
 - [x] `READONLY/READWRITE` ✅
 - [x] `CLUSTER REPLICAS` ✅
 
-### v0.8.0 - 高级功能 (周 13-15)
+### v0.7.0 - 功能完善 (周 13-14) ⭐ 当前阶段
 
-- [ ] 事务 (MULTI/EXEC/WATCH)
-- [ ] Pub/Sub
-- [ ] 跨槽支持
+> **目标**: 让功能更加完善且健全
 
-### v0.9.0 - 测试优化 (周 16-17)
+#### 🔴 P0: 核心稳定性 (必须)
+- [ ] 自动故障转移 (Auto Failover) - 节点失联时自动提升副本
+- [ ] `MIGRATE` 命令完整实现 - 跨节点键迁移网络传输
+- [ ] `WAIT` 命令 - 同步复制确认
 
-- [ ] 极限压测
-- [ ] 官方测试套件
-- [ ] 性能调优
+#### 🟠 P1: 阻塞命令 (重要)
+- [ ] `BLPOP`, `BRPOP` - 阻塞列表弹出
+- [ ] `BLMOVE` - 阻塞列表移动
+- [ ] 连接级阻塞队列管理
+
+#### 🟡 P2: 命令补全 (完整性)
+- [ ] `ZUNION`, `ZINTER`, `ZDIFF` - Sorted Set 集合运算
+- [ ] `SMOVE` - Set 成员移动
+- [ ] `SORT`, `SORT_RO` - 排序命令
+
+### v0.8.0 - 事务和 Pub/Sub (周 15-16)
+
+#### 事务支持
+- [ ] `MULTI` - 开始事务
+- [ ] `EXEC` - 执行事务
+- [ ] `DISCARD` - 丢弃事务
+- [ ] `WATCH` / `UNWATCH` - 乐观锁
+
+#### 发布订阅
+- [ ] `PUBLISH`, `SUBSCRIBE`, `UNSUBSCRIBE`
+- [ ] `PSUBSCRIBE`, `PUNSUBSCRIBE` - 模式订阅
+- [ ] `PUBSUB` - 订阅信息查询
+- [ ] 集群模式跨节点消息转发
+
+### v0.9.0 - 测试和优化 (周 17-18)
+
+- [ ] 极限压测和性能调优
+- [ ] Redis 官方测试套件兼容
+- [ ] YCSB 基准测试报告
+- [ ] 故障转移场景测试
+- [ ] 网络分区恢复测试
 
 ### v1.0.0 🎯 正式发布 (2026.03.31)
 
-- [ ] Docker 官方镜像
-- [ ] Helm Chart
-- [ ] Prometheus Exporter
-- [ ] 完整文档
-- [ ] YCSB 性能报告
+- [ ] Docker 官方镜像发布
+- [ ] Helm Chart for Kubernetes
+- [ ] Prometheus Exporter 完善
+- [ ] 完整文档和运维指南
+- [ ] 性能对比报告
 
 #### v1.0.0 性能目标
 

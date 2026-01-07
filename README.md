@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)]()
-[![Tests](https://img.shields.io/badge/tests-96%20passed-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-177%20passed-brightgreen.svg)]()
 
 AiKv 是一个基于 [AiDb v0.5.1](https://github.com/Genuineh/AiDb) 的高性能 Redis 协议兼容层实现，使用 Rust 编写。它提供了一个轻量级、高性能的键值存储服务，支持 Redis RESP 协议，使得现有的 Redis 客户端可以无缝连接。
 
@@ -512,7 +512,7 @@ HSET: ~70,000 ops/s
 ## 🧪 测试
 
 ```bash
-# 运行所有测试 (96 个测试)
+# 运行所有测试 (177 个测试)
 cargo test
 
 # 运行特定模块测试
@@ -540,7 +540,7 @@ redis-benchmark -h 127.0.0.1 -p 6379 -c -t set,get -n 100000 -q
 - ✅ 键过期机制（TTL 支持）
 - ✅ 双存储引擎：内存和 AiDb LSM-Tree
 - ✅ Lua 脚本支持 (事务性)
-- ✅ 96 个测试用例通过
+- ✅ 177 个测试用例通过
 
 ### v0.2.0 ⏳ (Stage 0-1: 集群基础)
 - ✅ Cluster 命令框架 (17 个命令)
@@ -644,7 +644,7 @@ cargo audit
 | 指标 | 数值 |
 |------|------|
 | 支持的命令 | 100+ |
-| 单元测试 | 96 个 |
+| 单元测试 | 177 个 |
 | 代码行数 | 8000+ |
 | 文档字数 | 40,000+ |
 
