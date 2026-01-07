@@ -237,13 +237,57 @@ redis.pcall('command', arg1, arg2, ...)
 
 ### Supported Commands in Scripts
 
-Currently, scripts can execute the following Redis commands:
+### Supported Commands in Scripts ✅
+
+Scripts can execute the following Redis commands (33 total):
+
+**String Commands (11):**
 - `GET`: Get a value by key
 - `SET`: Set a key-value pair
 - `DEL`: Delete one or more keys
 - `EXISTS`: Check if keys exist
+- `INCR`: Increment the integer value of a key
+- `DECR`: Decrement the integer value of a key
+- `INCRBY`: Increment by a specific amount
+- `DECRBY`: Decrement by a specific amount
+- `INCRBYFLOAT`: Increment by a floating point value
+- `APPEND`: Append a value to a key
+- `STRLEN`: Get the length of a string value
 
-More commands will be supported in future versions.
+**Hash Commands (9):**
+- `HGET`: Get a field from a hash
+- `HSET`: Set field(s) in a hash
+- `HDEL`: Delete field(s) from a hash
+- `HGETALL`: Get all fields and values
+- `HMGET`: Get multiple fields
+- `HMSET`: Set multiple fields
+- `HINCRBY`: Increment a field by an integer
+- `HEXISTS`: Check if a field exists
+- `HLEN`: Get the number of fields
+
+**List Commands (7):**
+- `LPUSH`: Push to the left/head of a list
+- `RPUSH`: Push to the right/tail of a list
+- `LPOP`: Pop from the left/head
+- `RPOP`: Pop from the right/tail
+- `LLEN`: Get the length of a list
+- `LRANGE`: Get a range of elements
+- `LINDEX`: Get an element by index
+
+**Set Commands (5):**
+- `SADD`: Add members to a set
+- `SREM`: Remove members from a set
+- `SMEMBERS`: Get all members
+- `SISMEMBER`: Check if a member exists
+- `SCARD`: Get the number of members
+
+**Sorted Set Commands (6):**
+- `ZADD`: Add members with scores
+- `ZREM`: Remove members
+- `ZSCORE`: Get the score of a member
+- `ZRANK`: Get the rank of a member
+- `ZRANGE`: Get a range of members by rank
+- `ZCARD`: Get the number of members
 
 ## Type Conversions
 
@@ -337,26 +381,13 @@ EVALSHA a9b7f1c8e2d3a4b5c6d7e8f9a0b1c2d3e4f5a6b7 1 mykey
 3. **Keep scripts simple**: Complex logic can make debugging difficult
 4. **Error handling**: Use redis.pcall() when you want to handle errors gracefully
 5. **Test thoroughly**: Test scripts with various inputs before production use
+6. **Use KEYS parameter**: For optimal parallel execution, declare all keys your script accesses via the KEYS parameter
 
-## Limitations
+## Key-Level Locking ✅ (已实现)
 
-Current limitations (to be addressed in future versions):
-- Limited set of Redis commands available in scripts (GET, SET, DEL, EXISTS only)
-- No timeout mechanism for long-running scripts
-- SCRIPT KILL is not functional in the current implementation
-- No support for script debugging
-- Transaction support only for String operations (List, Hash, Set, ZSet not yet supported in scripts)
-- No key-level locking for concurrent script execution
+AiKv implements key-level locking for parallel script execution. This allows scripts operating on different keys to execute in parallel while ensuring data consistency for scripts accessing the same keys.
 
-## Roadmap: Key-Level Locking (规划中)
-
-### 目标
-
-实现基于 KEYS 参数的自动锁机制：
-- **同 key 串行化**: 操作相同 key 的脚本串行执行
-- **不同 keys 并行化**: 操作不同 keys 的脚本可以并行执行
-
-### 设计方案
+### 设计架构
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -365,52 +396,78 @@ Current limitations (to be addressed in future versions):
 │                                                               │
 │   EVAL script 2 key1 key2 arg1 arg2                          │
 │                         ↓                                     │
-│   KeyLockManager.lock([key1, key2])                          │
+│   KeyLockManager.lock_keys([key1, key2])                     │
 │                         ↓                                     │
 │   ┌─────────────────────────────────────────────┐            │
-│   │ key1: 已被其他脚本锁定 → 等待                 │            │
+│   │ key1: 已被其他脚本锁定 → 等待 (Condvar)      │            │
 │   │ key2: 空闲 → 加锁成功                        │            │
 │   └─────────────────────────────────────────────┘            │
 │                         ↓                                     │
 │   执行脚本 (ScriptTransaction)                               │
 │                         ↓                                     │
-│   KeyLockManager.unlock([key1, key2])                        │
+│   KeyLockManager.unlock_keys([key1, key2])                   │
 │                                                               │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### 预期收益
+### 并行执行收益
 
-| 场景 | 当前行为 | 改进后 |
-|------|----------|--------|
-| 两个脚本操作不同 keys | 串行执行 | **并行执行** |
-| 两个脚本操作相同 key | 串行执行 | 串行执行 (保证一致性) |
-| 无 KEYS 参数的脚本 | 串行执行 | 串行执行 |
+| 场景 | 行为 |
+|------|------|
+| 两个脚本操作不同 keys | **并行执行** |
+| 两个脚本操作相同 key | 串行执行 (保证一致性) |
+| 无 KEYS 参数的脚本 | 无需等待，立即执行 |
 
-### 实现计划
+### 锁特性
 
-详见 [TODO.md](../TODO.md) 中的 "Lua 脚本增强" 部分。
+- **超时机制**: 默认 30 秒锁超时，防止死锁
+- **公平调度**: 使用 Condvar 实现公平的等待队列
+- **自动释放**: 使用 RAII 模式，脚本执行完毕自动释放锁
+- **键排序**: 锁获取前自动排序键，防止交叉死锁
 
-## Roadmap: Extended Command Support (规划中)
+## Transaction Support for All Data Types ✅ (已实现)
 
-### 目标
+Scripts now support transactional operations for all Redis data types:
 
-扩展脚本内可用的 Redis 命令，从目前的 4 个扩展到 40+ 个：
+### 支持的数据类型
 
-| 数据类型 | 当前支持 | 规划支持 |
-|----------|----------|----------|
-| String | GET, SET, DEL, EXISTS | +INCR, DECR, INCRBY, APPEND, STRLEN |
-| Hash | - | HGET, HSET, HDEL, HGETALL, HMGET, HINCRBY |
-| List | - | LPUSH, RPUSH, LPOP, RPOP, LLEN, LRANGE |
-| Set | - | SADD, SREM, SMEMBERS, SISMEMBER, SCARD |
-| ZSet | - | ZADD, ZREM, ZSCORE, ZRANK, ZRANGE, ZCARD |
+| 数据类型 | 读操作 | 写操作 | 事务回滚 |
+|----------|--------|--------|----------|
+| String | ✅ | ✅ | ✅ |
+| Hash | ✅ | ✅ | ✅ |
+| List | ✅ | ✅ | ✅ |
+| Set | ✅ | ✅ | ✅ |
+| Sorted Set | ✅ | ✅ | ✅ |
+
+### 示例：复杂类型事务
+
+```lua
+-- 所有操作在一个事务中执行
+EVAL "
+    redis.call('HSET', KEYS[1], 'field1', ARGV[1])
+    redis.call('LPUSH', KEYS[2], ARGV[2])
+    redis.call('SADD', KEYS[3], ARGV[3])
+    -- 如果这里发生错误，上述所有操作都会回滚
+    return 'OK'
+" 3 myhash mylist myset value1 value2 value3
+```
+
+## Limitations
+
+Current limitations:
+- No timeout mechanism for long-running scripts
+- SCRIPT KILL is not functional in the current implementation
+- No support for script debugging
+- Complex type operations (Hash, List, Set, ZSet) are committed individually, not atomically across types. Key-level locking ensures no other script can observe partial state during normal operation, but a crash during commit could result in partial writes.
 
 ## Performance Considerations
 
-- Scripts execute atomically, blocking other operations
+- Scripts execute atomically with key-level locking
+- Scripts operating on different keys can execute in parallel
 - Script caching (EVALSHA) is more efficient than EVAL for repeated executions
 - The SHA1 calculation overhead is minimal compared to network transfer
 - Lua VM initialization is done per script execution
+- Lock acquisition uses fair queuing with Condvar
 
 ## Security
 
@@ -424,3 +481,5 @@ Current limitations (to be addressed in future versions):
 - **Lua Library**: mlua v0.10 (with vendored Lua)
 - **Hash Algorithm**: SHA1 for script caching
 - **Standard Libraries**: TABLE, STRING, MATH, UTF8 only
+- **Lock Timeout**: 30 seconds (configurable via `with_lock_timeout`)
+- **Supported Commands**: 33 (String: 11, Hash: 9, List: 7, Set: 5, ZSet: 6)

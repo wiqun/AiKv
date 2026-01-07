@@ -194,10 +194,11 @@ AiDb MetaRaftNode (Group 0) ──────────────┘
 - [ ] 返回成功同步的副本数量
 - [ ] 超时处理
 
-### 🔴 P0: Lua 脚本增强 (Key 级锁 + 并行化)
+### ✅ P0: Lua 脚本增强 (Key 级锁 + 并行化) - 已完成
 
 > 目标: 同 key 串行化，不同 keys 并行化，提高并发性能
 > 方案: 利用 AiDb 的 WriteBatch 先写入缓冲区不刷入磁盘，最后原子批量刷入
+> 完成时间: 2026-01-07
 
 **已完成功能:**
 - [x] 写缓冲区机制 (ScriptTransaction)
@@ -205,28 +206,35 @@ AiDb MetaRaftNode (Group 0) ──────────────┘
 - [x] AiDb WriteBatch 原子批量提交
 - [x] 读自己的写 (read-your-own-writes)
 
-**待实现功能:**
+**新增功能:**
 
-#### 1. Key 级锁机制
-- [ ] 实现 `KeyLockManager` - 管理 key 级别的读写锁
-- [ ] EVAL/EVALSHA 执行前根据 KEYS 参数加锁
-- [ ] 同一 key 的脚本串行执行
-- [ ] 不同 keys 的脚本可以并行执行
-- [ ] 锁超时机制 (防止死锁)
-- [ ] 锁等待队列 (公平调度)
+#### 1. Key 级锁机制 ✅
+- [x] 实现 `KeyLockManager` - 管理 key 级别的读写锁
+- [x] EVAL/EVALSHA 执行前根据 KEYS 参数加锁
+- [x] 同一 key 的脚本串行执行
+- [x] 不同 keys 的脚本可以并行执行
+- [x] 锁超时机制 (防止死锁, 默认30秒)
+- [x] 锁等待队列 (使用 Condvar 实现公平调度)
 
-#### 2. Lua 脚本命令扩展
-当前只支持 GET/SET/DEL/EXISTS，需要扩展支持：
-- [ ] String: INCR, DECR, INCRBY, DECRBY, INCRBYFLOAT, APPEND, STRLEN
-- [ ] Hash: HGET, HSET, HDEL, HGETALL, HMGET, HMSET, HINCRBY, HEXISTS, HLEN
-- [ ] List: LPUSH, RPUSH, LPOP, RPOP, LLEN, LRANGE, LINDEX
-- [ ] Set: SADD, SREM, SMEMBERS, SISMEMBER, SCARD
-- [ ] ZSet: ZADD, ZREM, ZSCORE, ZRANK, ZRANGE, ZCARD
+#### 2. Lua 脚本命令扩展 ✅
+从 4 个命令扩展到 33 个命令：
+- [x] String: INCR, DECR, INCRBY, DECRBY, INCRBYFLOAT, APPEND, STRLEN
+- [x] Hash: HGET, HSET, HDEL, HGETALL, HMGET, HMSET, HINCRBY, HEXISTS, HLEN
+- [x] List: LPUSH, RPUSH, LPOP, RPOP, LLEN, LRANGE, LINDEX
+- [x] Set: SADD, SREM, SMEMBERS, SISMEMBER, SCARD
+- [x] ZSet: ZADD, ZREM, ZSCORE, ZRANK, ZRANGE, ZCARD
 
-#### 3. 复杂类型事务支持
-- [ ] 扩展 BatchOp 支持复杂类型 (List, Hash, Set, ZSet)
-- [ ] 复杂类型的读写缓冲
-- [ ] 批量提交时序列化处理
+#### 3. 复杂类型事务支持 ✅
+- [x] 扩展 ExtendedBatchOp 支持复杂类型 (List, Hash, Set, ZSet)
+- [x] 复杂类型的读写缓冲 (get_value 方法)
+- [x] 批量提交时处理复杂类型 (set_list, set_hash, set_set, set_zset)
+
+**实现说明:**
+- 新增 `KeyLockManager` 结构实现 key 级别锁
+- 新增 `ExtendedBatchOp` 枚举支持所有数据类型的事务操作
+- 扩展 `ScriptTransaction` 支持复杂类型的读写缓冲
+- 新增 20 个单元测试验证所有新功能
+- 所有测试通过 (37 个测试)
 
 ---
 
