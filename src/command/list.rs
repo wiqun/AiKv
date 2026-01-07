@@ -593,4 +593,160 @@ impl ListCommands {
             Ok(RespValue::Null)
         }
     }
+
+    /// LPOS key element [RANK rank] [COUNT num-matches] [MAXLEN len]
+    /// Returns the index of matching elements inside a list
+    pub fn lpos(&self, args: &[Bytes], db_index: usize) -> Result<RespValue> {
+        if args.len() < 2 {
+            return Err(AikvError::WrongArgCount("LPOS".to_string()));
+        }
+
+        let key = String::from_utf8_lossy(&args[0]).to_string();
+        let element = args[1].clone();
+
+        // Parse optional arguments
+        let mut rank: i64 = 1;
+        let mut count: Option<usize> = None;
+        let mut maxlen: usize = 0; // 0 means no limit
+
+        let mut i = 2;
+        while i < args.len() {
+            let option = String::from_utf8_lossy(&args[i]).to_uppercase();
+            match option.as_str() {
+                "RANK" => {
+                    if i + 1 >= args.len() {
+                        return Err(AikvError::InvalidArgument("ERR syntax error".to_string()));
+                    }
+                    i += 1;
+                    rank = String::from_utf8_lossy(&args[i])
+                        .parse::<i64>()
+                        .map_err(|_| {
+                            AikvError::InvalidArgument(
+                                "ERR value is not an integer or out of range".to_string(),
+                            )
+                        })?;
+                    if rank == 0 {
+                        return Err(AikvError::InvalidArgument(
+                            "ERR RANK can't be zero".to_string(),
+                        ));
+                    }
+                }
+                "COUNT" => {
+                    if i + 1 >= args.len() {
+                        return Err(AikvError::InvalidArgument("ERR syntax error".to_string()));
+                    }
+                    i += 1;
+                    count = Some(String::from_utf8_lossy(&args[i]).parse::<usize>().map_err(
+                        |_| {
+                            AikvError::InvalidArgument(
+                                "ERR value is not an integer or out of range".to_string(),
+                            )
+                        },
+                    )?);
+                }
+                "MAXLEN" => {
+                    if i + 1 >= args.len() {
+                        return Err(AikvError::InvalidArgument("ERR syntax error".to_string()));
+                    }
+                    i += 1;
+                    maxlen = String::from_utf8_lossy(&args[i])
+                        .parse::<usize>()
+                        .map_err(|_| {
+                            AikvError::InvalidArgument(
+                                "ERR value is not an integer or out of range".to_string(),
+                            )
+                        })?;
+                }
+                _ => {
+                    return Err(AikvError::InvalidArgument("ERR syntax error".to_string()));
+                }
+            }
+            i += 1;
+        }
+
+        if let Some(stored) = self.storage.get_value(db_index, &key)? {
+            let list = stored.as_list()?;
+
+            if list.is_empty() {
+                return if count.is_some() {
+                    Ok(RespValue::Array(Some(vec![])))
+                } else {
+                    Ok(RespValue::Null)
+                };
+            }
+
+            let mut matches: Vec<usize> = Vec::new();
+            let mut matched_count = 0;
+            // COUNT 0 means return all matches
+            let target_count = count.unwrap_or(1);
+            let unlimited = count == Some(0);
+            let max_to_scan = if maxlen > 0 {
+                maxlen.min(list.len())
+            } else {
+                list.len()
+            };
+
+            if rank > 0 {
+                // Positive rank: search from head to tail
+                let skip = (rank - 1) as usize;
+                let mut found = 0;
+                for (idx, item) in list.iter().enumerate().take(max_to_scan) {
+                    if item == &element {
+                        if found >= skip {
+                            matches.push(idx);
+                            matched_count += 1;
+                            if !unlimited && (count.is_none() || matched_count >= target_count) {
+                                break;
+                            }
+                        }
+                        found += 1;
+                    }
+                }
+            } else {
+                // Negative rank: search from tail to head
+                let skip = (-rank - 1) as usize;
+                let mut found = 0;
+                let start_idx = if max_to_scan < list.len() {
+                    list.len() - max_to_scan
+                } else {
+                    0
+                };
+                for idx in (start_idx..list.len()).rev() {
+                    if let Some(item) = list.get(idx) {
+                        if item == &element {
+                            if found >= skip {
+                                matches.push(idx);
+                                matched_count += 1;
+                                if !unlimited && (count.is_none() || matched_count >= target_count)
+                                {
+                                    break;
+                                }
+                            }
+                            found += 1;
+                        }
+                    }
+                }
+            }
+
+            if count.is_some() {
+                // Return array of indices
+                Ok(RespValue::Array(Some(
+                    matches
+                        .into_iter()
+                        .map(|i| RespValue::Integer(i as i64))
+                        .collect(),
+                )))
+            } else {
+                // Return single index or null
+                match matches.first() {
+                    Some(&idx) => Ok(RespValue::Integer(idx as i64)),
+                    None => Ok(RespValue::Null),
+                }
+            }
+        } else if count.is_some() {
+            Ok(RespValue::Array(Some(vec![])))
+        } else {
+            Ok(RespValue::Null)
+        }
+    }
 }

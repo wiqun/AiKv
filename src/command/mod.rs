@@ -184,6 +184,78 @@ impl CommandExecutor {
                 }
                 self.string_commands.append(args, *current_db)
             }
+            "INCR" => {
+                if !args.is_empty() {
+                    self.check_key_routing(&args[0])?;
+                }
+                self.string_commands.incr(args, *current_db)
+            }
+            "DECR" => {
+                if !args.is_empty() {
+                    self.check_key_routing(&args[0])?;
+                }
+                self.string_commands.decr(args, *current_db)
+            }
+            "INCRBY" => {
+                if !args.is_empty() {
+                    self.check_key_routing(&args[0])?;
+                }
+                self.string_commands.incrby(args, *current_db)
+            }
+            "DECRBY" => {
+                if !args.is_empty() {
+                    self.check_key_routing(&args[0])?;
+                }
+                self.string_commands.decrby(args, *current_db)
+            }
+            "INCRBYFLOAT" => {
+                if !args.is_empty() {
+                    self.check_key_routing(&args[0])?;
+                }
+                self.string_commands.incrbyfloat(args, *current_db)
+            }
+            "GETRANGE" => {
+                if !args.is_empty() {
+                    self.check_key_routing(&args[0])?;
+                }
+                self.string_commands.getrange(args, *current_db)
+            }
+            "SETRANGE" => {
+                if !args.is_empty() {
+                    self.check_key_routing(&args[0])?;
+                }
+                self.string_commands.setrange(args, *current_db)
+            }
+            "GETEX" => {
+                if !args.is_empty() {
+                    self.check_key_routing(&args[0])?;
+                }
+                self.string_commands.getex(args, *current_db)
+            }
+            "GETDEL" => {
+                if !args.is_empty() {
+                    self.check_key_routing(&args[0])?;
+                }
+                self.string_commands.getdel(args, *current_db)
+            }
+            "SETNX" => {
+                if !args.is_empty() {
+                    self.check_key_routing(&args[0])?;
+                }
+                self.string_commands.setnx(args, *current_db)
+            }
+            "SETEX" => {
+                if !args.is_empty() {
+                    self.check_key_routing(&args[0])?;
+                }
+                self.string_commands.setex(args, *current_db)
+            }
+            "PSETEX" => {
+                if !args.is_empty() {
+                    self.check_key_routing(&args[0])?;
+                }
+                self.string_commands.psetex(args, *current_db)
+            }
 
             // JSON commands - single key operations
             "JSON.GET" => {
@@ -475,6 +547,12 @@ impl CommandExecutor {
                 }
                 self.list_commands.lmove(args, *current_db)
             }
+            "LPOS" => {
+                if !args.is_empty() {
+                    self.check_key_routing(&args[0])?;
+                }
+                self.list_commands.lpos(args, *current_db)
+            }
 
             // Hash commands - single key operations
             "HSET" => {
@@ -649,6 +727,20 @@ impl CommandExecutor {
                 }
                 self.set_commands.sdiffstore(args, *current_db)
             }
+            "SSCAN" => {
+                if !args.is_empty() {
+                    self.check_key_routing(&args[0])?;
+                }
+                self.set_commands.sscan(args, *current_db)
+            }
+            "SMOVE" => {
+                // SMOVE takes source and destination keys
+                if args.len() >= 2 {
+                    let keys: Vec<&[u8]> = vec![args[0].as_ref(), args[1].as_ref()];
+                    self.check_keys_routing(&keys)?;
+                }
+                self.set_commands.smove(args, *current_db)
+            }
 
             // Sorted Set commands - single key operations
             "ZADD" => {
@@ -722,6 +814,42 @@ impl CommandExecutor {
                     self.check_key_routing(&args[0])?;
                 }
                 self.zset_commands.zincrby(args, *current_db)
+            }
+            "ZSCAN" => {
+                if !args.is_empty() {
+                    self.check_key_routing(&args[0])?;
+                }
+                self.zset_commands.zscan(args, *current_db)
+            }
+            "ZPOPMIN" => {
+                if !args.is_empty() {
+                    self.check_key_routing(&args[0])?;
+                }
+                self.zset_commands.zpopmin(args, *current_db)
+            }
+            "ZPOPMAX" => {
+                if !args.is_empty() {
+                    self.check_key_routing(&args[0])?;
+                }
+                self.zset_commands.zpopmax(args, *current_db)
+            }
+            "ZRANGEBYLEX" => {
+                if !args.is_empty() {
+                    self.check_key_routing(&args[0])?;
+                }
+                self.zset_commands.zrangebylex(args, *current_db)
+            }
+            "ZREVRANGEBYLEX" => {
+                if !args.is_empty() {
+                    self.check_key_routing(&args[0])?;
+                }
+                self.zset_commands.zrevrangebylex(args, *current_db)
+            }
+            "ZLEXCOUNT" => {
+                if !args.is_empty() {
+                    self.check_key_routing(&args[0])?;
+                }
+                self.zset_commands.zlexcount(args, *current_db)
             }
 
             // Cluster commands (only available with cluster feature)

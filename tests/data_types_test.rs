@@ -537,3 +537,738 @@ fn test_set_operations() {
         panic!("Expected array result");
     }
 }
+
+// ================= NEW STRING COMMANDS TESTS =================
+
+#[test]
+fn test_incr_decr_commands() {
+    let storage = StorageEngine::new_memory(16);
+    let executor = CommandExecutor::new(storage);
+    let mut current_db = 0;
+    let client_id = 1;
+
+    // INCR on non-existent key (starts from 0)
+    let result = executor.execute(
+        "INCR",
+        &[Bytes::from("counter")],
+        &mut current_db,
+        client_id,
+    );
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), RespValue::Integer(1));
+
+    // INCR again
+    let result = executor.execute(
+        "INCR",
+        &[Bytes::from("counter")],
+        &mut current_db,
+        client_id,
+    );
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), RespValue::Integer(2));
+
+    // DECR
+    let result = executor.execute(
+        "DECR",
+        &[Bytes::from("counter")],
+        &mut current_db,
+        client_id,
+    );
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), RespValue::Integer(1));
+
+    // DECR below 0
+    let result = executor.execute(
+        "DECR",
+        &[Bytes::from("counter")],
+        &mut current_db,
+        client_id,
+    );
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), RespValue::Integer(0));
+
+    let result = executor.execute(
+        "DECR",
+        &[Bytes::from("counter")],
+        &mut current_db,
+        client_id,
+    );
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), RespValue::Integer(-1));
+}
+
+#[test]
+fn test_incrby_decrby_commands() {
+    let storage = StorageEngine::new_memory(16);
+    let executor = CommandExecutor::new(storage);
+    let mut current_db = 0;
+    let client_id = 1;
+
+    // INCRBY
+    let result = executor.execute(
+        "INCRBY",
+        &[Bytes::from("counter"), Bytes::from("10")],
+        &mut current_db,
+        client_id,
+    );
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), RespValue::Integer(10));
+
+    // INCRBY again
+    let result = executor.execute(
+        "INCRBY",
+        &[Bytes::from("counter"), Bytes::from("5")],
+        &mut current_db,
+        client_id,
+    );
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), RespValue::Integer(15));
+
+    // DECRBY
+    let result = executor.execute(
+        "DECRBY",
+        &[Bytes::from("counter"), Bytes::from("3")],
+        &mut current_db,
+        client_id,
+    );
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), RespValue::Integer(12));
+}
+
+#[test]
+fn test_incrbyfloat_command() {
+    let storage = StorageEngine::new_memory(16);
+    let executor = CommandExecutor::new(storage);
+    let mut current_db = 0;
+    let client_id = 1;
+
+    // INCRBYFLOAT on non-existent key
+    let result = executor.execute(
+        "INCRBYFLOAT",
+        &[Bytes::from("floatkey"), Bytes::from("10.5")],
+        &mut current_db,
+        client_id,
+    );
+    assert!(result.is_ok());
+
+    // INCRBYFLOAT again
+    let result = executor.execute(
+        "INCRBYFLOAT",
+        &[Bytes::from("floatkey"), Bytes::from("0.1")],
+        &mut current_db,
+        client_id,
+    );
+    assert!(result.is_ok());
+
+    // INCRBYFLOAT with negative
+    let result = executor.execute(
+        "INCRBYFLOAT",
+        &[Bytes::from("floatkey"), Bytes::from("-5.2")],
+        &mut current_db,
+        client_id,
+    );
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_getrange_setrange_commands() {
+    let storage = StorageEngine::new_memory(16);
+    let executor = CommandExecutor::new(storage);
+    let mut current_db = 0;
+    let client_id = 1;
+
+    // SET a string
+    executor
+        .execute(
+            "SET",
+            &[Bytes::from("mykey"), Bytes::from("Hello World")],
+            &mut current_db,
+            client_id,
+        )
+        .unwrap();
+
+    // GETRANGE
+    let result = executor.execute(
+        "GETRANGE",
+        &[Bytes::from("mykey"), Bytes::from("0"), Bytes::from("4")],
+        &mut current_db,
+        client_id,
+    );
+    assert!(result.is_ok());
+    if let RespValue::BulkString(Some(value)) = result.unwrap() {
+        assert_eq!(value.as_ref(), b"Hello");
+    } else {
+        panic!("Expected BulkString result");
+    }
+
+    // GETRANGE with negative indices
+    let result = executor.execute(
+        "GETRANGE",
+        &[Bytes::from("mykey"), Bytes::from("-5"), Bytes::from("-1")],
+        &mut current_db,
+        client_id,
+    );
+    assert!(result.is_ok());
+    if let RespValue::BulkString(Some(value)) = result.unwrap() {
+        assert_eq!(value.as_ref(), b"World");
+    } else {
+        panic!("Expected BulkString result");
+    }
+
+    // SETRANGE
+    let result = executor.execute(
+        "SETRANGE",
+        &[Bytes::from("mykey"), Bytes::from("6"), Bytes::from("Redis")],
+        &mut current_db,
+        client_id,
+    );
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), RespValue::Integer(11));
+
+    // Verify
+    let result = executor.execute("GET", &[Bytes::from("mykey")], &mut current_db, client_id);
+    if let Ok(RespValue::BulkString(Some(value))) = result {
+        assert_eq!(value.as_ref(), b"Hello Redis");
+    } else {
+        panic!("Expected BulkString result");
+    }
+}
+
+#[test]
+fn test_getex_getdel_commands() {
+    let storage = StorageEngine::new_memory(16);
+    let executor = CommandExecutor::new(storage);
+    let mut current_db = 0;
+    let client_id = 1;
+
+    // SET a value
+    executor
+        .execute(
+            "SET",
+            &[Bytes::from("mykey"), Bytes::from("Hello")],
+            &mut current_db,
+            client_id,
+        )
+        .unwrap();
+
+    // GETEX with EX option
+    let result = executor.execute(
+        "GETEX",
+        &[Bytes::from("mykey"), Bytes::from("EX"), Bytes::from("100")],
+        &mut current_db,
+        client_id,
+    );
+    assert!(result.is_ok());
+    if let RespValue::BulkString(Some(value)) = result.unwrap() {
+        assert_eq!(value.as_ref(), b"Hello");
+    } else {
+        panic!("Expected BulkString result");
+    }
+
+    // GETDEL
+    let result = executor.execute(
+        "GETDEL",
+        &[Bytes::from("mykey")],
+        &mut current_db,
+        client_id,
+    );
+    assert!(result.is_ok());
+    if let RespValue::BulkString(Some(value)) = result.unwrap() {
+        assert_eq!(value.as_ref(), b"Hello");
+    } else {
+        panic!("Expected BulkString result");
+    }
+
+    // Key should be deleted
+    let result = executor.execute("GET", &[Bytes::from("mykey")], &mut current_db, client_id);
+    assert!(result.is_ok());
+    match result.unwrap() {
+        RespValue::BulkString(None) | RespValue::Null => {}
+        _ => panic!("Expected null result"),
+    }
+}
+
+#[test]
+fn test_setnx_setex_psetex_commands() {
+    let storage = StorageEngine::new_memory(16);
+    let executor = CommandExecutor::new(storage);
+    let mut current_db = 0;
+    let client_id = 1;
+
+    // SETNX on non-existent key
+    let result = executor.execute(
+        "SETNX",
+        &[Bytes::from("mykey"), Bytes::from("Hello")],
+        &mut current_db,
+        client_id,
+    );
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), RespValue::Integer(1));
+
+    // SETNX on existing key
+    let result = executor.execute(
+        "SETNX",
+        &[Bytes::from("mykey"), Bytes::from("World")],
+        &mut current_db,
+        client_id,
+    );
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), RespValue::Integer(0));
+
+    // Verify value unchanged
+    let result = executor.execute("GET", &[Bytes::from("mykey")], &mut current_db, client_id);
+    if let Ok(RespValue::BulkString(Some(value))) = result {
+        assert_eq!(value.as_ref(), b"Hello");
+    } else {
+        panic!("Expected BulkString result");
+    }
+
+    // SETEX
+    let result = executor.execute(
+        "SETEX",
+        &[
+            Bytes::from("exkey"),
+            Bytes::from("10"),
+            Bytes::from("value"),
+        ],
+        &mut current_db,
+        client_id,
+    );
+    assert!(result.is_ok());
+    if let RespValue::SimpleString(s) = result.unwrap() {
+        assert_eq!(s.as_str(), "OK");
+    } else {
+        panic!("Expected OK result");
+    }
+
+    // PSETEX
+    let result = executor.execute(
+        "PSETEX",
+        &[
+            Bytes::from("pexkey"),
+            Bytes::from("10000"),
+            Bytes::from("value"),
+        ],
+        &mut current_db,
+        client_id,
+    );
+    assert!(result.is_ok());
+    if let RespValue::SimpleString(s) = result.unwrap() {
+        assert_eq!(s.as_str(), "OK");
+    } else {
+        panic!("Expected OK result");
+    }
+}
+
+// ================= NEW LIST COMMANDS TESTS =================
+
+#[test]
+fn test_lpos_command() {
+    let storage = StorageEngine::new_memory(16);
+    let executor = CommandExecutor::new(storage);
+    let mut current_db = 0;
+    let client_id = 1;
+
+    // Create a list
+    executor
+        .execute(
+            "RPUSH",
+            &[
+                Bytes::from("mylist"),
+                Bytes::from("a"),
+                Bytes::from("b"),
+                Bytes::from("c"),
+                Bytes::from("b"),
+                Bytes::from("d"),
+                Bytes::from("b"),
+            ],
+            &mut current_db,
+            client_id,
+        )
+        .unwrap();
+
+    // LPOS - find first occurrence
+    let result = executor.execute(
+        "LPOS",
+        &[Bytes::from("mylist"), Bytes::from("b")],
+        &mut current_db,
+        client_id,
+    );
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), RespValue::Integer(1));
+
+    // LPOS with RANK 2 - find second occurrence
+    let result = executor.execute(
+        "LPOS",
+        &[
+            Bytes::from("mylist"),
+            Bytes::from("b"),
+            Bytes::from("RANK"),
+            Bytes::from("2"),
+        ],
+        &mut current_db,
+        client_id,
+    );
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), RespValue::Integer(3));
+
+    // LPOS with COUNT - find all occurrences
+    let result = executor.execute(
+        "LPOS",
+        &[
+            Bytes::from("mylist"),
+            Bytes::from("b"),
+            Bytes::from("COUNT"),
+            Bytes::from("0"),
+        ],
+        &mut current_db,
+        client_id,
+    );
+    assert!(result.is_ok());
+    if let RespValue::Array(Some(arr)) = result.unwrap() {
+        assert_eq!(arr.len(), 3);
+    } else {
+        panic!("Expected array result");
+    }
+
+    // LPOS - element not found
+    let result = executor.execute(
+        "LPOS",
+        &[Bytes::from("mylist"), Bytes::from("x")],
+        &mut current_db,
+        client_id,
+    );
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), RespValue::Null);
+}
+
+// ================= NEW SET COMMANDS TESTS =================
+
+#[test]
+fn test_sscan_command() {
+    let storage = StorageEngine::new_memory(16);
+    let executor = CommandExecutor::new(storage);
+    let mut current_db = 0;
+    let client_id = 1;
+
+    // Create a set
+    executor
+        .execute(
+            "SADD",
+            &[
+                Bytes::from("myset"),
+                Bytes::from("member1"),
+                Bytes::from("member2"),
+                Bytes::from("member3"),
+                Bytes::from("other"),
+            ],
+            &mut current_db,
+            client_id,
+        )
+        .unwrap();
+
+    // SSCAN
+    let result = executor.execute(
+        "SSCAN",
+        &[Bytes::from("myset"), Bytes::from("0")],
+        &mut current_db,
+        client_id,
+    );
+    assert!(result.is_ok());
+    if let RespValue::Array(Some(items)) = result.unwrap() {
+        assert_eq!(items.len(), 2);
+        if let RespValue::Array(Some(members)) = &items[1] {
+            assert_eq!(members.len(), 4);
+        }
+    } else {
+        panic!("Expected array result");
+    }
+
+    // SSCAN with MATCH
+    let result = executor.execute(
+        "SSCAN",
+        &[
+            Bytes::from("myset"),
+            Bytes::from("0"),
+            Bytes::from("MATCH"),
+            Bytes::from("member*"),
+        ],
+        &mut current_db,
+        client_id,
+    );
+    assert!(result.is_ok());
+    if let RespValue::Array(Some(items)) = result.unwrap() {
+        if let RespValue::Array(Some(members)) = &items[1] {
+            assert_eq!(members.len(), 3);
+        }
+    } else {
+        panic!("Expected array result");
+    }
+}
+
+#[test]
+fn test_smove_command() {
+    let storage = StorageEngine::new_memory(16);
+    let executor = CommandExecutor::new(storage);
+    let mut current_db = 0;
+    let client_id = 1;
+
+    // Create source set
+    executor
+        .execute(
+            "SADD",
+            &[
+                Bytes::from("src"),
+                Bytes::from("a"),
+                Bytes::from("b"),
+                Bytes::from("c"),
+            ],
+            &mut current_db,
+            client_id,
+        )
+        .unwrap();
+
+    // Create destination set
+    executor
+        .execute(
+            "SADD",
+            &[Bytes::from("dst"), Bytes::from("x"), Bytes::from("y")],
+            &mut current_db,
+            client_id,
+        )
+        .unwrap();
+
+    // SMOVE
+    let result = executor.execute(
+        "SMOVE",
+        &[Bytes::from("src"), Bytes::from("dst"), Bytes::from("b")],
+        &mut current_db,
+        client_id,
+    );
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), RespValue::Integer(1));
+
+    // Verify source
+    let result = executor.execute("SCARD", &[Bytes::from("src")], &mut current_db, client_id);
+    assert_eq!(result.unwrap(), RespValue::Integer(2));
+
+    // Verify destination
+    let result = executor.execute("SCARD", &[Bytes::from("dst")], &mut current_db, client_id);
+    assert_eq!(result.unwrap(), RespValue::Integer(3));
+
+    // SMOVE non-existent member
+    let result = executor.execute(
+        "SMOVE",
+        &[Bytes::from("src"), Bytes::from("dst"), Bytes::from("z")],
+        &mut current_db,
+        client_id,
+    );
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), RespValue::Integer(0));
+}
+
+// ================= NEW SORTED SET COMMANDS TESTS =================
+
+#[test]
+fn test_zscan_command() {
+    let storage = StorageEngine::new_memory(16);
+    let executor = CommandExecutor::new(storage);
+    let mut current_db = 0;
+    let client_id = 1;
+
+    // Create a sorted set
+    executor
+        .execute(
+            "ZADD",
+            &[
+                Bytes::from("myzset"),
+                Bytes::from("1"),
+                Bytes::from("one"),
+                Bytes::from("2"),
+                Bytes::from("two"),
+                Bytes::from("3"),
+                Bytes::from("three"),
+            ],
+            &mut current_db,
+            client_id,
+        )
+        .unwrap();
+
+    // ZSCAN
+    let result = executor.execute(
+        "ZSCAN",
+        &[Bytes::from("myzset"), Bytes::from("0")],
+        &mut current_db,
+        client_id,
+    );
+    assert!(result.is_ok());
+    if let RespValue::Array(Some(items)) = result.unwrap() {
+        assert_eq!(items.len(), 2);
+        if let RespValue::Array(Some(members)) = &items[1] {
+            assert_eq!(members.len(), 6); // 3 members * 2 (member + score)
+        }
+    } else {
+        panic!("Expected array result");
+    }
+}
+
+#[test]
+fn test_zpopmin_zpopmax_commands() {
+    let storage = StorageEngine::new_memory(16);
+    let executor = CommandExecutor::new(storage);
+    let mut current_db = 0;
+    let client_id = 1;
+
+    // Create a sorted set
+    executor
+        .execute(
+            "ZADD",
+            &[
+                Bytes::from("myzset"),
+                Bytes::from("1"),
+                Bytes::from("one"),
+                Bytes::from("2"),
+                Bytes::from("two"),
+                Bytes::from("3"),
+                Bytes::from("three"),
+            ],
+            &mut current_db,
+            client_id,
+        )
+        .unwrap();
+
+    // ZPOPMIN
+    let result = executor.execute(
+        "ZPOPMIN",
+        &[Bytes::from("myzset")],
+        &mut current_db,
+        client_id,
+    );
+    assert!(result.is_ok());
+    if let RespValue::Array(Some(items)) = result.unwrap() {
+        assert_eq!(items.len(), 2);
+        if let RespValue::BulkString(Some(member)) = &items[0] {
+            assert_eq!(member.as_ref(), b"one");
+        }
+    } else {
+        panic!("Expected array result");
+    }
+
+    // ZPOPMAX
+    let result = executor.execute(
+        "ZPOPMAX",
+        &[Bytes::from("myzset")],
+        &mut current_db,
+        client_id,
+    );
+    assert!(result.is_ok());
+    if let RespValue::Array(Some(items)) = result.unwrap() {
+        assert_eq!(items.len(), 2);
+        if let RespValue::BulkString(Some(member)) = &items[0] {
+            assert_eq!(member.as_ref(), b"three");
+        }
+    } else {
+        panic!("Expected array result");
+    }
+
+    // Verify only "two" remains
+    let result = executor.execute(
+        "ZCARD",
+        &[Bytes::from("myzset")],
+        &mut current_db,
+        client_id,
+    );
+    assert_eq!(result.unwrap(), RespValue::Integer(1));
+}
+
+#[test]
+fn test_zrangebylex_zrevrangebylex_zlexcount_commands() {
+    let storage = StorageEngine::new_memory(16);
+    let executor = CommandExecutor::new(storage);
+    let mut current_db = 0;
+    let client_id = 1;
+
+    // Create a sorted set with same score for lex ordering
+    executor
+        .execute(
+            "ZADD",
+            &[
+                Bytes::from("myzset"),
+                Bytes::from("0"),
+                Bytes::from("a"),
+                Bytes::from("0"),
+                Bytes::from("b"),
+                Bytes::from("0"),
+                Bytes::from("c"),
+                Bytes::from("0"),
+                Bytes::from("d"),
+                Bytes::from("0"),
+                Bytes::from("e"),
+            ],
+            &mut current_db,
+            client_id,
+        )
+        .unwrap();
+
+    // ZRANGEBYLEX
+    let result = executor.execute(
+        "ZRANGEBYLEX",
+        &[Bytes::from("myzset"), Bytes::from("[b"), Bytes::from("[d")],
+        &mut current_db,
+        client_id,
+    );
+    assert!(result.is_ok());
+    if let RespValue::Array(Some(items)) = result.unwrap() {
+        assert_eq!(items.len(), 3); // b, c, d
+    } else {
+        panic!("Expected array result");
+    }
+
+    // ZRANGEBYLEX with exclusive range
+    let result = executor.execute(
+        "ZRANGEBYLEX",
+        &[Bytes::from("myzset"), Bytes::from("(a"), Bytes::from("(e")],
+        &mut current_db,
+        client_id,
+    );
+    assert!(result.is_ok());
+    if let RespValue::Array(Some(items)) = result.unwrap() {
+        assert_eq!(items.len(), 3); // b, c, d
+    } else {
+        panic!("Expected array result");
+    }
+
+    // ZREVRANGEBYLEX
+    let result = executor.execute(
+        "ZREVRANGEBYLEX",
+        &[Bytes::from("myzset"), Bytes::from("[d"), Bytes::from("[b")],
+        &mut current_db,
+        client_id,
+    );
+    assert!(result.is_ok());
+    if let RespValue::Array(Some(items)) = result.unwrap() {
+        assert_eq!(items.len(), 3); // d, c, b (reversed)
+    } else {
+        panic!("Expected array result");
+    }
+
+    // ZLEXCOUNT
+    let result = executor.execute(
+        "ZLEXCOUNT",
+        &[Bytes::from("myzset"), Bytes::from("-"), Bytes::from("+")],
+        &mut current_db,
+        client_id,
+    );
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), RespValue::Integer(5));
+
+    // ZLEXCOUNT with range
+    let result = executor.execute(
+        "ZLEXCOUNT",
+        &[Bytes::from("myzset"), Bytes::from("[b"), Bytes::from("[d")],
+        &mut current_db,
+        client_id,
+    );
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), RespValue::Integer(3));
+}

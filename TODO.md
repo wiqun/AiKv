@@ -24,12 +24,12 @@
 | 类别 | 数量 | 状态 |
 |------|------|------|
 | **协议支持** | RESP2 + RESP3 | ✅ 完成 |
-| **String 命令** | 8 个 | ✅ 完成 |
+| **String 命令** | 20 个 | ✅ 完成 |
 | **JSON 命令** | 7 个 | ✅ 完成 |
-| **List 命令** | 12 个 | ✅ 完成 |
+| **List 命令** | 13 个 | ✅ 完成 |
 | **Hash 命令** | 14 个 | ✅ 完成 |
-| **Set 命令** | 13 个 | ✅ 完成 |
-| **Sorted Set 命令** | 12 个 | ✅ 完成 |
+| **Set 命令** | 15 个 | ✅ 完成 |
+| **Sorted Set 命令** | 18 个 | ✅ 完成 |
 | **Database 命令** | 6 个 | ✅ 完成 |
 | **Key 命令** | 20 个 | ✅ 完成 |
 | **Server 命令** | 16 个 | ✅ 完成 |
@@ -232,43 +232,51 @@ AiDb MetaRaftNode (Group 0) ──────────────┘
 
 ## 待完成项 - 中期计划
 
-### 🟠 P1: 基础数据类型命令补全
+### ✅ P1: 基础数据类型命令补全 - 已完成
 
 > 目标: 达到 Redis 核心命令完整覆盖
+> 完成时间: 2026-01-07
 
-#### String 命令补全 (12 个待实现)
-- [ ] `INCR` - 键值加 1
-- [ ] `DECR` - 键值减 1
-- [ ] `INCRBY` - 键值加指定整数
-- [ ] `DECRBY` - 键值减指定整数
-- [ ] `INCRBYFLOAT` - 键值加指定浮点数
-- [ ] `GETRANGE` - 获取子字符串
-- [ ] `SETRANGE` - 覆盖子字符串
-- [ ] `GETEX` - 获取并设置过期时间
-- [ ] `GETDEL` - 获取并删除
-- [ ] `SETNX` - 不存在时设置 (等同于 SET NX)
-- [ ] `SETEX` - 设置带过期时间 (等同于 SET EX)
-- [ ] `PSETEX` - 设置带毫秒过期时间
+#### String 命令补全 (12 个已实现) ✅
+- [x] `INCR` - 键值加 1 ✅
+- [x] `DECR` - 键值减 1 ✅
+- [x] `INCRBY` - 键值加指定整数 ✅
+- [x] `DECRBY` - 键值减指定整数 ✅
+- [x] `INCRBYFLOAT` - 键值加指定浮点数 ✅
+- [x] `GETRANGE` - 获取子字符串 ✅
+- [x] `SETRANGE` - 覆盖子字符串 ✅
+- [x] `GETEX` - 获取并设置过期时间 ✅
+- [x] `GETDEL` - 获取并删除 ✅
+- [x] `SETNX` - 不存在时设置 (等同于 SET NX) ✅
+- [x] `SETEX` - 设置带过期时间 (等同于 SET EX) ✅
+- [x] `PSETEX` - 设置带毫秒过期时间 ✅
 
-#### List 命令补全 (5 个待实现)
-- [ ] `LPOS` - 查找元素位置
+#### List 命令补全 (非阻塞命令已实现)
+- [x] `LPOS` - 查找元素位置 ✅
 - [ ] `LMPOP` - 从多个列表弹出
-- [ ] `LMOVE` - 列表间移动元素 (部分已实现)
-- [ ] `BLPOP`, `BRPOP` - 阻塞弹出
-- [ ] `BLMOVE` - 阻塞移动
+- [x] `LMOVE` - 列表间移动元素 ✅ (已实现)
+- [ ] `BLPOP`, `BRPOP` - 阻塞弹出 (需要阻塞支持)
+- [ ] `BLMOVE` - 阻塞移动 (需要阻塞支持)
 
-#### Set 命令补全 (2 个待实现)
-- [ ] `SSCAN` - 迭代集合成员
-- [ ] `SMOVE` - 移动成员到另一个集合
+#### Set 命令补全 (2 个已实现) ✅
+- [x] `SSCAN` - 迭代集合成员 ✅
+- [x] `SMOVE` - 移动成员到另一个集合 ✅
 
-#### Sorted Set 命令补全 (10 个待实现)
-- [ ] `ZSCAN` - 迭代有序集合成员
-- [ ] `ZPOPMIN`, `ZPOPMAX` - 弹出最小/最大分数成员
-- [ ] `BZPOPMIN`, `BZPOPMAX` - 阻塞弹出
-- [ ] `ZRANGEBYLEX`, `ZREVRANGEBYLEX` - 按字典序范围查询
-- [ ] `ZLEXCOUNT` - 字典序范围计数
+#### Sorted Set 命令补全 (非阻塞命令已实现)
+- [x] `ZSCAN` - 迭代有序集合成员 ✅
+- [x] `ZPOPMIN`, `ZPOPMAX` - 弹出最小/最大分数成员 ✅
+- [ ] `BZPOPMIN`, `BZPOPMAX` - 阻塞弹出 (需要阻塞支持)
+- [x] `ZRANGEBYLEX`, `ZREVRANGEBYLEX` - 按字典序范围查询 ✅
+- [x] `ZLEXCOUNT` - 字典序范围计数 ✅
 - [ ] `ZMPOP` - 从多个有序集合弹出
 - [ ] `ZUNION`, `ZINTER`, `ZDIFF` - 集合运算
+
+**实现说明:**
+- 新增 12 个 String 命令，覆盖数字操作、范围操作和条件设置
+- 新增 LPOS 命令，支持 RANK、COUNT、MAXLEN 选项
+- 新增 SSCAN 和 SMOVE 命令，完善 Set 操作
+- 新增 6 个 Sorted Set 命令，支持 SCAN、POP 和字典序操作
+- 阻塞命令（BLPOP、BRPOP、BLMOVE、BZPOPMIN、BZPOPMAX）需要连接级阻塞队列支持，留待后续版本实现
 
 ### 🟡 P2: 事务支持 (v0.8.0)
 
