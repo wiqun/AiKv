@@ -433,4 +433,194 @@ impl SetCommands {
 
         Ok(RespValue::Integer(count as i64))
     }
+
+    /// SSCAN key cursor [MATCH pattern] [COUNT count]
+    /// Incrementally iterates over the members of a set
+    pub fn sscan(&self, args: &[Bytes], db_index: usize) -> Result<RespValue> {
+        if args.len() < 2 {
+            return Err(AikvError::WrongArgCount("SSCAN".to_string()));
+        }
+
+        let key = String::from_utf8_lossy(&args[0]).to_string();
+        let cursor = String::from_utf8_lossy(&args[1])
+            .parse::<usize>()
+            .map_err(|_| AikvError::InvalidArgument("ERR invalid cursor".to_string()))?;
+
+        // Parse optional arguments
+        let mut pattern: Option<String> = None;
+        let mut count: usize = 10; // Default count
+
+        let mut i = 2;
+        while i < args.len() {
+            let option = String::from_utf8_lossy(&args[i]).to_uppercase();
+            match option.as_str() {
+                "MATCH" => {
+                    if i + 1 >= args.len() {
+                        return Err(AikvError::InvalidArgument("ERR syntax error".to_string()));
+                    }
+                    i += 1;
+                    pattern = Some(String::from_utf8_lossy(&args[i]).to_string());
+                }
+                "COUNT" => {
+                    if i + 1 >= args.len() {
+                        return Err(AikvError::InvalidArgument("ERR syntax error".to_string()));
+                    }
+                    i += 1;
+                    count = String::from_utf8_lossy(&args[i])
+                        .parse::<usize>()
+                        .map_err(|_| {
+                            AikvError::InvalidArgument(
+                                "ERR value is not an integer or out of range".to_string(),
+                            )
+                        })?;
+                }
+                _ => {
+                    return Err(AikvError::InvalidArgument("ERR syntax error".to_string()));
+                }
+            }
+            i += 1;
+        }
+
+        let (next_cursor, members) = if let Some(stored) = self.storage.get_value(db_index, &key)? {
+            let set = stored.as_set()?;
+            let all_members: Vec<Vec<u8>> = set.iter().cloned().collect();
+
+            // Filter by pattern if provided
+            let filtered: Vec<Vec<u8>> = if let Some(ref pat) = pattern {
+                all_members
+                    .into_iter()
+                    .filter(|m| {
+                        let member_str = String::from_utf8_lossy(m);
+                        Self::glob_match(pat, &member_str)
+                    })
+                    .collect()
+            } else {
+                all_members
+            };
+
+            let total = filtered.len();
+            if cursor >= total {
+                (0, Vec::new())
+            } else {
+                let end = (cursor + count).min(total);
+                let members: Vec<Vec<u8>> = filtered[cursor..end].to_vec();
+                let next = if end >= total { 0 } else { end };
+                (next, members)
+            }
+        } else {
+            (0, Vec::new())
+        };
+
+        // Build response: [cursor, [members...]]
+        let cursor_str = Bytes::from(next_cursor.to_string());
+        let members_arr: Vec<RespValue> = members
+            .into_iter()
+            .map(|m| RespValue::bulk_string(Bytes::from(m)))
+            .collect();
+
+        Ok(RespValue::Array(Some(vec![
+            RespValue::bulk_string(cursor_str),
+            RespValue::Array(Some(members_arr)),
+        ])))
+    }
+
+    /// SMOVE source destination member
+    /// Move a member from one set to another
+    pub fn smove(&self, args: &[Bytes], db_index: usize) -> Result<RespValue> {
+        if args.len() != 3 {
+            return Err(AikvError::WrongArgCount("SMOVE".to_string()));
+        }
+
+        let source_key = String::from_utf8_lossy(&args[0]).to_string();
+        let dest_key = String::from_utf8_lossy(&args[1]).to_string();
+        let member = args[2].clone();
+
+        // Get source set
+        if let Some(stored) = self.storage.get_value(db_index, &source_key)? {
+            let mut source_set = stored.as_set()?.clone();
+
+            // Check if member exists in source
+            if !source_set.remove(&member.to_vec()) {
+                return Ok(RespValue::Integer(0));
+            }
+
+            // Get or create destination set and add member
+            let dest_set = if source_key == dest_key {
+                // Moving within the same set - member was just removed, add it back
+                source_set.insert(member.to_vec());
+                source_set.clone()
+            } else if let Some(dest_stored) = self.storage.get_value(db_index, &dest_key)? {
+                let mut dest = dest_stored.as_set()?.clone();
+                dest.insert(member.to_vec());
+                dest
+            } else {
+                let mut new_set = HashSet::new();
+                new_set.insert(member.to_vec());
+                new_set
+            };
+
+            // Update source set
+            if source_key != dest_key {
+                if source_set.is_empty() {
+                    self.storage.delete_from_db(db_index, &source_key)?;
+                } else {
+                    self.storage.set_value(
+                        db_index,
+                        source_key,
+                        StoredValue::new_set(source_set),
+                    )?;
+                }
+            }
+
+            // Update destination set
+            self.storage
+                .set_value(db_index, dest_key, StoredValue::new_set(dest_set))?;
+
+            Ok(RespValue::Integer(1))
+        } else {
+            Ok(RespValue::Integer(0))
+        }
+    }
+
+    /// Simple glob pattern matching for SSCAN
+    fn glob_match(pattern: &str, text: &str) -> bool {
+        let mut pattern_chars = pattern.chars().peekable();
+        let mut text_chars = text.chars().peekable();
+
+        while let Some(p) = pattern_chars.next() {
+            match p {
+                '*' => {
+                    // Skip consecutive stars
+                    while pattern_chars.peek() == Some(&'*') {
+                        pattern_chars.next();
+                    }
+                    // If star is at end, match rest of text
+                    if pattern_chars.peek().is_none() {
+                        return true;
+                    }
+                    // Try matching remaining pattern at each position
+                    let remaining_pattern: String = pattern_chars.collect();
+                    while text_chars.peek().is_some() {
+                        let remaining_text: String = text_chars.clone().collect();
+                        if Self::glob_match(&remaining_pattern, &remaining_text) {
+                            return true;
+                        }
+                        text_chars.next();
+                    }
+                    return Self::glob_match(&remaining_pattern, "");
+                }
+                '?' => {
+                    if text_chars.next().is_none() {
+                        return false;
+                    }
+                }
+                c => {
+                    if text_chars.next() != Some(c) {
+                        return false;
+                    }
+                }
+            }
+        }
+        text_chars.peek().is_none()
+    }
 }

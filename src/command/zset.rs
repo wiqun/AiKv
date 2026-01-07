@@ -474,4 +474,445 @@ impl ZSetCommands {
             .set_value(db_index, key, StoredValue::new_zset(zset.1))?;
         Ok(RespValue::bulk_string(Bytes::from(zset.0.to_string())))
     }
+
+    /// ZSCAN key cursor [MATCH pattern] [COUNT count]
+    /// Incrementally iterates over members and scores of a sorted set
+    pub fn zscan(&self, args: &[Bytes], db_index: usize) -> Result<RespValue> {
+        if args.len() < 2 {
+            return Err(AikvError::WrongArgCount("ZSCAN".to_string()));
+        }
+
+        let key = String::from_utf8_lossy(&args[0]).to_string();
+        let cursor = String::from_utf8_lossy(&args[1])
+            .parse::<usize>()
+            .map_err(|_| AikvError::InvalidArgument("ERR invalid cursor".to_string()))?;
+
+        // Parse optional arguments
+        let mut pattern: Option<String> = None;
+        let mut count: usize = 10; // Default count
+
+        let mut i = 2;
+        while i < args.len() {
+            let option = String::from_utf8_lossy(&args[i]).to_uppercase();
+            match option.as_str() {
+                "MATCH" => {
+                    if i + 1 >= args.len() {
+                        return Err(AikvError::InvalidArgument("ERR syntax error".to_string()));
+                    }
+                    i += 1;
+                    pattern = Some(String::from_utf8_lossy(&args[i]).to_string());
+                }
+                "COUNT" => {
+                    if i + 1 >= args.len() {
+                        return Err(AikvError::InvalidArgument("ERR syntax error".to_string()));
+                    }
+                    i += 1;
+                    count = String::from_utf8_lossy(&args[i])
+                        .parse::<usize>()
+                        .map_err(|_| {
+                            AikvError::InvalidArgument(
+                                "ERR value is not an integer or out of range".to_string(),
+                            )
+                        })?;
+                }
+                _ => {
+                    return Err(AikvError::InvalidArgument("ERR syntax error".to_string()));
+                }
+            }
+            i += 1;
+        }
+
+        let (next_cursor, members) = if let Some(stored) = self.storage.get_value(db_index, &key)? {
+            let zset = stored.as_zset()?;
+            let all_members: Vec<(Vec<u8>, f64)> =
+                zset.iter().map(|(k, v)| (k.clone(), *v)).collect();
+
+            // Filter by pattern if provided
+            let filtered: Vec<(Vec<u8>, f64)> = if let Some(ref pat) = pattern {
+                all_members
+                    .into_iter()
+                    .filter(|(m, _)| {
+                        let member_str = String::from_utf8_lossy(m);
+                        Self::glob_match(pat, &member_str)
+                    })
+                    .collect()
+            } else {
+                all_members
+            };
+
+            let total = filtered.len();
+            if cursor >= total {
+                (0, Vec::new())
+            } else {
+                let end = (cursor + count).min(total);
+                let members: Vec<(Vec<u8>, f64)> = filtered[cursor..end].to_vec();
+                let next = if end >= total { 0 } else { end };
+                (next, members)
+            }
+        } else {
+            (0, Vec::new())
+        };
+
+        // Build response: [cursor, [member, score, member, score, ...]]
+        let cursor_str = Bytes::from(next_cursor.to_string());
+        let mut members_arr: Vec<RespValue> = Vec::with_capacity(members.len() * 2);
+        for (member, score) in members {
+            members_arr.push(RespValue::bulk_string(Bytes::from(member)));
+            members_arr.push(RespValue::bulk_string(Bytes::from(score.to_string())));
+        }
+
+        Ok(RespValue::Array(Some(vec![
+            RespValue::bulk_string(cursor_str),
+            RespValue::Array(Some(members_arr)),
+        ])))
+    }
+
+    /// ZPOPMIN key [count]
+    /// Removes and returns members with the lowest scores in a sorted set
+    pub fn zpopmin(&self, args: &[Bytes], db_index: usize) -> Result<RespValue> {
+        if args.is_empty() {
+            return Err(AikvError::WrongArgCount("ZPOPMIN".to_string()));
+        }
+
+        let key = String::from_utf8_lossy(&args[0]).to_string();
+        let count = if args.len() > 1 {
+            String::from_utf8_lossy(&args[1])
+                .parse::<usize>()
+                .map_err(|_| {
+                    AikvError::InvalidArgument(
+                        "ERR value is not an integer or out of range".to_string(),
+                    )
+                })?
+        } else {
+            1
+        };
+
+        if let Some(stored) = self.storage.get_value(db_index, &key)? {
+            let mut zset = stored.as_zset()?.clone();
+
+            // Sort by score (ascending)
+            let mut sorted: Vec<(Vec<u8>, f64)> =
+                zset.iter().map(|(k, v)| (k.clone(), *v)).collect();
+            sorted.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+
+            let to_pop = count.min(sorted.len());
+            let popped: Vec<(Vec<u8>, f64)> = sorted.into_iter().take(to_pop).collect();
+
+            // Remove popped elements from zset
+            for (member, _) in &popped {
+                zset.remove(member);
+            }
+
+            // Update or delete the zset
+            if zset.is_empty() {
+                self.storage.delete_from_db(db_index, &key)?;
+            } else {
+                self.storage
+                    .set_value(db_index, key, StoredValue::new_zset(zset))?;
+            }
+
+            // Build response
+            let mut result = Vec::with_capacity(popped.len() * 2);
+            for (member, score) in popped {
+                result.push(RespValue::bulk_string(Bytes::from(member)));
+                result.push(RespValue::bulk_string(Bytes::from(score.to_string())));
+            }
+            Ok(RespValue::Array(Some(result)))
+        } else {
+            Ok(RespValue::Array(Some(vec![])))
+        }
+    }
+
+    /// ZPOPMAX key [count]
+    /// Removes and returns members with the highest scores in a sorted set
+    pub fn zpopmax(&self, args: &[Bytes], db_index: usize) -> Result<RespValue> {
+        if args.is_empty() {
+            return Err(AikvError::WrongArgCount("ZPOPMAX".to_string()));
+        }
+
+        let key = String::from_utf8_lossy(&args[0]).to_string();
+        let count = if args.len() > 1 {
+            String::from_utf8_lossy(&args[1])
+                .parse::<usize>()
+                .map_err(|_| {
+                    AikvError::InvalidArgument(
+                        "ERR value is not an integer or out of range".to_string(),
+                    )
+                })?
+        } else {
+            1
+        };
+
+        if let Some(stored) = self.storage.get_value(db_index, &key)? {
+            let mut zset = stored.as_zset()?.clone();
+
+            // Sort by score (descending)
+            let mut sorted: Vec<(Vec<u8>, f64)> =
+                zset.iter().map(|(k, v)| (k.clone(), *v)).collect();
+            sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+
+            let to_pop = count.min(sorted.len());
+            let popped: Vec<(Vec<u8>, f64)> = sorted.into_iter().take(to_pop).collect();
+
+            // Remove popped elements from zset
+            for (member, _) in &popped {
+                zset.remove(member);
+            }
+
+            // Update or delete the zset
+            if zset.is_empty() {
+                self.storage.delete_from_db(db_index, &key)?;
+            } else {
+                self.storage
+                    .set_value(db_index, key, StoredValue::new_zset(zset))?;
+            }
+
+            // Build response
+            let mut result = Vec::with_capacity(popped.len() * 2);
+            for (member, score) in popped {
+                result.push(RespValue::bulk_string(Bytes::from(member)));
+                result.push(RespValue::bulk_string(Bytes::from(score.to_string())));
+            }
+            Ok(RespValue::Array(Some(result)))
+        } else {
+            Ok(RespValue::Array(Some(vec![])))
+        }
+    }
+
+    /// ZRANGEBYLEX key min max [LIMIT offset count]
+    /// Returns all elements in the sorted set with a value between min and max (lexicographically)
+    /// All elements must have the same score for lexicographical ordering to work correctly
+    pub fn zrangebylex(&self, args: &[Bytes], db_index: usize) -> Result<RespValue> {
+        if args.len() < 3 {
+            return Err(AikvError::WrongArgCount("ZRANGEBYLEX".to_string()));
+        }
+
+        let key = String::from_utf8_lossy(&args[0]).to_string();
+        let min_str = String::from_utf8_lossy(&args[1]).to_string();
+        let max_str = String::from_utf8_lossy(&args[2]).to_string();
+
+        // Parse LIMIT options
+        let mut offset: usize = 0;
+        let mut limit_count: Option<usize> = None;
+
+        if args.len() > 3 {
+            let opt = String::from_utf8_lossy(&args[3]).to_uppercase();
+            if opt == "LIMIT" {
+                if args.len() < 6 {
+                    return Err(AikvError::InvalidArgument("ERR syntax error".to_string()));
+                }
+                offset = String::from_utf8_lossy(&args[4])
+                    .parse::<usize>()
+                    .map_err(|_| {
+                        AikvError::InvalidArgument(
+                            "ERR value is not an integer or out of range".to_string(),
+                        )
+                    })?;
+                limit_count = Some(String::from_utf8_lossy(&args[5]).parse::<usize>().map_err(
+                    |_| {
+                        AikvError::InvalidArgument(
+                            "ERR value is not an integer or out of range".to_string(),
+                        )
+                    },
+                )?);
+            }
+        }
+
+        let members = if let Some(stored) = self.storage.get_value(db_index, &key)? {
+            let zset = stored.as_zset()?;
+
+            // Sort by member lexicographically
+            let mut sorted: Vec<Vec<u8>> = zset.keys().cloned().collect();
+            sorted.sort();
+
+            // Filter by lex range
+            let filtered: Vec<Vec<u8>> = sorted
+                .into_iter()
+                .filter(|m| Self::in_lex_range(m, &min_str, &max_str))
+                .collect();
+
+            // Apply LIMIT
+            let start = offset.min(filtered.len());
+            let result: Vec<Vec<u8>> = if let Some(cnt) = limit_count {
+                filtered.into_iter().skip(start).take(cnt).collect()
+            } else {
+                filtered.into_iter().skip(start).collect()
+            };
+
+            result
+        } else {
+            Vec::new()
+        };
+
+        Ok(RespValue::Array(Some(
+            members
+                .into_iter()
+                .map(|m| RespValue::bulk_string(Bytes::from(m)))
+                .collect(),
+        )))
+    }
+
+    /// ZREVRANGEBYLEX key max min [LIMIT offset count]
+    /// Returns all elements in the sorted set with a value between max and min (lexicographically, reversed)
+    pub fn zrevrangebylex(&self, args: &[Bytes], db_index: usize) -> Result<RespValue> {
+        if args.len() < 3 {
+            return Err(AikvError::WrongArgCount("ZREVRANGEBYLEX".to_string()));
+        }
+
+        let key = String::from_utf8_lossy(&args[0]).to_string();
+        let max_str = String::from_utf8_lossy(&args[1]).to_string();
+        let min_str = String::from_utf8_lossy(&args[2]).to_string();
+
+        // Parse LIMIT options
+        let mut offset: usize = 0;
+        let mut limit_count: Option<usize> = None;
+
+        if args.len() > 3 {
+            let opt = String::from_utf8_lossy(&args[3]).to_uppercase();
+            if opt == "LIMIT" {
+                if args.len() < 6 {
+                    return Err(AikvError::InvalidArgument("ERR syntax error".to_string()));
+                }
+                offset = String::from_utf8_lossy(&args[4])
+                    .parse::<usize>()
+                    .map_err(|_| {
+                        AikvError::InvalidArgument(
+                            "ERR value is not an integer or out of range".to_string(),
+                        )
+                    })?;
+                limit_count = Some(String::from_utf8_lossy(&args[5]).parse::<usize>().map_err(
+                    |_| {
+                        AikvError::InvalidArgument(
+                            "ERR value is not an integer or out of range".to_string(),
+                        )
+                    },
+                )?);
+            }
+        }
+
+        let members = if let Some(stored) = self.storage.get_value(db_index, &key)? {
+            let zset = stored.as_zset()?;
+
+            // Sort by member lexicographically (reversed)
+            let mut sorted: Vec<Vec<u8>> = zset.keys().cloned().collect();
+            sorted.sort();
+            sorted.reverse();
+
+            // Filter by lex range
+            let filtered: Vec<Vec<u8>> = sorted
+                .into_iter()
+                .filter(|m| Self::in_lex_range(m, &min_str, &max_str))
+                .collect();
+
+            // Apply LIMIT
+            let start = offset.min(filtered.len());
+            let result: Vec<Vec<u8>> = if let Some(cnt) = limit_count {
+                filtered.into_iter().skip(start).take(cnt).collect()
+            } else {
+                filtered.into_iter().skip(start).collect()
+            };
+
+            result
+        } else {
+            Vec::new()
+        };
+
+        Ok(RespValue::Array(Some(
+            members
+                .into_iter()
+                .map(|m| RespValue::bulk_string(Bytes::from(m)))
+                .collect(),
+        )))
+    }
+
+    /// ZLEXCOUNT key min max
+    /// Returns the number of elements in the sorted set with a value between min and max (lexicographically)
+    pub fn zlexcount(&self, args: &[Bytes], db_index: usize) -> Result<RespValue> {
+        if args.len() != 3 {
+            return Err(AikvError::WrongArgCount("ZLEXCOUNT".to_string()));
+        }
+
+        let key = String::from_utf8_lossy(&args[0]).to_string();
+        let min_str = String::from_utf8_lossy(&args[1]).to_string();
+        let max_str = String::from_utf8_lossy(&args[2]).to_string();
+
+        let count = if let Some(stored) = self.storage.get_value(db_index, &key)? {
+            let zset = stored.as_zset()?;
+            zset.keys()
+                .filter(|m| Self::in_lex_range(m, &min_str, &max_str))
+                .count()
+        } else {
+            0
+        };
+
+        Ok(RespValue::Integer(count as i64))
+    }
+
+    /// Check if a member is within a lexicographical range
+    fn in_lex_range(member: &[u8], min: &str, max: &str) -> bool {
+        let member_str = String::from_utf8_lossy(member);
+
+        // Parse min bound
+        let min_ok = if min == "-" {
+            true
+        } else if min.starts_with('[') {
+            member_str.as_ref() >= &min[1..]
+        } else if min.starts_with('(') {
+            member_str.as_ref() > &min[1..]
+        } else {
+            return false;
+        };
+
+        // Parse max bound
+        let max_ok = if max == "+" {
+            true
+        } else if max.starts_with('[') {
+            member_str.as_ref() <= &max[1..]
+        } else if max.starts_with('(') {
+            member_str.as_ref() < &max[1..]
+        } else {
+            return false;
+        };
+
+        min_ok && max_ok
+    }
+
+    /// Simple glob pattern matching for ZSCAN
+    fn glob_match(pattern: &str, text: &str) -> bool {
+        let mut pattern_chars = pattern.chars().peekable();
+        let mut text_chars = text.chars().peekable();
+
+        while let Some(p) = pattern_chars.next() {
+            match p {
+                '*' => {
+                    while pattern_chars.peek() == Some(&'*') {
+                        pattern_chars.next();
+                    }
+                    if pattern_chars.peek().is_none() {
+                        return true;
+                    }
+                    let remaining_pattern: String = pattern_chars.collect();
+                    while text_chars.peek().is_some() {
+                        let remaining_text: String = text_chars.clone().collect();
+                        if Self::glob_match(&remaining_pattern, &remaining_text) {
+                            return true;
+                        }
+                        text_chars.next();
+                    }
+                    return Self::glob_match(&remaining_pattern, "");
+                }
+                '?' => {
+                    if text_chars.next().is_none() {
+                        return false;
+                    }
+                }
+                c => {
+                    if text_chars.next() != Some(c) {
+                        return false;
+                    }
+                }
+            }
+        }
+        text_chars.peek().is_none()
+    }
 }

@@ -364,6 +364,668 @@ redis> GET mykey
 
 ---
 
+### INCR
+
+将存储的数字值加一。如果键不存在，会在操作前将其设置为 0。
+
+**语法:**
+```
+INCR key
+```
+
+**返回值:**
+- 操作后的值
+
+**示例:**
+```bash
+redis> SET counter "100"
+OK
+redis> INCR counter
+(integer) 101
+redis> INCR counter
+(integer) 102
+```
+
+**时间复杂度:** O(1)
+
+---
+
+### DECR
+
+将存储的数字值减一。如果键不存在，会在操作前将其设置为 0。
+
+**语法:**
+```
+DECR key
+```
+
+**返回值:**
+- 操作后的值
+
+**示例:**
+```bash
+redis> SET counter "100"
+OK
+redis> DECR counter
+(integer) 99
+```
+
+**时间复杂度:** O(1)
+
+---
+
+### INCRBY
+
+将存储的数字值加上指定的整数增量。
+
+**语法:**
+```
+INCRBY key increment
+```
+
+**参数:**
+- `key`: 键名
+- `increment`: 增量值（整数）
+
+**返回值:**
+- 操作后的值
+
+**示例:**
+```bash
+redis> SET counter "10"
+OK
+redis> INCRBY counter 5
+(integer) 15
+```
+
+**时间复杂度:** O(1)
+
+---
+
+### DECRBY
+
+将存储的数字值减去指定的整数减量。
+
+**语法:**
+```
+DECRBY key decrement
+```
+
+**参数:**
+- `key`: 键名
+- `decrement`: 减量值（整数）
+
+**返回值:**
+- 操作后的值
+
+**示例:**
+```bash
+redis> SET counter "10"
+OK
+redis> DECRBY counter 3
+(integer) 7
+```
+
+**时间复杂度:** O(1)
+
+---
+
+### INCRBYFLOAT
+
+将存储的数字值加上指定的浮点增量。
+
+**语法:**
+```
+INCRBYFLOAT key increment
+```
+
+**参数:**
+- `key`: 键名
+- `increment`: 增量值（浮点数）
+
+**返回值:**
+- 操作后的值（字符串形式）
+
+**示例:**
+```bash
+redis> SET value "10.5"
+OK
+redis> INCRBYFLOAT value 0.1
+"10.6"
+redis> INCRBYFLOAT value -5.2
+"5.4"
+```
+
+**时间复杂度:** O(1)
+
+---
+
+### GETRANGE
+
+获取存储在键中的字符串值的子字符串。
+
+**语法:**
+```
+GETRANGE key start end
+```
+
+**参数:**
+- `key`: 键名
+- `start`: 起始位置（支持负索引）
+- `end`: 结束位置（支持负索引）
+
+**返回值:**
+- 子字符串
+
+**示例:**
+```bash
+redis> SET mykey "Hello World"
+OK
+redis> GETRANGE mykey 0 4
+"Hello"
+redis> GETRANGE mykey -5 -1
+"World"
+```
+
+**时间复杂度:** O(N)，其中 N 是返回字符串的长度
+
+---
+
+### SETRANGE
+
+从指定偏移量开始覆盖存储在键中的字符串值。
+
+**语法:**
+```
+SETRANGE key offset value
+```
+
+**参数:**
+- `key`: 键名
+- `offset`: 偏移量
+- `value`: 要覆盖的值
+
+**返回值:**
+- 修改后字符串的长度
+
+**示例:**
+```bash
+redis> SET mykey "Hello World"
+OK
+redis> SETRANGE mykey 6 "Redis"
+(integer) 11
+redis> GET mykey
+"Hello Redis"
+```
+
+**时间复杂度:** O(1)
+
+---
+
+### GETEX
+
+获取键的值，并可选地设置其过期时间。
+
+**语法:**
+```
+GETEX key [EX seconds | PX milliseconds | EXAT unix-time | PXAT unix-time-ms | PERSIST]
+```
+
+**参数:**
+- `key`: 键名
+- `EX seconds`: 设置过期时间（秒）
+- `PX milliseconds`: 设置过期时间（毫秒）
+- `EXAT unix-time`: 设置过期的 Unix 时间戳（秒）
+- `PXAT unix-time-ms`: 设置过期的 Unix 时间戳（毫秒）
+- `PERSIST`: 移除过期时间
+
+**返回值:**
+- 键的值，如果键不存在则返回 nil
+
+**示例:**
+```bash
+redis> SET mykey "Hello"
+OK
+redis> GETEX mykey EX 60
+"Hello"
+```
+
+**时间复杂度:** O(1)
+
+---
+
+### GETDEL
+
+获取键的值并删除该键。
+
+**语法:**
+```
+GETDEL key
+```
+
+**返回值:**
+- 键的值，如果键不存在则返回 nil
+
+**示例:**
+```bash
+redis> SET mykey "Hello"
+OK
+redis> GETDEL mykey
+"Hello"
+redis> GET mykey
+(nil)
+```
+
+**时间复杂度:** O(1)
+
+---
+
+### SETNX
+
+仅当键不存在时设置键的值。
+
+**语法:**
+```
+SETNX key value
+```
+
+**返回值:**
+- 1: 键被设置
+- 0: 键未被设置（键已存在）
+
+**示例:**
+```bash
+redis> SETNX mykey "Hello"
+(integer) 1
+redis> SETNX mykey "World"
+(integer) 0
+redis> GET mykey
+"Hello"
+```
+
+**时间复杂度:** O(1)
+
+---
+
+### SETEX
+
+设置键的值并指定过期时间（秒）。
+
+**语法:**
+```
+SETEX key seconds value
+```
+
+**参数:**
+- `key`: 键名
+- `seconds`: 过期时间（秒）
+- `value`: 值
+
+**返回值:**
+- OK
+
+**示例:**
+```bash
+redis> SETEX mykey 10 "Hello"
+OK
+redis> TTL mykey
+(integer) 10
+```
+
+**时间复杂度:** O(1)
+
+---
+
+### PSETEX
+
+设置键的值并指定过期时间（毫秒）。
+
+**语法:**
+```
+PSETEX key milliseconds value
+```
+
+**参数:**
+- `key`: 键名
+- `milliseconds`: 过期时间（毫秒）
+- `value`: 值
+
+**返回值:**
+- OK
+
+**示例:**
+```bash
+redis> PSETEX mykey 10000 "Hello"
+OK
+redis> PTTL mykey
+(integer) 10000
+```
+
+**时间复杂度:** O(1)
+
+---
+
+## List 命令扩展
+
+### LPOS
+
+返回列表中匹配元素的索引。
+
+**语法:**
+```
+LPOS key element [RANK rank] [COUNT num-matches] [MAXLEN len]
+```
+
+**参数:**
+- `key`: 键名
+- `element`: 要查找的元素
+- `RANK rank`: 指定返回第几个匹配（正数从头开始，负数从尾开始）
+- `COUNT num-matches`: 返回的匹配数量（0 表示全部）
+- `MAXLEN len`: 扫描的最大元素数量
+
+**返回值:**
+- 不带 COUNT: 返回第一个匹配的索引，如果没找到返回 nil
+- 带 COUNT: 返回匹配索引的数组
+
+**示例:**
+```bash
+redis> RPUSH mylist "a" "b" "c" "b" "d" "b"
+(integer) 6
+redis> LPOS mylist "b"
+(integer) 1
+redis> LPOS mylist "b" RANK 2
+(integer) 3
+redis> LPOS mylist "b" COUNT 0
+1) (integer) 1
+2) (integer) 3
+3) (integer) 5
+```
+
+**时间复杂度:** O(N)
+
+---
+
+## Set 命令扩展
+
+### SSCAN
+
+增量迭代集合中的成员。
+
+**语法:**
+```
+SSCAN key cursor [MATCH pattern] [COUNT count]
+```
+
+**参数:**
+- `key`: 键名
+- `cursor`: 游标（从 0 开始）
+- `MATCH pattern`: 匹配模式
+- `COUNT count`: 每次迭代返回的元素数量提示
+
+**返回值:**
+- 包含两个元素的数组：下一个游标和成员数组
+
+**示例:**
+```bash
+redis> SADD myset "member1" "member2" "member3"
+(integer) 3
+redis> SSCAN myset 0
+1) "0"
+2) 1) "member1"
+   2) "member2"
+   3) "member3"
+redis> SSCAN myset 0 MATCH "member*"
+1) "0"
+2) 1) "member1"
+   2) "member2"
+   3) "member3"
+```
+
+**时间复杂度:** O(1) 每次调用，O(N) 完整迭代
+
+---
+
+### SMOVE
+
+将成员从一个集合移动到另一个集合。
+
+**语法:**
+```
+SMOVE source destination member
+```
+
+**参数:**
+- `source`: 源集合
+- `destination`: 目标集合
+- `member`: 要移动的成员
+
+**返回值:**
+- 1: 成员被成功移动
+- 0: 成员不在源集合中
+
+**示例:**
+```bash
+redis> SADD src "a" "b" "c"
+(integer) 3
+redis> SADD dst "x" "y"
+(integer) 2
+redis> SMOVE src dst "b"
+(integer) 1
+redis> SMEMBERS src
+1) "a"
+2) "c"
+redis> SMEMBERS dst
+1) "b"
+2) "x"
+3) "y"
+```
+
+**时间复杂度:** O(1)
+
+---
+
+## Sorted Set 命令扩展
+
+### ZSCAN
+
+增量迭代有序集合中的成员和分数。
+
+**语法:**
+```
+ZSCAN key cursor [MATCH pattern] [COUNT count]
+```
+
+**参数:**
+- `key`: 键名
+- `cursor`: 游标（从 0 开始）
+- `MATCH pattern`: 匹配模式
+- `COUNT count`: 每次迭代返回的元素数量提示
+
+**返回值:**
+- 包含两个元素的数组：下一个游标和成员-分数数组
+
+**示例:**
+```bash
+redis> ZADD myzset 1 "one" 2 "two" 3 "three"
+(integer) 3
+redis> ZSCAN myzset 0
+1) "0"
+2) 1) "one"
+   2) "1"
+   3) "two"
+   4) "2"
+   5) "three"
+   6) "3"
+```
+
+**时间复杂度:** O(1) 每次调用，O(N) 完整迭代
+
+---
+
+### ZPOPMIN
+
+移除并返回有序集合中分数最低的成员。
+
+**语法:**
+```
+ZPOPMIN key [count]
+```
+
+**参数:**
+- `key`: 键名
+- `count`: 返回的成员数量（可选，默认 1）
+
+**返回值:**
+- 成员和分数的数组
+
+**示例:**
+```bash
+redis> ZADD myzset 1 "one" 2 "two" 3 "three"
+(integer) 3
+redis> ZPOPMIN myzset
+1) "one"
+2) "1"
+redis> ZPOPMIN myzset 2
+1) "two"
+2) "2"
+3) "three"
+4) "3"
+```
+
+**时间复杂度:** O(log(N)*M)，其中 N 是有序集合的大小，M 是弹出的成员数量
+
+---
+
+### ZPOPMAX
+
+移除并返回有序集合中分数最高的成员。
+
+**语法:**
+```
+ZPOPMAX key [count]
+```
+
+**参数:**
+- `key`: 键名
+- `count`: 返回的成员数量（可选，默认 1）
+
+**返回值:**
+- 成员和分数的数组
+
+**示例:**
+```bash
+redis> ZADD myzset 1 "one" 2 "two" 3 "three"
+(integer) 3
+redis> ZPOPMAX myzset
+1) "three"
+2) "3"
+```
+
+**时间复杂度:** O(log(N)*M)，其中 N 是有序集合的大小，M 是弹出的成员数量
+
+---
+
+### ZRANGEBYLEX
+
+按字典序范围返回有序集合中的成员（需要所有成员具有相同分数）。
+
+**语法:**
+```
+ZRANGEBYLEX key min max [LIMIT offset count]
+```
+
+**参数:**
+- `key`: 键名
+- `min`: 最小值（`-` 表示负无穷，`[value` 包含，`(value` 不包含）
+- `max`: 最大值（`+` 表示正无穷，`[value` 包含，`(value` 不包含）
+- `LIMIT offset count`: 分页选项
+
+**返回值:**
+- 成员数组
+
+**示例:**
+```bash
+redis> ZADD myzset 0 "a" 0 "b" 0 "c" 0 "d" 0 "e"
+(integer) 5
+redis> ZRANGEBYLEX myzset [b [d
+1) "b"
+2) "c"
+3) "d"
+redis> ZRANGEBYLEX myzset - +
+1) "a"
+2) "b"
+3) "c"
+4) "d"
+5) "e"
+```
+
+**时间复杂度:** O(log(N)+M)，其中 N 是有序集合的大小，M 是返回的成员数量
+
+---
+
+### ZREVRANGEBYLEX
+
+按字典序逆序范围返回有序集合中的成员。
+
+**语法:**
+```
+ZREVRANGEBYLEX key max min [LIMIT offset count]
+```
+
+**参数:**
+- `key`: 键名
+- `max`: 最大值
+- `min`: 最小值
+- `LIMIT offset count`: 分页选项
+
+**返回值:**
+- 成员数组（逆序）
+
+**示例:**
+```bash
+redis> ZADD myzset 0 "a" 0 "b" 0 "c" 0 "d" 0 "e"
+(integer) 5
+redis> ZREVRANGEBYLEX myzset [d [b
+1) "d"
+2) "c"
+3) "b"
+```
+
+**时间复杂度:** O(log(N)+M)
+
+---
+
+### ZLEXCOUNT
+
+返回有序集合中指定字典序范围内的成员数量。
+
+**语法:**
+```
+ZLEXCOUNT key min max
+```
+
+**参数:**
+- `key`: 键名
+- `min`: 最小值
+- `max`: 最大值
+
+**返回值:**
+- 范围内的成员数量
+
+**示例:**
+```bash
+redis> ZADD myzset 0 "a" 0 "b" 0 "c" 0 "d" 0 "e"
+(integer) 5
+redis> ZLEXCOUNT myzset [b [d
+(integer) 3
+redis> ZLEXCOUNT myzset - +
+(integer) 5
+```
+
+**时间复杂度:** O(log(N))
+
+---
+
 ## JSON 命令
 
 JSON 命令允许在 Redis 中存储、更新和检索 JSON 值。
