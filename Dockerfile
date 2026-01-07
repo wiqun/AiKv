@@ -22,7 +22,8 @@
 # ------------------------------------------------------------
 # Stage 1: Builder - Compile the Rust application
 # ------------------------------------------------------------
-FROM rust:1.82-bookworm AS builder
+FROM rust:1.91-bookworm AS builder
+# Use Rust 1.91 which includes a newer Cargo that supports unstable features like edition2024
 
 # Build argument for enabling features (e.g., "cluster" for cluster support)
 ARG FEATURES=""
