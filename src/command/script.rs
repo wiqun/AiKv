@@ -390,6 +390,13 @@ impl ScriptTransaction {
         }
 
         // Commit complex type operations individually
+        // Note: Complex type operations are committed one by one because the current
+        // write_batch API only supports string operations. While individual commits
+        // are not strictly atomic across types, the key-level locking mechanism
+        // ensures that no other script can observe partial state during commit.
+        // A crash during commit could result in partial writes, but this is
+        // acceptable for the current use case. Future versions may implement
+        // a unified batch commit for all types.
         for (key, op) in complex_ops {
             match op {
                 ExtendedBatchOp::SetList(list) => {
@@ -1499,7 +1506,9 @@ impl ScriptCommands {
         let count = if args.len() > 1 {
             String::from_utf8_lossy(&args[1])
                 .parse::<usize>()
-                .unwrap_or(1)
+                .map_err(|_| {
+                    AikvError::InvalidArgument("count is not a valid integer".to_string())
+                })?
         } else {
             1
         };
@@ -1558,7 +1567,9 @@ impl ScriptCommands {
         let count = if args.len() > 1 {
             String::from_utf8_lossy(&args[1])
                 .parse::<usize>()
-                .unwrap_or(1)
+                .map_err(|_| {
+                    AikvError::InvalidArgument("count is not a valid integer".to_string())
+                })?
         } else {
             1
         };

@@ -458,6 +458,7 @@ Current limitations:
 - No timeout mechanism for long-running scripts
 - SCRIPT KILL is not functional in the current implementation
 - No support for script debugging
+- Complex type operations (Hash, List, Set, ZSet) are committed individually, not atomically across types. Key-level locking ensures no other script can observe partial state during normal operation, but a crash during commit could result in partial writes.
 
 ## Performance Considerations
 
