@@ -2,7 +2,7 @@
 
 ## 项目概述
 
-AiKv 是基于 [AiDb v0.6.1](https://github.com/Genuineh/AiDb) 的 Redis 协议兼容层实现。本项目旨在提供一个高性能、轻量级的键值存储服务，同时兼容 Redis 协议，使得现有的 Redis 客户端可以无缝连接。
+AiKv 是基于 [AiDb v0.6.1](https://github.com/wiqun/AiDb) 的 Redis 协议兼容层实现。本项目旨在提供一个高性能、轻量级的键值存储服务，同时兼容 Redis 协议，使得现有的 Redis 客户端可以无缝连接。
 
 **目标**: 发布全球第一个 100% Redis Cluster 协议兼容 + 完全 Rust 原生 + 基于 Multi-Raft 的生产级分布式 KV 引擎 (v1.0.0 - 2026.03.31)
 
@@ -181,7 +181,7 @@ pub enum RespValue {
 #### AiDb 集成方式
 ```toml
 [dependencies]
-aidb = { git = "https://github.com/Genuineh/AiDb", tag = "v0.1.0" }
+aidb = { git = "https://github.com/wiqun/AiDb", tag = "v0.1.0" }
 ```
 
 ### 阶段 4: String 命令实现 (第 6-7 天)
@@ -372,7 +372,7 @@ redis-benchmark -h 127.0.0.1 -p 6379 -t set,get -n 100000 -q
 - [Redis Protocol Specification](https://redis.io/docs/reference/protocol-spec/)
 - [Redis Commands](https://redis.io/commands/)
 - [RedisJSON](https://redis.io/docs/stack/json/)
-- [AiDb Repository](https://github.com/Genuineh/AiDb)
+- [AiDb Repository](https://github.com/wiqun/AiDb)
 - [Tokio Documentation](https://tokio.rs/)
 - [Rust Async Book](https://rust-lang.github.io/async-book/)
 

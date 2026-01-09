@@ -61,7 +61,7 @@ default = []
 cluster = ["aidb/raft-cluster"]
 
 [dependencies]
-aidb = { git = "https://github.com/Genuineh/AiDb", tag = "v0.5.2" }
+aidb = { git = "https://github.com/wiqun/AiDb", tag = "v0.5.2" }
 ```
 
 使用时启用 feature:
@@ -660,7 +660,7 @@ enum RedirectAction {
 ## 📚 相关文档
 
 - [TODO.md](../TODO.md) - 详细实现计划
-- [AiDb GitHub](https://github.com/Genuineh/AiDb) - AiDb 源码仓库
+- [AiDb GitHub](https://github.com/wiqun/AiDb) - AiDb 源码仓库
 
 ---
 

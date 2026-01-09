@@ -325,8 +325,8 @@ async fn test_cluster_meet_metadata_sync() {
 
 ## 📚 参考文档
 
-- [AiDb MULTI_RAFT_API_REFERENCE.md](https://github.com/Genuineh/AiDb/blob/v0.5.1/docs/MULTI_RAFT_API_REFERENCE.md)
-- [AiDb MULTI_RAFT_QUICKSTART.md](https://github.com/Genuineh/AiDb/blob/v0.5.1/docs/MULTI_RAFT_QUICKSTART.md)
+- [AiDb MULTI_RAFT_API_REFERENCE.md](https://github.com/wiqun/AiDb/blob/v0.5.1/docs/MULTI_RAFT_API_REFERENCE.md)
+- [AiDb MULTI_RAFT_QUICKSTART.md](https://github.com/wiqun/AiDb/blob/v0.5.1/docs/MULTI_RAFT_QUICKSTART.md)
 - [AIDB_V051_UPGRADE.md](./AIDB_V051_UPGRADE.md)
 
 ---

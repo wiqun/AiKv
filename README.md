@@ -5,7 +5,7 @@
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)]()
 [![Tests](https://img.shields.io/badge/tests-177%20passed-brightgreen.svg)]()
 
-AiKv 是一个基于 [AiDb v0.5.1](https://github.com/Genuineh/AiDb) 的高性能 Redis 协议兼容层实现，使用 Rust 编写。它提供了一个轻量级、高性能的键值存储服务，支持 Redis RESP 协议，使得现有的 Redis 客户端可以无缝连接。
+AiKv 是一个基于 [AiDb v0.5.1](https://github.com/wiqun/AiDb) 的高性能 Redis 协议兼容层实现，使用 Rust 编写。它提供了一个轻量级、高性能的键值存储服务，支持 Redis RESP 协议，使得现有的 Redis 客户端可以无缝连接。
 
 **🎯 目标**: 发布全球第一个 100% Redis Cluster 协议兼容 + 完全 Rust 原生 + 基于 Multi-Raft 的生产级分布式 KV 引擎 (**v1.0.0 - 2026.03.31**)
 
@@ -630,7 +630,7 @@ cargo audit
 
 ## 🙏 致谢
 
-- [AiDb](https://github.com/Genuineh/AiDb) - 核心存储引擎和 Multi-Raft 支持
+- [AiDb](https://github.com/wiqun/AiDb) - 核心存储引擎和 Multi-Raft 支持
 - [Tokio](https://tokio.rs/) - 异步运行时
 - [Redis](https://redis.io/) - 协议规范和设计灵感
 - [openraft](https://github.com/datafuselabs/openraft) - Raft 共识算法
