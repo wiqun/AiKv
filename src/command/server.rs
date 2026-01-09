@@ -977,7 +977,11 @@ impl ServerCommands {
         Self::with_storage_port_and_cluster(StorageEngine::new_memory(16), port, cluster_enabled)
     }
 
-    pub fn with_storage_port_and_cluster(storage: StorageEngine, port: u16, cluster_enabled: bool) -> Self {
+    pub fn with_storage_port_and_cluster(
+        storage: StorageEngine,
+        port: u16,
+        cluster_enabled: bool,
+    ) -> Self {
         let mut default_config = HashMap::new();
         default_config.insert("server".to_string(), "aikv".to_string());
         default_config.insert("version".to_string(), AIKV_VERSION.to_string());

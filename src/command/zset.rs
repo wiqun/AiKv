@@ -336,13 +336,17 @@ impl ZSetCommands {
                     if i + 2 >= args.len() {
                         return Err(AikvError::InvalidArgument("ERR syntax error".to_string()));
                     }
-                    offset = String::from_utf8_lossy(&args[i + 1])
-                        .parse()
-                        .map_err(|_| AikvError::InvalidArgument("ERR value is not an integer".to_string()))?;
+                    offset = String::from_utf8_lossy(&args[i + 1]).parse().map_err(|_| {
+                        AikvError::InvalidArgument("ERR value is not an integer".to_string())
+                    })?;
                     count = Some(
                         String::from_utf8_lossy(&args[i + 2])
                             .parse::<i64>()
-                            .map_err(|_| AikvError::InvalidArgument("ERR value is not an integer".to_string()))?,
+                            .map_err(|_| {
+                                AikvError::InvalidArgument(
+                                    "ERR value is not an integer".to_string(),
+                                )
+                            })?,
                     );
                     i += 3;
                 }
@@ -416,13 +420,17 @@ impl ZSetCommands {
                     if i + 2 >= args.len() {
                         return Err(AikvError::InvalidArgument("ERR syntax error".to_string()));
                     }
-                    offset = String::from_utf8_lossy(&args[i + 1])
-                        .parse()
-                        .map_err(|_| AikvError::InvalidArgument("ERR value is not an integer".to_string()))?;
+                    offset = String::from_utf8_lossy(&args[i + 1]).parse().map_err(|_| {
+                        AikvError::InvalidArgument("ERR value is not an integer".to_string())
+                    })?;
                     count = Some(
                         String::from_utf8_lossy(&args[i + 2])
                             .parse::<i64>()
-                            .map_err(|_| AikvError::InvalidArgument("ERR value is not an integer".to_string()))?,
+                            .map_err(|_| {
+                                AikvError::InvalidArgument(
+                                    "ERR value is not an integer".to_string(),
+                                )
+                            })?,
                     );
                     i += 3;
                 }
@@ -506,7 +514,9 @@ impl ZSetCommands {
         // Migrated: Logic moved from storage layer to command layer
         let count = if let Some(stored) = self.storage.get_value(db_index, &key)? {
             let zset = stored.as_zset()?;
-            zset.values().filter(|s| Self::score_in_range(**s, &min_bound, &max_bound)).count()
+            zset.values()
+                .filter(|s| Self::score_in_range(**s, &min_bound, &max_bound))
+                .count()
         } else {
             0
         };
@@ -996,17 +1006,20 @@ impl ZSetCommands {
         if s == "+inf" {
             return Ok(ScoreBound::PositiveInfinity);
         }
-        
+
         if let Some(stripped) = s.strip_prefix('(') {
-            let score = stripped.parse::<f64>()
+            let score = stripped
+                .parse::<f64>()
                 .map_err(|_| AikvError::InvalidArgument("invalid score".to_string()))?;
             Ok(ScoreBound::Exclusive(score))
         } else if let Some(stripped) = s.strip_prefix('[') {
-            let score = stripped.parse::<f64>()
+            let score = stripped
+                .parse::<f64>()
                 .map_err(|_| AikvError::InvalidArgument("invalid score".to_string()))?;
             Ok(ScoreBound::Inclusive(score))
         } else {
-            let score = s.parse::<f64>()
+            let score = s
+                .parse::<f64>()
                 .map_err(|_| AikvError::InvalidArgument("invalid score".to_string()))?;
             Ok(ScoreBound::Inclusive(score))
         }
@@ -1020,14 +1033,14 @@ impl ZSetCommands {
             ScoreBound::Exclusive(min_score) => score > *min_score,
             ScoreBound::PositiveInfinity => false,
         };
-        
+
         let max_ok = match max {
             ScoreBound::PositiveInfinity => true,
             ScoreBound::Inclusive(max_score) => score <= *max_score,
             ScoreBound::Exclusive(max_score) => score < *max_score,
             ScoreBound::NegativeInfinity => false,
         };
-        
+
         min_ok && max_ok
     }
 }

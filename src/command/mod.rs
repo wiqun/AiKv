@@ -57,7 +57,11 @@ impl CommandExecutor {
             json_commands: JsonCommands::new(storage.clone()),
             database_commands: DatabaseCommands::new(storage.clone()),
             key_commands: KeyCommands::new(storage.clone()),
-            server_commands: ServerCommands::with_storage_port_and_cluster(storage.clone(), port, cluster_enabled),
+            server_commands: ServerCommands::with_storage_port_and_cluster(
+                storage.clone(),
+                port,
+                cluster_enabled,
+            ),
             script_commands: ScriptCommands::new(storage.clone()),
             list_commands: ListCommands::new(storage.clone()),
             hash_commands: HashCommands::new(storage.clone()),

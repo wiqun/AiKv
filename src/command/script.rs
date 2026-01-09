@@ -2160,9 +2160,9 @@ impl ScriptCommands {
             return Err(AikvError::WrongArgCount("EXPIRE".to_string()));
         }
         let key = String::from_utf8_lossy(&args[0]).to_string();
-        let seconds: i64 = String::from_utf8_lossy(&args[1])
-            .parse()
-            .map_err(|_| AikvError::InvalidArgument("seconds is not a valid integer".to_string()))?;
+        let seconds: i64 = String::from_utf8_lossy(&args[1]).parse().map_err(|_| {
+            AikvError::InvalidArgument("seconds is not a valid integer".to_string())
+        })?;
 
         let txn_guard = transaction
             .read()

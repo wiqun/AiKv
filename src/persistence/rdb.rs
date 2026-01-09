@@ -337,21 +337,32 @@ pub fn save_rdb<P: AsRef<Path>>(path: P, databases: &[DatabaseData]) -> Result<(
 
 /// Save StoredValue database to RDB file
 /// This converts StoredValue data to DatabaseData format for RDB compatibility
-pub fn save_stored_value_rdb<P: AsRef<Path>>(path: P, databases: &[HashMap<String, StoredValue>]) -> Result<()> {
+pub fn save_stored_value_rdb<P: AsRef<Path>>(
+    path: P,
+    databases: &[HashMap<String, StoredValue>],
+) -> Result<()> {
     // Convert StoredValue databases to DatabaseData format
-    let rdb_databases: Result<Vec<DatabaseData>> = databases.iter().map(|db| {
-        let mut rdb_db = HashMap::new();
-        for (key, stored_value) in db {
-            if !stored_value.is_expired() {
-                // For RDB compatibility, we serialize the StoredValue using bincode
-                // This allows us to store complex data types in RDB format
-                let serialized = bincode::serialize(&stored_value.to_serializable())
-                    .map_err(|e| AikvError::Persistence(format!("Failed to serialize value: {}", e)))?;
-                rdb_db.insert(key.clone(), (Bytes::from(serialized), stored_value.expires_at()));
+    let rdb_databases: Result<Vec<DatabaseData>> = databases
+        .iter()
+        .map(|db| {
+            let mut rdb_db = HashMap::new();
+            for (key, stored_value) in db {
+                if !stored_value.is_expired() {
+                    // For RDB compatibility, we serialize the StoredValue using bincode
+                    // This allows us to store complex data types in RDB format
+                    let serialized =
+                        bincode::serialize(&stored_value.to_serializable()).map_err(|e| {
+                            AikvError::Persistence(format!("Failed to serialize value: {}", e))
+                        })?;
+                    rdb_db.insert(
+                        key.clone(),
+                        (Bytes::from(serialized), stored_value.expires_at()),
+                    );
+                }
             }
-        }
-        Ok(rdb_db)
-    }).collect();
+            Ok(rdb_db)
+        })
+        .collect();
 
     let rdb_databases = rdb_databases?;
     save_rdb(path, &rdb_databases)
@@ -372,26 +383,29 @@ pub fn load_stored_value_rdb<P: AsRef<Path>>(path: P) -> Result<Vec<HashMap<Stri
     let rdb_databases = load_rdb(path)?;
 
     // Convert DatabaseData back to StoredValue format
-    let stored_databases: Vec<HashMap<String, StoredValue>> = rdb_databases.into_iter().map(|rdb_db| {
-        let mut stored_db = HashMap::new();
-        for (key, (data, expire_ms)) in rdb_db {
-            // Try to deserialize as StoredValue first (new format)
-            match bincode::deserialize::<SerializableStoredValue>(&data) {
-                Ok(serializable) => {
-                    let mut stored_value = StoredValue::from_serializable(serializable);
-                    stored_value.set_expiration(expire_ms);
-                    stored_db.insert(key, stored_value);
-                }
-                Err(_) => {
-                    // Fall back to treating as raw bytes (legacy string-only format)
-                    let mut stored_value = StoredValue::new_string(data);
-                    stored_value.set_expiration(expire_ms);
-                    stored_db.insert(key, stored_value);
+    let stored_databases: Vec<HashMap<String, StoredValue>> = rdb_databases
+        .into_iter()
+        .map(|rdb_db| {
+            let mut stored_db = HashMap::new();
+            for (key, (data, expire_ms)) in rdb_db {
+                // Try to deserialize as StoredValue first (new format)
+                match bincode::deserialize::<SerializableStoredValue>(&data) {
+                    Ok(serializable) => {
+                        let mut stored_value = StoredValue::from_serializable(serializable);
+                        stored_value.set_expiration(expire_ms);
+                        stored_db.insert(key, stored_value);
+                    }
+                    Err(_) => {
+                        // Fall back to treating as raw bytes (legacy string-only format)
+                        let mut stored_value = StoredValue::new_string(data);
+                        stored_value.set_expiration(expire_ms);
+                        stored_db.insert(key, stored_value);
+                    }
                 }
             }
-        }
-        stored_db
-    }).collect();
+            stored_db
+        })
+        .collect();
 
     Ok(stored_databases)
 }

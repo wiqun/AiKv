@@ -644,13 +644,21 @@ impl StringCommands {
         let key = String::from_utf8_lossy(&args[0]).to_string();
         let offset = String::from_utf8_lossy(&args[1])
             .parse::<usize>()
-            .map_err(|_| AikvError::InvalidArgument("ERR bit offset is not an integer or out of range".to_string()))?;
+            .map_err(|_| {
+                AikvError::InvalidArgument(
+                    "ERR bit offset is not an integer or out of range".to_string(),
+                )
+            })?;
         let bit_value = String::from_utf8_lossy(&args[2])
             .parse::<u8>()
-            .map_err(|_| AikvError::InvalidArgument("ERR bit is not an integer or out of range".to_string()))?;
+            .map_err(|_| {
+                AikvError::InvalidArgument("ERR bit is not an integer or out of range".to_string())
+            })?;
 
         if bit_value != 0 && bit_value != 1 {
-            return Err(AikvError::InvalidArgument("ERR bit is not an integer or out of range".to_string()));
+            return Err(AikvError::InvalidArgument(
+                "ERR bit is not an integer or out of range".to_string(),
+            ));
         }
 
         // Get current value or create empty string
@@ -678,7 +686,8 @@ impl StringCommands {
             current[byte_index] &= !(1 << (7 - bit_index));
         }
 
-        self.storage.set_in_db(current_db, key, Bytes::from(current))?;
+        self.storage
+            .set_in_db(current_db, key, Bytes::from(current))?;
         Ok(RespValue::integer(old_bit))
     }
 }

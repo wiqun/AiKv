@@ -439,7 +439,7 @@ impl AiDbStorageAdapter {
     // ========================================================================
 
     /// Get a value by key from a specific database
-    /// 
+    ///
     /// Uses get_value internally and extracts string bytes if the stored value is a string.
     pub fn get_from_db(&self, db_index: usize, key: &str) -> Result<Option<Bytes>> {
         // Use get_value which properly deserializes bincode data
@@ -461,7 +461,7 @@ impl AiDbStorageAdapter {
     }
 
     /// Set a value for a key in a specific database
-    /// 
+    ///
     /// Uses set_value internally to properly serialize with bincode.
     pub fn set_in_db(&self, db_index: usize, key: String, value: Bytes) -> Result<()> {
         let stored_value = StoredValue::new_string(value);
@@ -474,7 +474,7 @@ impl AiDbStorageAdapter {
     }
 
     /// Set a value with expiration time in milliseconds
-    /// 
+    ///
     /// Uses set_value internally to properly serialize with bincode, then sets expiration.
     pub fn set_with_expiration_in_db(
         &self,
@@ -1150,19 +1150,32 @@ impl AiDbStorageAdapter {
                 }
 
                 // Get the value
-                if let Some(serialized) = db.get(key).map_err(|e| AikvError::Storage(format!("Failed to get value: {}", e)))? {
+                if let Some(serialized) = db
+                    .get(key)
+                    .map_err(|e| AikvError::Storage(format!("Failed to get value: {}", e)))?
+                {
                     // Deserialize using bincode
                     let serializable: SerializableStoredValue = bincode::deserialize(&serialized)
-                        .map_err(|e| AikvError::Storage(format!("Failed to deserialize value: {}", e)))?;
+                        .map_err(|e| {
+                        AikvError::Storage(format!("Failed to deserialize value: {}", e))
+                    })?;
                     let mut stored_value = StoredValue::from_serializable(serializable);
 
                     // Get expiration if exists
                     let expire_key = Self::expiration_key(key);
-                    if let Some(expire_bytes) = db.get(&expire_key).map_err(|e| AikvError::Storage(format!("Failed to get expiration: {}", e)))? {
+                    if let Some(expire_bytes) = db.get(&expire_key).map_err(|e| {
+                        AikvError::Storage(format!("Failed to get expiration: {}", e))
+                    })? {
                         if expire_bytes.len() == 8 {
                             let expire_at = u64::from_le_bytes([
-                                expire_bytes[0], expire_bytes[1], expire_bytes[2], expire_bytes[3],
-                                expire_bytes[4], expire_bytes[5], expire_bytes[6], expire_bytes[7],
+                                expire_bytes[0],
+                                expire_bytes[1],
+                                expire_bytes[2],
+                                expire_bytes[3],
+                                expire_bytes[4],
+                                expire_bytes[5],
+                                expire_bytes[6],
+                                expire_bytes[7],
                             ]);
                             stored_value.set_expiration(Some(expire_at));
                         }

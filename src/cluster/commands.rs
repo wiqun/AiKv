@@ -38,11 +38,11 @@ use openraft::BasicNode;
 const TOTAL_SLOTS: u16 = 16384;
 
 /// Extract the hash tag from a key.
-/// 
+///
 /// Redis Cluster implements a concept called hash tags that makes it possible
 /// to force certain keys to be stored in the same slot. If the key contains
 /// a "{...}" pattern, only the substring between { and } is hashed.
-/// 
+///
 /// The first occurrence of { and the first occurrence of } after it are used.
 /// If the key contains {} with nothing in between, the whole key is hashed.
 fn extract_hash_tag(key: &[u8]) -> &[u8] {
@@ -61,7 +61,7 @@ fn extract_hash_tag(key: &[u8]) -> &[u8] {
 }
 
 /// Calculate the slot for a key, respecting hash tags.
-/// 
+///
 /// This wraps AiDb's Router::key_to_slot but first extracts any hash tag.
 /// Redis Cluster uses hash tags to allow related keys to be stored in the same slot.
 pub fn key_to_slot_with_hash_tag(key: &[u8]) -> u16 {
