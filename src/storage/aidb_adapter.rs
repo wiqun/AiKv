@@ -416,7 +416,13 @@ impl AiDbStorageAdapter {
             let key_bytes = key.as_bytes();
             match op {
                 BatchOp::Set(value) => {
-                    batch.put(key_bytes, &value);
+                    // Serialize StoredValue into bincode format before putting into AiDb
+                    let stored = StoredValue::new_string(value);
+                    let serializable = stored.to_serializable();
+                    let serialized = bincode::serialize(&serializable).map_err(|e| {
+                        AikvError::Storage(format!("Failed to serialize value: {}", e))
+                    })?;
+                    batch.put(key_bytes, &serialized);
                 }
                 BatchOp::Delete => {
                     batch.delete(key_bytes);

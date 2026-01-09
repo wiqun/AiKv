@@ -649,7 +649,7 @@ impl ZSetCommands {
         ])))
     }
 
-    /// ZPOPMIN key [count]
+    /// ZPOPMIN key \[count\]
     /// Removes and returns members with the lowest scores in a sorted set
     pub fn zpopmin(&self, args: &[Bytes], db_index: usize) -> Result<RespValue> {
         if args.is_empty() {
@@ -705,7 +705,7 @@ impl ZSetCommands {
         }
     }
 
-    /// ZPOPMAX key [count]
+    /// ZPOPMAX key \[count\]
     /// Removes and returns members with the highest scores in a sorted set
     pub fn zpopmax(&self, args: &[Bytes], db_index: usize) -> Result<RespValue> {
         if args.is_empty() {
