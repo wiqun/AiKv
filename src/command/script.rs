@@ -2123,7 +2123,7 @@ impl ScriptCommands {
 
         if let Some(stored) = txn.get_value(storage, &key)? {
             let set = stored.as_set()?;
-            let mut members: Vec<RespValue> = set
+            let members: Vec<RespValue> = set
                 .iter()
                 .map(|m| RespValue::bulk_string(Bytes::from(m.clone())))
                 .collect();
@@ -2135,15 +2135,17 @@ impl ScriptCommands {
                 (0, Vec::new())
             };
 
-            let mut result = Vec::new();
-            result.push(RespValue::bulk_string(Bytes::from(new_cursor.to_string())));
-            result.push(RespValue::Array(Some(result_members)));
+            let result = vec![
+                RespValue::bulk_string(Bytes::from(new_cursor.to_string())),
+                RespValue::Array(Some(result_members)),
+            ];
             Ok(RespValue::Array(Some(result)))
         } else {
             // Empty set
-            let mut result = Vec::new();
-            result.push(RespValue::bulk_string(Bytes::from("0")));
-            result.push(RespValue::Array(Some(Vec::new())));
+            let result = vec![
+                RespValue::bulk_string(Bytes::from("0")),
+                RespValue::Array(Some(Vec::new())),
+            ];
             Ok(RespValue::Array(Some(result)))
         }
     }
@@ -2162,14 +2164,15 @@ impl ScriptCommands {
             .parse()
             .map_err(|_| AikvError::InvalidArgument("seconds is not a valid integer".to_string()))?;
 
-        let txn = transaction
+        let txn_guard = transaction
             .read()
             .map_err(|e| AikvError::Storage(format!("Lock error: {}", e)))?;
 
         // Check if key exists
-        if txn.exists(storage, &key)? {
-            // In a real Redis implementation, this would set an expiration time
-            // For now, we'll just return success since the key exists
+        if txn_guard.exists(storage, &key)? {
+            // Convert seconds to milliseconds and set expiration in storage
+            let expire_ms = (seconds as u64).saturating_mul(1000);
+            storage.set_expire_in_db(txn_guard.db_index, &key, expire_ms)?;
             Ok(RespValue::Integer(1))
         } else {
             Ok(RespValue::Integer(0))

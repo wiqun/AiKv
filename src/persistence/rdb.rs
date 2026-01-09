@@ -339,7 +339,7 @@ pub fn save_rdb<P: AsRef<Path>>(path: P, databases: &[DatabaseData]) -> Result<(
 /// This converts StoredValue data to DatabaseData format for RDB compatibility
 pub fn save_stored_value_rdb<P: AsRef<Path>>(path: P, databases: &[HashMap<String, StoredValue>]) -> Result<()> {
     // Convert StoredValue databases to DatabaseData format
-    let rdb_databases: Result<Vec<DatabaseData>> = databases.iter().enumerate().map(|(db_index, db)| {
+    let rdb_databases: Result<Vec<DatabaseData>> = databases.iter().map(|db| {
         let mut rdb_db = HashMap::new();
         for (key, stored_value) in db {
             if !stored_value.is_expired() {
@@ -399,7 +399,6 @@ pub fn load_stored_value_rdb<P: AsRef<Path>>(path: P) -> Result<Vec<HashMap<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
     use tempfile::NamedTempFile;
 
     #[test]
