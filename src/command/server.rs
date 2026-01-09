@@ -1,6 +1,7 @@
 use crate::error::{AikvError, Result};
 use crate::observability::{LogConfig, SlowQueryLog};
 use crate::protocol::RespValue;
+use crate::storage::StorageEngine;
 use bytes::Bytes;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -42,6 +43,7 @@ pub struct CommandInfo {
 
 /// Server command handler
 pub struct ServerCommands {
+    storage: StorageEngine,
     clients: Arc<RwLock<HashMap<usize, ClientInfo>>>,
     config: Arc<RwLock<HashMap<String, String>>>,
     start_time: Instant,
@@ -972,6 +974,14 @@ impl ServerCommands {
     }
 
     pub fn with_port_and_cluster(port: u16, cluster_enabled: bool) -> Self {
+        Self::with_storage_port_and_cluster(StorageEngine::new_memory(16), port, cluster_enabled)
+    }
+
+    pub fn with_storage_port_and_cluster(
+        storage: StorageEngine,
+        port: u16,
+        cluster_enabled: bool,
+    ) -> Self {
         let mut default_config = HashMap::new();
         default_config.insert("server".to_string(), "aikv".to_string());
         default_config.insert("version".to_string(), AIKV_VERSION.to_string());
@@ -988,6 +998,7 @@ impl ServerCommands {
             .as_secs();
 
         Self {
+            storage,
             clients: Arc::new(RwLock::new(HashMap::new())),
             config: Arc::new(RwLock::new(default_config)),
             start_time: Instant::now(),
@@ -1896,8 +1907,22 @@ impl ServerCommands {
     }
 
     /// SAVE - Synchronously save the dataset to disk
-    /// Note: This is a stub implementation. Actual persistence is handled by the storage engine.
-    pub fn save(&self, _args: &[Bytes]) -> Result<RespValue> {
+    pub fn save(&self, args: &[Bytes]) -> Result<RespValue> {
+        if !args.is_empty() {
+            return Err(AikvError::WrongArgCount("SAVE".to_string()));
+        }
+
+        // Export all databases from storage
+        let databases = self.storage.export_all_databases()?;
+
+        // Create a temporary file for the RDB dump
+        let temp_file = tempfile::NamedTempFile::new()
+            .map_err(|e| AikvError::Persistence(format!("Failed to create temp file: {}", e)))?;
+        let temp_path = temp_file.path();
+
+        // Save to RDB format
+        crate::persistence::save_stored_value_rdb(temp_path, &databases)?;
+
         // Update last save time
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1905,23 +1930,21 @@ impl ServerCommands {
             .as_secs();
         self.last_save_time.store(now, Ordering::SeqCst);
 
-        // In AiKv with memory storage, there's no actual persistence
-        // With AiDb storage, persistence is automatic via LSM-Tree
+        // For now, we save to a temporary file and don't persist it permanently
+        // In a real implementation, this would save to a configured RDB file path
         Ok(RespValue::ok())
     }
 
     /// BGSAVE - Asynchronously save the dataset to disk
-    /// Note: This is a stub implementation. Actual persistence is handled by the storage engine.
-    pub fn bgsave(&self, _args: &[Bytes]) -> Result<RespValue> {
-        // Update last save time
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        self.last_save_time.store(now, Ordering::SeqCst);
+    pub fn bgsave(&self, args: &[Bytes]) -> Result<RespValue> {
+        if !args.is_empty() {
+            return Err(AikvError::WrongArgCount("BGSAVE".to_string()));
+        }
 
-        // In AiKv, background save is simulated
-        // With AiDb storage, persistence is automatic via LSM-Tree
+        // For now, perform synchronous save (background save would require threading)
+        // In a real implementation, this would spawn a background thread
+        self.save(args)?;
+
         Ok(RespValue::simple_string("Background saving started"))
     }
 

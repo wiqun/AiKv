@@ -42,6 +42,7 @@ use crate::error::{AikvError, Result};
 use crate::storage::{SerializableStoredValue, StoredValue};
 use aidb::{Options, WriteBatch, DB};
 use bytes::Bytes;
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -415,7 +416,13 @@ impl AiDbStorageAdapter {
             let key_bytes = key.as_bytes();
             match op {
                 BatchOp::Set(value) => {
-                    batch.put(key_bytes, &value);
+                    // Serialize StoredValue into bincode format before putting into AiDb
+                    let stored = StoredValue::new_string(value);
+                    let serializable = stored.to_serializable();
+                    let serialized = bincode::serialize(&serializable).map_err(|e| {
+                        AikvError::Storage(format!("Failed to serialize value: {}", e))
+                    })?;
+                    batch.put(key_bytes, &serialized);
                 }
                 BatchOp::Delete => {
                     batch.delete(key_bytes);
@@ -438,34 +445,18 @@ impl AiDbStorageAdapter {
     // ========================================================================
 
     /// Get a value by key from a specific database
+    ///
+    /// Uses get_value internally and extracts string bytes if the stored value is a string.
     pub fn get_from_db(&self, db_index: usize, key: &str) -> Result<Option<Bytes>> {
-        if db_index >= self.databases.len() {
-            return Err(AikvError::Storage(format!(
-                "Invalid database index: {}",
-                db_index
-            )));
-        }
-
-        let db = &self.databases[db_index];
-        let key_bytes = key.as_bytes();
-
-        // Check if key is expired
-        if self.is_expired(db, key_bytes)? {
-            // Clean up expired key
-            db.delete(key_bytes)
-                .map_err(|e| AikvError::Storage(format!("Failed to delete expired key: {}", e)))?;
-            let expire_key = Self::expiration_key(key_bytes);
-            db.delete(&expire_key)
-                .map_err(|e| AikvError::Storage(format!("Failed to delete expiration: {}", e)))?;
-            return Ok(None);
-        }
-
-        // Get the actual value
-        match db
-            .get(key_bytes)
-            .map_err(|e| AikvError::Storage(format!("Failed to get value: {}", e)))?
-        {
-            Some(value) => Ok(Some(Bytes::from(value))),
+        // Use get_value which properly deserializes bincode data
+        match self.get_value(db_index, key)? {
+            Some(stored_value) => {
+                // Extract string bytes from StoredValue
+                match stored_value.as_string() {
+                    Ok(bytes) => Ok(Some(bytes.clone())),
+                    Err(_) => Ok(None), // Non-string types return None for legacy compatibility
+                }
+            }
             None => Ok(None),
         }
     }
@@ -476,18 +467,11 @@ impl AiDbStorageAdapter {
     }
 
     /// Set a value for a key in a specific database
+    ///
+    /// Uses set_value internally to properly serialize with bincode.
     pub fn set_in_db(&self, db_index: usize, key: String, value: Bytes) -> Result<()> {
-        if db_index >= self.databases.len() {
-            return Err(AikvError::Storage(format!(
-                "Invalid database index: {}",
-                db_index
-            )));
-        }
-
-        let db = &self.databases[db_index];
-        db.put(key.as_bytes(), &value)
-            .map_err(|e| AikvError::Storage(format!("Failed to put value: {}", e)))?;
-        Ok(())
+        let stored_value = StoredValue::new_string(value);
+        self.set_value(db_index, key, stored_value)
     }
 
     /// Set a value for a key (in default database 0)
@@ -496,6 +480,8 @@ impl AiDbStorageAdapter {
     }
 
     /// Set a value with expiration time in milliseconds
+    ///
+    /// Uses set_value internally to properly serialize with bincode, then sets expiration.
     pub fn set_with_expiration_in_db(
         &self,
         db_index: usize,
@@ -503,26 +489,10 @@ impl AiDbStorageAdapter {
         value: Bytes,
         expires_at: u64,
     ) -> Result<()> {
-        if db_index >= self.databases.len() {
-            return Err(AikvError::Storage(format!(
-                "Invalid database index: {}",
-                db_index
-            )));
-        }
-
-        let db = &self.databases[db_index];
-        let key_bytes = key.as_bytes();
-
-        // Set the value
-        db.put(key_bytes, &value)
-            .map_err(|e| AikvError::Storage(format!("Failed to put value: {}", e)))?;
-
-        // Set the expiration
-        let expire_key = Self::expiration_key(key_bytes);
-        db.put(&expire_key, &expires_at.to_le_bytes())
-            .map_err(|e| AikvError::Storage(format!("Failed to set expiration: {}", e)))?;
-
-        Ok(())
+        // Create a StoredValue with expiration
+        let mut stored_value = StoredValue::new_string(value);
+        stored_value.set_expiration(Some(expires_at));
+        self.set_value(db_index, key, stored_value)
     }
 
     /// Set expiration for a key in milliseconds
@@ -825,6 +795,7 @@ impl AiDbStorageAdapter {
         let mut keys = Vec::new();
 
         // Create an iterator to scan all keys
+        // Note: AiDb v0.6.2+ iterator automatically skips tombstones (deleted keys)
         let mut iter = db.iter();
 
         while iter.valid() {
@@ -1158,6 +1129,76 @@ impl AiDbStorageAdapter {
         }
 
         Ok(None)
+    }
+
+    /// Export all databases as StoredValue maps (for persistence)
+    pub fn export_all_databases(&self) -> Result<Vec<HashMap<String, StoredValue>>> {
+        let mut result = Vec::with_capacity(self.databases.len());
+
+        for db_index in 0..self.databases.len() {
+            let mut db_map = HashMap::new();
+            let db = &self.databases[db_index];
+
+            let mut iter = db.iter();
+            while iter.valid() {
+                let key = iter.key();
+
+                // Skip expiration metadata keys
+                if key.starts_with(b"__exp__:") {
+                    iter.next();
+                    continue;
+                }
+
+                // Check if expired
+                if self.is_expired(db, key)? {
+                    iter.next();
+                    continue;
+                }
+
+                // Get the value
+                if let Some(serialized) = db
+                    .get(key)
+                    .map_err(|e| AikvError::Storage(format!("Failed to get value: {}", e)))?
+                {
+                    // Deserialize using bincode
+                    let serializable: SerializableStoredValue = bincode::deserialize(&serialized)
+                        .map_err(|e| {
+                        AikvError::Storage(format!("Failed to deserialize value: {}", e))
+                    })?;
+                    let mut stored_value = StoredValue::from_serializable(serializable);
+
+                    // Get expiration if exists
+                    let expire_key = Self::expiration_key(key);
+                    if let Some(expire_bytes) = db.get(&expire_key).map_err(|e| {
+                        AikvError::Storage(format!("Failed to get expiration: {}", e))
+                    })? {
+                        if expire_bytes.len() == 8 {
+                            let expire_at = u64::from_le_bytes([
+                                expire_bytes[0],
+                                expire_bytes[1],
+                                expire_bytes[2],
+                                expire_bytes[3],
+                                expire_bytes[4],
+                                expire_bytes[5],
+                                expire_bytes[6],
+                                expire_bytes[7],
+                            ]);
+                            stored_value.set_expiration(Some(expire_at));
+                        }
+                    }
+
+                    if let Ok(key_str) = String::from_utf8(key.to_vec()) {
+                        db_map.insert(key_str, stored_value);
+                    }
+                }
+
+                iter.next();
+            }
+
+            result.push(db_map);
+        }
+
+        Ok(result)
     }
 }
 

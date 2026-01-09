@@ -57,7 +57,11 @@ impl CommandExecutor {
             json_commands: JsonCommands::new(storage.clone()),
             database_commands: DatabaseCommands::new(storage.clone()),
             key_commands: KeyCommands::new(storage.clone()),
-            server_commands: ServerCommands::with_port_and_cluster(port, cluster_enabled),
+            server_commands: ServerCommands::with_storage_port_and_cluster(
+                storage.clone(),
+                port,
+                cluster_enabled,
+            ),
             script_commands: ScriptCommands::new(storage.clone()),
             list_commands: ListCommands::new(storage.clone()),
             hash_commands: HashCommands::new(storage.clone()),
@@ -255,6 +259,12 @@ impl CommandExecutor {
                     self.check_key_routing(&args[0])?;
                 }
                 self.string_commands.psetex(args, *current_db)
+            }
+            "SETBIT" => {
+                if !args.is_empty() {
+                    self.check_key_routing(&args[0])?;
+                }
+                self.string_commands.setbit(args, *current_db)
             }
 
             // JSON commands - single key operations
@@ -979,8 +989,8 @@ impl CommandExecutor {
                 if args.len() != 2 {
                     return Err(AikvError::WrongArgCount("CLUSTER KEYSLOT".to_string()));
                 }
-                // Calculate slot even without cluster - this is a pure function
-                let slot = crate::cluster::Router::key_to_slot(&args[1]);
+                // Calculate slot even without cluster - uses hash tag extraction
+                let slot = crate::cluster::key_to_slot_with_hash_tag(&args[1]);
                 Ok(RespValue::Integer(slot as i64))
             }
             "SAVECONFIG" => Ok(RespValue::simple_string("OK")),

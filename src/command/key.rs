@@ -222,13 +222,13 @@ impl KeyCommands {
 
         let key = String::from_utf8_lossy(&args[0]).to_string();
 
-        if !self.storage.exists_in_db(current_db, &key)? {
-            return Ok(RespValue::simple_string("none"));
+        match self.storage.get_value(current_db, &key)? {
+            Some(stored_value) => {
+                let type_name = stored_value.get_type_name();
+                Ok(RespValue::simple_string(type_name))
+            }
+            None => Ok(RespValue::simple_string("none")),
         }
-
-        // For now, we only support string type
-        // In future, we'll need to track the actual type
-        Ok(RespValue::simple_string("string"))
     }
 
     /// COPY source destination \[DB destination-db\] \[REPLACE\]

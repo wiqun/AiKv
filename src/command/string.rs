@@ -633,6 +633,63 @@ impl StringCommands {
             .set_with_expiration_in_db(current_db, key, value, expire_at)?;
         Ok(RespValue::ok())
     }
+
+    /// SETBIT key offset value
+    /// Sets or clears the bit at offset in the string value stored at key
+    pub fn setbit(&self, args: &[Bytes], current_db: usize) -> Result<RespValue> {
+        if args.len() != 3 {
+            return Err(AikvError::WrongArgCount("SETBIT".to_string()));
+        }
+
+        let key = String::from_utf8_lossy(&args[0]).to_string();
+        let offset = String::from_utf8_lossy(&args[1])
+            .parse::<usize>()
+            .map_err(|_| {
+                AikvError::InvalidArgument(
+                    "ERR bit offset is not an integer or out of range".to_string(),
+                )
+            })?;
+        let bit_value = String::from_utf8_lossy(&args[2])
+            .parse::<u8>()
+            .map_err(|_| {
+                AikvError::InvalidArgument("ERR bit is not an integer or out of range".to_string())
+            })?;
+
+        if bit_value != 0 && bit_value != 1 {
+            return Err(AikvError::InvalidArgument(
+                "ERR bit is not an integer or out of range".to_string(),
+            ));
+        }
+
+        // Get current value or create empty string
+        let mut current = match self.storage.get_from_db(current_db, &key)? {
+            Some(v) => v.to_vec(),
+            None => Vec::new(),
+        };
+
+        // Calculate byte and bit positions
+        let byte_index = offset / 8;
+        let bit_index = offset % 8;
+
+        // Extend the string if necessary
+        if byte_index >= current.len() {
+            current.resize(byte_index + 1, 0);
+        }
+
+        // Get the old bit value
+        let old_bit = ((current[byte_index] >> (7 - bit_index)) & 1) as i64;
+
+        // Set or clear the bit
+        if bit_value == 1 {
+            current[byte_index] |= 1 << (7 - bit_index);
+        } else {
+            current[byte_index] &= !(1 << (7 - bit_index));
+        }
+
+        self.storage
+            .set_in_db(current_db, key, Bytes::from(current))?;
+        Ok(RespValue::integer(old_bit))
+    }
 }
 
 #[cfg(test)]

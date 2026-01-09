@@ -41,7 +41,9 @@ mod node;
 pub mod raft_service;
 
 // Export our implementations
-pub use commands::{ClusterCommands, FailoverMode, NodeInfo, RedirectType};
+pub use commands::{
+    key_to_slot_with_hash_tag, ClusterCommands, FailoverMode, NodeInfo, RedirectType,
+};
 pub use node::{ClusterConfig, ClusterNode, GroupId, NodeId};
 
 // Re-export AiDb v0.5.1 cluster types
