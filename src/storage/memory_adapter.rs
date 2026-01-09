@@ -858,17 +858,28 @@ impl StorageAdapter {
 
     /// Get database size (number of keys)
     pub fn dbsize_in_db(&self, db_index: usize) -> Result<usize> {
+        Ok(self.get_all_keys_in_db(db_index)?.len())
+    }
+
+    /// Export all databases as StoredValue format for RDB persistence
+    /// This is used by RDB save functionality to persist all data types
+    pub fn export_all_databases(&self) -> Result<Vec<HashMap<String, StoredValue>>> {
         let databases = self
             .databases
             .read()
             .map_err(|e| AikvError::Storage(format!("Lock error: {}", e)))?;
 
-        if let Some(db) = databases.get(db_index) {
-            let count = db.iter().filter(|(_, v)| !v.is_expired()).count();
-            Ok(count)
-        } else {
-            Ok(0)
+        let mut result = Vec::new();
+        for db in databases.iter() {
+            let mut exported_db = HashMap::new();
+            for (key, stored_value) in db {
+                if !stored_value.is_expired() {
+                    exported_db.insert(key.clone(), stored_value.clone());
+                }
+            }
+            result.push(exported_db);
         }
+        Ok(result)
     }
 
     /// Clear a specific database

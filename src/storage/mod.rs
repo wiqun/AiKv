@@ -13,6 +13,7 @@ pub use memory_adapter::{BatchOp, SerializableStoredValue, StoredValue, ValueTyp
 
 use crate::error::Result;
 use bytes::Bytes;
+use std::collections::HashMap;
 
 /// Unified storage engine that wraps both memory and AiDb adapters.
 /// This enum allows seamless switching between storage backends via configuration.
@@ -307,6 +308,14 @@ impl StorageEngine {
         match self {
             StorageEngine::Memory(adapter) => adapter.random_key_in_db(db_index),
             StorageEngine::AiDb(adapter) => adapter.random_key_in_db(db_index),
+        }
+    }
+
+    /// Export all databases as StoredValue maps (for persistence)
+    pub fn export_all_databases(&self) -> Result<Vec<HashMap<String, StoredValue>>> {
+        match self {
+            StorageEngine::Memory(adapter) => adapter.export_all_databases(),
+            StorageEngine::AiDb(adapter) => adapter.export_all_databases(),
         }
     }
 }

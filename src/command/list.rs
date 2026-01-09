@@ -30,15 +30,15 @@ impl ListCommands {
         let list = if let Some(stored) = self.storage.get_value(db_index, &key)? {
             // Get existing list or return error if wrong type
             let mut list = stored.as_list()?.clone();
-            // Insert elements at the front (left) in reverse order to maintain order
-            for element in elements.iter().rev() {
+            // Insert elements at the front (left) in correct order
+            for element in elements {
                 list.push_front(element.clone());
             }
             list
         } else {
             // Create new list with elements
             let mut list = VecDeque::new();
-            for element in elements.iter().rev() {
+            for element in elements {
                 list.push_front(element.clone());
             }
             list

@@ -308,7 +308,7 @@ impl ZSetCommands {
         Ok(RespValue::Array(Some(result)))
     }
 
-    /// ZRANGEBYSCORE key min max \[WITHSCORES\]
+    /// ZRANGEBYSCORE key min max \[WITHSCORES\] \[LIMIT offset count\]
     /// Returns all the elements in the sorted set at key with a score between min and max
     pub fn zrangebyscore(&self, args: &[Bytes], db_index: usize) -> Result<RespValue> {
         if args.len() < 3 {
@@ -316,27 +316,63 @@ impl ZSetCommands {
         }
 
         let key = String::from_utf8_lossy(&args[0]).to_string();
-        let min = String::from_utf8_lossy(&args[1])
-            .parse::<f64>()
-            .map_err(|_| AikvError::InvalidArgument("invalid min score".to_string()))?;
-        let max = String::from_utf8_lossy(&args[2])
-            .parse::<f64>()
-            .map_err(|_| AikvError::InvalidArgument("invalid max score".to_string()))?;
+        let min_str = String::from_utf8_lossy(&args[1]).to_string();
+        let max_str = String::from_utf8_lossy(&args[2]).to_string();
 
-        let with_scores =
-            args.len() > 3 && String::from_utf8_lossy(&args[3]).to_uppercase() == "WITHSCORES";
+        // Parse optional arguments: WITHSCORES and LIMIT offset count
+        let mut with_scores = false;
+        let mut offset: usize = 0;
+        let mut count: Option<i64> = None;
+
+        let mut i = 3;
+        while i < args.len() {
+            let arg = String::from_utf8_lossy(&args[i]).to_uppercase();
+            match arg.as_str() {
+                "WITHSCORES" => {
+                    with_scores = true;
+                    i += 1;
+                }
+                "LIMIT" => {
+                    if i + 2 >= args.len() {
+                        return Err(AikvError::InvalidArgument("ERR syntax error".to_string()));
+                    }
+                    offset = String::from_utf8_lossy(&args[i + 1])
+                        .parse()
+                        .map_err(|_| AikvError::InvalidArgument("ERR value is not an integer".to_string()))?;
+                    count = Some(
+                        String::from_utf8_lossy(&args[i + 2])
+                            .parse::<i64>()
+                            .map_err(|_| AikvError::InvalidArgument("ERR value is not an integer".to_string()))?,
+                    );
+                    i += 3;
+                }
+                _ => {
+                    return Err(AikvError::InvalidArgument("ERR syntax error".to_string()));
+                }
+            }
+        }
+
+        // Parse min and max bounds
+        let min_bound = Self::parse_score_bound(&min_str)?;
+        let max_bound = Self::parse_score_bound(&max_str)?;
 
         // Migrated: Logic moved from storage layer to command layer
         let members = if let Some(stored) = self.storage.get_value(db_index, &key)? {
             let zset = stored.as_zset()?;
             let mut result: Vec<_> = zset
                 .iter()
-                .filter(|(_, s)| **s >= min && **s <= max)
+                .filter(|(_, s)| Self::score_in_range(**s, &min_bound, &max_bound))
                 .map(|(m, s)| (Bytes::from(m.to_vec()), *s))
                 .collect();
 
             result.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-            result
+
+            // Apply LIMIT offset count (count of -1 means no limit)
+            let result = result.into_iter().skip(offset);
+            match count {
+                Some(c) if c >= 0 => result.take(c as usize).collect(),
+                _ => result.collect(), // -1 or None means no limit
+            }
         } else {
             Vec::new()
         };
@@ -352,7 +388,7 @@ impl ZSetCommands {
         Ok(RespValue::Array(Some(result)))
     }
 
-    /// ZREVRANGEBYSCORE key max min \[WITHSCORES\]
+    /// ZREVRANGEBYSCORE key max min \[WITHSCORES\] \[LIMIT offset count\]
     /// Returns all the elements in the sorted set at key with a score between max and min (in reverse order)
     pub fn zrevrangebyscore(&self, args: &[Bytes], db_index: usize) -> Result<RespValue> {
         if args.len() < 3 {
@@ -360,27 +396,63 @@ impl ZSetCommands {
         }
 
         let key = String::from_utf8_lossy(&args[0]).to_string();
-        let max = String::from_utf8_lossy(&args[1])
-            .parse::<f64>()
-            .map_err(|_| AikvError::InvalidArgument("invalid max score".to_string()))?;
-        let min = String::from_utf8_lossy(&args[2])
-            .parse::<f64>()
-            .map_err(|_| AikvError::InvalidArgument("invalid min score".to_string()))?;
+        let max_str = String::from_utf8_lossy(&args[1]).to_string();
+        let min_str = String::from_utf8_lossy(&args[2]).to_string();
 
-        let with_scores =
-            args.len() > 3 && String::from_utf8_lossy(&args[3]).to_uppercase() == "WITHSCORES";
+        // Parse optional arguments: WITHSCORES and LIMIT offset count
+        let mut with_scores = false;
+        let mut offset: usize = 0;
+        let mut count: Option<i64> = None;
+
+        let mut i = 3;
+        while i < args.len() {
+            let arg = String::from_utf8_lossy(&args[i]).to_uppercase();
+            match arg.as_str() {
+                "WITHSCORES" => {
+                    with_scores = true;
+                    i += 1;
+                }
+                "LIMIT" => {
+                    if i + 2 >= args.len() {
+                        return Err(AikvError::InvalidArgument("ERR syntax error".to_string()));
+                    }
+                    offset = String::from_utf8_lossy(&args[i + 1])
+                        .parse()
+                        .map_err(|_| AikvError::InvalidArgument("ERR value is not an integer".to_string()))?;
+                    count = Some(
+                        String::from_utf8_lossy(&args[i + 2])
+                            .parse::<i64>()
+                            .map_err(|_| AikvError::InvalidArgument("ERR value is not an integer".to_string()))?,
+                    );
+                    i += 3;
+                }
+                _ => {
+                    return Err(AikvError::InvalidArgument("ERR syntax error".to_string()));
+                }
+            }
+        }
+
+        // Parse min and max bounds
+        let min_bound = Self::parse_score_bound(&min_str)?;
+        let max_bound = Self::parse_score_bound(&max_str)?;
 
         // Migrated: Logic moved from storage layer to command layer
         let members = if let Some(stored) = self.storage.get_value(db_index, &key)? {
             let zset = stored.as_zset()?;
             let mut result: Vec<_> = zset
                 .iter()
-                .filter(|(_, s)| **s >= min && **s <= max)
+                .filter(|(_, s)| Self::score_in_range(**s, &min_bound, &max_bound))
                 .map(|(m, s)| (Bytes::from(m.to_vec()), *s))
                 .collect();
 
             result.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap()); // Reverse order
-            result
+
+            // Apply LIMIT offset count (count of -1 means no limit)
+            let result = result.into_iter().skip(offset);
+            match count {
+                Some(c) if c >= 0 => result.take(c as usize).collect(),
+                _ => result.collect(), // -1 or None means no limit
+            }
         } else {
             Vec::new()
         };
@@ -424,17 +496,17 @@ impl ZSetCommands {
         }
 
         let key = String::from_utf8_lossy(&args[0]).to_string();
-        let min = String::from_utf8_lossy(&args[1])
-            .parse::<f64>()
-            .map_err(|_| AikvError::InvalidArgument("invalid min score".to_string()))?;
-        let max = String::from_utf8_lossy(&args[2])
-            .parse::<f64>()
-            .map_err(|_| AikvError::InvalidArgument("invalid max score".to_string()))?;
+        let min_str = String::from_utf8_lossy(&args[1]).to_string();
+        let max_str = String::from_utf8_lossy(&args[2]).to_string();
+
+        // Parse min and max bounds using the same logic as ZRANGEBYSCORE
+        let min_bound = Self::parse_score_bound(&min_str)?;
+        let max_bound = Self::parse_score_bound(&max_str)?;
 
         // Migrated: Logic moved from storage layer to command layer
         let count = if let Some(stored) = self.storage.get_value(db_index, &key)? {
             let zset = stored.as_zset()?;
-            zset.values().filter(|s| **s >= min && **s <= max).count()
+            zset.values().filter(|s| Self::score_in_range(**s, &min_bound, &max_bound)).count()
         } else {
             0
         };
@@ -915,4 +987,55 @@ impl ZSetCommands {
         }
         text_chars.peek().is_none()
     }
+
+    /// Parse Redis score bound syntax
+    fn parse_score_bound(s: &str) -> Result<ScoreBound> {
+        if s == "-inf" {
+            return Ok(ScoreBound::NegativeInfinity);
+        }
+        if s == "+inf" {
+            return Ok(ScoreBound::PositiveInfinity);
+        }
+        
+        if let Some(stripped) = s.strip_prefix('(') {
+            let score = stripped.parse::<f64>()
+                .map_err(|_| AikvError::InvalidArgument("invalid score".to_string()))?;
+            Ok(ScoreBound::Exclusive(score))
+        } else if let Some(stripped) = s.strip_prefix('[') {
+            let score = stripped.parse::<f64>()
+                .map_err(|_| AikvError::InvalidArgument("invalid score".to_string()))?;
+            Ok(ScoreBound::Inclusive(score))
+        } else {
+            let score = s.parse::<f64>()
+                .map_err(|_| AikvError::InvalidArgument("invalid score".to_string()))?;
+            Ok(ScoreBound::Inclusive(score))
+        }
+    }
+
+    /// Check if a score is within the specified bounds
+    fn score_in_range(score: f64, min: &ScoreBound, max: &ScoreBound) -> bool {
+        let min_ok = match min {
+            ScoreBound::NegativeInfinity => true,
+            ScoreBound::Inclusive(min_score) => score >= *min_score,
+            ScoreBound::Exclusive(min_score) => score > *min_score,
+            ScoreBound::PositiveInfinity => false,
+        };
+        
+        let max_ok = match max {
+            ScoreBound::PositiveInfinity => true,
+            ScoreBound::Inclusive(max_score) => score <= *max_score,
+            ScoreBound::Exclusive(max_score) => score < *max_score,
+            ScoreBound::NegativeInfinity => false,
+        };
+        
+        min_ok && max_ok
+    }
+}
+
+#[derive(Debug, Clone)]
+enum ScoreBound {
+    NegativeInfinity,
+    Inclusive(f64),
+    Exclusive(f64),
+    PositiveInfinity,
 }

@@ -37,6 +37,38 @@ use openraft::BasicNode;
 /// Redis Cluster has 16384 slots
 const TOTAL_SLOTS: u16 = 16384;
 
+/// Extract the hash tag from a key.
+/// 
+/// Redis Cluster implements a concept called hash tags that makes it possible
+/// to force certain keys to be stored in the same slot. If the key contains
+/// a "{...}" pattern, only the substring between { and } is hashed.
+/// 
+/// The first occurrence of { and the first occurrence of } after it are used.
+/// If the key contains {} with nothing in between, the whole key is hashed.
+fn extract_hash_tag(key: &[u8]) -> &[u8] {
+    // Find the first '{'
+    if let Some(start) = key.iter().position(|&b| b == b'{') {
+        // Find the first '}' after '{'
+        if let Some(end) = key[start + 1..].iter().position(|&b| b == b'}') {
+            // Check if there's content between { and }
+            if end > 0 {
+                return &key[start + 1..start + 1 + end];
+            }
+        }
+    }
+    // No hash tag, return the whole key
+    key
+}
+
+/// Calculate the slot for a key, respecting hash tags.
+/// 
+/// This wraps AiDb's Router::key_to_slot but first extracts any hash tag.
+/// Redis Cluster uses hash tags to allow related keys to be stored in the same slot.
+pub fn key_to_slot_with_hash_tag(key: &[u8]) -> u16 {
+    let hash_part = extract_hash_tag(key);
+    Router::key_to_slot(hash_part)
+}
+
 /// Failover mode for CLUSTER FAILOVER command
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailoverMode {
@@ -469,9 +501,9 @@ impl ClusterCommands {
 
     /// Handle CLUSTER KEYSLOT command.
     ///
-    /// Maps to: `Router::key_to_slot(key)`
+    /// Uses hash tag extraction for proper Redis Cluster compatibility.
     pub fn cluster_keyslot(&self, key: &[u8]) -> Result<RespValue> {
-        let slot = Router::key_to_slot(key);
+        let slot = key_to_slot_with_hash_tag(key);
         Ok(RespValue::Integer(slot as i64))
     }
 
@@ -1549,7 +1581,7 @@ impl ClusterCommands {
     /// // If no error, proceed with the command
     /// ```
     pub fn check_key_slot(&self, key: &[u8]) -> Result<()> {
-        let slot = Router::key_to_slot(key);
+        let slot = key_to_slot_with_hash_tag(key);
         self.check_slot_ownership(slot)
     }
 
@@ -1646,12 +1678,12 @@ impl ClusterCommands {
             return Ok(());
         }
 
-        // Calculate slot for first key
-        let first_slot = Router::key_to_slot(keys[0]);
+        // Calculate slot for first key (using hash tag extraction)
+        let first_slot = key_to_slot_with_hash_tag(keys[0]);
 
         // Verify all keys are in the same slot
         for key in &keys[1..] {
-            let slot = Router::key_to_slot(key);
+            let slot = key_to_slot_with_hash_tag(key);
             if slot != first_slot {
                 return Err(AikvError::CrossSlot);
             }
@@ -1663,9 +1695,9 @@ impl ClusterCommands {
 
     /// Get the slot number for a key.
     ///
-    /// This is a convenience wrapper around `Router::key_to_slot()`.
+    /// This uses hash tag extraction for Redis Cluster compatibility.
     pub fn get_key_slot(key: &[u8]) -> u16 {
-        Router::key_to_slot(key)
+        key_to_slot_with_hash_tag(key)
     }
 
     /// Check if cluster is fully operational (all slots assigned and served).
