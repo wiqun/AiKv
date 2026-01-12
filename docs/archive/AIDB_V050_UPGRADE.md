@@ -39,7 +39,7 @@ The `rmp-serde` dependency was added to the `raft-cluster` feature for improved 
 ### Code Changes
 1. **Cargo.toml**: Updated dependency tag from `v0.4.1` to `v0.5.0`
    ```toml
-   aidb = { git = "https://github.com/Genuineh/AiDb", tag = "v0.5.0" }
+   aidb = { git = "https://github.com/wiqun/AiDb", tag = "v0.5.0" }
    ```
 
 2. **No Code Modifications**: All AiKv source code remains unchanged due to API compatibility

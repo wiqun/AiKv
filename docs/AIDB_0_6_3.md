@@ -19,5 +19,5 @@ Repro & Validation Steps
 3. Confirm: previously failing tests referencing keys like `test001:{0}` now pass and `DEL` + `EXISTS` behave correctly in manual `redis-cli` checks.
 
 Notes for Developers
-- We bumped `Cargo.toml` in the project to reference `aidb = { git = "https://github.com/Genuineh/AiDb", tag = "v0.6.3" }`.
+- We bumped `Cargo.toml` in the project to reference `aidb = { git = "https://github.com/wiqun/AiDb", tag = "v0.6.3" }`.
 - No changes to AiKv command APIs were required besides the dependency update and the documentation entry.

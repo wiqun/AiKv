@@ -2,7 +2,7 @@
 
 ## 概述
 
-AiKv 是一个基于 [AiDb v0.5.0](https://github.com/Genuineh/AiDb) 的高性能 Redis 协议兼容层实现。本文档详细描述了 AiKv 的系统架构、核心组件和设计原则。
+AiKv 是一个基于 [AiDb v0.5.0](https://github.com/wiqun/AiDb) 的高性能 Redis 协议兼容层实现。本文档详细描述了 AiKv 的系统架构、核心组件和设计原则。
 
 ## 设计目标
 
@@ -437,7 +437,7 @@ impl MonitorBroadcaster {
 
 - [Redis Protocol Specification](https://redis.io/docs/reference/protocol-spec/)
 - [Redis Cluster Specification](https://redis.io/docs/reference/cluster-spec/)
-- [AiDb Documentation](https://github.com/Genuineh/AiDb)
+- [AiDb Documentation](https://github.com/wiqun/AiDb)
 - [Tokio Runtime](https://tokio.rs/)
 
 ---
