@@ -194,24 +194,24 @@ impl AiDbStorageAdapter {
         let db = &self.databases[db_index];
         let key_bytes = key.as_bytes();
 
-        // Check if key is expired
-        if self.is_expired(db, key_bytes)? {
-            // Clean up expired key
-            db.delete(key_bytes)
-                .map_err(|e| AikvError::Storage(format!("Failed to delete expired key: {}", e)))?;
-            let expire_key = Self::expiration_key(key_bytes);
-            db.delete(&expire_key)
-                .map_err(|e| AikvError::Storage(format!("Failed to delete expiration: {}", e)))?;
-            return Ok(None);
-        }
-
-        // Get the serialized value
+        // 先尝试读取主键，只有主键存在时才检查过期时间
+        // 这样可以避免对不存在的键进行额外的过期检查数据库读取
         match db
             .get(key_bytes)
             .map_err(|e| AikvError::Storage(format!("Failed to get value: {}", e)))?
         {
             Some(serialized) => {
-                // Deserialize using bincode
+                // 主键存在，检查是否过期
+                if self.is_expired(db, key_bytes)? {
+                    // 清理过期键
+                    db.delete(key_bytes)
+                        .map_err(|e| AikvError::Storage(format!("Failed to delete expired key: {}", e)))?;
+                    let expire_key = Self::expiration_key(key_bytes);
+                    db.delete(&expire_key)
+                        .map_err(|e| AikvError::Storage(format!("Failed to delete expiration: {}", e)))?;
+                    return Ok(None);
+                }
+                // 反序列化并返回
                 let serializable: SerializableStoredValue = bincode::deserialize(&serialized)
                     .map_err(|e| {
                         AikvError::Storage(format!("Failed to deserialize value: {}", e))
