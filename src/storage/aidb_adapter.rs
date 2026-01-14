@@ -194,24 +194,26 @@ impl AiDbStorageAdapter {
         let db = &self.databases[db_index];
         let key_bytes = key.as_bytes();
 
-        // Check if key is expired
-        if self.is_expired(db, key_bytes)? {
-            // Clean up expired key
-            db.delete(key_bytes)
-                .map_err(|e| AikvError::Storage(format!("Failed to delete expired key: {}", e)))?;
-            let expire_key = Self::expiration_key(key_bytes);
-            db.delete(&expire_key)
-                .map_err(|e| AikvError::Storage(format!("Failed to delete expiration: {}", e)))?;
-            return Ok(None);
-        }
-
-        // Get the serialized value
+        // Try to read main key first, only check expiration when key exists
+        // This avoids unnecessary database reads for non-existent keys
         match db
             .get(key_bytes)
             .map_err(|e| AikvError::Storage(format!("Failed to get value: {}", e)))?
         {
             Some(serialized) => {
-                // Deserialize using bincode
+                // Main key exists, check if expired
+                if self.is_expired(db, key_bytes)? {
+                    // Clean up expired key
+                    db.delete(key_bytes).map_err(|e| {
+                        AikvError::Storage(format!("Failed to delete expired key: {}", e))
+                    })?;
+                    let expire_key = Self::expiration_key(key_bytes);
+                    db.delete(&expire_key).map_err(|e| {
+                        AikvError::Storage(format!("Failed to delete expiration: {}", e))
+                    })?;
+                    return Ok(None);
+                }
+                // Deserialize and return
                 let serializable: SerializableStoredValue = bincode::deserialize(&serialized)
                     .map_err(|e| {
                         AikvError::Storage(format!("Failed to deserialize value: {}", e))

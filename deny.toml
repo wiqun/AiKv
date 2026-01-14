@@ -11,8 +11,14 @@ db-urls = ["https://github.com/rustsec/advisory-db"]
 # openraft to depend on a safe rkyv >= 0.8.13.
 # Transient transitive dependency (rkyv) pulled in via rust_decimal -> byte-unit -> openraft;
 # no safe upgrade available yet. Tracked in repo issue.
+#
+# Temporary exception for RUSTSEC-2025-0141 (bincode unmaintained). Bincode is used
+# for serialization in AiDb storage adapter. No safe drop-in replacement available yet
+# as alternatives (wincode, postcard, bitcode, rkyv) have different APIs or performance
+# characteristics. Tracked in repo issue.
 ignore = [
     "RUSTSEC-2026-0001",
+    "RUSTSEC-2025-0141",
 ]
 
 [licenses]
