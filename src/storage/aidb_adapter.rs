@@ -194,16 +194,16 @@ impl AiDbStorageAdapter {
         let db = &self.databases[db_index];
         let key_bytes = key.as_bytes();
 
-        // 先尝试读取主键，只有主键存在时才检查过期时间
-        // 这样可以避免对不存在的键进行额外的过期检查数据库读取
+        // Try to read main key first, only check expiration when key exists
+        // This avoids unnecessary database reads for non-existent keys
         match db
             .get(key_bytes)
             .map_err(|e| AikvError::Storage(format!("Failed to get value: {}", e)))?
         {
             Some(serialized) => {
-                // 主键存在，检查是否过期
+                // Main key exists, check if expired
                 if self.is_expired(db, key_bytes)? {
-                    // 清理过期键
+                    // Clean up expired key
                     db.delete(key_bytes).map_err(|e| {
                         AikvError::Storage(format!("Failed to delete expired key: {}", e))
                     })?;
@@ -213,7 +213,7 @@ impl AiDbStorageAdapter {
                     })?;
                     return Ok(None);
                 }
-                // 反序列化并返回
+                // Deserialize and return
                 let serializable: SerializableStoredValue = bincode::deserialize(&serialized)
                     .map_err(|e| {
                         AikvError::Storage(format!("Failed to deserialize value: {}", e))
