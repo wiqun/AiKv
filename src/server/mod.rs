@@ -11,6 +11,7 @@ use crate::storage::StorageEngine;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
+use tracing::warn;
 use tracing::{error, info};
 
 #[cfg(feature = "cluster")]
@@ -273,7 +274,7 @@ impl Server {
                     self.metrics.connections.record_connection();
 
                     // Create executor with or without cluster commands
-                    let executor = CommandExecutor::with_port(self.storage.clone(), self.port);
+                    let mut executor = CommandExecutor::with_port(self.storage.clone(), self.port);
 
                     #[cfg(feature = "cluster")]
                     if let (Some(meta_raft), Some(multi_raft), Some(router)) =
