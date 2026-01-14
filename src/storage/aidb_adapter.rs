@@ -204,11 +204,13 @@ impl AiDbStorageAdapter {
                 // 主键存在，检查是否过期
                 if self.is_expired(db, key_bytes)? {
                     // 清理过期键
-                    db.delete(key_bytes)
-                        .map_err(|e| AikvError::Storage(format!("Failed to delete expired key: {}", e)))?;
+                    db.delete(key_bytes).map_err(|e| {
+                        AikvError::Storage(format!("Failed to delete expired key: {}", e))
+                    })?;
                     let expire_key = Self::expiration_key(key_bytes);
-                    db.delete(&expire_key)
-                        .map_err(|e| AikvError::Storage(format!("Failed to delete expiration: {}", e)))?;
+                    db.delete(&expire_key).map_err(|e| {
+                        AikvError::Storage(format!("Failed to delete expiration: {}", e))
+                    })?;
                     return Ok(None);
                 }
                 // 反序列化并返回
