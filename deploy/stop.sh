@@ -1,7 +1,7 @@
 #!/bin/bash
-# Stop AiKv single node
+# Stop AiKv cluster
 
-echo "Stopping AiKv..."
+echo "Stopping AiKv cluster..."
 docker-compose down
 
-echo "✅ AiKv stopped"
+echo "✅ AiKv cluster stopped"

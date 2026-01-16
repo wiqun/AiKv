@@ -483,3 +483,17 @@ Current limitations:
 - **Standard Libraries**: TABLE, STRING, MATH, UTF8 only
 - **Lock Timeout**: 30 seconds (configurable via `with_lock_timeout`)
 - **Supported Commands**: 33 (String: 11, Hash: 9, List: 7, Set: 5, ZSet: 6)
+
+## Related Documentation
+
+- [API Commands](../api/01-commands.md) - EVAL, EVALSHA, SCRIPT commands
+- [Best Practices](../../guide/04-best-practices.md) - Script optimization tips
+- [Redis Lua Documentation](https://redis.io/docs/interact/programmability/lua-scripting/) - Redis Lua scripting reference
+
+---
+
+**Last Updated**: 2026-01-16  
+**Version**: v0.1.0  
+**Lua Version**: 5.4 (via mlua v0.10)  
+**Supported Commands**: 38 (String: 11, Hash: 9, List: 7, Set: 5, ZSet: 6)  
+**Maintained by**: @Genuineh
