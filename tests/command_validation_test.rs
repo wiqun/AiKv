@@ -5,6 +5,7 @@ use bytes::Bytes;
 
 // 命令验证结果
 #[derive(Debug)]
+#[allow(dead_code)]
 struct CommandValidation {
     command: String,
     category: String,
@@ -13,6 +14,7 @@ struct CommandValidation {
 }
 
 #[derive(Debug, PartialEq)]
+#[allow(dead_code)]
 enum ValidationStatus {
     Passed,
     Failed,
