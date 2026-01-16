@@ -37,7 +37,10 @@ impl CommandValidator {
     }
 
     fn test_ping(&mut self) -> CommandValidation {
-        match self.executor.execute("PING", &[], &mut self.current_db, self.client_id) {
+        match self
+            .executor
+            .execute("PING", &[], &mut self.current_db, self.client_id)
+        {
             Ok(resp) => {
                 if matches!(resp, RespValue::SimpleString(_)) {
                     CommandValidation {
@@ -60,13 +63,18 @@ impl CommandValidator {
                 category: "Protocol".to_string(),
                 status: ValidationStatus::Failed,
                 error: Some(e.to_string()),
-            }
+            },
         }
     }
 
     fn test_echo(&mut self) -> CommandValidation {
         let test_message = "Hello AiKv!";
-        match self.executor.execute("ECHO", &[Bytes::from(test_message)], &mut self.current_db, self.client_id) {
+        match self.executor.execute(
+            "ECHO",
+            &[Bytes::from(test_message)],
+            &mut self.current_db,
+            self.client_id,
+        ) {
             Ok(resp) => {
                 if matches!(resp, RespValue::BulkString(Some(_))) {
                     CommandValidation {
@@ -89,7 +97,7 @@ impl CommandValidator {
                 category: "Protocol".to_string(),
                 status: ValidationStatus::Failed,
                 error: Some(e.to_string()),
-            }
+            },
         }
     }
 
@@ -98,7 +106,12 @@ impl CommandValidator {
         let value = "test_value";
 
         // Test SET
-        match self.executor.execute("SET", &[Bytes::from(key), Bytes::from(value)], &mut self.current_db, self.client_id) {
+        match self.executor.execute(
+            "SET",
+            &[Bytes::from(key), Bytes::from(value)],
+            &mut self.current_db,
+            self.client_id,
+        ) {
             Ok(resp) => {
                 if !matches!(resp, RespValue::SimpleString(_)) && resp != RespValue::ok() {
                     return CommandValidation {
@@ -109,16 +122,23 @@ impl CommandValidator {
                     };
                 }
             }
-            Err(e) => return CommandValidation {
-                command: "SET".to_string(),
-                category: "String".to_string(),
-                status: ValidationStatus::Failed,
-                error: Some(format!("SET failed with error: {}", e)),
+            Err(e) => {
+                return CommandValidation {
+                    command: "SET".to_string(),
+                    category: "String".to_string(),
+                    status: ValidationStatus::Failed,
+                    error: Some(format!("SET failed with error: {}", e)),
+                }
             }
         }
 
         // Test GET
-        match self.executor.execute("GET", &[Bytes::from(key)], &mut self.current_db, self.client_id) {
+        match self.executor.execute(
+            "GET",
+            &[Bytes::from(key)],
+            &mut self.current_db,
+            self.client_id,
+        ) {
             Ok(resp) => {
                 if matches!(resp, RespValue::BulkString(Some(ref data)) if data == value) {
                     CommandValidation {
@@ -141,7 +161,7 @@ impl CommandValidator {
                 category: "String".to_string(),
                 status: ValidationStatus::Failed,
                 error: Some(format!("GET failed with error: {}", e)),
-            }
+            },
         }
     }
 }
@@ -155,42 +175,63 @@ fn validate_basic_commands() {
 
     // Test PING
     let ping_result = validator.test_ping();
-    println!("Protocol - {}: {:?}", ping_result.command,
-             match ping_result.status {
-                 ValidationStatus::Passed => "✓ PASSED",
-                 ValidationStatus::Failed => "✗ FAILED",
-                 ValidationStatus::NotImplemented => "? NOT IMPLEMENTED",
-             });
+    println!(
+        "Protocol - {}: {:?}",
+        ping_result.command,
+        match ping_result.status {
+            ValidationStatus::Passed => "✓ PASSED",
+            ValidationStatus::Failed => "✗ FAILED",
+            ValidationStatus::NotImplemented => "? NOT IMPLEMENTED",
+        }
+    );
     if let Some(error) = ping_result.error {
         println!("  Error: {}", error);
     }
-    assert_eq!(ping_result.status, ValidationStatus::Passed, "PING command should work");
+    assert_eq!(
+        ping_result.status,
+        ValidationStatus::Passed,
+        "PING command should work"
+    );
 
     // Test ECHO
     let echo_result = validator.test_echo();
-    println!("Protocol - {}: {:?}", echo_result.command,
-             match echo_result.status {
-                 ValidationStatus::Passed => "✓ PASSED",
-                 ValidationStatus::Failed => "✗ FAILED",
-                 ValidationStatus::NotImplemented => "? NOT IMPLEMENTED",
-             });
+    println!(
+        "Protocol - {}: {:?}",
+        echo_result.command,
+        match echo_result.status {
+            ValidationStatus::Passed => "✓ PASSED",
+            ValidationStatus::Failed => "✗ FAILED",
+            ValidationStatus::NotImplemented => "? NOT IMPLEMENTED",
+        }
+    );
     if let Some(error) = echo_result.error {
         println!("  Error: {}", error);
     }
-    assert_eq!(echo_result.status, ValidationStatus::Passed, "ECHO command should work");
+    assert_eq!(
+        echo_result.status,
+        ValidationStatus::Passed,
+        "ECHO command should work"
+    );
 
     // Test SET/GET
     let setget_result = validator.test_set_get();
-    println!("String - {}: {:?}", setget_result.command,
-             match setget_result.status {
-                 ValidationStatus::Passed => "✓ PASSED",
-                 ValidationStatus::Failed => "✗ FAILED",
-                 ValidationStatus::NotImplemented => "? NOT IMPLEMENTED",
-             });
+    println!(
+        "String - {}: {:?}",
+        setget_result.command,
+        match setget_result.status {
+            ValidationStatus::Passed => "✓ PASSED",
+            ValidationStatus::Failed => "✗ FAILED",
+            ValidationStatus::NotImplemented => "? NOT IMPLEMENTED",
+        }
+    );
     if let Some(error) = setget_result.error {
         println!("  Error: {}", error);
     }
-    assert_eq!(setget_result.status, ValidationStatus::Passed, "SET/GET commands should work");
+    assert_eq!(
+        setget_result.status,
+        ValidationStatus::Passed,
+        "SET/GET commands should work"
+    );
 
     println!("\n✓ All basic commands validated successfully!");
 }
