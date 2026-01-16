@@ -2,7 +2,7 @@
 
 ## 概述
 
-AiKv 是一个基于 [AiDb v0.6.3](https://github.com/wiqun/AiDb) 的高性能 Redis 协议兼容层实现。本文档详细描述了 AiKv 的系统架构、核心组件和设计原则。
+AiKv 是一个基于 [AiDb v0.5.0](https://github.com/wiqun/AiDb) 的高性能 Redis 协议兼容层实现。本文档详细描述了 AiKv 的系统架构、核心组件和设计原则。
 
 ## 设计目标
 
@@ -93,8 +93,6 @@ AiKv 是一个基于 [AiDb v0.6.3](https://github.com/wiqun/AiDb) 的高性能 R
 
 ### 集群架构 (Cluster Mode)
 
-AiKv 使用 **MetaRaft** 而非 Redis gossip 协议进行集群协调。
-
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                     AiKv Cluster (3 节点示例)                           │
@@ -110,25 +108,23 @@ AiKv 使用 **MetaRaft** 而非 Redis gossip 协议进行集群协调。
 │  │  └─────┬──────┘  │  │  └─────┬──────┘  │  │  └─────┬──────┘  │      │
 │  │        │         │  │        │         │  │        │         │      │
 │  │  ┌─────┴──────┐  │  │  ┌─────┴──────┐  │  │  ┌─────┴──────┐  │      │
-│  │  │ClusterNode │  │  │  │ClusterNode │  │  │  │ClusterNode │  │      │
+│  │  │ ClusterNode│  │  │  │ ClusterNode│  │  │  │ ClusterNode│  │      │
+│  │  │  • SlotMap │  │  │  │  • SlotMap │  │  │  │  • SlotMap │  │      │
 │  │  │  • Router  │  │  │  │  • Router  │  │  │  │  • Router  │  │      │
 │  │  │  • MOVED   │  │  │  │  • MOVED   │  │  │  │  • MOVED   │  │      │
 │  │  └─────┬──────┘  │  │  └─────┬──────┘  │  │  └─────┬──────┘  │      │
 │  │        │         │  │        │         │  │        │         │      │
 │  │  ┌─────┴──────┐  │  │  ┌─────┴──────┐  │  │  ┌─────┴──────┐  │      │
-│  │  │MetaRaft    │◄─┼──┼─►│MetaRaft    │◄─┼──┼─►│MetaRaft    │  │      │
-│  │  │   :50051   │  │  │  │   :50052   │  │  │  │   :50053   │  │      │
+│  │  │Cluster Bus │◄─┼──┼─►│Cluster Bus │◄─┼──┼─►│Cluster Bus │  │      │
+│  │  │   :16379   │  │  │  │   :16380   │  │  │  │   :16381   │  │      │
 │  │  └────────────┘  │  │  └────────────┘  │  │  └────────────┘  │      │
 │  └──────────────────┘  └──────────────────┘  └──────────────────┘      │
 │                                                                         │
-│                      MetaRaft Consensus                                 │
+│                         Gossip Protocol                                 │
 │                    ◄───────────────────────►                           │
-│                      Raft 共识 + 成员管理                               │
+│                      心跳检测 + 故障发现                                │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
-
-> **注意**: AiKv 使用 MetaRaft 进行集群协调，不需要端口 16379 (gossip 协议端口)。
-> 详见 [02-cluster-api.md](../api/02-cluster-api.md)。
 
 ## 核心模块
 
@@ -187,10 +183,9 @@ src/command/
 ├── key.rs          # Key 命令 (KEYS, SCAN, EXPIRE...)
 ├── database.rs     # Database 命令 (SELECT, FLUSHDB...)
 ├── server.rs       # Server 命令 (INFO, CONFIG, TIME...)
-└── script.rs       # Lua 脚本 (EVAL, EVALSHA...)
+├── script.rs       # Lua 脚本 (EVAL, EVALSHA...)
+└── cluster.rs      # Cluster 命令 (CLUSTER INFO...)
 ```
-
-> **说明**: 集群命令 (CLUSTER INFO, CLUSTER NODES 等) 实现在 `src/cluster/commands.rs`，详见 [02-cluster-api.md](../api/02-cluster-api.md)。
 
 ### 3. 存储层 (Storage Layer)
 
@@ -271,23 +266,11 @@ aikv_connected_clients 10
 实现 Redis Cluster 协议兼容的分布式功能。
 
 **核心组件**:
-- **ClusterCommands**: Redis Cluster 命令处理器 (CLUSTER INFO, NODES, SLOTS...)
-- **ClusterNode**: 集群节点封装，管理 MetaRaftNode 和 MultiRaftNode
-- **ClusterConfig**: 集群配置管理
-- **MultiRaftService**: Multi-Raft gRPC 服务（集群模式）
-- **Router**: (来自 AiDb) 请求路由和重定向
-- **MigrationManager**: (来自 AiDb) 在线槽迁移
-- **MetaRaftNode**: (来自 AiDb) 元数据 Raft 共识
-- **MultiRaftNode**: (来自 AiDb) 多 Raft Group 数据操作
-
-**命令实现**:
-- 集群信息: `CLUSTER INFO`, `CLUSTER NODES`, `CLUSTER SLOTS`, `CLUSTER MYID`, `CLUSTER KEYSLOT`
-- 节点管理: `CLUSTER MEET`, `CLUSTER FORGET`
-- 槽管理: `CLUSTER ADDSLOTS`, `CLUSTER DELSLOTS`, `CLUSTER SETSLOT`
-- 副本管理: `CLUSTER REPLICATE`, `CLUSTER REPLICAS`, `CLUSTER ADDREPLICATION`
-- 故障转移: `CLUSTER FAILOVER`, `CLUSTER FAILOVER FORCE`, `CLUSTER FAILOVER TAKEOVER`
-- MetaRaft: `CLUSTER METARAFT ADDLEARNER`, `CLUSTER METARAFT PROMOTE`, `CLUSTER METARAFT MEMBERS`
-- 其他: `READONLY`, `READWRITE`, `ASKING`, `CLUSTER SHARDS`, `CLUSTER MYSHARDID`
+- **ClusterState**: 集群状态管理
+- **SlotMap**: 16384 槽位映射
+- **Router**: 请求路由和重定向
+- **MigrationManager**: 在线槽迁移
+- **ClusterBus**: 节点间通信
 
 ## 数据流
 
@@ -459,6 +442,6 @@ impl MonitorBroadcaster {
 
 ---
 
-**最后更新**: 2026-01-16  
+**最后更新**: 2025-12-02  
 **版本**: v0.1.0  
-**维护者**: @Genuineh
+**维护者**: @Genuineh, @copilot
