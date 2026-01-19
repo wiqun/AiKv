@@ -1,8 +1,6 @@
 use aikv::command::CommandExecutor;
 use aikv::protocol::RespValue;
 use aikv::StorageEngine;
-use bytes::Bytes;
-use std::collections::HashMap;
 
 // 命令验证结果
 #[derive(Debug)]
