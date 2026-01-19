@@ -48,7 +48,9 @@ impl CommandValidator {
         }
 
         // String 命令
-        let string_commands = vec!["GET", "SET", "DEL", "EXISTS", "MGET", "MSET", "STRLEN", "APPEND"];
+        let string_commands = vec![
+            "GET", "SET", "DEL", "EXISTS", "MGET", "MSET", "STRLEN", "APPEND",
+        ];
         for cmd in string_commands {
             let result = self.test_command(cmd, "String");
             results.push(result);
@@ -75,12 +77,15 @@ impl CommandValidator {
                 category: category.to_string(),
                 status: ValidationStatus::NotImplemented,
                 error: Some("Test not implemented".to_string()),
-            }
+            },
         }
     }
 
     fn test_ping(&mut self) -> CommandValidation {
-        match self.executor.execute("PING", &[], &mut self.current_db, self.client_id) {
+        match self
+            .executor
+            .execute("PING", &[], &mut self.current_db, self.client_id)
+        {
             Ok(resp) => {
                 if matches!(resp, RespValue::SimpleString(_)) {
                     CommandValidation {
@@ -103,7 +108,7 @@ impl CommandValidator {
                 category: "Protocol".to_string(),
                 status: ValidationStatus::Failed,
                 error: Some(e.to_string()),
-            }
+            },
         }
     }
 
