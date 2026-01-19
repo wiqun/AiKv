@@ -306,7 +306,52 @@ MGET user:1 user:2 user:3
 MGET {group1}:user:1 {group1}:user:2 {group1}:user:3
 ```
 
-### 3. 处理重定向
+### 3. 使用 aikv-tool 部署集群（推荐）
+
+**推荐方式**: 使用 aikv-tool 一键部署 6 节点集群（3 主 3 从）
+
+```bash
+# 1. 安装 aikv-tool
+cd aikv-toolchain && cargo install --path . && cd ..
+
+# 2. 一键部署集群
+aikv-tool cluster setup
+
+# 3. 查看集群状态
+aikv-tool cluster status
+
+# 4. 连接使用
+redis-cli -c -h 127.0.0.1 -p 6379
+```
+
+**优势**:
+- ✅ 自动生成配置文件和 Docker Compose
+- ✅ 自动构建镜像
+- ✅ 自动初始化 MetaRaft 成员
+- ✅ 自动分配 16384 槽位
+- ✅ 自动配置主从复制
+
+### 4. 集群管理命令
+
+```bash
+# 查看集群状态
+aikv-tool cluster status
+
+# 查看集群日志
+aikv-tool cluster logs
+aikv-tool cluster logs -f  # 实时日志
+
+# 重启集群
+aikv-tool cluster restart
+
+# 停止集群（保留数据）
+aikv-tool cluster stop
+
+# 停止集群并清理数据
+aikv-tool cluster stop -v
+```
+
+### 5. 处理重定向
 
 ```python
 # Python redis-py-cluster 自动处理
@@ -555,6 +600,6 @@ func (s *UserService) IncrementLoginCount(ctx context.Context, userID int64) (in
 
 ---
 
-**最后更新**: 2025-12-02  
+**最后更新**: 2026-01-16  
 **版本**: v0.1.0  
-**维护者**: @Genuineh, @copilot
+**维护者**: @Genuineh

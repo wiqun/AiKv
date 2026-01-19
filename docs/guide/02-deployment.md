@@ -109,6 +109,8 @@ cargo test -- --nocapture
 host = "127.0.0.1"
 # 服务器监听端口
 port = 6379
+# 最大连接数（默认 10000）
+max_connections = 10000
 
 [storage]
 # 存储引擎类型: "memory" 或 "aidb"
@@ -264,36 +266,107 @@ sudo journalctl -u aikv -f
 ### 1. 创建 Dockerfile
 
 ```dockerfile
-FROM rust:1.75 as builder
+# ============================================================
+# AiKv Dockerfile - Multi-stage build for minimal image size
+# ============================================================
+
+# ------------------------------------------------------------
+# Stage 1: Builder - Compile the Rust application
+# ------------------------------------------------------------
+FROM rust:1.75-bookworm AS builder
+# Use Rust 1.75 (matches project requirement: Rust 1.70+)
+
+# Build argument for enabling features (e.g., "cluster" for cluster support)
+ARG FEATURES=""
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    cmake \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY . .
 
-RUN cargo build --release
+# Copy manifests first for better caching
+COPY Cargo.toml Cargo.lock ./
 
-FROM debian:bookworm-slim
+# Create dummy source files to build dependencies
+RUN mkdir -p src benches && \
+    echo 'fn main() { println!("Dummy"); }' > src/main.rs && \
+    echo 'pub fn dummy() {}' > src/lib.rs
 
-RUN apt-get update && \
-    apt-get install -y ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
+# Build dependencies only (this layer will be cached)
+RUN cargo build --release --features $FEATURES && rm -rf src benches
+
+# Copy actual source code
+COPY src ./src
+
+# Recreate dummy benchmark files
+RUN mkdir -p benches && \
+    echo 'fn main() {}' > benches/aikv_benchmark.rs && \
+    echo 'fn main() {}' > benches/comprehensive_benchmark.rs
+
+# Build the actual application
+RUN cargo build --release --features $FEATURES --bin aikv
+
+# Strip the binary to reduce size
+RUN strip target/release/aikv
+
+# ------------------------------------------------------------
+# Stage 2: Runtime - Create minimal runtime image
+# ------------------------------------------------------------
+FROM debian:bookworm-slim AS runtime
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libssl3 \
+    redis-tools \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user for security
+RUN groupadd --gid 1000 aikv && \
+    useradd --uid 1000 --gid aikv --shell /bin/bash --create-home aikv
+
+# Create directories
+RUN mkdir -p /app/data /app/logs /app/config && \
+    chown -R aikv:aikv /app
 
 WORKDIR /app
 
+# Copy the binary from builder stage
 COPY --from=builder /app/target/release/aikv /app/aikv
-COPY config.toml /app/
 
-RUN mkdir -p /app/data /app/logs && \
-    chmod +x /app/aikv
+# Copy default configuration
+COPY config/aikv.toml /app/config/aikv.toml
 
+# Set ownership
+RUN chown -R aikv:aikv /app
+
+# Switch to non-root user
+USER aikv
+
+# Expose default port
 EXPOSE 6379
 
-CMD ["/app/aikv", "--config", "/app/config.toml"]
+# Health check using redis-cli
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD redis-cli PING | grep -q "PONG" || exit 1
+
+# Default command
+ENTRYPOINT ["/app/aikv"]
+CMD ["--host", "0.0.0.0", "--port", "6379"]
 ```
 
 ### 2. 构建镜像
 
 ```bash
+# 构建单机版
 docker build -t aikv:latest .
+
+# 构建集群版
+docker build -t aikv:cluster --build-arg FEATURES=cluster .
 ```
 
 ### 3. 运行容器
@@ -395,6 +468,7 @@ aikv-tool cluster setup
 
 ```bash
 aikv-tool cluster setup      # 一键部署
+aikv-tool cluster init       # 初始化集群配置
 aikv-tool cluster start      # 启动集群
 aikv-tool cluster stop       # 停止集群
 aikv-tool cluster stop -v    # 停止并清理数据
