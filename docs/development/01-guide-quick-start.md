@@ -189,10 +189,10 @@ CLUSTER KEYSLOT mykey
 
 ## 🔗 下一步
 
-- [API 参考](API.md) - 完整命令文档
-- [部署指南](DEPLOYMENT.md) - 生产部署详情
-- [Cluster API](AIDB_CLUSTER_API_REFERENCE.md) - 集群命令
-- [性能调优](PERFORMANCE_TUNING.md) - 优化指南
+- [API 参考](02-api-commands.md) - 完整命令文档
+- [部署指南](01-guide-deployment.md) - 生产部署详情
+- [集群 API](02-api-cluster-api.md) - 集群命令
+- [系统架构](03-architecture-overview.md) - 架构设计概览
 
 ---
 
@@ -234,4 +234,10 @@ lsof -i :6379
 
 ---
 
-*需要更多帮助？查看 [故障排除](TROUBLESHOOTING.md) 或 [集群故障排除](CLUSTER_TROUBLESHOOTING.md)*
+*需要更多帮助？查看 [故障排除](01-guide-troubleshooting.md) 或 [集群架构](03-architecture-cluster.md)*
+---
+
+**Last Updated**: 2026-01-16  
+**Version**: v0.1.0  
+**Rust Version**: 1.70+  
+**Maintained by**: @Genuineh

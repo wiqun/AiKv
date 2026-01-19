@@ -272,6 +272,27 @@ KEYS *
 redis-cli -c -h 127.0.0.1 -p 6379
 ```
 
+### 4. 未实现的命令
+
+#### DEBUG OBJECT
+
+**状态**: ⚠️ 未实现
+
+AiKv 目前未实现 `DEBUG OBJECT` 命令，该命令在标准 Redis 中用于调试目的。
+
+```bash
+127.0.0.1:6379> DEBUG OBJECT mykey
+(error) ERR command 'debug' is not implemented
+```
+
+**替代方案**:
+
+- 使用 `INFO` 命令查看服务器信息
+- 使用 `TYPE` 命令查看键的类型
+- 查看 `INFO memory` 获取整体内存使用情况
+
+> **说明**: `DEBUG OBJECT` 是 Redis 内部的调试命令，在生产环境中通常不需要使用。AiKv 目前未实现 `MEMORY USAGE` 和 `OBJECT ENCODING` 命令。如果确实需要调试功能，建议使用上述替代命令。
+
 ## 性能问题
 
 ### 1. 响应延迟高
@@ -566,17 +587,35 @@ Waiting for the cluster to join
 
 #### 原因分析
 
-这是因为 AiKv 使用 **Multi-Raft 共识** 而非 Redis gossip 协议来同步集群状态。详见 [CLUSTER_BUS_ANALYSIS.md](CLUSTER_BUS_ANALYSIS.md)。
+这是因为 AiKv 使用 **MetaRaft 共识** 而非 Redis gossip 协议来同步集群状态。
 
 **技术说明:**
 - AiKv 正确报告 `cluster_enabled:1`
-- CLUSTER 命令（MEET, ADDSLOTS, NODES 等）已实现
-- AiKv 使用 AiDb 的 Multi-Raft 进行状态同步
+- CLUSTER 命令（MEET, ADDSLOTS, NODES 等）已实现（26+ 个命令）
+- AiKv 使用 AiDb 的 MetaRaft 进行状态同步
 - **不需要端口 16379** - 这是设计选择，不是缺陷
 
-#### 解决方案: 使用手动方式初始化集群
+#### 解决方案: 使用 aikv-tool 一键部署（推荐）
 
-AiKv 集群使用 Raft 共识而非 gossip 协议，请使用以下方式初始化：
+**推荐方式**: 使用 aikv-tool 一键部署集群
+
+```bash
+# 安装 aikv-tool
+cd aikv-toolchain && cargo install --path . && cd ..
+
+# 一键部署 6 节点集群（3 主 3 从）
+aikv-tool cluster setup
+
+# 查看集群状态
+aikv-tool cluster status
+
+# 连接使用
+redis-cli -c -h 127.0.0.1 -p 6379
+```
+
+#### 解决方案: 手动方式初始化集群
+
+如果需要手动配置，可以使用以下方式：
 
 ```bash
 # 1. 启动 AiKv 节点（使用 aikv --help 查看可用选项）
@@ -598,8 +637,8 @@ redis-cli -p 6379 CLUSTER INFO
 redis-cli -p 6379 CLUSTER NODES
 ```
 
-> **当前限制**: `redis-cli --cluster create` 命令暂不支持，因为它依赖 gossip 协议
-> 进行节点发现。请使用上述手动方式配置集群。
+> **推荐方式**: 使用 `aikv-tool cluster setup` 一键部署集群，无需手动配置
+> **手动方式**: 如果需要细粒度控制，可以使用上述手动方式初始化集群
 
 #### 验证步骤
 
@@ -618,8 +657,10 @@ redis-cli -p 6379 CLUSTER NODES
 ```
 
 **相关文档:**
-- [CLUSTER_BUS_ANALYSIS.md](CLUSTER_BUS_ANALYSIS.md) - Multi-Raft 集群方案详解
-- [TODO.md](../TODO.md) - 项目路线图
+- [快速开始指南](../01-quick-start.md) - 使用 aikv-tool 部署集群
+- [部署指南](../02-deployment.md) - 详细部署说明
+- [集群 API](../development/api/02-cluster-api.md) - CLUSTER 命令详解
+- [架构概览](../development/architecture/01-overview.md) - 系统架构设计
 
 ### 2. CLUSTER MEET 后节点不同步
 
@@ -663,6 +704,6 @@ redis-cli -p 6379 CLUSTER NODES
 
 ---
 
-**最后更新**: 2025-12-08  
+**最后更新**: 2026-01-16  
 **版本**: v0.1.0  
-**维护者**: @Genuineh, @copilot
+**维护者**: @Genuineh
