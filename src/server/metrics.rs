@@ -59,6 +59,9 @@ pub struct ServerMetrics {
     uptime_secs: AtomicU64,
     cached_rss_bytes: AtomicU64,
     cached_total_system_memory: AtomicU64,
+    cached_process_threads: AtomicU64,
+    cached_voluntary_ctxt_switches: AtomicU64,
+    cached_nonvoluntary_ctxt_switches: AtomicU64,
     net_last_input_bytes: AtomicU64,
     net_last_output_bytes: AtomicU64,
     net_last_sample_secs: AtomicU64,
@@ -107,6 +110,9 @@ impl Default for ServerMetrics {
             uptime_secs: AtomicU64::new(0),
             cached_rss_bytes: AtomicU64::new(0),
             cached_total_system_memory: AtomicU64::new(0),
+            cached_process_threads: AtomicU64::new(0),
+            cached_voluntary_ctxt_switches: AtomicU64::new(0),
+            cached_nonvoluntary_ctxt_switches: AtomicU64::new(0),
             net_last_input_bytes: AtomicU64::new(0),
             net_last_output_bytes: AtomicU64::new(0),
             net_last_sample_secs: AtomicU64::new(0),
@@ -397,6 +403,43 @@ impl ServerMetrics {
             self.cached_total_system_memory
                 .store(bytes, Ordering::Relaxed);
         }
+        if let Some((threads, vol, nonvol)) =
+            crate::server::process_metrics::read_process_threads_and_context_switches()
+        {
+            self.cached_process_threads
+                .store(threads, Ordering::Relaxed);
+            self.cached_voluntary_ctxt_switches
+                .store(vol, Ordering::Relaxed);
+            self.cached_nonvoluntary_ctxt_switches
+                .store(nonvol, Ordering::Relaxed);
+        }
+    }
+
+    /// 获取进程线程数与上下文切换数 (threads, voluntary, nonvoluntary).
+    ///
+    /// 优先从原子缓存直读；若缓存为 0（如启动初期未完成首次周期刷新），
+    /// 则兜底直读 `/proc/self/status` 并回填缓存，与 `cached_rss_bytes` 保持一致兜底语义。
+    pub fn get_threads_and_context_switches(&self) -> (u64, u64, u64) {
+        let threads = self.cached_process_threads.load(Ordering::Relaxed);
+        let vol = self.cached_voluntary_ctxt_switches.load(Ordering::Relaxed);
+        let nonvol = self
+            .cached_nonvoluntary_ctxt_switches
+            .load(Ordering::Relaxed);
+        if threads > 0 {
+            return (threads, vol, nonvol);
+        }
+        if let Some((t, v, nv)) =
+            crate::server::process_metrics::read_process_threads_and_context_switches()
+        {
+            self.cached_process_threads.store(t, Ordering::Relaxed);
+            self.cached_voluntary_ctxt_switches
+                .store(v, Ordering::Relaxed);
+            self.cached_nonvoluntary_ctxt_switches
+                .store(nv, Ordering::Relaxed);
+            (t, v, nv)
+        } else {
+            (0, 0, 0)
+        }
     }
 
     pub fn cached_rss_bytes(&self) -> u64 {
@@ -682,4 +725,57 @@ impl ServerMetrics {
 
     #[cfg(not(feature = "monitoring"))]
     pub fn sync_redis_aligned_gauges(&self) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_server_metrics_threads_and_context_switches_cache() {
+        let metrics = ServerMetrics::default();
+        // 1. 验证启动初期兜底直读与回填（在 Linux 环境下大于 0）
+        let (threads, vol, nonvol) = metrics.get_threads_and_context_switches();
+        #[cfg(target_os = "linux")]
+        {
+            assert!(threads > 0, "threads should be > 0 on linux");
+            assert_eq!(
+                metrics.cached_process_threads.load(Ordering::Relaxed),
+                threads
+            );
+            assert_eq!(
+                metrics
+                    .cached_voluntary_ctxt_switches
+                    .load(Ordering::Relaxed),
+                vol
+            );
+            assert_eq!(
+                metrics
+                    .cached_nonvoluntary_ctxt_switches
+                    .load(Ordering::Relaxed),
+                nonvol
+            );
+        }
+
+        // 2. 模拟缓存命中（优先返回缓存，不触发二次解析）
+        metrics.cached_process_threads.store(99, Ordering::Relaxed);
+        metrics
+            .cached_voluntary_ctxt_switches
+            .store(888, Ordering::Relaxed);
+        metrics
+            .cached_nonvoluntary_ctxt_switches
+            .store(777, Ordering::Relaxed);
+        assert_eq!(metrics.get_threads_and_context_switches(), (99, 888, 777));
+
+        // 3. 验证周期刷新逻辑
+        metrics.refresh_cached_process_info();
+        #[cfg(target_os = "linux")]
+        {
+            let refreshed = metrics.get_threads_and_context_switches();
+            assert_ne!(
+                refreshed.0, 99,
+                "refresh should overwrite dummy cache with real data"
+            );
+        }
+    }
 }
