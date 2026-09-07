@@ -553,7 +553,12 @@ impl<'a> InfoRenderer<'a> {
     }
 
     fn render_threads(&self) -> String {
-        String::from("# Threads\r\n")
+        let mut out = String::from("# Threads\r\n");
+        let (threads, vol, nonvol) = self.shared.metrics.get_threads_and_context_switches();
+        append_kv_u64(&mut out, "process_threads", threads);
+        append_kv_u64(&mut out, "context_switches_voluntary", vol);
+        append_kv_u64(&mut out, "context_switches_nonvoluntary", nonvol);
+        out
     }
 
     fn render_latencystats(&self) -> String {
@@ -678,6 +683,33 @@ impl<'a> InfoRenderer<'a> {
                 &mut out,
                 "aidb_write_stall_max_duration_us",
                 snap.write_stall_max_duration_us,
+            );
+
+            // 冷启动恢复 (Recovery) 指标
+            append_kv_u64(
+                &mut out,
+                "aidb_recovery_wal_replay_duration_us",
+                snap.recovery_wal_replay_duration_us,
+            );
+            append_kv_u64(
+                &mut out,
+                "aidb_recovery_wal_replayed_bytes",
+                snap.recovery_wal_replayed_bytes,
+            );
+            append_kv_u64(
+                &mut out,
+                "aidb_recovery_manifest_duration_us",
+                snap.recovery_manifest_duration_us,
+            );
+            append_kv_u64(
+                &mut out,
+                "aidb_recovery_sstable_open_duration_us",
+                snap.recovery_sstable_open_duration_us,
+            );
+            append_kv_u64(
+                &mut out,
+                "aikv_recovery_rebuild_counters_duration_us",
+                self.storage.rebuild_counters_duration_us(),
             );
         } else {
             let engine = match self.shared.engine_kind {

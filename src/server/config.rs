@@ -293,7 +293,12 @@ impl ServerSharedState {
         let expired = self.storage_observation.drain_expired_keys();
         self.metrics.record_expired_keys(expired);
         #[cfg(feature = "monitoring")]
-        crate::server::info_catalog::sync_otel_from_server_metrics(&self.metrics);
+        {
+            if let Some(otel) = self.metrics.otel_handle() {
+                otel.set_rebuild_counters_duration(self.storage.rebuild_counters_duration_us());
+            }
+            crate::server::info_catalog::sync_otel_from_server_metrics(&self.metrics);
+        }
     }
 
     pub fn uptime_secs(&self) -> u64 {

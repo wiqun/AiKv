@@ -106,6 +106,9 @@ pub struct OtelMetrics {
     process_cpu_time: Counter<f64>,
     process_memory_usage: Gauge<f64>,
     process_disk_io: Counter<u64>,
+    rebuild_counters_duration_seconds: Gauge<f64>,
+    process_threads: Gauge<f64>,
+    process_context_switches_total: Counter<u64>,
     sync_snapshot: Mutex<SyncSnapshot>,
 }
 
@@ -273,6 +276,21 @@ impl OtelMetrics {
                 .with_description("Process disk I/O bytes")
                 .with_unit("By")
                 .build(),
+            rebuild_counters_duration_seconds: meter
+                .f64_gauge("aikv_recovery_rebuild_counters_duration_seconds")
+                .with_description("键计数器全库重建恢复耗时")
+                .with_unit("s")
+                .build(),
+            process_threads: meter
+                .f64_gauge("aikv_process_threads")
+                .with_description("进程当前 OS 线程总数")
+                .with_unit("1")
+                .build(),
+            process_context_switches_total: meter
+                .u64_counter("aikv_process_context_switches_total")
+                .with_description("进程上下文切换累计次数")
+                .with_unit("1")
+                .build(),
             sync_snapshot: Mutex::new(SyncSnapshot::default()),
         });
 
@@ -292,6 +310,30 @@ impl OtelMetrics {
             count as f64,
             &[KeyValue::new(ATTR_DB_INDEX, db.to_string())],
         );
+    }
+
+    pub fn set_rebuild_counters_duration(&self, duration_us: u64) {
+        self.rebuild_counters_duration_seconds
+            .record(duration_us as f64 / 1_000_000.0, &[]);
+    }
+
+    pub fn set_process_threads(&self, threads: u64) {
+        self.process_threads.record(threads as f64, &[]);
+    }
+
+    pub fn add_process_context_switches(&self, vol_delta: u64, nonvol_delta: u64) {
+        if vol_delta > 0 {
+            self.process_context_switches_total.add(
+                vol_delta,
+                &[KeyValue::new("aikv_context_switch_type", "voluntary")],
+            );
+        }
+        if nonvol_delta > 0 {
+            self.process_context_switches_total.add(
+                nonvol_delta,
+                &[KeyValue::new("aikv_context_switch_type", "nonvoluntary")],
+            );
+        }
     }
 
     pub fn on_connect(&self) {

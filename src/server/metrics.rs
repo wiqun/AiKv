@@ -81,6 +81,10 @@ pub struct ServerMetrics {
     #[cfg(feature = "monitoring")]
     process_last_write_bytes: AtomicU64,
     #[cfg(feature = "monitoring")]
+    process_last_voluntary_ctxt_switches: AtomicU64,
+    #[cfg(feature = "monitoring")]
+    process_last_nonvoluntary_ctxt_switches: AtomicU64,
+    #[cfg(feature = "monitoring")]
     otel: Option<Arc<super::otel_metrics::OtelMetrics>>,
 }
 
@@ -131,6 +135,10 @@ impl Default for ServerMetrics {
             process_last_read_bytes: AtomicU64::new(0),
             #[cfg(feature = "monitoring")]
             process_last_write_bytes: AtomicU64::new(0),
+            #[cfg(feature = "monitoring")]
+            process_last_voluntary_ctxt_switches: AtomicU64::new(0),
+            #[cfg(feature = "monitoring")]
+            process_last_nonvoluntary_ctxt_switches: AtomicU64::new(0),
             #[cfg(feature = "monitoring")]
             otel: None,
         }
@@ -546,6 +554,29 @@ impl ServerMetrics {
                 let delta = write_bytes - prev_write;
                 otel.add_process_io(0, delta);
             }
+        }
+        if let Some((threads, vol, nonvol)) =
+            crate::server::process_metrics::read_process_threads_and_context_switches()
+        {
+            otel.set_process_threads(threads);
+
+            let prev_vol = self
+                .process_last_voluntary_ctxt_switches
+                .load(Ordering::Relaxed);
+            if prev_vol > 0 && vol > prev_vol {
+                otel.add_process_context_switches(vol - prev_vol, 0);
+            }
+            self.process_last_voluntary_ctxt_switches
+                .store(vol, Ordering::Relaxed);
+
+            let prev_nonvol = self
+                .process_last_nonvoluntary_ctxt_switches
+                .load(Ordering::Relaxed);
+            if prev_nonvol > 0 && nonvol > prev_nonvol {
+                otel.add_process_context_switches(0, nonvol - prev_nonvol);
+            }
+            self.process_last_nonvoluntary_ctxt_switches
+                .store(nonvol, Ordering::Relaxed);
         }
     }
 
