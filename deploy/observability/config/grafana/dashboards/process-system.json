@@ -1,0 +1,363 @@
+{
+  "title": "AiKv - 系统物理度量与协议概览 (Process & System)",
+  "uid": "aikv-process-system",
+  "tags": [
+    "aikv",
+    "system",
+    "process"
+  ],
+  "timezone": "browser",
+  "editable": true,
+  "schemaVersion": 38,
+  "version": 1,
+  "panels": [
+    {
+      "id": 1,
+      "title": "进程物理度量 (OS & Physical Resources)",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "collapsed": false
+    },
+    {
+      "id": 2,
+      "title": "OS 线程总数 (OS Threads)",
+      "type": "stat",
+      "gridPos": {
+        "h": 7,
+        "w": 4,
+        "x": 0,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "aikv_process_threads",
+          "refId": "A",
+          "legendFormat": "Threads"
+        }
+      ],
+      "description": "当前 aikv 进程使用的操作系统底层线程数。对账契约: OTel 线程数 = INFO threads process_threads。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "title": "上下文切换速率 (Context Switches Rate)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 7,
+        "w": 6,
+        "x": 4,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (aikv_context_switch_type) (rate(aikv_process_context_switches_total[1m]))",
+          "refId": "A",
+          "legendFormat": "{{aikv_context_switch_type}}"
+        }
+      ],
+      "description": "自愿 (voluntary) 与非自愿 (involuntary) 上下文切换速率。对账契约: OTel 差分速率 = INFO threads 差分累加。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "title": "CPU 使用率 (CPU Usage)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 7,
+        "w": 4,
+        "x": 10,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(aikv_process_cpu_milliseconds_total[1m]) / 1000 * 100",
+          "refId": "A",
+          "legendFormat": "CPU %"
+        }
+      ],
+      "description": "CPU 毫秒换算为单核百分比率。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "title": "磁盘物理 I/O 读写双曲线 (Disk Physical I/O)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 7,
+        "w": 6,
+        "x": 14,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(aikv_process_read_bytes_total[1m])",
+          "refId": "A",
+          "legendFormat": "Read Bytes/s"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(aikv_process_write_bytes_total[1m])",
+          "refId": "B",
+          "legendFormat": "Write Bytes/s"
+        }
+      ],
+      "description": "基于 /proc/self/io 统计的独立物理读写速率双曲线。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "binBps"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "title": "进程物理驻留内存 (Resident Memory RSS)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 7,
+        "w": 4,
+        "x": 20,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "aikv_process_resident_memory_bytes",
+          "refId": "A",
+          "legendFormat": "RSS"
+        }
+      ],
+      "description": "进程真实驻留物理内存占用。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "title": "协议层与业务吞吐概览 (Protocol & Business Overview)",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 8
+      },
+      "collapsed": false
+    },
+    {
+      "id": 8,
+      "title": "命令执行 QPS (Commands QPS)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 7,
+        "w": 6,
+        "x": 0,
+        "y": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(aikv_commands_total[1m])",
+          "refId": "A",
+          "legendFormat": "QPS"
+        }
+      ],
+      "description": "Redis 协议命令每秒处理请求数。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 9,
+      "title": "客户端连接概况 (Client Connections)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 7,
+        "w": 6,
+        "x": 6,
+        "y": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "aikv_connected_clients",
+          "refId": "A",
+          "legendFormat": "Connected Clients"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "aikv_blocked_clients",
+          "refId": "B",
+          "legendFormat": "Blocked Clients"
+        }
+      ],
+      "description": "当前已连接客户端与阻塞等待客户端数。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 10,
+      "title": "键空间命中率 (Keyspace Hit Ratio)",
+      "type": "gauge",
+      "gridPos": {
+        "h": 7,
+        "w": 6,
+        "x": 12,
+        "y": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(aikv_keyspace_hits_total[1m]) / (rate(aikv_keyspace_hits_total[1m]) + rate(aikv_keyspace_misses_total[1m])) * 100",
+          "refId": "A",
+          "legendFormat": "Hit %"
+        }
+      ],
+      "description": "键空间查询命中百分比。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 11,
+      "title": "网络 I/O 带宽 (Network Bandwidth)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 7,
+        "w": 6,
+        "x": 18,
+        "y": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(aikv_net_input_bytes_total[1m])",
+          "refId": "A",
+          "legendFormat": "Net In"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(aikv_net_output_bytes_total[1m])",
+          "refId": "B",
+          "legendFormat": "Net Out"
+        }
+      ],
+      "description": "网络入站与出站带宽速率。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "binBps"
+        },
+        "overrides": []
+      }
+    }
+  ]
+}

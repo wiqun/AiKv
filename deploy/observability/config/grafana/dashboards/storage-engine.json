@@ -1,0 +1,528 @@
+{
+  "title": "AiKv - 存储引擎白盒指标 (Storage Engine)",
+  "uid": "aikv-storage-engine",
+  "tags": [
+    "aikv",
+    "storage",
+    "aidb"
+  ],
+  "timezone": "browser",
+  "editable": true,
+  "schemaVersion": 38,
+  "version": 1,
+  "panels": [
+    {
+      "id": 1,
+      "title": "写放大 (Write Amplification, WA)",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "collapsed": false
+    },
+    {
+      "id": 2,
+      "title": "综合写放大 (WA Ratio)",
+      "type": "stat",
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "(rate(aidb_wal_written_bytes_total[1m]) + rate(aidb_flush_written_bytes_total[1m]) + rate(aidb_compaction_written_bytes_total[1m])) / rate(aidb_logical_write_bytes_total[1m])",
+          "refId": "A",
+          "legendFormat": "WA Ratio"
+        }
+      ],
+      "description": "综合写放大 WA = (WAL物理写 + Flush写 + Compaction写) / 逻辑写入。对账契约: OTel 秒级速率，INFO 对应 wal_written_bytes, flush_written_bytes, compaction_written_bytes 累加量。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "title": "写入吞吐各组成速率 (Write Throughput Breakdown)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 18,
+        "x": 6,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(aidb_logical_write_bytes_total[1m])",
+          "refId": "A",
+          "legendFormat": "Logical Write"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(aidb_wal_written_bytes_total[1m])",
+          "refId": "B",
+          "legendFormat": "WAL Written"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(aidb_flush_written_bytes_total[1m])",
+          "refId": "C",
+          "legendFormat": "Flush Written"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(aidb_compaction_written_bytes_total[1m])",
+          "refId": "D",
+          "legendFormat": "Compaction Written"
+        }
+      ],
+      "description": "写路径各组成部分的每秒吞吐字节量。逻辑写为分母，WAL/Flush/Compaction 为分子。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "binBps"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "title": "读放大 (Read Amplification, RA) 与缓存命中率",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 9
+      },
+      "collapsed": false
+    },
+    {
+      "id": 5,
+      "title": "综合读放大 (RA Ratio)",
+      "type": "stat",
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 10
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(aidb_block_read_bytes_total[1m]) / rate(aidb_logical_read_bytes_total[1m])",
+          "refId": "A",
+          "legendFormat": "RA Ratio"
+        }
+      ],
+      "description": "综合读放大 RA = 物理块读取 / 逻辑读取 (纯用户点查与迭代，不受 Compaction 与内部写检查污染)。对账契约: INFO storage 对应 block_read_bytes / logical_read_bytes。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "title": "块缓存命中率 (Block Cache Hit Ratio)",
+      "type": "gauge",
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 6,
+        "y": 10
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(aidb_block_cache_hits_total[1m]) / (rate(aidb_block_cache_hits_total[1m]) + rate(aidb_block_cache_misses_total[1m])) * 100",
+          "refId": "A",
+          "legendFormat": "Hit %"
+        }
+      ],
+      "description": "纯用户读口径下的 Block Cache 命中百分比。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "title": "物理读与逻辑读吞吐 (Read Throughput)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 10
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(aidb_logical_read_bytes_total[1m])",
+          "refId": "A",
+          "legendFormat": "Logical Read"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(aidb_block_read_bytes_total[1m])",
+          "refId": "B",
+          "legendFormat": "Block Physical Read"
+        }
+      ],
+      "description": "用户逻辑读与底层穿透物理磁盘块读取速率对比。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "binBps"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 8,
+      "title": "写入停顿 (Write Stall) 观测与归因",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 18
+      },
+      "collapsed": false
+    },
+    {
+      "id": 9,
+      "title": "Write Stall 请求发生率 (Stall Ratio)",
+      "type": "stat",
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 19
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(aidb_write_stall_requests_total[1m])) / rate(aidb_operations_total{aidb_operation_name=~\"put|delete|write_batch\"}[1m]) * 100",
+          "refId": "A",
+          "legendFormat": "Stall Ratio %"
+        }
+      ],
+      "description": "经历写停顿的写请求百分比。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 10,
+      "title": "停顿原因归因速率 (Stall Requests by Cause)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 6,
+        "y": 19
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (aidb_write_stall_cause) (rate(aidb_write_stall_requests_total[1m]))",
+          "refId": "A",
+          "legendFormat": "{{aidb_write_stall_cause}}"
+        }
+      ],
+      "description": "触发写停顿的原因分类: memtable, l0, level_size。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 11,
+      "title": "停顿延迟 P99 (Stall Duration P99)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 19
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(aidb_write_stall_duration_seconds_bucket[1m])))",
+          "refId": "A",
+          "legendFormat": "P99 Duration"
+        }
+      ],
+      "description": "写停顿耗时 P99 分位数。对账契约: OTel 秒 = INFO 微秒 × 10⁻⁶。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 12,
+      "title": "单次最大停顿时长极值 (Max Stall Duration)",
+      "type": "stat",
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 19
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "aidb_write_stall_max_duration_seconds",
+          "refId": "A",
+          "legendFormat": "Max Stall"
+        }
+      ],
+      "description": "进程生命周期内单次最大停顿时长极值。对账契约: OTel 秒 = INFO write_stall_max_duration_us × 10⁻⁶。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 13,
+      "title": "LSM 形态、空间与 Bloom FPR",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 27
+      },
+      "collapsed": false
+    },
+    {
+      "id": 14,
+      "title": "Compaction 积压量 (Compaction Pending Bytes)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 28
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "aidb_compaction_pending_bytes",
+          "refId": "A",
+          "legendFormat": "Pending Bytes"
+        }
+      ],
+      "description": "后台待 Compaction 数据积压量，是 Write Stall 的核心前兆预警指标。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 15,
+      "title": "各层 SSTable 文件数 (SSTable Count by Level)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 6,
+        "y": 28
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "aidb_sstable_count",
+          "refId": "A",
+          "legendFormat": "Level {{aidb_sstable_level}}"
+        }
+      ],
+      "description": "LSM 树各层 SSTable 文件数分布。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 16,
+      "title": "各层 SSTable 总容量 (SSTable Size by Level)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 28
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "aidb_sstable_size_bytes",
+          "refId": "A",
+          "legendFormat": "Level {{aidb_sstable_level}}"
+        }
+      ],
+      "description": "LSM 树各层 SSTable 物理容量占用。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 17,
+      "title": "Bloom 假阳性率 (Bloom False Positive Rate)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 28
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(aidb_bloom_false_positive_total[1m]) / (rate(aidb_bloom_false_positive_total[1m]) + rate(aidb_bloom_useful_total[1m])) * 100",
+          "refId": "A",
+          "legendFormat": "FPR %"
+        }
+      ],
+      "description": "精确 Bloom 过滤器假阳性穿透比率 FPR = FP / (FP + TN)。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        },
+        "overrides": []
+      }
+    }
+  ]
+}
