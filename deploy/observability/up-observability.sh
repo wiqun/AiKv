@@ -47,7 +47,7 @@ for ((i=1; i<=MAX_RETRIES; i++)); do
     # 检查 Grafana 健康接口
     if [ "${grafana_ready}" = false ]; then
         health_resp=$(curl -s "http://127.0.0.1:3000/api/health" 2>/dev/null || true)
-        if echo "${health_resp}" | grep -q '"database":"ok"'; then
+        if echo "${health_resp}" | grep -qE '"database":\s*"ok"'; then
             grafana_ready=true
             echo "  ✓ Grafana 就绪 (http://127.0.0.1:3000)"
         fi
