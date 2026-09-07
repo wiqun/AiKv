@@ -105,11 +105,11 @@ Grafana 启动后自动加载 `AiKv` 仪表盘目录下的四张大盘：
 
 1. **`AiKv / 概览与基准评测 (Overview & Benchmark)` (推荐主盘)**：
    - **严格对齐 `bench.md` 三层架构**：
-     - **业务黑盒层 (Business Black-Box Layer)**：实时 QPS 吞吐、网络吞吐带宽 (In/Out)、活跃/阻塞客户端数、键命中率、命令 QPS 趋势分布、网络带宽时序趋势；
-     - **存储白盒层 (Storage Engine White-Box Layer)**：三大放大比率 (WA 写放大、RA 读放大、SA 空间放大)、物理写入拆分 (WAL/Flush/Compaction)、Write Stall 停顿频次与最大停顿耗时、Block Cache 命中率、Bloom Filter 假阳性率、Compaction 待处理积压量；
+     - **业务黑盒层 (Business Black-Box Layer)**：三大时序黄金柱石 (8:8:8 宽幅并列)：左侧集群与各节点吞吐趋势 (一张图多根线对比集群总吞吐与 `aikv-1`~`aikv-6` 各节点负载)、中间各命令吞吐时序拆解 (QPS by Command)、右侧命令端到端延迟分位数时序 (P50/P95/P99)；下排 6:6:6:6 规整四栏并列命令调用量占比 (饼图)、键空间命中率时序趋势、网络吞吐带宽 (双线: In/Out)、客户端连接与阻塞趋势 (双线: Connected/Blocked)；
+     - **存储白盒层 (Storage Engine White-Box Layer)**：三大放大比率 (WA 写放大、RA 读放大、SA 空间放大)、存储底层 Put/Get/Batch P95 耗时穿透、物理写入拆分 (WAL/Flush/Compaction)、Write Stall 停顿频次与最大停顿耗时、Block Cache 命中率与容量使用率 (%)、SSTable 分层文件数分布、Bloom Filter 穿透率与 Compaction 待处理积压量；
      - **系统物理层 (System Physical Layer)**：宿主机 CPU/IO-wait、内存分布 (Used/Cached/Buffers)、磁盘 IO 吞吐、文件句柄数；以及各 AiKv 实例 CPU 核数消耗、物理驻留内存 RSS、写吞吐、线程数与内核上下文切换。
    - **顶层变量级联联动**：支持 `$cluster` (集群) -> `$host` (宿主机) -> `$instance` (实例，支持多选与 All 聚合) 三级联动；
-   - **默认时间窗口与刷新率**：默认 `now-30m` 到 `now`，`10s` 自动刷新；
+   - **默认时间窗口与自适应刷新**：默认 `now-30m` 到 `now`，`10s` 自动刷新；PromQL 全面使用 `[$__rate_interval]` 动态平滑自适应；
    - **空闲防抖与容错**：PromQL 深度防御除零异常，静态空闲与无请求状态下绝不出现 No Data 报错。
 2. **`AiKv - 存储引擎白盒指标 (Storage Engine)`**：
    - 写放大 (WA) 综合比率与 4 种写吞吐拆分曲线；
