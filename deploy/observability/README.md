@@ -130,3 +130,25 @@ Grafana 启动后自动加载 `AiKv` 仪表盘目录下的三张大盘：
 OpenTelemetry trace error occurred. Exporting failed to send batch: status code 12 (Unimplemented)
 ```
 **这是完全正常的文档化预期行为**，对 `aikv` 正常业务处理和 metrics 指标收集没有任何副作用。后续若需追踪 tracing，仅需在 `otel-collector/config.yaml` 增加 trace pipeline 并接入 Tempo 即可无缝启用。
+
+---
+
+## 8. OpenTelemetry 单位规范化与 Transform 策略 (架构决策)
+
+- **现象与挑战**：
+  OpenTelemetry Collector 0.160+ 默认开启了单位规范化（Unit Normalization）。当 Instrument 以无量纲单位 `with_unit("1")` 注册时（如 `aikv_process_threads`、`aidb_sstable_count`），Prometheus Remote Write Exporter 默认会将其视为 ratio 并追加 `_ratio` 后缀（导致仪表盘指标名漂移查无数据）。
+- **全局选项 `add_metric_suffixes: false` 的副作用**：
+  若在 Exporter 侧全局设置 `add_metric_suffixes: false`，会连带禁用 Histogram 直方图指标的 `_bucket`、`_sum`、`_count` 类型后缀，导致所有延迟分位数计算（如 Write Stall P99、命令耗时分布）的底层时序完全缺失。
+- **最佳解法：Transform Processor**：
+  在 Collector 管道中引入 `transform/strip_unit_one` 处理器：
+  ```yaml
+  processors:
+    transform/strip_unit_one:
+      metric_statements:
+        - context: metric
+          statements:
+            - set(unit, "") where unit == "1"
+  ```
+  在导出前自动将无量纲 `unit="1"` 清空，既避免跨仓修改底层存储引擎代码，又同时实现了：
+  1. Gauge 指标绝不产生 `_ratio` 后缀漂移；
+  2. Histogram 直方图派生序列（`_bucket`、`_sum`、`_count`）100% 完整保留。

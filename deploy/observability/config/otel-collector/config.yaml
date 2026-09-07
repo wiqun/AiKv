@@ -10,13 +10,17 @@ processors:
   batch:
     timeout: 1s
     send_batch_size: 1024
+  transform/strip_unit_one:
+    metric_statements:
+      - context: metric
+        statements:
+          - set(unit, "") where unit == "1"
 
 exporters:
   prometheusremotewrite:
     endpoint: http://prometheus:9090/api/v1/write
     tls:
       insecure: true
-    add_metric_suffixes: false
     resource_to_telemetry_conversion:
       enabled: true
 
@@ -27,5 +31,5 @@ service:
   pipelines:
     metrics:
       receivers: [otlp]
-      processors: [batch]
+      processors: [transform/strip_unit_one, batch]
       exporters: [prometheusremotewrite]
