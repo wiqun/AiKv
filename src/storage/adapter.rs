@@ -28,6 +28,7 @@
 //!   (对齐 Redis 7, 与 `GET` 的 WRONGTYPE 不同).
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -172,6 +173,7 @@ pub struct KvStorageAdapter {
     counters: Arc<DbKeyCounters>,
     expire_gate: Arc<ExpireDecrGate>,
     watchers: Arc<WatchRegistry>,
+    rebuild_counters_duration_us: Arc<AtomicU64>,
 }
 
 impl KvStorageAdapter {
@@ -202,6 +204,7 @@ impl KvStorageAdapter {
             counters,
             expire_gate,
             watchers: WatchRegistry::new(),
+            rebuild_counters_duration_us: Arc::new(AtomicU64::new(0)),
         });
         adapter.rebuild_counters().await?;
         Ok(adapter)
@@ -222,16 +225,30 @@ impl KvStorageAdapter {
             counters: Arc::new(DbKeyCounters::new()),
             expire_gate: Arc::new(ExpireDecrGate::new()),
             watchers: WatchRegistry::new(),
+            rebuild_counters_duration_us: Arc::new(AtomicU64::new(0)),
         })
     }
 
+    /// 最近一次键计数器全库重建端到端耗时 (微秒).
+    ///
+    /// 包含全库重扫与过期 key 探测的端到端墙钟时间 (含调度与 I/O await 等待).
+    pub fn rebuild_counters_duration_us(&self) -> u64 {
+        self.rebuild_counters_duration_us.load(Ordering::Relaxed)
+    }
+
     /// 重建全部逻辑 DB 的键计数器 (存活未过期 user key; 过期 key `try_claim` 门闩, 不清空).
+    ///
+    /// 度量含 await 等待的端到端耗时 (墙钟时间，微秒)，并更新 `rebuild_counters_duration_us`。
     pub async fn rebuild_counters(&self) -> Result<()> {
+        let start = std::time::Instant::now();
         for db in 0..self.db_count {
             self.claim_expired_logical_keys(db).await?;
             self.counters
                 .set(db, self.keys_for_db(db, b"").await?.len() as u64);
         }
+        let elapsed_us = start.elapsed().as_micros() as u64;
+        self.rebuild_counters_duration_us
+            .store(elapsed_us, Ordering::Relaxed);
         Ok(())
     }
 
@@ -477,6 +494,10 @@ impl KvStorageAdapter {
 impl KvStorage for KvStorageAdapter {
     fn aidb_statistics(&self) -> Option<std::sync::Arc<aidb::Statistics>> {
         self.storage.aidb_statistics()
+    }
+
+    fn rebuild_counters_duration_us(&self) -> u64 {
+        self.rebuild_counters_duration_us.load(Ordering::Relaxed)
     }
 
     async fn get(&self, db: usize, key: &[u8]) -> Result<Option<Vec<u8>>> {
