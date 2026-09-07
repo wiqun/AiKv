@@ -31,10 +31,12 @@ if ! [[ "$STARTUP_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
     exit 2
 fi
 
-OTLP_ENDPOINT="${AIKV_OTLP_ENDPOINT:-${OTEL_EXPORTER_OTLP_ENDPOINT:-}}"
+OTLP_ENDPOINT="${AIKV_OTLP_ENDPOINT:-}"
 if [[ -z "$OTLP_ENDPOINT" ]]; then
     if docker ps --format '{{.Names}}' 2>/dev/null | grep -qE '^(aikv-)?otel-collector$'; then
         OTLP_ENDPOINT="http://aikv-otel-collector:4317"
+    else
+        OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
     fi
 fi
 

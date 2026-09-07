@@ -99,20 +99,28 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317
 
 ---
 
-## 6. 3 张专属预置大盘说明
+## 6. 预置监控大盘体系 (4 张预置大盘)
 
-Grafana 启动后自动加载 `AiKv` 仪表盘目录下的三张大盘：
+Grafana 启动后自动加载 `AiKv` 仪表盘目录下的四张大盘：
 
-1. **`AiKv - 存储引擎白盒指标 (Storage Engine)`**：
+1. **`AiKv / 概览与基准评测 (Overview & Benchmark)` (推荐主盘)**：
+   - **严格对齐 `bench.md` 三层架构**：
+     - **业务黑盒层 (Business Black-Box Layer)**：实时 QPS 吞吐、网络吞吐带宽 (In/Out)、活跃/阻塞客户端数、键命中率、命令 QPS 趋势分布、网络带宽时序趋势；
+     - **存储白盒层 (Storage Engine White-Box Layer)**：三大放大比率 (WA 写放大、RA 读放大、SA 空间放大)、物理写入拆分 (WAL/Flush/Compaction)、Write Stall 停顿频次与最大停顿耗时、Block Cache 命中率、Bloom Filter 假阳性率、Compaction 待处理积压量；
+     - **系统物理层 (System Physical Layer)**：宿主机 CPU/IO-wait、内存分布 (Used/Cached/Buffers)、磁盘 IO 吞吐、文件句柄数；以及各 AiKv 实例 CPU 核数消耗、物理驻留内存 RSS、写吞吐、线程数与内核上下文切换。
+   - **顶层变量级联联动**：支持 `$cluster` (集群) -> `$host` (宿主机) -> `$instance` (实例，支持多选与 All 聚合) 三级联动；
+   - **默认时间窗口与刷新率**：默认 `now-30m` 到 `now`，`10s` 自动刷新；
+   - **空闲防抖与容错**：PromQL 深度防御除零异常，静态空闲与无请求状态下绝不出现 No Data 报错。
+2. **`AiKv - 存储引擎白盒指标 (Storage Engine)`**：
    - 写放大 (WA) 综合比率与 4 种写吞吐拆分曲线；
    - 读放大 (RA) 综合比率与 BlockCache 纯读命中率；
    - Write Stall 请求停顿百分比、停顿原因归因与 P99 停顿延迟分位数；
    - LSM 形态与 Compaction 积压量、各层 SST 文件与容量、Bloom 过滤器假阳性率 (FPR)。
-2. **`AiKv - 冷启动恢复与 RTO 分析 (Cold Recovery & RTO)`**：
+3. **`AiKv - 冷启动恢复与 RTO 分析 (Cold Recovery & RTO)`**：
    - 5 项冷启动 RTO 耗时与字节 Stat 核心卡片；
    - WAL 物理重放带宽吞吐折线图；
    - RTO 4 阶段（Manifest、SST 打开、WAL 回放、计数器全库重扫）耗时构成对比图。
-3. **`AiKv - 系统物理度量与协议概览 (Process & System)`**：
+4. **`AiKv - 系统物理度量与协议概览 (Process & System)`**：
    - OS 线程总数、自愿/非自愿上下文切换速率曲线；
    - 物理 CPU 毫秒使用率换算；
    - 独立物理磁盘读写 I/O 双曲线；

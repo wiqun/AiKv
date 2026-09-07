@@ -1,0 +1,956 @@
+{
+  "title": "AiKv / 概览与基准评测 (Overview & Benchmark)",
+  "uid": "aikv-overview",
+  "tags": [
+    "aikv",
+    "benchmark",
+    "overview"
+  ],
+  "timezone": "browser",
+  "editable": true,
+  "schemaVersion": 38,
+  "version": 1,
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "refresh": "10s",
+  "templating": {
+    "list": [
+      {
+        "name": "cluster",
+        "label": "Cluster",
+        "type": "query",
+        "query": "label_values(aikv_uptime_seconds, cluster)",
+        "definition": "label_values(aikv_uptime_seconds, cluster)",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "refresh": 1,
+        "includeAll": true,
+        "multi": false,
+        "allValue": ".*",
+        "sort": 1,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "host",
+        "label": "Host",
+        "type": "query",
+        "query": "label_values(aikv_uptime_seconds{cluster=~\"$cluster\"}, host_name)",
+        "definition": "label_values(aikv_uptime_seconds{cluster=~\"$cluster\"}, host_name)",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "refresh": 1,
+        "includeAll": true,
+        "multi": false,
+        "allValue": ".*",
+        "sort": 1,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "instance",
+        "label": "Instance",
+        "type": "query",
+        "query": "label_values(aikv_uptime_seconds{cluster=~\"$cluster\", host_name=~\"$host\"}, service_instance_id)",
+        "definition": "label_values(aikv_uptime_seconds{cluster=~\"$cluster\", host_name=~\"$host\"}, service_instance_id)",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "refresh": 1,
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "sort": 1,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "1. 业务黑盒层 (Business Black-Box Layer)",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "collapsed": false
+    },
+    {
+      "id": 2,
+      "title": "实时 QPS 吞吐 (Commands/s)",
+      "type": "stat",
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 0,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(aikv_commands_total{cluster=~\"$cluster\", host_name=~\"$host\", service_instance_id=~\"$instance\"}[1m])) or vector(0)",
+          "refId": "A",
+          "legendFormat": "总 QPS"
+        }
+      ],
+      "description": "服务端处理命令的瞬时吞吐量 (QPS)。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "noValue": "0"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "title": "网络吞吐带宽 (MB/s)",
+      "type": "stat",
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 6,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "(sum(rate(aikv_net_input_bytes_total{cluster=~\"$cluster\", host_name=~\"$host\", service_instance_id=~\"$instance\"}[1m])) / 1024 / 1024) or vector(0)",
+          "refId": "A",
+          "legendFormat": "入站 (In)"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "(sum(rate(aikv_net_output_bytes_total{cluster=~\"$cluster\", host_name=~\"$host\", service_instance_id=~\"$instance\"}[1m])) / 1024 / 1024) or vector(0)",
+          "refId": "B",
+          "legendFormat": "出站 (Out)"
+        }
+      ],
+      "description": "客户端与 AiKv 之间的网络流量吞吐速率。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "MB/s",
+          "noValue": "0"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "title": "活跃客户端连接数 (Clients)",
+      "type": "stat",
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 12,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(aikv_connected_clients{cluster=~\"$cluster\", host_name=~\"$host\", service_instance_id=~\"$instance\"}) or vector(0)",
+          "refId": "A",
+          "legendFormat": "当前活跃连接"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(aikv_blocked_clients{cluster=~\"$cluster\", host_name=~\"$host\", service_instance_id=~\"$instance\"}) or vector(0)",
+          "refId": "B",
+          "legendFormat": "阻塞等待连接"
+        }
+      ],
+      "description": "当前连接的客户端总数与阻塞等待客户端数量。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "0"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "title": "键命中率 (Keyspace Hit Rate)",
+      "type": "stat",
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 18,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "((sum(rate(aikv_keyspace_hits_total{cluster=~\"$cluster\", host_name=~\"$host\", service_instance_id=~\"$instance\"}[1m])) / ((sum(rate(aikv_keyspace_hits_total{cluster=~\"$cluster\", host_name=~\"$host\", service_instance_id=~\"$instance\"}[1m])) + sum(rate(aikv_keyspace_misses_total{cluster=~\"$cluster\", host_name=~\"$host\", service_instance_id=~\"$instance\"}[1m]))) > 0)) * 100) or vector(100)",
+          "refId": "A",
+          "legendFormat": "Hit Rate"
+        }
+      ],
+      "description": "键查找成功命中率 (Hits / (Hits + Misses))。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "noValue": "100%"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "title": "命令吞吐趋势与命令分布 (QPS by Command)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (aikv_command_name) (rate(aikv_commands_total{cluster=~\"$cluster\", host_name=~\"$host\", service_instance_id=~\"$instance\"}[1m]))",
+          "refId": "A",
+          "legendFormat": "{{aikv_command_name}}"
+        }
+      ],
+      "description": "各命令执行频率的时间序列趋势。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "title": "网络入站/出站带宽趋势 (MB/s)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(aikv_net_input_bytes_total{cluster=~\"$cluster\", host_name=~\"$host\", service_instance_id=~\"$instance\"}[1m])) / 1024 / 1024",
+          "refId": "A",
+          "legendFormat": "入站带宽 (MB/s)"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(aikv_net_output_bytes_total{cluster=~\"$cluster\", host_name=~\"$host\", service_instance_id=~\"$instance\"}[1m])) / 1024 / 1024",
+          "refId": "B",
+          "legendFormat": "出站带宽 (MB/s)"
+        }
+      ],
+      "description": "客户端请求与响应带宽历史趋势。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "MB/s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 8,
+      "title": "2. 存储白盒层 (Storage Engine White-Box Layer)",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 15
+      },
+      "collapsed": false
+    },
+    {
+      "id": 9,
+      "title": "综合写放大 (WA Ratio)",
+      "type": "stat",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 16
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "((sum(rate(aidb_wal_written_bytes_total{cluster=~\"$cluster\", host_name=~\"$host\", service_instance_id=~\"$instance\"}[1m])) + sum(rate(aidb_flush_written_bytes_total{cluster=~\"$cluster\", host_name=~\"$host\", service_instance_id=~\"$instance\"}[1m])) + sum(rate(aidb_compaction_written_bytes_total{cluster=~\"$cluster\", host_name=~\"$host\", service_instance_id=~\"$instance\"}[1m]))) / (sum(rate(aidb_logical_write_bytes_total{cluster=~\"$cluster\", host_name=~\"$host\", service_instance_id=~\"$instance\"}[1m])) > 0)) or vector(0)",
+          "refId": "A",
+          "legendFormat": "WA Ratio"
+        }
+      ],
+      "description": "写放大 WA = (WAL物理写 + Flush写 + Compaction写) / 逻辑写入。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "0.00"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 10,
+      "title": "综合读放大 (RA Ratio)",
+      "type": "stat",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 16
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "(sum(rate(aidb_block_read_bytes_total{cluster=~\"$cluster\", host_name=~\"$host\", service_instance_id=~\"$instance\"}[1m])) / (sum(rate(aidb_logical_read_bytes_total{cluster=~\"$cluster\", host_name=~\"$host\", service_instance_id=~\"$instance\"}[1m])) > 0)) or vector(0)",
+          "refId": "A",
+          "legendFormat": "RA Ratio"
+        }
+      ],
+      "description": "读放大 RA = 从存储介质实际读取的物理字节数 / 用户逻辑读取字节数。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "0.00"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 11,
+      "title": "空间放大 (SA Ratio)",
+      "type": "stat",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 16
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "((sum(aidb_sstable_size_bytes{cluster=~\"$cluster\", host_name=~\"$host\", service_instance_id=~\"$instance\"}) + sum(aidb_wal_size_bytes{cluster=~\"$cluster\", host_name=~\"$host\", service_instance_id=~\"$instance\"})) / (sum(aidb_memtable_size_bytes{cluster=~\"$cluster\", host_name=~\"$host\", service_instance_id=~\"$instance\"}) > 0)) or vector(0)",
+          "refId": "A",
+          "legendFormat": "SA Ratio"
+        }
+      ],
+      "description": "空间放大 SA = 物理磁盘占用大小 (SST + WAL) / 有效逻辑数据大小。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "0.00"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 12,
+      "title": "物理写入速率分解 (MB/s)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 22
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(aidb_wal_written_bytes_total{cluster=~\"$cluster\", host_name=~\"$host\", service_instance_id=~\"$instance\"}[1m])) / 1024 / 1024",
+          "refId": "A",
+          "legendFormat": "WAL 写入"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(aidb_flush_written_bytes_total{cluster=~\"$cluster\", host_name=~\"$host\", service_instance_id=~\"$instance\"}[1m])) / 1024 / 1024",
+          "refId": "B",
+          "legendFormat": "Flush 刷盘"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(aidb_compaction_written_bytes_total{cluster=~\"$cluster\", host_name=~\"$host\", service_instance_id=~\"$instance\"}[1m])) / 1024 / 1024",
+          "refId": "C",
+          "legendFormat": "Compaction 写入"
+        }
+      ],
+      "description": "存储引擎底层物理写速率分解。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "MB/s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 13,
+      "title": "Write Stall 停顿频次与最大耗时",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 22
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (aidb_write_stall_cause) (rate(aidb_write_stall_requests_total{cluster=~\"$cluster\", host_name=~\"$host\", service_instance_id=~\"$instance\"}[1m]))",
+          "refId": "A",
+          "legendFormat": "停顿请求频次 ({{aidb_write_stall_cause}})"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(aidb_write_stall_max_duration_seconds{cluster=~\"$cluster\", host_name=~\"$host\", service_instance_id=~\"$instance\"})",
+          "refId": "B",
+          "legendFormat": "单次最大停顿耗时 (s)"
+        }
+      ],
+      "description": "因 MemTable 刷盘不及时或 L0 文件堆积触发的写停顿监控。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 14,
+      "title": "Block Cache 命中率 (%)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 30
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "((sum(rate(aidb_block_cache_hits_total{cluster=~\"$cluster\", host_name=~\"$host\", service_instance_id=~\"$instance\"}[1m])) / ((sum(rate(aidb_block_cache_hits_total{cluster=~\"$cluster\", host_name=~\"$host\", service_instance_id=~\"$instance\"}[1m])) + sum(rate(aidb_block_cache_misses_total{cluster=~\"$cluster\", host_name=~\"$host\", service_instance_id=~\"$instance\"}[1m]))) > 0)) * 100) or vector(0)",
+          "refId": "A",
+          "legendFormat": "命中率 (%)"
+        }
+      ],
+      "description": "Block Cache 数据块读取命中率。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 15,
+      "title": "Bloom Filter 假阳性穿透率 (%)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 30
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "((sum(rate(aidb_bloom_false_positive_total{cluster=~\"$cluster\", host_name=~\"$host\", service_instance_id=~\"$instance\"}[1m])) / ((sum(rate(aidb_bloom_false_positive_total{cluster=~\"$cluster\", host_name=~\"$host\", service_instance_id=~\"$instance\"}[1m])) + sum(rate(aidb_bloom_useful_total{cluster=~\"$cluster\", host_name=~\"$host\", service_instance_id=~\"$instance\"}[1m]))) > 0)) * 100) or vector(0)",
+          "refId": "A",
+          "legendFormat": "假阳性率 (%)"
+        }
+      ],
+      "description": "布隆过滤器过滤未命中 key 的假阳性穿透率。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 16,
+      "title": "Compaction 待处理积压量 (MB)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 30
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "(sum(aidb_compaction_pending_bytes{cluster=~\"$cluster\", host_name=~\"$host\", service_instance_id=~\"$instance\"}) / 1024 / 1024) or vector(0)",
+          "refId": "A",
+          "legendFormat": "Pending Compaction (MB)"
+        }
+      ],
+      "description": "LSM-Tree 等待压缩合并的数据体积积压。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "MB"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 17,
+      "title": "3. 系统物理层 (System Physical Layer)",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 37
+      },
+      "collapsed": false
+    },
+    {
+      "id": 18,
+      "title": "主机 CPU 利用率 (%) [node-exporter]",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 38
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "100 - (avg(rate(node_cpu_seconds_total{job=\"node-exporter\", mode=\"idle\"}[1m])) * 100)",
+          "refId": "A",
+          "legendFormat": "总使用率"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "avg(rate(node_cpu_seconds_total{job=\"node-exporter\", mode=\"iowait\"}[1m])) * 100",
+          "refId": "B",
+          "legendFormat": "I/O 等待 (iowait)"
+        }
+      ],
+      "description": "物理宿主机总体 CPU 利用率与 IO 等待占用。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 19,
+      "title": "主机内存使用分布 (GB) [node-exporter]",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 38
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "(node_memory_MemTotal_bytes{job=\"node-exporter\"} - node_memory_MemAvailable_bytes{job=\"node-exporter\"}) / 1024 / 1024 / 1024",
+          "refId": "A",
+          "legendFormat": "已用内存 (Used)"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "node_memory_Cached_bytes{job=\"node-exporter\"} / 1024 / 1024 / 1024",
+          "refId": "B",
+          "legendFormat": "页缓存 (Cached)"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "node_memory_Buffers_bytes{job=\"node-exporter\"} / 1024 / 1024 / 1024",
+          "refId": "C",
+          "legendFormat": "缓冲区 (Buffers)"
+        }
+      ],
+      "description": "物理宿主机内存使用、操作系统缓存与可用内存。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "GB"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 20,
+      "title": "主机磁盘 I/O 读写带宽 (MB/s) [node-exporter]",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 38
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(node_disk_read_bytes_total{job=\"node-exporter\"}[1m])) / 1024 / 1024",
+          "refId": "A",
+          "legendFormat": "磁盘读带宽 (Read)"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(node_disk_written_bytes_total{job=\"node-exporter\"}[1m])) / 1024 / 1024",
+          "refId": "B",
+          "legendFormat": "磁盘写带宽 (Write)"
+        }
+      ],
+      "description": "物理宿主机磁盘底层实际发生的 I/O 读写吞吐。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "MB/s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 21,
+      "title": "AiKv 实例 CPU 消耗核数 (Cores)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 46
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (service_instance_id) (rate(aikv_process_cpu_milliseconds_total{cluster=~\"$cluster\", host_name=~\"$host\", service_instance_id=~\"$instance\"}[1m])) / 1000",
+          "refId": "A",
+          "legendFormat": "实例 {{service_instance_id}} (Cores)"
+        }
+      ],
+      "description": "AiKv 各实例实际消耗的 CPU 物理核数 (由进程精确上报)。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 22,
+      "title": "AiKv 实例物理驻留内存 RSS (MB)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 46
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (service_instance_id) (aikv_process_resident_memory_bytes{cluster=~\"$cluster\", host_name=~\"$host\", service_instance_id=~\"$instance\"}) / 1024 / 1024",
+          "refId": "A",
+          "legendFormat": "实例 {{service_instance_id}} (MB)"
+        }
+      ],
+      "description": "AiKv 各实例真实占用的驻留物理内存 (VmRSS)。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "MB"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 23,
+      "title": "AiKv 实例磁盘写入吞吐 (MB/s)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 46
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (service_instance_id) (rate(aikv_process_write_bytes_total{cluster=~\"$cluster\", host_name=~\"$host\", service_instance_id=~\"$instance\"}[1m])) / 1024 / 1024",
+          "refId": "A",
+          "legendFormat": "实例 {{service_instance_id}} (MB/s)"
+        }
+      ],
+      "description": "AiKv 各实例进程级别实际发生的磁盘写吞吐速率。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "MB/s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 24,
+      "title": "AiKv 进程线程数与上下文切换",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 54
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(aikv_process_threads{cluster=~\"$cluster\", host_name=~\"$host\", service_instance_id=~\"$instance\"})",
+          "refId": "A",
+          "legendFormat": "线程总数"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (aikv_context_switch_type) (rate(aikv_process_context_switches_total{cluster=~\"$cluster\", host_name=~\"$host\", service_instance_id=~\"$instance\"}[1m]))",
+          "refId": "B",
+          "legendFormat": "上下文切换/s ({{aikv_context_switch_type}})"
+        }
+      ],
+      "description": "AiKv 内部线程规模与内核上下文切换速率。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 25,
+      "title": "主机打开文件描述符数 [node-exporter]",
+      "type": "stat",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 54
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "node_filefd_allocated{job=\"node-exporter\"}",
+          "refId": "A",
+          "legendFormat": "Allocated FDs"
+        }
+      ],
+      "description": "系统内核当前分配的文件句柄数，防范句柄耗尽。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "0"
+        },
+        "overrides": []
+      }
+    }
+  ]
+}

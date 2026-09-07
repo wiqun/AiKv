@@ -4,14 +4,18 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OBS_DIR="${SCRIPT_DIR}/observability"
 COMPOSE_FILE="${OBS_DIR}/docker-compose.yaml"
+NODE_COMPOSE_FILE="${OBS_DIR}/docker-compose.node.yaml"
+CADVISOR_COMPOSE_FILE="${OBS_DIR}/docker-compose.cadvisor.yaml"
 ENV_FILE="${SCRIPT_DIR}/.env"
 ENV_EXAMPLE="${SCRIPT_DIR}/.env.example"
 
-compose() {
-    docker compose --project-directory "${OBS_DIR}" -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" "$@"
+# 探测宿主机是否已有原生且正常响应的 node-exporter
+probe_native_node_exporter() {
+    if curl -fsS -m 2 "http://127.0.0.1:9100/metrics" 2>/dev/null | grep -qE '^node_'; then
+        return 0
+    fi
+    return 1
 }
-
-echo "=== [AiKv Observability] 启动可观测性监控栈 ==="
 
 # 1. 检查 Docker 与 Compose 环境
 if ! command -v docker &> /dev/null; then
@@ -30,8 +34,43 @@ if [ ! -f "${ENV_FILE}" ]; then
     cp "${ENV_EXAMPLE}" "${ENV_FILE}"
 fi
 
-# 3. 拉起容器栈 (幂等执行)
-echo "🚀 正在启动容器服务 (otel-collector, prometheus, grafana)..."
+# 3. 组织 Compose 文件列表与 Prometheus 动态抓取 targets
+COMPOSE_FILES=("-f" "${COMPOSE_FILE}")
+TARGETS_DIR="${OBS_DIR}/config/prometheus/targets"
+mkdir -p "${TARGETS_DIR}"
+
+if [ ! -f "${TARGETS_DIR}/cadvisor.yaml" ]; then
+    cat << 'EOF' > "${TARGETS_DIR}/cadvisor.yaml"
+- targets:
+    - cadvisor:8080
+EOF
+fi
+
+if probe_native_node_exporter; then
+    echo "ℹ️ 检测到宿主机已运行原生 node-exporter (127.0.0.1:9100 响应正常)，跳过容器版部署"
+    cat << 'EOF' > "${TARGETS_DIR}/node.yaml"
+- targets:
+    - host.docker.internal:9100
+EOF
+else
+    echo "ℹ️ 宿主机未检测到原生 node-exporter，将协同拉起容器版 node-exporter"
+    COMPOSE_FILES+=("-f" "${NODE_COMPOSE_FILE}")
+    cat << 'EOF' > "${TARGETS_DIR}/node.yaml"
+- targets:
+    - node-exporter:9100
+EOF
+fi
+
+if [ -f "${CADVISOR_COMPOSE_FILE}" ]; then
+    COMPOSE_FILES+=("-f" "${CADVISOR_COMPOSE_FILE}")
+fi
+
+compose() {
+    docker compose --project-directory "${OBS_DIR}" "${COMPOSE_FILES[@]}" --env-file "${ENV_FILE}" "$@"
+}
+
+# 4. 拉起容器栈 (幂等执行)
+echo "🚀 正在启动可观测性容器服务..."
 compose up -d
 
 # 4. 轮询探活与就绪检查 (超时保护 60s)

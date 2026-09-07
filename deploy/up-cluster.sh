@@ -26,10 +26,12 @@ RUNTIME_ROOT="$SCRIPT_DIR/.runtime/cluster"
 PROJECT_NAME="aikv-cluster"
 STARTUP_TIMEOUT_SECONDS="${AIKV_CLUSTER_TIMEOUT_SECONDS:-120}"
 ANNOUNCE_IP="${AIKV_ANNOUNCE_IP:-127.0.0.1}"
-OTLP_ENDPOINT="${AIKV_OTLP_ENDPOINT:-${OTEL_EXPORTER_OTLP_ENDPOINT:-}}"
+OTLP_ENDPOINT="${AIKV_OTLP_ENDPOINT:-}"
 if [[ -z "$OTLP_ENDPOINT" ]]; then
     if docker ps --format '{{.Names}}' 2>/dev/null | grep -qE '^(aikv-)?otel-collector$'; then
         OTLP_ENDPOINT="http://aikv-otel-collector:4317"
+    else
+        OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
     fi
 fi
 

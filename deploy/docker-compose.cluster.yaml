@@ -2,6 +2,9 @@ x-aikv-node: &aikv-node
   image: ${AIKV_IMAGE:-aikv:dev}
   command: ["--config", "/etc/aikv/aikv.toml"]
   restart: unless-stopped
+  environment:
+    OTEL_RESOURCE_ATTRIBUTES: "${OTEL_RESOURCE_ATTRIBUTES:-cluster=dev}"
+    AIKV_HOST_LABEL: "${AIKV_HOST_LABEL:-localhost}"
   networks:
     - aikv-net
 

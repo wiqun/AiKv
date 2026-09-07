@@ -4,6 +4,9 @@ services:
     image: ${AIKV_IMAGE:-aikv:dev}
     command: ["--config", "/etc/aikv/aikv.toml"]
     restart: unless-stopped
+    environment:
+      OTEL_RESOURCE_ATTRIBUTES: "${OTEL_RESOURCE_ATTRIBUTES:-cluster=single}"
+      AIKV_HOST_LABEL: "${AIKV_HOST_LABEL:-localhost}"
     ports:
       - "${AIKV_BIND_IP:-127.0.0.1}:6379:6379"
       - "${AIKV_BIND_IP:-127.0.0.1}:9191:9191"
