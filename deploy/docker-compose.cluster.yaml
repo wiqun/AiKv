@@ -3,8 +3,9 @@ x-aikv-node: &aikv-node
   command: ["--config", "/etc/aikv/aikv.toml"]
   restart: unless-stopped
   networks:
-    - aikv-cluster
+    - aikv-net
 
+name: aikv-cluster
 services:
   aikv-1:
     <<: *aikv-node
@@ -133,8 +134,8 @@ services:
       retries: 3
 
 networks:
-  aikv-cluster:
-    name: aikv-cluster
+  aikv-net:
+    name: aikv-net
 
 volumes:
   aikv1-data:

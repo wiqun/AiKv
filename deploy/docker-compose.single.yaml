@@ -1,3 +1,4 @@
+name: aikv-single
 services:
   aikv-single:
     image: ${AIKV_IMAGE:-aikv:dev}
@@ -18,7 +19,13 @@ services:
       timeout: 3s
       start_period: 5s
       retries: 3
+    networks:
+      - aikv-net
 
 volumes:
   aikv:
     name: aikv
+
+networks:
+  aikv-net:
+    name: aikv-net

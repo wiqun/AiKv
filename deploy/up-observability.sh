@@ -2,7 +2,14 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "${SCRIPT_DIR}"
+OBS_DIR="${SCRIPT_DIR}/observability"
+COMPOSE_FILE="${OBS_DIR}/docker-compose.yaml"
+ENV_FILE="${SCRIPT_DIR}/.env"
+ENV_EXAMPLE="${SCRIPT_DIR}/.env.example"
+
+compose() {
+    docker compose --project-directory "${OBS_DIR}" -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" "$@"
+}
 
 echo "=== [AiKv Observability] 启动可观测性监控栈 ==="
 
@@ -18,14 +25,14 @@ if ! docker compose version &> /dev/null; then
 fi
 
 # 2. 检查 .env 配置文件，缺失时从模板复制
-if [ ! -f .env ]; then
+if [ ! -f "${ENV_FILE}" ]; then
     echo "ℹ️ 未检测到 .env 文件，自动从 .env.example 创建默认配置..."
-    cp .env.example .env
+    cp "${ENV_EXAMPLE}" "${ENV_FILE}"
 fi
 
 # 3. 拉起容器栈 (幂等执行)
 echo "🚀 正在启动容器服务 (otel-collector, prometheus, grafana)..."
-docker compose up -d
+compose up -d
 
 # 4. 轮询探活与就绪检查 (超时保护 60s)
 echo "⏳ 正在等待服务就绪与探活..."
@@ -63,9 +70,9 @@ done
 # 5. 超时处理与诊断输出
 if [ "${prom_ready}" = false ] || [ "${grafana_ready}" = false ]; then
     echo "❌ 错误: 服务在 60s 内未完全就绪，输出诊断信息:" >&2
-    docker compose ps >&2
+    compose ps >&2
     echo "--- 最近容器日志 ---" >&2
-    docker compose logs --tail 20 >&2
+    compose logs --tail 20 >&2
     exit 1
 fi
 

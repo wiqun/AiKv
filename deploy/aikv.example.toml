@@ -8,10 +8,10 @@ bind = "127.0.0.1:6379"
 max_clients = 10000
 
 [engine]
-kind = "aidb"              # memory | aidb
+kind = "aidb"
 data_dir = "/var/lib/aikv/data"
 sync_wal = false
-aidb_preset = "high-write" # default | high-write | high-read
+aidb_preset = "high-write"  # default | high-write | high-read
 # backup_dir = "/var/lib/aikv/backup"  # 可选; 默认 {data_dir}/backup
 
 [observability]
@@ -19,4 +19,4 @@ aidb_preset = "high-write" # default | high-write | high-read
 metrics_addr = "127.0.0.1"
 metrics_port = 9191
 json_log = true
-# otlp_endpoint = "http://127.0.0.1:4317"  # 可选; 亦可用 OTEL_EXPORTER_OTLP_ENDPOINT
+# otlp_endpoint = "http://aikv-otel-collector:4317"

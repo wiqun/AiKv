@@ -2,12 +2,36 @@
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "$SCRIPT_DIR/.env" ]]; then
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+        if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+            _k="${BASH_REMATCH[1]}"
+            _v="${BASH_REMATCH[2]}"
+            _v="${_v%\"}"
+            _v="${_v#\"}"
+            _v="${_v%\'}"
+            _v="${_v#\'}"
+            if [[ -z "${!_k+x}" ]]; then
+                export "$_k=$_v"
+            fi
+        fi
+    done < "$SCRIPT_DIR/.env"
+    unset _k _v
+fi
 COMPOSE_FILE="$SCRIPT_DIR/docker-compose.cluster.yaml"
 TEMPLATE="$SCRIPT_DIR/aikv.example.toml"
 RUNTIME_ROOT="$SCRIPT_DIR/.runtime/cluster"
 PROJECT_NAME="aikv-cluster"
 STARTUP_TIMEOUT_SECONDS="${AIKV_CLUSTER_TIMEOUT_SECONDS:-120}"
 ANNOUNCE_IP="${AIKV_ANNOUNCE_IP:-127.0.0.1}"
+OTLP_ENDPOINT="${AIKV_OTLP_ENDPOINT:-${OTEL_EXPORTER_OTLP_ENDPOINT:-}}"
+if [[ -z "$OTLP_ENDPOINT" ]]; then
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -qE '^(aikv-)?otel-collector$'; then
+        OTLP_ENDPOINT="http://aikv-otel-collector:4317"
+    fi
+fi
 
 CLIENT_PORTS=(6379 6380 6381 7379 7380 7381)
 RPC_PORTS=(16379 16380 16381 17379 17380 17381)
@@ -57,11 +81,15 @@ generate_configs() {
 
         mkdir -p "$node_dir"
         cp "$TEMPLATE" "$node_dir/aikv.toml"
-        sed -i \
-            -e "s|^bind = .*|bind = \"0.0.0.0:$client_port\"|" \
-            -e 's|^metrics_addr = .*|metrics_addr = "0.0.0.0"|' \
-            -e "s|^metrics_port = .*|metrics_port = $metrics_port|" \
-            "$node_dir/aikv.toml"
+        sed_exprs=(
+            -e "s|^bind = .*|bind = \"0.0.0.0:$client_port\"|"
+            -e 's|^metrics_addr = .*|metrics_addr = "0.0.0.0"|'
+            -e "s|^metrics_port = .*|metrics_port = $metrics_port|"
+        )
+        if [[ -n "$OTLP_ENDPOINT" && "$OTLP_ENDPOINT" != "none" ]]; then
+            sed_exprs+=(-e "s|^#\? *otlp_endpoint = .*|otlp_endpoint = \"$OTLP_ENDPOINT\"|")
+        fi
+        sed -i "${sed_exprs[@]}" "$node_dir/aikv.toml"
         {
             printf '\n[cluster]\n'
             printf 'node_id = %d\n' "$node"
@@ -373,4 +401,8 @@ add_replica_if_needed 7379 7380 "$node4_id"
 add_replica_if_needed 7379 7381 "$node4_id"
 
 validate_final_topology
-printf 'aikv cluster is ready: 2 masters, 4 replicas, 16384 slots\n'
+if [[ -n "$OTLP_ENDPOINT" && "$OTLP_ENDPOINT" != "none" ]]; then
+    printf 'aikv cluster is ready: 2 masters, 4 replicas, 16384 slots (OTel: %s)\n' "$OTLP_ENDPOINT"
+else
+    printf 'aikv cluster is ready: 2 masters, 4 replicas, 16384 slots\n'
+fi

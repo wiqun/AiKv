@@ -1,14 +1,13 @@
 name: aikv-observability
-
 services:
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.160.0
-    container_name: aikv-obs-collector
+    container_name: aikv-otel-collector
     restart: unless-stopped
     command: ["--config=/etc/otelcol-contrib/config.yaml"]
     ports:
-      - "${OTEL_GRPC_BIND:-127.0.0.1:4317}:4317"
-      - "${OTEL_HTTP_BIND:-127.0.0.1:4318}:4318"
+      - "${OTEL_GRPC_BIND:-0.0.0.0:4317}:4317"
+      - "${OTEL_HTTP_BIND:-0.0.0.0:4318}:4318"
     volumes:
       - ./config/otel-collector/config.yaml:/etc/otelcol-contrib/config.yaml:ro
     deploy:
@@ -18,11 +17,11 @@ services:
         reservations:
           memory: 64M
     networks:
-      - aikv-obs-net
+      - aikv-net
 
   prometheus:
     image: prom/prometheus:v3.14.0
-    container_name: aikv-obs-prometheus
+    container_name: prometheus
     restart: unless-stopped
     ports:
       - "${PROMETHEUS_BIND:-127.0.0.1:9090}:9090"
@@ -42,11 +41,11 @@ services:
         reservations:
           memory: 128M
     networks:
-      - aikv-obs-net
+      - aikv-net
 
   grafana:
     image: grafana/grafana:13.2.1
-    container_name: aikv-obs-grafana
+    container_name: grafana
     restart: unless-stopped
     ports:
       - "${GRAFANA_BIND:-127.0.0.1:3000}:3000"
@@ -71,12 +70,12 @@ services:
         reservations:
           memory: 256M
     networks:
-      - aikv-obs-net
+      - aikv-net
 
 volumes:
   prom-data:
   grafana-data:
 
 networks:
-  aikv-obs-net:
-    driver: bridge
+  aikv-net:
+    name: aikv-net

@@ -43,24 +43,24 @@ flowchart LR
 ### 3.1 启动监控栈
 
 ```bash
-cd deploy/observability
+cd deploy
 ./up-observability.sh
 ```
 
-脚本将自动检测 Docker/Compose 环境、自 `.env.example` 复制默认环境变量、启动服务并执行 60 秒轮询探活。
+脚本将自动检测 Docker/Compose 环境、自 `deploy/.env.example` 复制默认环境变量、启动服务并执行 60 秒轮询探活。
 
 - **Grafana 访问**：[http://127.0.0.1:3000](http://127.0.0.1:3000)（默认免密 Viewer 模式，管理员账号 `admin` / `admin`）
 - **Prometheus 访问**：[http://127.0.0.1:9090](http://127.0.0.1:9090)
-- **OTel 收集端点**：`127.0.0.1:4317` (gRPC) / `127.0.0.1:4318` (HTTP)
+- **OTel 收集端点**：宿主机访问 `127.0.0.1:4317` (gRPC) / `127.0.0.1:4318` (HTTP)；同 Docker 网络容器原生 DNS 为 `http://aikv-otel-collector:4317`
 
 ### 3.2 停止监控栈
 
 ```bash
 # 停止容器并保留历史监控数据卷 (prom-data, grafana-data)
-./down-observability.sh
+docker compose --project-directory deploy/observability -f deploy/observability/docker-compose.yaml --env-file deploy/.env down
 
 # 停止容器并彻底清空历史监控数据卷
-./down-observability.sh --clean
+docker compose --project-directory deploy/observability -f deploy/observability/docker-compose.yaml --env-file deploy/.env down -v
 ```
 
 ---
