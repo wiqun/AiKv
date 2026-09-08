@@ -104,13 +104,31 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317
 Grafana 启动后自动加载 `AiKv` 仪表盘目录下的四张大盘：
 
 1. **`AiKv / 概览与基准评测 (Overview & Benchmark)` (推荐主盘)**：
-   - **严格对齐 `bench.md` 三层架构**：
-     - **业务黑盒层 (Business Black-Box Layer)**：三大时序黄金柱石 (8:8:8 宽幅并列)：左侧集群与各节点吞吐趋势 (一张图多根线对比集群总吞吐与 `aikv-1`~`aikv-6` 各节点负载)、中间各命令吞吐时序拆解 (QPS by Command)、右侧命令端到端延迟分位数时序 (P50/P95/P99)；下排 6:6:6:6 规整四栏并列命令调用量占比 (饼图)、键空间命中率时序趋势、网络吞吐带宽 (双线: In/Out)、客户端连接与阻塞趋势 (双线: Connected/Blocked)；
-     - **存储白盒层 (Storage Engine White-Box Layer)**：三大放大比率 (WA 写放大、RA 读放大、SA 空间放大)、存储底层 Put/Get/Batch P95 耗时穿透、物理写入拆分 (WAL/Flush/Compaction)、Write Stall 停顿频次与最大停顿耗时、Block Cache 命中率与容量使用率 (%)、SSTable 分层文件数分布、Bloom Filter 穿透率与 Compaction 待处理积压量；
-     - **系统物理层 (System Physical Layer)**：宿主机 CPU/IO-wait、内存分布 (Used/Cached/Buffers)、磁盘 IO 吞吐、文件句柄数；以及各 AiKv 实例 CPU 核数消耗、物理驻留内存 RSS、写吞吐、线程数与内核上下文切换。
-   - **顶层变量级联联动**：支持 `$cluster` (集群) -> `$host` (宿主机) -> `$instance` (实例，支持多选与 All 聚合) 三级联动；
-   - **默认时间窗口与自适应刷新**：默认 `now-30m` 到 `now`，`10s` 自动刷新；PromQL 全面使用 `[$__rate_interval]` 动态平滑自适应；
-   - **空闲防抖与容错**：PromQL 深度防御除零异常，静态空闲与无请求状态下绝不出现 No Data 报错。
+   - **“3 个常驻展开 + 2 个专项折叠”工业级 5-Row 架构**：
+     - **Row 1: 业务服务层 (Client 视角)**（常驻展开）：
+       - 顶部 6 张核心 KPI 摘要卡 (w=4)：存活节点数、集群总 Key 数、SST 磁盘总占用、区间慢查询增量 (≥10 告警)、命令错误率 (ID 50, error 比率 %)、连接拒绝速率 (ID 51, ops/s)；
+       - 三大时序黄金柱石 (8:8:8 宽幅并列)：总处理吞吐趋势 (OPS)、各命令吞吐时序拆解 (OPS by Commands)、端到端延迟分位数时序 (P50/P95/P99)；
+       - 命令观测矩阵四联 (6:6:6:6)：命令调用量占比 (环形饼图)、命令执行量排行 (Top 10 Bar Gauge)、各业务命令响应延迟 P50 对比、键空间命中率时序 (真实命中率，无假健康)；全部命令面板严格过滤内部控制面伪命令；
+       - 网络与连接状态监控 (8:8:8)：服务网络带宽 (双线: In/Out)、客户端连接/阻塞与拒绝 (三线)、慢查询速率 (全命令合计 vs 各命令分线)。
+     - **Row 2: 存储引擎层 (LSM-Tree 视角)**（常驻展开）：
+       - 四大核心状态摘要卡 (w=6)：写放大 (WA, 带 Sparkline 面积图)、读放大 (RA, 带 Sparkline)、Bloom 假阳性率 (ID 12 FPR, 带 Sparkline)、压缩待处理积压量 (ID 13 Pending Bytes)；
+       - 写路径因果诊断区：物理写入速率分解 vs 用户逻辑写入基准 (ID 14, 堆叠物理写上叠独立逻辑写折线, 直读写放大)、Write Stall 写停顿频次与最大耗时 (ID 15 双轴)、MemTable 活跃/只读内存与 WAL 大小心跳 (ID 35)、Flush 与 Compaction 速率/P95 耗时双轴同屏 (ID 43)；
+       - 读链路与缓存穿透区：Block Cache 命中率与 Miss 穿透速率 (ID 17 双轴)、读放大 (RA) 演进与 Bloom Filter 假阳性率联动 (ID 52 双轴带 1.0 基准线)；
+       - LSM 空间形态与底层算子区：纯 SSTable 分层文件数堆叠 (ID 18, L0 高亮)、SSTable 分层占用与 Key 增长 (ID 36 彻底修复 Matcher 右轴纯数字绑定)、存储底层核心算子 P95 耗时分布 (ID 16 表格图例)。
+     - **Row 3: 系统物理层 (OS & Host 视角)**（常驻展开）：
+       - 顶部 4 张物理摘要卡 (w=6)：AiKv 实例 CPU 消耗核数 (ID 53)、进程物理驻留内存 RSS (ID 54)、OS 线程总数 (ID 55)、磁盘最大平均等待耗时 (ID 56 await ms，显式 `* 1000` 换算)；
+       - 主机硬件 vs 进程资源对比区 (3 联 × w=8, h=7)：主机 CPU 利用率 vs AiKv 消耗核数 (用户态/内核态拆解)、主机物理内存分布 vs AiKv 驻留 RSS、主机磁盘读写带宽 + AiKv 进程自身真实读写吞吐 + await 等待耗时右轴印证；
+       - 磁盘饱和度与内核调度区 (2 联 × w=12, h=7)：磁盘饱和度 (ID 57，左轴读写 IOPS，右轴 `%util` 显式 `* 100` 换算)、进程线程数 + 系统分配 FD (宿主机视角标注) + 自愿/非自愿上下文切换速率右轴。
+     - **Row 4: 分布式与集群通信 (Cluster & HA)**（默认折叠，按需展开）：
+       - 集群重定向速率 (ID 34, MOVED/ASK)、Gossip 心跳与故障转移速率 (ID 41, Failover 标红)、Raft 底层复制通信吞吐 (ID 42，按 RPC 类型与方向分解)。
+     - **Row 5: 冷启动与崩溃恢复 (Cold Recovery & RTO)**（默认折叠，按需展开）：
+       - 完整迁入并保留全部对账契约说明：5 张 RTO 阶段 Stat 卡片 (WAL 重放耗时与字节、Manifest 耗时、SST 打开耗时、全库键计数器重扫耗时)、WAL 重放吞吐带宽 (ID 65, Gauge)、RTO 4 阶段耗时构成占比 (ID 66, Timeseries)。全量注入 `$cluster/$host/$node` 模板变量。
+   - **顶层变量级联联动与导航**：支持 `$cluster` (集群) -> `$host` (宿主机) -> `$node` (节点实例，支持多选与 All 聚合) 三级联动；内置 `tags: ["aikv-nav"]` 与全局面板下拉互跳链接；
+   - **默认时间窗口与刷新**：默认 `now-30m` 到 `now`，`30s` 平衡刷新；所有 Timeseries 统一提供 `[mean, max]` 统计列；
+   - **架构决策演进：拒绝「假健康」，建立生产级对账与排障契约**：
+     - **淘汰假健康与 legacy 兜底**：全面剔除掩盖故障的 `vector(100)` 与无意义伪装，彻底清理 legacy `_ratio` 兜底与 `label_replace * 0` hack；
+     - **Description 排障指引与对账契约**：在各面板内置标准 Description 说明，逐一列出「No data 常见原因」及「OTel 秒 = INFO 微秒 × 10⁻⁶」对账契约；
+     - **折叠行节流**：Grafana 原生特性保证折叠状态的 Row 4 与 Row 5 不发起后台查询，兼顾单机极速压测与集群深度诊断。
 2. **`AiKv - 存储引擎白盒指标 (Storage Engine)`**：
    - 写放大 (WA) 综合比率与 4 种写吞吐拆分曲线；
    - 读放大 (RA) 综合比率与 BlockCache 纯读命中率；
