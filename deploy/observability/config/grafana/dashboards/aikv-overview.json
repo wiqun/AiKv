@@ -996,7 +996,7 @@
                     "legendFormat": "写放大"
                 }
             ],
-            "description": "**指标定义**\n每写入 1 字节业务数据, 实际落盘字节数: (WAL + Flush + Compaction) / 逻辑写入, 5m 均值.\n\n**阈值标准**\n绿 < 5: 正常\n黄 5 ~ 15: Compaction 偏重, 结合下方走势图观察紫色 Compaction 面积\n红 >= 15: 后台重写剧烈, 优先排查 Write Stall 与 Compaction 积压\n\n**补充说明**\n写入初期落盘滞后, 瞬时值可 < 1.0, 属正常; 无写入时显示 N/A.",
+            "description": "**指标定义**\n\n每写入 1 字节业务数据, 实际落盘字节数: (WAL + Flush + Compaction) / 逻辑写入, 5m 均值.\n\n**阈值标准**\n\n- `< 5` (绿): 正常\n- `5 ~ 15` (黄): Compaction 偏重, 结合下方走势图观察紫色 Compaction 面积\n- `>= 15` (红): 后台重写剧烈, 优先排查 Write Stall 与 Compaction 积压\n\n**补充说明**\n\n- 写入初期落盘滞后, 瞬时值可 < 1.0, 属正常; 无写入时显示 N/A.",
             "fieldConfig": {
                 "defaults": {
                     "unit": "suffix:x",
@@ -1065,7 +1065,7 @@
                     "legendFormat": "读放大"
                 }
             ],
-            "description": "**指标定义**\n每次读操作平均触碰的数据块数 (含 BlockCache 命中), 反映 LSM 逐层下探开销, 5m 均值.\n\n**阈值标准**\n绿 < 3: 正常\n黄 3 ~ 8: 关注缓存命中率与 LSM 层数\n红 >= 8: 排查 L0 堆积与 Bloom 假阳性 (见下方联动面板)\n\n**补充说明**\n纯用户读口径, 不含 Compaction 内部读; 无读流量时显示 N/A; 磁盘 IO 压力请查看下方走势图中读穿透字节比.",
+            "description": "**指标定义**\n\n每次读操作平均触碰的数据块数 (含 BlockCache 命中), 反映 LSM 逐层下探开销, 5m 均值.\n\n**阈值标准**\n\n- `< 3` (绿): 正常\n- `3 ~ 8` (黄): 关注缓存命中率与 LSM 层数\n- `>= 8` (红): 排查 L0 堆积与 Bloom 假阳性 (见下方联动面板)\n\n**补充说明**\n\n- 纯用户读口径, 不含 Compaction 内部读; 无读流量时显示 N/A; 磁盘 IO 压力请查看下方走势图中读穿透字节比.",
             "fieldConfig": {
                 "defaults": {
                     "unit": "suffix:x",
@@ -1137,7 +1137,7 @@
                     "refId": "A"
                 }
             ],
-            "description": "**指标定义**\n磁盘实际占用与有效数据体积之比: (SST + WAL) / (live_bytes + MemTable), 引擎实测无估算.\n\n**阈值标准**\n绿 < 1.5: 健康\n黄 1.5 ~ 2.5: 关注 Compaction 进度\n红 >= 2.5: 多版本与墓碑滞留, 等待 Compaction 回收或检查是否停滞\n\n**补充说明**\n频繁覆盖写/删除后升高属正常, 去重完成后回落; 无数据时显示 N/A.",
+            "description": "**指标定义**\n\n磁盘实际占用与有效数据体积之比: (SST + WAL) / (live_bytes + MemTable), 引擎实测无估算.\n\n**阈值标准**\n\n- `< 1.5` (绿): 健康\n- `1.5 ~ 2.5` (黄): 关注 Compaction 进度\n- `>= 2.5` (红): 多版本与墓碑滞留, 等待 Compaction 回收或检查是否停滞\n\n**补充说明**\n\n- 频繁覆盖写/删除后升高属正常, 去重完成后回落; 无数据时显示 N/A.",
             "fieldConfig": {
                 "defaults": {
                     "unit": "suffix:x",
