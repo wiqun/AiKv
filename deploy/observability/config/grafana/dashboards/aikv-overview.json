@@ -77,6 +77,58 @@
                     "value": "$__all"
                 },
                 "description": "aikv 集群节点实例标识 (node_id 1..6 / service_instance_id)，All 支持多节点对比。"
+            },
+            {
+                "name": "payload_bytes",
+                "label": "Payload (B)",
+                "type": "custom",
+                "query": "64, 116, 128, 256, 512, 1024, 4096",
+                "multi": false,
+                "includeAll": false,
+                "allValue": null,
+                "current": {
+                    "selected": true,
+                    "text": "116",
+                    "value": "116"
+                },
+                "options": [
+                    {
+                        "selected": false,
+                        "text": "64",
+                        "value": "64"
+                    },
+                    {
+                        "selected": true,
+                        "text": "116",
+                        "value": "116"
+                    },
+                    {
+                        "selected": false,
+                        "text": "128",
+                        "value": "128"
+                    },
+                    {
+                        "selected": false,
+                        "text": "256",
+                        "value": "256"
+                    },
+                    {
+                        "selected": false,
+                        "text": "512",
+                        "value": "512"
+                    },
+                    {
+                        "selected": false,
+                        "text": "1024",
+                        "value": "1024"
+                    },
+                    {
+                        "selected": false,
+                        "text": "4096",
+                        "value": "4096"
+                    }
+                ],
+                "description": "空间放大估算所用平均 Key-Value 逻辑载荷 (字节), 默认对齐基准测试 16B key + 100B val = 116B, 可按实际压测自由选择或手输"
             }
         ]
     },
@@ -94,390 +146,14 @@
             "collapsed": false
         },
         {
-            "id": 28,
-            "title": "存活节点数",
-            "type": "stat",
-            "gridPos": {
-                "h": 3,
-                "w": 4,
-                "x": 0,
-                "y": 1
-            },
-            "datasource": {
-                "type": "prometheus",
-                "uid": "prometheus"
-            },
-            "targets": [
-                {
-                    "datasource": {
-                        "type": "prometheus",
-                        "uid": "prometheus"
-                    },
-                    "expr": "count(aikv_uptime_seconds{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\"})",
-                    "refId": "A",
-                    "legendFormat": "存活节点"
-                }
-            ],
-            "description": "当前集群中处于健康运行状态的 AiKv 节点实例总数。",
-            "fieldConfig": {
-                "defaults": {
-                    "unit": "none",
-                    "noValue": "0",
-                    "color": {
-                        "mode": "thresholds"
-                    },
-                    "thresholds": {
-                        "mode": "absolute",
-                        "steps": [
-                            {
-                                "color": "red",
-                                "value": null
-                            },
-                            {
-                                "color": "green",
-                                "value": 1
-                            }
-                        ]
-                    }
-                },
-                "overrides": []
-            },
-            "options": {
-                "graphMode": "none",
-                "colorMode": "value",
-                "justifyMode": "auto",
-                "orientation": "auto",
-                "reduceOptions": {
-                    "values": false,
-                    "calcs": [
-                        "lastNotNull"
-                    ],
-                    "fields": ""
-                }
-            }
-        },
-        {
-            "id": 29,
-            "title": "集群总 Key 数",
-            "type": "stat",
-            "gridPos": {
-                "h": 3,
-                "w": 4,
-                "x": 4,
-                "y": 1
-            },
-            "datasource": {
-                "type": "prometheus",
-                "uid": "prometheus"
-            },
-            "targets": [
-                {
-                    "datasource": {
-                        "type": "prometheus",
-                        "uid": "prometheus"
-                    },
-                    "expr": "sum(aidb_total_key_count{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"})",
-                    "refId": "A",
-                    "legendFormat": "总 Key 数"
-                }
-            ],
-            "description": "底层存储引擎当前持久化保存的用户数据 Key 物理总数。",
-            "fieldConfig": {
-                "defaults": {
-                    "unit": "short",
-                    "noValue": "0",
-                    "color": {
-                        "mode": "fixed",
-                        "fixedColor": "semi-dark-blue"
-                    }
-                },
-                "overrides": []
-            },
-            "options": {
-                "graphMode": "area",
-                "colorMode": "value",
-                "justifyMode": "auto",
-                "orientation": "auto",
-                "reduceOptions": {
-                    "values": false,
-                    "calcs": [
-                        "lastNotNull"
-                    ],
-                    "fields": ""
-                }
-            }
-        },
-        {
-            "id": 30,
-            "title": "SST 磁盘总占用",
-            "type": "stat",
-            "gridPos": {
-                "h": 3,
-                "w": 4,
-                "x": 8,
-                "y": 1
-            },
-            "datasource": {
-                "type": "prometheus",
-                "uid": "prometheus"
-            },
-            "targets": [
-                {
-                    "datasource": {
-                        "type": "prometheus",
-                        "uid": "prometheus"
-                    },
-                    "expr": "sum(aidb_sstable_size_bytes{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"})",
-                    "refId": "A",
-                    "legendFormat": "SST 总体积"
-                }
-            ],
-            "description": "所有 SSTable 文件在磁盘上占用的实际物理数据总体积。",
-            "fieldConfig": {
-                "defaults": {
-                    "unit": "bytes",
-                    "noValue": "0",
-                    "color": {
-                        "mode": "fixed",
-                        "fixedColor": "purple"
-                    }
-                },
-                "overrides": []
-            },
-            "options": {
-                "graphMode": "area",
-                "colorMode": "value",
-                "justifyMode": "auto",
-                "orientation": "auto",
-                "reduceOptions": {
-                    "values": false,
-                    "calcs": [
-                        "lastNotNull"
-                    ],
-                    "fields": ""
-                }
-            }
-        },
-        {
-            "id": 31,
-            "title": "慢查询总数",
-            "type": "stat",
-            "gridPos": {
-                "h": 3,
-                "w": 4,
-                "x": 12,
-                "y": 1
-            },
-            "datasource": {
-                "type": "prometheus",
-                "uid": "prometheus"
-            },
-            "targets": [
-                {
-                    "datasource": {
-                        "type": "prometheus",
-                        "uid": "prometheus"
-                    },
-                    "expr": "sum(floor(increase(aikv_slow_queries_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__range])))",
-                    "refId": "A",
-                    "legendFormat": "慢查询数"
-                }
-            ],
-            "description": "**面板作用**\n所选时间窗口内 ($__range) 超过 slowlog 阈值的慢查询总次数。\n\n**图示/阈值**\n- 0 次：绿色健康\n- 1 ~ 9 次：橙色关注\n- ≥ 10 次：红色警报\n\n**No data 常见原因**\n1. 时间窗口内无慢查询产生 (正常)\n2. 指标需新版 aikv 导出\n3. 变量过滤无匹配实例\n\n**数据来源**\nOTLP 链路 (aikv)",
-            "fieldConfig": {
-                "defaults": {
-                    "unit": "short",
-                    "noValue": "0",
-                    "color": {
-                        "mode": "thresholds"
-                    },
-                    "thresholds": {
-                        "mode": "absolute",
-                        "steps": [
-                            {
-                                "color": "green",
-                                "value": null
-                            },
-                            {
-                                "color": "orange",
-                                "value": 1
-                            },
-                            {
-                                "color": "red",
-                                "value": 10
-                            }
-                        ]
-                    }
-                },
-                "overrides": []
-            },
-            "options": {
-                "graphMode": "area",
-                "colorMode": "value",
-                "justifyMode": "auto",
-                "orientation": "auto",
-                "reduceOptions": {
-                    "values": false,
-                    "calcs": [
-                        "lastNotNull"
-                    ],
-                    "fields": ""
-                }
-            }
-        },
-        {
-            "id": 50,
-            "title": "命令错误率",
-            "type": "stat",
-            "gridPos": {
-                "h": 3,
-                "w": 4,
-                "x": 16,
-                "y": 1
-            },
-            "datasource": {
-                "type": "prometheus",
-                "uid": "prometheus"
-            },
-            "targets": [
-                {
-                    "datasource": {
-                        "type": "prometheus",
-                        "uid": "prometheus"
-                    },
-                    "editorMode": "code",
-                    "expr": "sum(rate(aikv_commands_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\", aikv_command_status=\"error\"}[$__rate_interval])) / sum(rate(aikv_commands_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval])) * 100",
-                    "instant": false,
-                    "legendFormat": "命令错误率",
-                    "range": true,
-                    "refId": "A"
-                }
-            ],
-            "description": "**面板作用**\n所选时间窗口内 () 命令执行错误率。错误数 / 总命令数。\n\n**图示/阈值**\n- < 0.1%：绿色健康\n- 0.1% ~ 1.0%：橙色关注\n- ≥ 1.0%：红色警报\n\n**数据来源**\nOTLP 链路 (aikv)",
-            "fieldConfig": {
-                "defaults": {
-                    "color": {
-                        "mode": "thresholds"
-                    },
-                    "decimals": 2,
-                    "min": 0,
-                    "noValue": "0%",
-                    "thresholds": {
-                        "mode": "absolute",
-                        "steps": [
-                            {
-                                "color": "green",
-                                "value": null
-                            },
-                            {
-                                "color": "orange",
-                                "value": 0.1
-                            },
-                            {
-                                "color": "red",
-                                "value": 1.0
-                            }
-                        ]
-                    },
-                    "unit": "percent"
-                },
-                "overrides": []
-            },
-            "options": {
-                "colorMode": "value",
-                "graphMode": "area",
-                "justifyMode": "auto",
-                "orientation": "auto",
-                "reduceOptions": {
-                    "calcs": [
-                        "lastNotNull"
-                    ],
-                    "fields": "",
-                    "values": false
-                }
-            }
-        },
-        {
-            "id": 51,
-            "title": "连接拒绝速率",
-            "type": "stat",
-            "gridPos": {
-                "h": 3,
-                "w": 4,
-                "x": 20,
-                "y": 1
-            },
-            "datasource": {
-                "type": "prometheus",
-                "uid": "prometheus"
-            },
-            "targets": [
-                {
-                    "datasource": {
-                        "type": "prometheus",
-                        "uid": "prometheus"
-                    },
-                    "editorMode": "code",
-                    "expr": "sum(rate(aikv_rejected_connections_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval])) or vector(0)",
-                    "instant": false,
-                    "legendFormat": "拒绝连接速率",
-                    "range": true,
-                    "refId": "A"
-                }
-            ],
-            "description": "**面板作用**\n客户端连接被拒绝速率 (maxclients 达到上限或过载拒绝)。\n\n**图示/阈值**\n- 0 ops/s：绿色健康\n- > 0 ops/s：橙色/红色告警，客户端连接被拒绝\n\n**数据来源**\nOTLP 链路 (aikv)",
-            "fieldConfig": {
-                "defaults": {
-                    "color": {
-                        "mode": "thresholds"
-                    },
-                    "decimals": 2,
-                    "min": 0,
-                    "noValue": "0 ops/s",
-                    "thresholds": {
-                        "mode": "absolute",
-                        "steps": [
-                            {
-                                "color": "green",
-                                "value": null
-                            },
-                            {
-                                "color": "orange",
-                                "value": 1
-                            },
-                            {
-                                "color": "red",
-                                "value": 10
-                            }
-                        ]
-                    },
-                    "unit": "ops/s"
-                },
-                "overrides": []
-            },
-            "options": {
-                "colorMode": "value",
-                "graphMode": "area",
-                "justifyMode": "auto",
-                "orientation": "auto",
-                "reduceOptions": {
-                    "calcs": [
-                        "lastNotNull"
-                    ],
-                    "fields": "",
-                    "values": false
-                }
-            }
-        },
-        {
             "id": 2,
-            "title": "OPS",
+            "title": "集群命令执行速率",
             "type": "timeseries",
             "gridPos": {
                 "h": 7,
                 "w": 8,
                 "x": 0,
-                "y": 4
+                "y": 1
             },
             "datasource": {
                 "type": "prometheus",
@@ -507,7 +183,7 @@
                     "refId": "B"
                 }
             ],
-            "description": "集群及其节点的命令执行速率 (排除部分内部命令)",
+            "description": "集群及其节点的命令执行速率",
             "options": {
                 "legend": {
                     "calcs": [],
@@ -564,7 +240,7 @@
                 "h": 7,
                 "w": 8,
                 "x": 8,
-                "y": 4
+                "y": 1
             },
             "datasource": {
                 "type": "prometheus",
@@ -623,7 +299,7 @@
                 "h": 7,
                 "w": 8,
                 "x": 16,
-                "y": 4
+                "y": 1
             },
             "datasource": {
                 "type": "prometheus",
@@ -740,7 +416,7 @@
                 "h": 7,
                 "w": 6,
                 "x": 0,
-                "y": 11
+                "y": 8
             },
             "datasource": {
                 "type": "prometheus",
@@ -752,33 +428,43 @@
                         "type": "prometheus",
                         "uid": "prometheus"
                     },
+                    "editorMode": "code",
                     "expr": "sum by (aikv_command_name) (increase(aikv_commands_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\", aikv_command_name!~\".*\\\\..*|CLIENT.*|CLUSTER.*|COMMAND.*|INFO.*|GOSSIP.*\"}[$__range]))",
-                    "refId": "A",
-                    "legendFormat": "{{aikv_command_name}}"
+                    "instant": true,
+                    "legendFormat": "{{aikv_command_name}}",
+                    "range": false,
+                    "refId": "A"
                 }
             ],
-            "description": "**面板作用**\n当前所选时间窗口内各类业务命令调用量占比构成 (如 SET / GET 等百分比分布，排除内部伪命令)。\n\n**数据来源**\nOTLP 链路 (aikv)",
+            "description": "命令调用量占比",
             "fieldConfig": {
                 "defaults": {
+                    "color": {
+                        "mode": "palette-classic"
+                    },
                     "unit": "short"
                 },
                 "overrides": []
             },
             "options": {
+                "displayLabels": [
+                    "name"
+                ],
                 "legend": {
                     "displayMode": "table",
                     "placement": "right",
+                    "showLegend": true,
                     "values": [
                         "percent"
                     ]
                 },
-                "pieType": "donut",
+                "pieType": "pie",
                 "reduceOptions": {
-                    "values": false,
                     "calcs": [
                         "lastNotNull"
                     ],
-                    "fields": ""
+                    "fields": "",
+                    "values": false
                 },
                 "tooltip": {
                     "mode": "single",
@@ -794,7 +480,7 @@
                 "h": 7,
                 "w": 6,
                 "x": 6,
-                "y": 11
+                "y": 8
             },
             "datasource": {
                 "type": "prometheus",
@@ -806,44 +492,47 @@
                         "type": "prometheus",
                         "uid": "prometheus"
                     },
-                    "expr": "topk(10, floor(sum by (aikv_command_name) (increase(aikv_commands_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\", aikv_command_name!~\".*\\\\..*|CLIENT.*|CLUSTER.*|COMMAND.*|INFO.*|GOSSIP.*\"}[$__range]))))",
-                    "refId": "A",
-                    "legendFormat": "{{aikv_command_name}}"
+                    "editorMode": "code",
+                    "expr": "sort_desc(topk(10, floor(sum by (aikv_command_name) (increase(aikv_commands_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\", aikv_command_name!~\".*\\\\..*|CLIENT.*|CLUSTER.*|COMMAND.*|INFO.*|GOSSIP.*\"}[$__range])))))",
+                    "instant": true,
+                    "legendFormat": "{{aikv_command_name}}",
+                    "range": false,
+                    "refId": "A"
                 }
             ],
-            "description": "当前所选时间范围内调用量 Top 10 的核心业务命令执行总次数排行。",
+            "description": "命令执行量排行 (Top 10)",
             "fieldConfig": {
                 "defaults": {
-                    "unit": "short",
-                    "min": 0,
                     "color": {
                         "mode": "palette-classic"
-                    }
+                    },
+                    "min": 0,
+                    "unit": "short"
                 },
                 "overrides": []
             },
             "options": {
                 "displayMode": "gradient",
                 "orientation": "horizontal",
-                "showUnfilled": true,
                 "reduceOptions": {
-                    "values": false,
                     "calcs": [
                         "lastNotNull"
                     ],
-                    "fields": ""
-                }
+                    "fields": "",
+                    "values": false
+                },
+                "showUnfilled": true
             }
         },
         {
             "id": 40,
-            "title": "各命令响应延迟",
+            "title": "各命令响应延迟 (P95)",
             "type": "timeseries",
             "gridPos": {
                 "h": 7,
                 "w": 6,
                 "x": 12,
-                "y": 11
+                "y": 8
             },
             "datasource": {
                 "type": "prometheus",
@@ -855,34 +544,38 @@
                         "type": "prometheus",
                         "uid": "prometheus"
                     },
-                    "expr": "histogram_quantile(0.50, sum(rate(aikv_command_duration_seconds_bucket{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\", aikv_command_name!~\".*\\\\..*|CLIENT.*|CLUSTER.*|COMMAND.*|INFO.*|GOSSIP.*\"}[$__rate_interval])) by (le, aikv_command_name))",
-                    "refId": "A",
-                    "legendFormat": "{{aikv_command_name}}"
+                    "editorMode": "code",
+                    "expr": "histogram_quantile(0.95, sum(rate(aikv_command_duration_seconds_bucket{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\", aikv_command_name!~\".*\\\\..*|CLIENT.*|CLUSTER.*|COMMAND.*|INFO.*|GOSSIP.*\"}[$__rate_interval])) by (le, aikv_command_name))",
+                    "legendFormat": "{{aikv_command_name}}",
+                    "range": true,
+                    "refId": "A"
                 }
             ],
-            "description": "**面板作用**\n各业务命令 P50 中位数响应延迟对比 (排除内部伪命令)。\n\n**图示/调优**\n单命令耗时突增可直接定位具体命令瓶颈 (如区分 GET 慢还是 SET 慢)。\n\n**数据来源**\nOTLP 链路 (aikv)",
+            "description": "各命令响应延迟 P95",
             "fieldConfig": {
                 "defaults": {
-                    "unit": "s",
-                    "min": 0,
+                    "color": {
+                        "mode": "palette-classic"
+                    },
                     "custom": {
+                        "fillOpacity": 0,
+                        "gradientMode": "none",
                         "lineWidth": 1.5,
-                        "fillOpacity": 8
-                    }
+                        "stacking": {
+                            "mode": "none"
+                        }
+                    },
+                    "min": 0,
+                    "unit": "s"
                 },
                 "overrides": []
             },
             "options": {
                 "legend": {
-                    "calcs": [
-                        "mean",
-                        "max"
-                    ],
-                    "displayMode": "table",
+                    "calcs": [],
+                    "displayMode": "list",
                     "placement": "bottom",
-                    "showLegend": true,
-                    "sortBy": "Max",
-                    "sortDesc": true
+                    "showLegend": true
                 },
                 "tooltip": {
                     "mode": "multi",
@@ -898,7 +591,7 @@
                 "h": 7,
                 "w": 6,
                 "x": 18,
-                "y": 11
+                "y": 8
             },
             "datasource": {
                 "type": "prometheus",
@@ -910,37 +603,29 @@
                         "type": "prometheus",
                         "uid": "prometheus"
                     },
+                    "editorMode": "code",
                     "expr": "((sum(rate(aikv_keyspace_hits_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval])) / (sum(rate(aikv_keyspace_hits_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval])) + sum(rate(aikv_keyspace_misses_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval])))) * 100)",
-                    "refId": "A",
-                    "legendFormat": "命中率"
+                    "legendFormat": "命中率",
+                    "range": true,
+                    "refId": "A"
                 }
             ],
-            "description": "**面板作用**\n键查找命中率时序波动 (Hits / (Hits + Misses))。\n\n**图示/阈值**\n正常读多场景宜 >80%。\n\n**No data 常见原因**\n1. 无读请求 (无 hits 且无 misses)\n2. 变量过滤无匹配实例\n\n**数据来源**\nOTLP 链路 (aikv)",
-            "options": {
-                "legend": {
-                    "calcs": [
-                        "mean",
-                        "max"
-                    ],
-                    "displayMode": "table",
-                    "placement": "bottom",
-                    "showLegend": true,
-                    "sortBy": "Max",
-                    "sortDesc": true
-                },
-                "tooltip": {
-                    "mode": "multi",
-                    "sort": "desc"
-                }
-            },
+            "description": "**概念说明**\n- 键空间 (Keyspace): 数据库中所有 Key 的集合.\n- 命中 / 未命中: 读请求 (如 GET) 查询的 Key 存在即为命中, 否则为未命中 (Key 不存在或已过期).\n\n**命中率**\n\n命中率 = Hits / (Hits + Misses).\n- 高 (≥90%, 绿): 绝大多数读请求有效命中, 服务健康高效.\n- 低 (<75%, 红; 75%~90%, 橙): 大量请求读空或数据已过期/淘汰.\n\n**告警说明**\n\n命中率突降或持续偏低时, 需排查缓存穿透 (频繁查询不存在的 Key), 热点 Key 集中过期, 或内存不足引发淘汰.",
             "fieldConfig": {
                 "defaults": {
-                    "unit": "percent",
-                    "min": 0,
-                    "max": 100,
                     "color": {
                         "mode": "thresholds"
                     },
+                    "custom": {
+                        "fillOpacity": 8,
+                        "gradientMode": "opacity",
+                        "lineWidth": 1.5,
+                        "stacking": {
+                            "mode": "none"
+                        }
+                    },
+                    "max": 100,
+                    "min": 0,
                     "thresholds": {
                         "mode": "absolute",
                         "steps": [
@@ -958,12 +643,21 @@
                             }
                         ]
                     },
-                    "custom": {
-                        "lineWidth": 2,
-                        "fillOpacity": 10
-                    }
+                    "unit": "percent"
                 },
                 "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "calcs": [],
+                    "displayMode": "list",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
             }
         },
         {
@@ -972,9 +666,9 @@
             "type": "timeseries",
             "gridPos": {
                 "h": 7,
-                "w": 8,
+                "w": 6,
                 "x": 0,
-                "y": 18
+                "y": 15
             },
             "datasource": {
                 "type": "prometheus",
@@ -986,29 +680,37 @@
                         "type": "prometheus",
                         "uid": "prometheus"
                     },
+                    "editorMode": "code",
                     "expr": "sum(rate(aikv_net_input_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval]))",
-                    "refId": "A",
-                    "legendFormat": "入站"
+                    "legendFormat": "入站",
+                    "range": true,
+                    "refId": "A"
                 },
                 {
                     "datasource": {
                         "type": "prometheus",
                         "uid": "prometheus"
                     },
+                    "editorMode": "code",
                     "expr": "sum(rate(aikv_net_output_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval]))",
-                    "refId": "B",
-                    "legendFormat": "出站"
+                    "legendFormat": "出站",
+                    "range": true,
+                    "refId": "B"
                 }
             ],
-            "description": "AiKv 实例自身处理的客户端 RESP 网络吞吐 (Payload 字节流)，非宿主机物理网卡全局流量。",
+            "description": "实例处理的客户端网络吞吐 (入站/出站字节流)，非物理网卡流量",
             "fieldConfig": {
                 "defaults": {
-                    "unit": "binBps",
-                    "min": 0,
                     "custom": {
+                        "fillOpacity": 0,
+                        "gradientMode": "none",
                         "lineWidth": 1.5,
-                        "fillOpacity": 8
-                    }
+                        "stacking": {
+                            "mode": "none"
+                        }
+                    },
+                    "min": 0,
+                    "unit": "binBps"
                 },
                 "overrides": [
                     {
@@ -1045,15 +747,10 @@
             },
             "options": {
                 "legend": {
-                    "calcs": [
-                        "mean",
-                        "max"
-                    ],
-                    "displayMode": "table",
+                    "calcs": [],
+                    "displayMode": "list",
                     "placement": "bottom",
-                    "showLegend": true,
-                    "sortBy": "Max",
-                    "sortDesc": true
+                    "showLegend": true
                 },
                 "tooltip": {
                     "mode": "multi",
@@ -1063,13 +760,13 @@
         },
         {
             "id": 8,
-            "title": "客户端连接与阻塞",
+            "title": "客户端连接数",
             "type": "timeseries",
             "gridPos": {
                 "h": 7,
-                "w": 8,
-                "x": 8,
-                "y": 18
+                "w": 6,
+                "x": 6,
+                "y": 15
             },
             "datasource": {
                 "type": "prometheus",
@@ -1081,18 +778,11 @@
                         "type": "prometheus",
                         "uid": "prometheus"
                     },
+                    "editorMode": "code",
                     "expr": "sum(aikv_connected_clients{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"})",
-                    "refId": "A",
-                    "legendFormat": "活跃客户端数"
-                },
-                {
-                    "datasource": {
-                        "type": "prometheus",
-                        "uid": "prometheus"
-                    },
-                    "expr": "sum(aikv_blocked_clients{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"})",
-                    "refId": "B",
-                    "legendFormat": "受阻塞客户端数"
+                    "legendFormat": "活跃客户端数",
+                    "range": true,
+                    "refId": "A"
                 },
                 {
                     "datasource": {
@@ -1100,23 +790,26 @@
                         "uid": "prometheus"
                     },
                     "editorMode": "code",
-                    "expr": "sum(rate(aikv_rejected_connections_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval])) or vector(0)",
-                    "instant": false,
-                    "legendFormat": "连接拒绝速率",
+                    "expr": "sum(aikv_blocked_clients{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"})",
+                    "legendFormat": "受阻塞客户端数",
                     "range": true,
-                    "refId": "C"
+                    "refId": "B"
                 }
             ],
-            "description": "活跃连接数与阻塞等待连接数 (如 BLPOP/互斥等待)，右轴指示客户端连接被拒绝速率 (maxclients 超限)。",
+            "description": "当前活跃连接数与受阻塞等待的连接数 (如 BLPOP/互斥等待)。",
             "fieldConfig": {
                 "defaults": {
-                    "unit": "short",
-                    "min": 0,
-                    "decimals": 0,
                     "custom": {
+                        "fillOpacity": 0,
+                        "gradientMode": "none",
                         "lineWidth": 1.5,
-                        "fillOpacity": 8
-                    }
+                        "stacking": {
+                            "mode": "none"
+                        }
+                    },
+                    "decimals": 0,
+                    "min": 0,
+                    "unit": "short"
                 },
                 "overrides": [
                     {
@@ -1152,43 +845,15 @@
                                 "value": 2
                             }
                         ]
-                    },
-                    {
-                        "matcher": {
-                            "id": "byName",
-                            "options": "连接拒绝速率"
-                        },
-                        "properties": [
-                            {
-                                "id": "color",
-                                "value": {
-                                    "fixedColor": "red",
-                                    "mode": "fixed"
-                                }
-                            },
-                            {
-                                "id": "custom.axisPlacement",
-                                "value": "right"
-                            },
-                            {
-                                "id": "unit",
-                                "value": "ops/s"
-                            }
-                        ]
                     }
                 ]
             },
             "options": {
                 "legend": {
-                    "calcs": [
-                        "mean",
-                        "max"
-                    ],
-                    "displayMode": "table",
+                    "calcs": [],
+                    "displayMode": "list",
                     "placement": "bottom",
-                    "showLegend": true,
-                    "sortBy": "Max",
-                    "sortDesc": true
+                    "showLegend": true
                 },
                 "tooltip": {
                     "mode": "multi",
@@ -1197,14 +862,14 @@
             }
         },
         {
-            "id": 33,
-            "title": "慢查询速率",
+            "id": 59,
+            "title": "慢查询趋势",
             "type": "timeseries",
             "gridPos": {
                 "h": 7,
-                "w": 8,
-                "x": 16,
-                "y": 18
+                "w": 6,
+                "x": 12,
+                "y": 15
             },
             "datasource": {
                 "type": "prometheus",
@@ -1216,48 +881,134 @@
                         "type": "prometheus",
                         "uid": "prometheus"
                     },
-                    "expr": "sum(rate(aikv_slow_queries_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\", aikv_command_name!~\".*\\\\..*|CLIENT.*|CLUSTER.*|COMMAND.*|INFO.*|GOSSIP.*\"}[$__rate_interval]))",
-                    "refId": "A",
-                    "legendFormat": "合计"
+                    "editorMode": "code",
+                    "expr": "(round(sum(increase(aikv_slow_queries_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\", aikv_command_name!~\".*\\\\..*|CLIENT.*|CLUSTER.*|COMMAND.*|INFO.*|GOSSIP.*\"}[$__rate_interval])))) or vector(0)",
+                    "legendFormat": "合计",
+                    "range": true,
+                    "refId": "A"
                 },
                 {
                     "datasource": {
                         "type": "prometheus",
                         "uid": "prometheus"
                     },
-                    "expr": "sum(rate(aikv_slow_queries_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\", aikv_command_name!~\".*\\\\..*|CLIENT.*|CLUSTER.*|COMMAND.*|INFO.*|GOSSIP.*\"}[$__rate_interval])) by (aikv_command_name)",
-                    "refId": "B",
-                    "legendFormat": "{{aikv_command_name}}"
+                    "editorMode": "code",
+                    "expr": "round(sum(increase(aikv_slow_queries_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\", aikv_command_name!~\".*\\\\..*|CLIENT.*|CLUSTER.*|COMMAND.*|INFO.*|GOSSIP.*\"}[$__rate_interval])) by (aikv_command_name))",
+                    "legendFormat": "{{aikv_command_name}}",
+                    "range": true,
+                    "refId": "B"
                 }
             ],
-            "description": "**面板作用**\n超过 slowlog 阈值的慢查询触发速率 (全命令合计 vs 各命令分线)。\n\n**No data 常见原因**\n1. 正常运行且无慢查询触发\n2. 变量过滤无匹配实例\n\n**数据来源**\nOTLP 链路 (aikv)",
+            "description": "各时刻慢查询触发频次走势 (合计与各命令细分)。展示微观时间窗口内新增慢查询脉冲，尖峰突起即为集中爆发点；波形归零表示当前无慢查询持续产生。",
             "fieldConfig": {
                 "defaults": {
-                    "unit": "ops",
-                    "min": 0,
+                    "color": {
+                        "mode": "palette-classic"
+                    },
                     "custom": {
-                        "lineWidth": 2,
-                        "fillOpacity": 10
-                    }
+                        "fillOpacity": 0,
+                        "gradientMode": "none",
+                        "lineWidth": 1.5,
+                        "stacking": {
+                            "mode": "none"
+                        }
+                    },
+                    "decimals": 0,
+                    "min": 0,
+                    "unit": "short"
                 },
-                "overrides": []
+                "overrides": [
+                    {
+                        "matcher": {
+                            "id": "byName",
+                            "options": "合计"
+                        },
+                        "properties": [
+                            {
+                                "id": "custom.lineWidth",
+                                "value": 2.5
+                            }
+                        ]
+                    }
+                ]
             },
             "options": {
                 "legend": {
-                    "calcs": [
-                        "mean",
-                        "max"
-                    ],
-                    "displayMode": "table",
+                    "calcs": [],
+                    "displayMode": "list",
                     "placement": "bottom",
-                    "showLegend": true,
-                    "sortBy": "Max",
-                    "sortDesc": true
+                    "showLegend": true
                 },
                 "tooltip": {
                     "mode": "multi",
                     "sort": "desc"
                 }
+            }
+        },
+        {
+            "id": 33,
+            "title": "慢查询数量",
+            "type": "bargauge",
+            "gridPos": {
+                "h": 7,
+                "w": 6,
+                "x": 18,
+                "y": 15
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+            },
+            "targets": [
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus"
+                    },
+                    "editorMode": "code",
+                    "expr": "(round(sum(increase(aikv_slow_queries_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\", aikv_command_name!~\".*\\\\..*|CLIENT.*|CLUSTER.*|COMMAND.*|INFO.*|GOSSIP.*\"}[$__range])))) > 0",
+                    "instant": false,
+                    "legendFormat": "合计",
+                    "range": true,
+                    "refId": "A"
+                },
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus"
+                    },
+                    "editorMode": "code",
+                    "expr": "(round(sum by (aikv_command_name) (increase(aikv_slow_queries_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\", aikv_command_name!~\".*\\\\..*|CLIENT.*|CLUSTER.*|COMMAND.*|INFO.*|GOSSIP.*\"}[$__range])))) > 0",
+                    "instant": false,
+                    "legendFormat": "{{aikv_command_name}}",
+                    "range": true,
+                    "refId": "B"
+                }
+            ],
+            "description": "所选时间范围内 ($__range) 慢查询累计触发总数分布 (合计与各命令细分)。反映全周期历史总账，柱高即总次数；若区间内无慢查询则显示为「无慢查询」。",
+            "fieldConfig": {
+                "defaults": {
+                    "color": {
+                        "mode": "palette-classic"
+                    },
+                    "decimals": 0,
+                    "min": 0,
+                    "noValue": "无慢查询",
+                    "unit": "short"
+                },
+                "overrides": []
+            },
+            "options": {
+                "displayMode": "gradient",
+                "orientation": "vertical",
+                "reduceOptions": {
+                    "calcs": [
+                        "lastNotNull"
+                    ],
+                    "fields": "",
+                    "values": false
+                },
+                "showUnfilled": true
             }
         },
         {
@@ -1268,19 +1019,19 @@
                 "h": 1,
                 "w": 24,
                 "x": 0,
-                "y": 25
+                "y": 22
             },
             "collapsed": false
         },
         {
             "id": 10,
-            "title": "写放大 (WA)",
+            "title": "写放大",
             "type": "stat",
             "gridPos": {
                 "h": 3,
-                "w": 6,
+                "w": 8,
                 "x": 0,
-                "y": 26
+                "y": 23
             },
             "datasource": {
                 "type": "prometheus",
@@ -1292,18 +1043,18 @@
                         "type": "prometheus",
                         "uid": "prometheus"
                     },
-                    "expr": "((sum(rate(aidb_wal_written_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval])) + sum(rate(aidb_flush_written_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval])) + sum(rate(aidb_compaction_written_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval]))) / (sum(rate(aidb_logical_write_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval])) > 0))",
+                    "expr": "((sum(rate(aidb_wal_written_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[5m])) + sum(rate(aidb_flush_written_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[5m])) + sum(rate(aidb_compaction_written_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[5m]))) / (sum(rate(aidb_logical_write_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[5m])) > 0))",
                     "refId": "A",
                     "legendFormat": "写放大"
                 }
             ],
-            "description": "写放大 = 物理写总字节 (WAL + Flush + Compaction) / 用户有效逻辑写入字节。\n\n- < 5.0：绿色，写入顺畅，层级合并开销合理。\n- 5.0 ~ 15.0：橙色，中度写放大，关注合并压力。\n- ≥ 15.0：红色，严重写放大，存在磁盘 IO 瓶颈或写停顿风险。",
+            "description": "存储引擎写放大倍数 (5m 移动均值): 物理写总字节 (WAL + Flush + Compaction) / 逻辑写入字节. 写入初期落盘滞后瞬时值可 < 1.0; 无逻辑写入时显示 N/A; 瞬时爆发与分解下钻见下方走势图.",
             "fieldConfig": {
                 "defaults": {
-                    "unit": "none",
+                    "unit": "suffix:x",
                     "decimals": 2,
                     "min": 0,
-                    "noValue": "0",
+                    "noValue": "N/A",
                     "color": {
                         "mode": "thresholds"
                     },
@@ -1343,13 +1094,13 @@
         },
         {
             "id": 11,
-            "title": "读放大 (RA)",
+            "title": "读放大",
             "type": "stat",
             "gridPos": {
                 "h": 3,
-                "w": 6,
-                "x": 6,
-                "y": 26
+                "w": 8,
+                "x": 8,
+                "y": 23
             },
             "datasource": {
                 "type": "prometheus",
@@ -1361,18 +1112,18 @@
                         "type": "prometheus",
                         "uid": "prometheus"
                     },
-                    "expr": "(sum(rate(aidb_block_read_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval])) / (sum(rate(aidb_logical_read_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval])) > 0))",
+                    "expr": "(sum(rate(aidb_block_read_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[5m])) / (sum(rate(aidb_logical_read_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[5m])) > 0))",
                     "refId": "A",
                     "legendFormat": "读放大"
                 }
             ],
-            "description": "读放大 = 物理实际读取字节 (Block Read) / 用户有效逻辑读取字节。\n\n- < 5.0：绿色，Cache 命中极佳，近内存级读取。\n- 5.0 ~ 20.0：橙色，中等读放大，部分查询下探物理磁盘。\n- ≥ 20.0：红色，严重读放大，大量查询击穿缓存穿透多层 SSTable，磁盘读取 IO 负载沉重。",
+            "description": "存储引擎读放大倍数 (5m 移动均值): 物理块读取字节 (Block Read) / 逻辑读取字节. Block Cache 高命中时常态可低至 0.0x, 无缓存完全穿透时 > 1.0; 无逻辑读时显示 N/A; 穿透走势与分解下钻见下方时序图.",
             "fieldConfig": {
                 "defaults": {
-                    "unit": "none",
+                    "unit": "suffix:x",
                     "decimals": 2,
                     "min": 0,
-                    "noValue": "0",
+                    "noValue": "N/A",
                     "color": {
                         "mode": "thresholds"
                     },
@@ -1412,13 +1163,13 @@
         },
         {
             "id": 12,
-            "title": "Bloom 假阳性率",
+            "title": "空间放大",
             "type": "stat",
             "gridPos": {
                 "h": 3,
-                "w": 6,
-                "x": 18,
-                "y": 26
+                "w": 8,
+                "x": 16,
+                "y": 23
             },
             "datasource": {
                 "type": "prometheus",
@@ -1431,20 +1182,20 @@
                         "uid": "prometheus"
                     },
                     "editorMode": "code",
-                    "expr": "(sum(rate(aidb_bloom_false_positive_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval])) / ((sum(rate(aidb_bloom_false_positive_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval])) + sum(rate(aidb_bloom_useful_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval]))) > 0)) * 100",
+                    "expr": "((sum(aidb_sstable_size_bytes{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}) + sum(aidb_wal_size_bytes{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"})) / (sum(aikv_db_keys{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}) * $payload_bytes > 0))",
                     "instant": false,
-                    "legendFormat": "Bloom 假阳性率",
+                    "legendFormat": "空间放大",
                     "range": true,
                     "refId": "A"
                 }
             ],
-            "description": "**面板作用**\nBloom Filter 假阳性穿透率 (FPR) = 假阳性穿透 (FP) / (假阳性穿透 FP + 有效过滤 TN)。\n\n**图示/阈值**\n- < 1.0%：绿色健康，过滤器有效阻挡无用点查下探磁盘\n- 1.0% ~ 5.0%：橙色关注，适度穿透\n- ≥ 5.0%：红色告警，严重穿透导致读放大恶化，需检查 bits_per_key 配置\n\n**数据来源**\nOTLP 链路 (aidb)",
+            "description": "存储引擎空间放大倍数 (估算): 物理磁盘占用 (SST + WAL) / 存活有效数据体积 (按负载变量 $payload_bytes/Key 估算). Hash/List 等复合类型子字段未计入 key 数, 此类负载下分母偏小导致 SA 虚高; 无数据时显示 N/A; 绝对存储量与走势见下方时序图.",
             "fieldConfig": {
                 "defaults": {
-                    "unit": "percent",
+                    "unit": "suffix:x",
                     "decimals": 2,
                     "min": 0,
-                    "noValue": "0%",
+                    "noValue": "N/A",
                     "color": {
                         "mode": "thresholds"
                     },
@@ -1457,79 +1208,11 @@
                             },
                             {
                                 "color": "yellow",
-                                "value": 1.0
+                                "value": 1.5
                             },
                             {
                                 "color": "red",
-                                "value": 5.0
-                            }
-                        ]
-                    }
-                },
-                "overrides": []
-            },
-            "options": {
-                "graphMode": "area",
-                "colorMode": "value",
-                "justifyMode": "auto",
-                "orientation": "auto",
-                "reduceOptions": {
-                    "values": false,
-                    "calcs": [
-                        "lastNotNull"
-                    ],
-                    "fields": ""
-                }
-            }
-        },
-        {
-            "id": 13,
-            "title": "压缩待处理积压",
-            "type": "stat",
-            "gridPos": {
-                "h": 3,
-                "w": 6,
-                "x": 12,
-                "y": 26
-            },
-            "datasource": {
-                "type": "prometheus",
-                "uid": "prometheus"
-            },
-            "targets": [
-                {
-                    "datasource": {
-                        "type": "prometheus",
-                        "uid": "prometheus"
-                    },
-                    "expr": "sum(aidb_compaction_pending_bytes{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"})",
-                    "refId": "A",
-                    "legendFormat": "压缩积压"
-                }
-            ],
-            "description": "LSM-Tree 等待后台压缩合并 (Compaction) 的数据体积积压。\n\n- < 50 MB：绿色，后台压缩消化良好，无积压风险。\n- 50 MB ~ 200 MB：橙色，存在积压堆积，后台压缩正在追赶。\n- ≥ 200 MB：红色，严重积压，写入即将触发限流或写停顿 (Write Stall)。",
-            "fieldConfig": {
-                "defaults": {
-                    "unit": "decbytes",
-                    "min": 0,
-                    "noValue": "0",
-                    "color": {
-                        "mode": "thresholds"
-                    },
-                    "thresholds": {
-                        "mode": "absolute",
-                        "steps": [
-                            {
-                                "color": "green",
-                                "value": null
-                            },
-                            {
-                                "color": "yellow",
-                                "value": 52428800
-                            },
-                            {
-                                "color": "red",
-                                "value": 209715200
+                                "value": 2.5
                             }
                         ]
                     }
@@ -1552,13 +1235,13 @@
         },
         {
             "id": 14,
-            "title": "物理写入速率分解 vs 用户逻辑写入",
+            "title": "写放大走势与物理写分解",
             "type": "timeseries",
             "gridPos": {
                 "h": 8,
-                "w": 12,
+                "w": 8,
                 "x": 0,
-                "y": 29
+                "y": 26
             },
             "datasource": {
                 "type": "prometheus",
@@ -1570,9 +1253,19 @@
                         "type": "prometheus",
                         "uid": "prometheus"
                     },
+                    "editorMode": "code",
+                    "expr": "((sum(rate(aidb_wal_written_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval])) + sum(rate(aidb_flush_written_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval])) + sum(rate(aidb_compaction_written_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval]))) / (sum(rate(aidb_logical_write_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval])) > 0))",
+                    "legendFormat": "写放大 (WA)",
+                    "refId": "A"
+                },
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus"
+                    },
                     "expr": "sum(rate(aidb_wal_written_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval]))",
                     "legendFormat": "WAL 写入",
-                    "refId": "A"
+                    "refId": "B"
                 },
                 {
                     "datasource": {
@@ -1581,7 +1274,7 @@
                     },
                     "expr": "sum(rate(aidb_flush_written_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval]))",
                     "legendFormat": "Flush 刷盘",
-                    "refId": "B"
+                    "refId": "C"
                 },
                 {
                     "datasource": {
@@ -1590,7 +1283,7 @@
                     },
                     "expr": "sum(rate(aidb_compaction_written_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval]))",
                     "legendFormat": "Compaction 压缩",
-                    "refId": "C"
+                    "refId": "D"
                 },
                 {
                     "datasource": {
@@ -1598,11 +1291,11 @@
                         "uid": "prometheus"
                     },
                     "expr": "sum(rate(aidb_logical_write_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval]))",
-                    "legendFormat": "用户逻辑写入 (基准)",
-                    "refId": "D"
+                    "legendFormat": "用户逻辑写入",
+                    "refId": "E"
                 }
             ],
-            "description": "LSM-Tree 存储引擎各物理写入组件的实时写吞吐速率分解 (预写日志追加、内存表刷盘与层级压缩合并)。",
+            "description": "**指标定义**\n\n展示写放大 (WA) 的动态演进趋势, 并联动下钻物理写总吞吐 (WAL 追加, MemTable 刷盘与 Compaction 压缩) 与用户有效逻辑写入.\n\n**图示说明**\n- 左轴 (实线): `写放大 (WA)` 倍数, 无量纲\n- 右轴 (面积堆叠/实线): WAL 写入 (橙), Flush 刷盘 (蓝), Compaction 压缩 (紫) 堆叠面积 vs 用户逻辑写基准 (绿实线)\n\n**调优关注**\n当紫蓝色面积显著超过绿线时, 说明后台重写剧烈; 若写放大持续 `>= 15.0`, 需警惕 IO 瓶颈与写停顿风险.",
             "fieldConfig": {
                 "defaults": {
                     "unit": "binBps",
@@ -1610,6 +1303,8 @@
                     "custom": {
                         "lineWidth": 1.5,
                         "fillOpacity": 10,
+                        "axisPlacement": "right",
+                        "axisLabel": "写入吞吐",
                         "stacking": {
                             "group": "A",
                             "mode": "normal"
@@ -1617,6 +1312,52 @@
                     }
                 },
                 "overrides": [
+                    {
+                        "matcher": {
+                            "id": "byName",
+                            "options": "写放大 (WA)"
+                        },
+                        "properties": [
+                            {
+                                "id": "custom.axisPlacement",
+                                "value": "left"
+                            },
+                            {
+                                "id": "custom.axisLabel",
+                                "value": "放大倍数"
+                            },
+                            {
+                                "id": "unit",
+                                "value": "none"
+                            },
+                            {
+                                "id": "decimals",
+                                "value": 2
+                            },
+                            {
+                                "id": "color",
+                                "value": {
+                                    "fixedColor": "yellow",
+                                    "mode": "fixed"
+                                }
+                            },
+                            {
+                                "id": "custom.lineWidth",
+                                "value": 2.5
+                            },
+                            {
+                                "id": "custom.fillOpacity",
+                                "value": 0
+                            },
+                            {
+                                "id": "custom.stacking",
+                                "value": {
+                                    "group": "__unstacked__",
+                                    "mode": "none"
+                                }
+                            }
+                        ]
+                    },
                     {
                         "matcher": {
                             "id": "byName",
@@ -1665,7 +1406,7 @@
                     {
                         "matcher": {
                             "id": "byName",
-                            "options": "用户逻辑写入 (基准)"
+                            "options": "用户逻辑写入"
                         },
                         "properties": [
                             {
@@ -1678,6 +1419,10 @@
                             {
                                 "id": "custom.lineWidth",
                                 "value": 2
+                            },
+                            {
+                                "id": "custom.fillOpacity",
+                                "value": 0
                             },
                             {
                                 "id": "custom.stacking",
@@ -1709,14 +1454,331 @@
             }
         },
         {
+            "id": 60,
+            "title": "读放大走势与缓存穿透",
+            "type": "timeseries",
+            "gridPos": {
+                "h": 8,
+                "w": 8,
+                "x": 8,
+                "y": 26
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+            },
+            "targets": [
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus"
+                    },
+                    "editorMode": "code",
+                    "expr": "(sum(rate(aidb_block_read_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval])) / (sum(rate(aidb_logical_read_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval])) > 0))",
+                    "legendFormat": "读放大 (RA)",
+                    "refId": "A"
+                },
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus"
+                    },
+                    "editorMode": "code",
+                    "expr": "sum(rate(aidb_logical_read_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval]))",
+                    "legendFormat": "用户逻辑读",
+                    "refId": "B"
+                },
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus"
+                    },
+                    "editorMode": "code",
+                    "expr": "sum(rate(aidb_block_read_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval]))",
+                    "legendFormat": "物理磁盘读",
+                    "refId": "C"
+                }
+            ],
+            "description": "**指标定义**\n\n展示读放大 (RA) 的动态演进趋势, 并对比用户逻辑读取吞吐与穿透至底层磁盘的物理块读取 (Block Read) 吞吐.\n\n**图示说明**\n- 左轴 (实线): `读放大 (RA)` 倍数, 无量纲\n- 右轴 (吞吐折线): 用户逻辑读吞吐 (绿实线) vs 物理磁盘读吞吐 (红实线)\n\n**调优关注**\n正常情况下 Block Cache 拦截 > 99% 的读取, 物理磁盘读应贴近底线, RA 维持在 `< 3.0`; 当缓存命中率骤降或发生大范围点查未命中时, 物理磁盘读攀升, RA 曲线将迅速翘头.",
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "binBps",
+                    "min": 0,
+                    "custom": {
+                        "lineWidth": 1.5,
+                        "fillOpacity": 6,
+                        "axisPlacement": "right",
+                        "axisLabel": "读取吞吐"
+                    }
+                },
+                "overrides": [
+                    {
+                        "matcher": {
+                            "id": "byName",
+                            "options": "读放大 (RA)"
+                        },
+                        "properties": [
+                            {
+                                "id": "custom.axisPlacement",
+                                "value": "left"
+                            },
+                            {
+                                "id": "custom.axisLabel",
+                                "value": "放大倍数"
+                            },
+                            {
+                                "id": "unit",
+                                "value": "none"
+                            },
+                            {
+                                "id": "decimals",
+                                "value": 2
+                            },
+                            {
+                                "id": "color",
+                                "value": {
+                                    "fixedColor": "green",
+                                    "mode": "fixed"
+                                }
+                            },
+                            {
+                                "id": "custom.lineWidth",
+                                "value": 2.5
+                            },
+                            {
+                                "id": "custom.fillOpacity",
+                                "value": 0
+                            }
+                        ]
+                    },
+                    {
+                        "matcher": {
+                            "id": "byName",
+                            "options": "用户逻辑读"
+                        },
+                        "properties": [
+                            {
+                                "id": "color",
+                                "value": {
+                                    "fixedColor": "semi-dark-green",
+                                    "mode": "fixed"
+                                }
+                            },
+                            {
+                                "id": "custom.lineWidth",
+                                "value": 2
+                            },
+                            {
+                                "id": "custom.fillOpacity",
+                                "value": 0
+                            }
+                        ]
+                    },
+                    {
+                        "matcher": {
+                            "id": "byName",
+                            "options": "物理磁盘读"
+                        },
+                        "properties": [
+                            {
+                                "id": "color",
+                                "value": {
+                                    "fixedColor": "red",
+                                    "mode": "fixed"
+                                }
+                            },
+                            {
+                                "id": "custom.lineWidth",
+                                "value": 1.5
+                            }
+                        ]
+                    }
+                ]
+            },
+            "options": {
+                "legend": {
+                    "calcs": [
+                        "mean",
+                        "max"
+                    ],
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true,
+                    "sortBy": "Max",
+                    "sortDesc": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            }
+        },
+        {
+            "id": 61,
+            "title": "空间放大走势与存储占用",
+            "type": "timeseries",
+            "gridPos": {
+                "h": 8,
+                "w": 8,
+                "x": 16,
+                "y": 26
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+            },
+            "targets": [
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus"
+                    },
+                    "editorMode": "code",
+                    "expr": "((sum(aidb_sstable_size_bytes{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}) + sum(aidb_wal_size_bytes{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"})) / (sum(aikv_db_keys{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}) * $payload_bytes > 0))",
+                    "legendFormat": "空间放大 (SA)",
+                    "refId": "A"
+                },
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus"
+                    },
+                    "editorMode": "code",
+                    "expr": "sum(aidb_sstable_size_bytes{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}) + sum(aidb_wal_size_bytes{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"})",
+                    "legendFormat": "物理磁盘占用 (SST + WAL)",
+                    "refId": "B"
+                },
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus"
+                    },
+                    "editorMode": "code",
+                    "expr": "sum(aikv_db_keys{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}) * $payload_bytes",
+                    "legendFormat": "有效数据净体积",
+                    "refId": "C"
+                }
+            ],
+            "description": "**指标定义**\n\n展示空间放大 (SA) 的动态演进趋势, 并对比磁盘物理文件总体积 (SSTable + WAL) 与存活数据的逻辑净体积.\n\n**图示说明**\n- 左轴 (实线): `空间放大 (SA)` 倍数, 无量纲\n- 右轴 (存储容量): 物理磁盘占用 (紫实线) vs 有效数据净体积 (绿实线)\n\n**调优关注**\n当频繁更新或大量删除发生后, 墓碑与历史版本滞留导致紫线与绿线间距拉大, SA 曲线攀升; 待 Compaction 充分执行垃圾回收后, SA 应回落至 `< 1.5` 的理想健康区间.",
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "bytes",
+                    "min": 0,
+                    "custom": {
+                        "lineWidth": 1.5,
+                        "fillOpacity": 6,
+                        "axisPlacement": "right",
+                        "axisLabel": "存储容量"
+                    }
+                },
+                "overrides": [
+                    {
+                        "matcher": {
+                            "id": "byName",
+                            "options": "空间放大 (SA)"
+                        },
+                        "properties": [
+                            {
+                                "id": "custom.axisPlacement",
+                                "value": "left"
+                            },
+                            {
+                                "id": "custom.axisLabel",
+                                "value": "放大倍数"
+                            },
+                            {
+                                "id": "unit",
+                                "value": "none"
+                            },
+                            {
+                                "id": "decimals",
+                                "value": 2
+                            },
+                            {
+                                "id": "color",
+                                "value": {
+                                    "fixedColor": "blue",
+                                    "mode": "fixed"
+                                }
+                            },
+                            {
+                                "id": "custom.lineWidth",
+                                "value": 2.5
+                            },
+                            {
+                                "id": "custom.fillOpacity",
+                                "value": 0
+                            }
+                        ]
+                    },
+                    {
+                        "matcher": {
+                            "id": "byName",
+                            "options": "物理磁盘占用 (SST + WAL)"
+                        },
+                        "properties": [
+                            {
+                                "id": "color",
+                                "value": {
+                                    "fixedColor": "purple",
+                                    "mode": "fixed"
+                                }
+                            },
+                            {
+                                "id": "custom.lineWidth",
+                                "value": 2
+                            }
+                        ]
+                    },
+                    {
+                        "matcher": {
+                            "id": "byName",
+                            "options": "有效数据净体积"
+                        },
+                        "properties": [
+                            {
+                                "id": "color",
+                                "value": {
+                                    "fixedColor": "green",
+                                    "mode": "fixed"
+                                }
+                            },
+                            {
+                                "id": "custom.lineWidth",
+                                "value": 2
+                            }
+                        ]
+                    }
+                ]
+            },
+            "options": {
+                "legend": {
+                    "calcs": [
+                        "mean",
+                        "lastNotNull",
+                        "max"
+                    ],
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true,
+                    "sortBy": "Last *",
+                    "sortDesc": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            }
+        },
+        {
             "id": 15,
             "title": "写停顿频次与最大耗时",
             "type": "timeseries",
             "gridPos": {
-                "h": 8,
-                "w": 12,
-                "x": 12,
-                "y": 29
+                "h": 7,
+                "w": 8,
+                "x": 16,
+                "y": 34
             },
             "datasource": {
                 "type": "prometheus",
@@ -1748,7 +1810,7 @@
                     "refId": "B"
                 }
             ],
-            "description": "**面板作用**\nLSM 写停顿 (Write Stall) 触发频次与单次最长卡顿耗时。当 L0 SSTable 堆积或 MemTable 满时引擎主动限流或阻塞写入。\n\n**图示/阈值**\n- 左轴 slowdown / stop: 写减速/停顿频次 (ops/s，按 memtable / l0 / level_size 归因)\n- 右轴 单次最长停顿: 进程生命周期内写停顿最大持续时间 (s)\n正常情况下停顿频次应恒为 0。\n\n**数据来源**\nOTLP 链路 (aidb)",
+            "description": "**指标定义**\n\n监控 LSM 写停顿 (Write Stall) 触发频次与进程生命周期内单次最长卡顿耗时. 当 L0 SSTable 堆积或 MemTable 满时引擎主动限流或阻塞写入.\n\n**图示说明**\n- 左轴 (实线): 写减速 / 停顿频次 (`ops/s`, 按 `memtable` / `l0` / `level_size` 归因)\n- 右轴 (实线): 进程生命周期内写停顿最大持续时间 (`s`)\n\n**调优关注**\n健康状态下停顿频次应恒为 0; 若出现毛刺或突增, 需排查 Flush 刷盘积压或 Compaction 压缩延迟.",
             "fieldConfig": {
                 "defaults": {
                     "unit": "reqps",
@@ -1856,9 +1918,9 @@
             "type": "timeseries",
             "gridPos": {
                 "h": 7,
-                "w": 12,
-                "x": 12,
-                "y": 37
+                "w": 8,
+                "x": 8,
+                "y": 34
             },
             "datasource": {
                 "type": "prometheus",
@@ -1902,7 +1964,7 @@
                     "refId": "D"
                 }
             ],
-            "description": "**面板作用**\n后台 MemTable 刷盘 (Flush) 与 LSM-Tree 分层合并 (Compaction) 的执行速率与 P95 耗时。\n\n- 左轴：刷盘与合并执行速率 (ops/s)\n- 右轴：P95 执行耗时 (s)\n\n**数据来源**\nOTLP 链路 (aidb)",
+            "description": "**指标定义**\n\n后台 MemTable 刷盘 (Flush) 与 LSM-Tree 分层合并 (Compaction) 的执行速率与 P95 耗时.\n\n**图示说明**\n- 左轴 (实线): 刷盘与合并执行速率 (`ops/s`)\n- 右轴 (实线): P95 执行耗时 (`s`)\n\n**调优关注**\n刷盘耗时突增通常说明磁盘写入饱和或文件系统延迟; 合并耗时过长需评估 Compaction 并发与单次合并数据量.",
             "fieldConfig": {
                 "defaults": {
                     "unit": "ops",
@@ -1963,7 +2025,7 @@
                 "h": 7,
                 "w": 12,
                 "x": 0,
-                "y": 52
+                "y": 49
             },
             "datasource": {
                 "type": "prometheus",
@@ -2044,7 +2106,7 @@
                 "h": 8,
                 "w": 12,
                 "x": 12,
-                "y": 44
+                "y": 41
             },
             "datasource": {
                 "type": "prometheus",
@@ -2171,7 +2233,7 @@
                 "h": 8,
                 "w": 12,
                 "x": 0,
-                "y": 44
+                "y": 41
             },
             "datasource": {
                 "type": "prometheus",
@@ -2309,7 +2371,7 @@
                 "h": 7,
                 "w": 24,
                 "x": 0,
-                "y": 59
+                "y": 56
             },
             "datasource": {
                 "type": "prometheus",
@@ -2363,7 +2425,7 @@
                 "h": 7,
                 "w": 12,
                 "x": 12,
-                "y": 52
+                "y": 49
             },
             "datasource": {
                 "type": "prometheus",
@@ -2474,9 +2536,9 @@
             "type": "timeseries",
             "gridPos": {
                 "h": 7,
-                "w": 12,
+                "w": 8,
                 "x": 0,
-                "y": 37
+                "y": 34
             },
             "datasource": {
                 "type": "prometheus",
@@ -2511,7 +2573,7 @@
                     "refId": "C"
                 }
             ],
-            "description": "LSM-Tree 前端写缓冲 MemTable 内存体积与预写日志 WAL 磁盘占用。MemTable 周期性刷盘 (Flush) 时体积回落。",
+            "description": "**指标定义**\n\n监控 LSM-Tree 前端写缓冲 MemTable 内存占用 (Active 写入态与 Immutable 待刷盘态) 与预写日志 WAL 磁盘占用.\n\n**图示说明**\n- 实线/面积: Active MemTable (橙), Immutable MemTable (红), WAL 磁盘总体积 (紫)\n\n**调优关注**\nMemTable 体积随写入增长, 达到阈值后转为 Immutable 并触发后台刷盘 (Flush), 体积瞬时回落; 若 Immutable 堆积不回落, 表明 Flush 刷盘受阻.",
             "fieldConfig": {
                 "defaults": {
                     "unit": "decbytes",
@@ -2595,7 +2657,7 @@
                 "h": 1,
                 "w": 24,
                 "x": 0,
-                "y": 66
+                "y": 63
             },
             "collapsed": false
         },
@@ -2607,7 +2669,7 @@
                 "h": 3,
                 "w": 6,
                 "x": 0,
-                "y": 67
+                "y": 64
             },
             "datasource": {
                 "type": "prometheus",
@@ -2679,7 +2741,7 @@
                 "h": 3,
                 "w": 6,
                 "x": 6,
-                "y": 67
+                "y": 64
             },
             "datasource": {
                 "type": "prometheus",
@@ -2750,7 +2812,7 @@
                 "h": 3,
                 "w": 6,
                 "x": 12,
-                "y": 67
+                "y": 64
             },
             "datasource": {
                 "type": "prometheus",
@@ -2822,7 +2884,7 @@
                 "h": 3,
                 "w": 6,
                 "x": 18,
-                "y": 67
+                "y": 64
             },
             "datasource": {
                 "type": "prometheus",
@@ -2894,7 +2956,7 @@
                 "h": 7,
                 "w": 8,
                 "x": 0,
-                "y": 70
+                "y": 67
             },
             "datasource": {
                 "type": "prometheus",
@@ -3037,7 +3099,7 @@
                 "h": 7,
                 "w": 8,
                 "x": 8,
-                "y": 70
+                "y": 67
             },
             "datasource": {
                 "type": "prometheus",
@@ -3151,7 +3213,7 @@
                 "h": 7,
                 "w": 8,
                 "x": 16,
-                "y": 70
+                "y": 67
             },
             "datasource": {
                 "type": "prometheus",
@@ -3287,7 +3349,7 @@
                 "h": 7,
                 "w": 12,
                 "x": 0,
-                "y": 77
+                "y": 74
             },
             "datasource": {
                 "type": "prometheus",
@@ -3401,7 +3463,7 @@
                 "h": 7,
                 "w": 12,
                 "x": 12,
-                "y": 77
+                "y": 74
             },
             "datasource": {
                 "type": "prometheus",
@@ -3517,7 +3579,7 @@
                 "h": 1,
                 "w": 24,
                 "x": 0,
-                "y": 84
+                "y": 81
             },
             "id": 37,
             "title": "4. 分布式与集群通信 (Cluster & HA)",
@@ -3756,7 +3818,7 @@
                 "h": 1,
                 "w": 24,
                 "x": 0,
-                "y": 85
+                "y": 82
             },
             "id": 58,
             "title": "5. 冷启动与崩溃恢复 (Cold Recovery & RTO)",

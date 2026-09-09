@@ -111,7 +111,7 @@ Grafana 启动后自动加载 `AiKv` 仪表盘目录下的四张大盘：
        - 命令观测矩阵四联 (6:6:6:6)：命令调用量占比 (环形饼图)、命令执行量排行 (Top 10 Bar Gauge)、各业务命令响应延迟 P50 对比、键空间命中率时序 (真实命中率，无假健康)；全部命令面板严格过滤内部控制面伪命令；
        - 网络与连接状态监控 (8:8:8)：服务网络带宽 (双线: In/Out)、客户端连接/阻塞与拒绝 (三线)、慢查询速率 (全命令合计 vs 各命令分线)。
      - **Row 2: 存储引擎层 (LSM-Tree 视角)**（常驻展开）：
-       - 四大核心状态摘要卡 (w=6)：写放大 (WA, 带 Sparkline 面积图)、读放大 (RA, 带 Sparkline)、Bloom 假阳性率 (ID 12 FPR, 带 Sparkline)、压缩待处理积压量 (ID 13 Pending Bytes)；
+       - 三大核心状态摘要卡 (w=8)：写放大 (WA, 带 Sparkline 面积图)、读放大 (RA, 带 Sparkline)、空间放大 (SA, 基于 $payload_bytes 估算, 带 Sparkline)；
        - 写路径因果诊断区：物理写入速率分解 vs 用户逻辑写入基准 (ID 14, 堆叠物理写上叠独立逻辑写折线, 直读写放大)、Write Stall 写停顿频次与最大耗时 (ID 15 双轴)、MemTable 活跃/只读内存与 WAL 大小心跳 (ID 35)、Flush 与 Compaction 速率/P95 耗时双轴同屏 (ID 43)；
        - 读链路与缓存穿透区：Block Cache 命中率与 Miss 穿透速率 (ID 17 双轴)、读放大 (RA) 演进与 Bloom Filter 假阳性率联动 (ID 52 双轴带 1.0 基准线)；
        - LSM 空间形态与底层算子区：纯 SSTable 分层文件数堆叠 (ID 18, L0 高亮)、SSTable 分层占用与 Key 增长 (ID 36 彻底修复 Matcher 右轴纯数字绑定)、存储底层核心算子 P95 耗时分布 (ID 16 表格图例)。
@@ -123,7 +123,7 @@ Grafana 启动后自动加载 `AiKv` 仪表盘目录下的四张大盘：
        - 集群重定向速率 (ID 34, MOVED/ASK)、Gossip 心跳与故障转移速率 (ID 41, Failover 标红)、Raft 底层复制通信吞吐 (ID 42，按 RPC 类型与方向分解)。
      - **Row 5: 冷启动与崩溃恢复 (Cold Recovery & RTO)**（默认折叠，按需展开）：
        - 完整迁入并保留全部对账契约说明：5 张 RTO 阶段 Stat 卡片 (WAL 重放耗时与字节、Manifest 耗时、SST 打开耗时、全库键计数器重扫耗时)、WAL 重放吞吐带宽 (ID 65, Gauge)、RTO 4 阶段耗时构成占比 (ID 66, Timeseries)。全量注入 `$cluster/$host/$node` 模板变量。
-   - **顶层变量级联联动与导航**：支持 `$cluster` (集群) -> `$host` (宿主机) -> `$node` (节点实例，支持多选与 All 聚合) 三级联动；内置 `tags: ["aikv-nav"]` 与全局面板下拉互跳链接；
+   - **顶层变量级联联动与导航**：支持 `$cluster` (集群) -> `$host` (宿主机) -> `$node` (节点实例，支持多选与 All 聚合) 三级联动，并提供 `$payload_bytes` (单 Key 估算净载荷，默认 116B) 动态调整空间放大；内置 `tags: ["aikv-nav"]` 与全局面板下拉互跳链接；
    - **默认时间窗口与刷新**：默认 `now-30m` 到 `now`，`30s` 平衡刷新；所有 Timeseries 统一提供 `[mean, max]` 统计列；
    - **架构决策演进：拒绝「假健康」，建立生产级对账与排障契约**：
      - **淘汰假健康与 legacy 兜底**：全面剔除掩盖故障的 `vector(100)` 与无意义伪装，彻底清理 legacy `_ratio` 兜底与 `label_replace * 0` hack；
