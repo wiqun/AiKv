@@ -996,7 +996,7 @@
                     "legendFormat": "写放大"
                 }
             ],
-            "description": "**指标定义**\n\n每写入 1 字节业务数据, 实际落盘字节数: (WAL + Flush + Compaction) / 逻辑写入, 5m 均值.\n\n**阈值标准**\n\n- `< 5` (绿): 正常\n- `5 ~ 15` (黄): Compaction 偏重, 结合下方走势图观察紫色 Compaction 面积\n- `>= 15` (红): 后台重写剧烈, 优先排查 Write Stall 与 Compaction 积压\n\n**补充说明**\n\n- 写入初期落盘滞后, 瞬时值可 < 1.0, 属正常; 无写入时显示 N/A.",
+            "description": "**指标定义**\n\n每写入 1 字节业务数据, 实际落盘字节数: (WAL + Flush + Compaction) / 逻辑写入, 5m 均值.\n\n**阈值标准**\n\n- `< 5` (绿): 正常\n- `5 ~ 15` (黄): Compaction 偏重, 见下方 Flush 刷盘与 Compaction 速率与耗时\n- `>= 15` (红): 后台重写剧烈, 优先排查 Write Stall 与 Compaction 积压\n\n**补充说明**\n\n- 写入初期落盘滞后, 瞬时值可 < 1.0, 属正常; 无写入时显示 N/A.",
             "fieldConfig": {
                 "defaults": {
                     "unit": "suffix:x",
@@ -1065,7 +1065,7 @@
                     "legendFormat": "读放大"
                 }
             ],
-            "description": "**指标定义**\n\n每次读操作平均触碰的数据块数 (含 BlockCache 命中), 反映 LSM 逐层下探开销, 5m 均值.\n\n**阈值标准**\n\n- `< 3` (绿): 正常\n- `3 ~ 8` (黄): 关注缓存命中率与 LSM 层数\n- `>= 8` (红): 排查 L0 堆积与 Bloom 假阳性 (见下方联动面板)\n\n**补充说明**\n\n- 纯用户读口径, 不含 Compaction 内部读; 无读流量时显示 N/A; 磁盘 IO 压力请查看下方走势图中读穿透字节比.",
+            "description": "**指标定义**\n\n每次读操作平均触碰的数据块数 (含 BlockCache 命中), 反映 LSM 逐层下探开销, 5m 均值.\n\n**阈值标准**\n\n- `< 3` (绿): 正常\n- `3 ~ 8` (黄): 关注缓存命中率与 LSM 层数\n- `>= 8` (红): 排查 L0 堆积与 Bloom 假阳性 (见下方联动面板)\n\n**补充说明**\n\n- 纯用户读口径, 不含 Compaction 内部读; 无读流量时显示 N/A; 磁盘 IO 压力见下方 Block Cache 命中率与穿透吞吐.",
             "fieldConfig": {
                 "defaults": {
                     "unit": "suffix:x",
@@ -1183,7 +1183,7 @@
         },
         {
             "id": 14,
-            "title": "写放大走势与物理写分解",
+            "title": "写放大走势",
             "type": "timeseries",
             "gridPos": {
                 "h": 8,
@@ -1202,8 +1202,8 @@
                         "uid": "prometheus"
                     },
                     "editorMode": "code",
-                    "expr": "((sum(rate(aidb_wal_written_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval])) + sum(rate(aidb_flush_written_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval])) + sum(rate(aidb_compaction_written_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval]))) / (sum(rate(aidb_logical_write_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval])) > 0))",
-                    "legendFormat": "写放大 (WA)",
+                    "expr": "((sum(rate(aidb_wal_written_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[5m])) + sum(rate(aidb_flush_written_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[5m])) + sum(rate(aidb_compaction_written_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[5m]))) / (sum(rate(aidb_logical_write_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[5m])) > 0))",
+                    "legendFormat": "写放大",
                     "refId": "A"
                 },
                 {
@@ -1211,51 +1211,25 @@
                         "type": "prometheus",
                         "uid": "prometheus"
                     },
-                    "expr": "sum(rate(aidb_wal_written_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval]))",
-                    "legendFormat": "WAL 写入",
+                    "editorMode": "code",
+                    "expr": "sum(rate(aidb_logical_write_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[5m]))",
+                    "legendFormat": "逻辑写入",
                     "refId": "B"
-                },
-                {
-                    "datasource": {
-                        "type": "prometheus",
-                        "uid": "prometheus"
-                    },
-                    "expr": "sum(rate(aidb_flush_written_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval]))",
-                    "legendFormat": "Flush 刷盘",
-                    "refId": "C"
-                },
-                {
-                    "datasource": {
-                        "type": "prometheus",
-                        "uid": "prometheus"
-                    },
-                    "expr": "sum(rate(aidb_compaction_written_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval]))",
-                    "legendFormat": "Compaction 压缩",
-                    "refId": "D"
-                },
-                {
-                    "datasource": {
-                        "type": "prometheus",
-                        "uid": "prometheus"
-                    },
-                    "expr": "sum(rate(aidb_logical_write_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval]))",
-                    "legendFormat": "用户逻辑写入",
-                    "refId": "E"
                 }
             ],
-            "description": "**指标定义**\n\n展示写放大 (WA) 的动态演进趋势, 并联动下钻物理写总吞吐 (WAL 追加, MemTable 刷盘与 Compaction 压缩) 与用户有效逻辑写入.\n\n**图示说明**\n- 左轴 (实线): `写放大 (WA)` 倍数, 无量纲\n- 右轴 (面积堆叠/实线): WAL 写入 (橙), Flush 刷盘 (蓝), Compaction 压缩 (紫) 堆叠面积 vs 用户逻辑写基准 (绿实线)\n\n**调优关注**\n当紫蓝色面积显著超过绿线时, 说明后台重写剧烈; 若写放大持续 `>= 15.0`, 需警惕 IO 瓶颈与写停顿风险.",
+            "description": "**指标定义**\n\n与上方写放大同一口径的 5m 走势; 右轴为逻辑写入吞吐 (分母).\n\n**如何读**\n\n- 倍数升而逻辑写平稳: 后台重写变重, 见下方 Flush 刷盘与 Compaction 速率与耗时\n- 两者一起升: 先看写入负载\n\n**补充说明**\n\n- 无写入时空档, 与上方 N/A 一致.",
             "fieldConfig": {
                 "defaults": {
                     "unit": "binBps",
                     "min": 0,
                     "custom": {
                         "lineWidth": 1.5,
-                        "fillOpacity": 10,
+                        "fillOpacity": 0,
                         "axisPlacement": "right",
                         "axisLabel": "写入吞吐",
                         "stacking": {
                             "group": "A",
-                            "mode": "normal"
+                            "mode": "none"
                         }
                     }
                 },
@@ -1263,7 +1237,7 @@
                     {
                         "matcher": {
                             "id": "byName",
-                            "options": "写放大 (WA)"
+                            "options": "写放大"
                         },
                         "properties": [
                             {
@@ -1276,7 +1250,7 @@
                             },
                             {
                                 "id": "unit",
-                                "value": "none"
+                                "value": "suffix:x"
                             },
                             {
                                 "id": "decimals",
@@ -1300,23 +1274,34 @@
                             {
                                 "id": "custom.stacking",
                                 "value": {
-                                    "group": "__unstacked__",
+                                    "group": "A",
                                     "mode": "none"
                                 }
-                            }
-                        ]
-                    },
-                    {
-                        "matcher": {
-                            "id": "byName",
-                            "options": "WAL 写入"
-                        },
-                        "properties": [
+                            },
                             {
-                                "id": "color",
+                                "id": "custom.thresholdsStyle",
                                 "value": {
-                                    "fixedColor": "orange",
-                                    "mode": "fixed"
+                                    "mode": "line"
+                                }
+                            },
+                            {
+                                "id": "thresholds",
+                                "value": {
+                                    "mode": "absolute",
+                                    "steps": [
+                                        {
+                                            "color": "green",
+                                            "value": null
+                                        },
+                                        {
+                                            "color": "yellow",
+                                            "value": 5.0
+                                        },
+                                        {
+                                            "color": "red",
+                                            "value": 15.0
+                                        }
+                                    ]
                                 }
                             }
                         ]
@@ -1324,60 +1309,23 @@
                     {
                         "matcher": {
                             "id": "byName",
-                            "options": "Flush 刷盘"
+                            "options": "逻辑写入"
                         },
                         "properties": [
                             {
                                 "id": "color",
                                 "value": {
-                                    "fixedColor": "blue",
-                                    "mode": "fixed"
-                                }
-                            }
-                        ]
-                    },
-                    {
-                        "matcher": {
-                            "id": "byName",
-                            "options": "Compaction 压缩"
-                        },
-                        "properties": [
-                            {
-                                "id": "color",
-                                "value": {
-                                    "fixedColor": "purple",
-                                    "mode": "fixed"
-                                }
-                            }
-                        ]
-                    },
-                    {
-                        "matcher": {
-                            "id": "byName",
-                            "options": "用户逻辑写入"
-                        },
-                        "properties": [
-                            {
-                                "id": "color",
-                                "value": {
-                                    "fixedColor": "green",
+                                    "fixedColor": "text",
                                     "mode": "fixed"
                                 }
                             },
                             {
                                 "id": "custom.lineWidth",
-                                "value": 2
+                                "value": 1.5
                             },
                             {
                                 "id": "custom.fillOpacity",
                                 "value": 0
-                            },
-                            {
-                                "id": "custom.stacking",
-                                "value": {
-                                    "group": "__unstacked__",
-                                    "mode": "none"
-                                }
                             }
                         ]
                     }
@@ -1386,14 +1334,12 @@
             "options": {
                 "legend": {
                     "calcs": [
-                        "mean",
-                        "max"
+                        "lastNotNull",
+                        "mean"
                     ],
                     "displayMode": "table",
                     "placement": "bottom",
-                    "showLegend": true,
-                    "sortBy": "Max",
-                    "sortDesc": true
+                    "showLegend": true
                 },
                 "tooltip": {
                     "mode": "multi",
@@ -1403,7 +1349,7 @@
         },
         {
             "id": 60,
-            "title": "读放大走势与缓存穿透",
+            "title": "读放大走势",
             "type": "timeseries",
             "gridPos": {
                 "h": 8,
@@ -1422,8 +1368,8 @@
                         "uid": "prometheus"
                     },
                     "editorMode": "code",
-                    "expr": "(sum(rate(aidb_block_seek_count_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval])) / (sum(rate(aidb_logical_read_count_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval])) > 0))",
-                    "legendFormat": "读放大 (RA)",
+                    "expr": "((sum(rate(aidb_block_seek_count_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[5m]))) / (sum(rate(aidb_logical_read_count_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[5m])) > 0))",
+                    "legendFormat": "读放大",
                     "refId": "A"
                 },
                 {
@@ -1432,48 +1378,32 @@
                         "uid": "prometheus"
                     },
                     "editorMode": "code",
-                    "expr": "(sum(rate(aidb_block_read_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval])) / (sum(rate(aidb_logical_read_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval])) > 0))",
-                    "legendFormat": "读穿透字节比",
-                    "refId": "D"
-                },
-                {
-                    "datasource": {
-                        "type": "prometheus",
-                        "uid": "prometheus"
-                    },
-                    "editorMode": "code",
-                    "expr": "sum(rate(aidb_logical_read_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval]))",
-                    "legendFormat": "用户逻辑读",
+                    "expr": "sum(rate(aidb_logical_read_count_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[5m]))",
+                    "legendFormat": "逻辑读",
                     "refId": "B"
-                },
-                {
-                    "datasource": {
-                        "type": "prometheus",
-                        "uid": "prometheus"
-                    },
-                    "editorMode": "code",
-                    "expr": "sum(rate(aidb_block_read_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval]))",
-                    "legendFormat": "物理磁盘读",
-                    "refId": "C"
                 }
             ],
-            "description": "**指标定义**\n\n展示读放大 (RA, 经典口径) 的动态演进趋势, 并对比用户逻辑读取吞吐与穿透至底层磁盘的物理块读取 (Block Read) 吞吐.\n\n**图示说明**\n- 左轴 (实线): `读放大 (RA)` = block 触碰次数 / 逻辑读次数 (含 BlockCache 命中), 无量纲; `读穿透字节比` = 仅 cache miss 落盘字节 / 逻辑读字节, 二者互补\n- 右轴 (吞吐折线): 用户逻辑读吞吐 (绿实线) vs 物理磁盘读吞吐 (红实线)\n\n**调优关注**\n正常情况下 Block Cache 拦截 > 99% 的读取, 物理磁盘读应贴近底线; RA 反映每次读的逐层下探与 L0 合并开销, 穿透字节比反映磁盘 IO 压力. 当缓存命中率骤降或大范围点查未命中时, 两条曲线将同步翘头.",
+            "description": "**指标定义**\n\n与上方读放大同一口径的 5m 走势 (block 触碰 / 逻辑读次数); 右轴为逻辑读 QPS (分母).\n\n**如何读**\n\n- 倍数升而逻辑读平稳: 关注 L0 堆积与 Bloom, 磁盘 IO 见下方 Block Cache 命中率与穿透吞吐\n- 两者一起升: 先看读负载\n\n**补充说明**\n\n- 纯用户读, 不含 Compaction 内部读; 无读流量时空档.",
             "fieldConfig": {
                 "defaults": {
-                    "unit": "binBps",
+                    "unit": "ops",
                     "min": 0,
                     "custom": {
                         "lineWidth": 1.5,
-                        "fillOpacity": 6,
+                        "fillOpacity": 0,
                         "axisPlacement": "right",
-                        "axisLabel": "读取吞吐"
+                        "axisLabel": "逻辑读 QPS",
+                        "stacking": {
+                            "group": "A",
+                            "mode": "none"
+                        }
                     }
                 },
                 "overrides": [
                     {
                         "matcher": {
                             "id": "byName",
-                            "options": "读放大 (RA)"
+                            "options": "读放大"
                         },
                         "properties": [
                             {
@@ -1486,7 +1416,7 @@
                             },
                             {
                                 "id": "unit",
-                                "value": "none"
+                                "value": "suffix:x"
                             },
                             {
                                 "id": "decimals",
@@ -1506,48 +1436,62 @@
                             {
                                 "id": "custom.fillOpacity",
                                 "value": 0
-                            }
-                        ]
-                    },
-                    {
-                        "matcher": {
-                            "id": "byName",
-                            "options": "用户逻辑读"
-                        },
-                        "properties": [
+                            },
                             {
-                                "id": "color",
+                                "id": "custom.stacking",
                                 "value": {
-                                    "fixedColor": "semi-dark-green",
-                                    "mode": "fixed"
+                                    "group": "A",
+                                    "mode": "none"
                                 }
                             },
                             {
-                                "id": "custom.lineWidth",
-                                "value": 2
+                                "id": "custom.thresholdsStyle",
+                                "value": {
+                                    "mode": "line"
+                                }
                             },
                             {
-                                "id": "custom.fillOpacity",
-                                "value": 0
+                                "id": "thresholds",
+                                "value": {
+                                    "mode": "absolute",
+                                    "steps": [
+                                        {
+                                            "color": "green",
+                                            "value": null
+                                        },
+                                        {
+                                            "color": "yellow",
+                                            "value": 3.0
+                                        },
+                                        {
+                                            "color": "red",
+                                            "value": 8.0
+                                        }
+                                    ]
+                                }
                             }
                         ]
                     },
                     {
                         "matcher": {
                             "id": "byName",
-                            "options": "物理磁盘读"
+                            "options": "逻辑读"
                         },
                         "properties": [
                             {
                                 "id": "color",
                                 "value": {
-                                    "fixedColor": "red",
+                                    "fixedColor": "text",
                                     "mode": "fixed"
                                 }
                             },
                             {
                                 "id": "custom.lineWidth",
                                 "value": 1.5
+                            },
+                            {
+                                "id": "custom.fillOpacity",
+                                "value": 0
                             }
                         ]
                     }
@@ -1556,14 +1500,12 @@
             "options": {
                 "legend": {
                     "calcs": [
-                        "mean",
-                        "max"
+                        "lastNotNull",
+                        "mean"
                     ],
                     "displayMode": "table",
                     "placement": "bottom",
-                    "showLegend": true,
-                    "sortBy": "Max",
-                    "sortDesc": true
+                    "showLegend": true
                 },
                 "tooltip": {
                     "mode": "multi",
@@ -1573,7 +1515,7 @@
         },
         {
             "id": 61,
-            "title": "空间放大走势与存储占用",
+            "title": "空间放大走势",
             "type": "timeseries",
             "gridPos": {
                 "h": 8,
@@ -1593,7 +1535,7 @@
                     },
                     "editorMode": "code",
                     "expr": "((sum(aidb_sstable_size_bytes{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}) + sum(aidb_wal_size_bytes{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"})) / ((sum(aidb_live_bytes{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}) + sum(aidb_memtable_size_bytes{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\", aidb_memtable_state=~\"active|frozen\"})) > 0))",
-                    "legendFormat": "空间放大 (SA)",
+                    "legendFormat": "空间放大",
                     "refId": "A"
                 },
                 {
@@ -1602,38 +1544,32 @@
                         "uid": "prometheus"
                     },
                     "editorMode": "code",
-                    "expr": "sum(aidb_sstable_size_bytes{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}) + sum(aidb_wal_size_bytes{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"})",
-                    "legendFormat": "物理磁盘占用 (SST + WAL)",
-                    "refId": "B"
-                },
-                {
-                    "datasource": {
-                        "type": "prometheus",
-                        "uid": "prometheus"
-                    },
-                    "editorMode": "code",
                     "expr": "sum(aidb_live_bytes{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}) + sum(aidb_memtable_size_bytes{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\", aidb_memtable_state=~\"active|frozen\"})",
-                    "legendFormat": "有效数据净体积 (live + memtable)",
-                    "refId": "C"
+                    "legendFormat": "有效数据",
+                    "refId": "B"
                 }
             ],
-            "description": "**指标定义**\n\n展示空间放大 (SA) 的动态演进趋势, 并对比磁盘物理文件总体积 (SSTable + WAL) 与存活数据的引擎实测净体积 (live_bytes + MemTable).\n\n**图示说明**\n- 左轴 (实线): `空间放大 (SA)` 倍数, 无量纲\n- 右轴 (存储容量): 物理磁盘占用 (紫实线) vs 有效数据净体积 (绿实线)\n\n**调优关注**\n当频繁更新或大量删除发生后, 墓碑与历史版本滞留导致紫线与绿线间距拉大, SA 曲线攀升; 待 Compaction 充分执行垃圾回收后, SA 应回落至 `< 1.5` 的理想健康区间.",
+            "description": "**指标定义**\n\n与上方空间放大同一口径; 右轴为有效数据体积 (live_bytes + MemTable).\n\n**如何读**\n\n- 倍数升而有效数据平稳: 关注 WAL 堆积或编码开销\n- 有效数据上升而倍数稳定: 是数据在涨\n\n**补充说明**\n\n- 无数据时空档; live_bytes 含未回收旧版本, 与第一行一致.",
             "fieldConfig": {
                 "defaults": {
                     "unit": "bytes",
                     "min": 0,
                     "custom": {
                         "lineWidth": 1.5,
-                        "fillOpacity": 6,
+                        "fillOpacity": 0,
                         "axisPlacement": "right",
-                        "axisLabel": "存储容量"
+                        "axisLabel": "有效数据",
+                        "stacking": {
+                            "group": "A",
+                            "mode": "none"
+                        }
                     }
                 },
                 "overrides": [
                     {
                         "matcher": {
                             "id": "byName",
-                            "options": "空间放大 (SA)"
+                            "options": "空间放大"
                         },
                         "properties": [
                             {
@@ -1646,7 +1582,7 @@
                             },
                             {
                                 "id": "unit",
-                                "value": "none"
+                                "value": "suffix:x"
                             },
                             {
                                 "id": "decimals",
@@ -1666,44 +1602,62 @@
                             {
                                 "id": "custom.fillOpacity",
                                 "value": 0
+                            },
+                            {
+                                "id": "custom.stacking",
+                                "value": {
+                                    "group": "A",
+                                    "mode": "none"
+                                }
+                            },
+                            {
+                                "id": "custom.thresholdsStyle",
+                                "value": {
+                                    "mode": "line"
+                                }
+                            },
+                            {
+                                "id": "thresholds",
+                                "value": {
+                                    "mode": "absolute",
+                                    "steps": [
+                                        {
+                                            "color": "green",
+                                            "value": null
+                                        },
+                                        {
+                                            "color": "yellow",
+                                            "value": 1.5
+                                        },
+                                        {
+                                            "color": "red",
+                                            "value": 2.5
+                                        }
+                                    ]
+                                }
                             }
                         ]
                     },
                     {
                         "matcher": {
                             "id": "byName",
-                            "options": "物理磁盘占用 (SST + WAL)"
+                            "options": "有效数据"
                         },
                         "properties": [
                             {
                                 "id": "color",
                                 "value": {
-                                    "fixedColor": "purple",
+                                    "fixedColor": "text",
                                     "mode": "fixed"
                                 }
                             },
                             {
                                 "id": "custom.lineWidth",
-                                "value": 2
-                            }
-                        ]
-                    },
-                    {
-                        "matcher": {
-                            "id": "byName",
-                            "options": "有效数据净体积"
-                        },
-                        "properties": [
-                            {
-                                "id": "color",
-                                "value": {
-                                    "fixedColor": "green",
-                                    "mode": "fixed"
-                                }
+                                "value": 1.5
                             },
                             {
-                                "id": "custom.lineWidth",
-                                "value": 2
+                                "id": "custom.fillOpacity",
+                                "value": 0
                             }
                         ]
                     }
@@ -1712,15 +1666,12 @@
             "options": {
                 "legend": {
                     "calcs": [
-                        "mean",
                         "lastNotNull",
-                        "max"
+                        "mean"
                     ],
                     "displayMode": "table",
                     "placement": "bottom",
-                    "showLegend": true,
-                    "sortBy": "Last *",
-                    "sortDesc": true
+                    "showLegend": true
                 },
                 "tooltip": {
                     "mode": "multi",
