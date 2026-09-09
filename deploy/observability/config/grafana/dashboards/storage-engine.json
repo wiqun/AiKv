@@ -148,12 +148,12 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "rate(aidb_block_read_bytes_total[1m]) / rate(aidb_logical_read_bytes_total[1m])",
+          "expr": "rate(aidb_block_seek_count_total[1m]) / rate(aidb_logical_read_count_total[1m])",
           "refId": "A",
           "legendFormat": "RA Ratio"
         }
       ],
-      "description": "综合读放大 RA = 物理块读取 / 逻辑读取 (纯用户点查与迭代，不受 Compaction 与内部写检查污染)。对账契约: INFO storage 对应 block_read_bytes / logical_read_bytes。",
+      "description": "综合读放大 RA = data block 触碰次数 / 逻辑读次数 (含 BlockCache 命中, 经典口径; 纯用户点查与迭代，不受 Compaction 与内部写检查污染)。读穿透字节比 (仅 cache miss 落盘字节 / 逻辑读字节) 为互补口径。对账契约: INFO storage 对应 block_seek_count / logical_read_count。",
       "fieldConfig": {
         "defaults": {
           "unit": "none"

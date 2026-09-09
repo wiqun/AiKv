@@ -77,58 +77,6 @@
                     "value": "$__all"
                 },
                 "description": "aikv 集群节点实例标识 (node_id 1..6 / service_instance_id)，All 支持多节点对比。"
-            },
-            {
-                "name": "payload_bytes",
-                "label": "Payload (B)",
-                "type": "custom",
-                "query": "64, 116, 128, 256, 512, 1024, 4096",
-                "multi": false,
-                "includeAll": false,
-                "allValue": null,
-                "current": {
-                    "selected": true,
-                    "text": "116",
-                    "value": "116"
-                },
-                "options": [
-                    {
-                        "selected": false,
-                        "text": "64",
-                        "value": "64"
-                    },
-                    {
-                        "selected": true,
-                        "text": "116",
-                        "value": "116"
-                    },
-                    {
-                        "selected": false,
-                        "text": "128",
-                        "value": "128"
-                    },
-                    {
-                        "selected": false,
-                        "text": "256",
-                        "value": "256"
-                    },
-                    {
-                        "selected": false,
-                        "text": "512",
-                        "value": "512"
-                    },
-                    {
-                        "selected": false,
-                        "text": "1024",
-                        "value": "1024"
-                    },
-                    {
-                        "selected": false,
-                        "text": "4096",
-                        "value": "4096"
-                    }
-                ],
-                "description": "空间放大估算所用平均 Key-Value 逻辑载荷 (字节), 默认对齐基准测试 16B key + 100B val = 116B, 可按实际压测自由选择或手输"
             }
         ]
     },
@@ -1048,7 +996,7 @@
                     "legendFormat": "写放大"
                 }
             ],
-            "description": "存储引擎写放大倍数 (5m 移动均值): 物理写总字节 (WAL + Flush + Compaction) / 逻辑写入字节. 写入初期落盘滞后瞬时值可 < 1.0; 无逻辑写入时显示 N/A; 瞬时爆发与分解下钻见下方走势图.",
+            "description": "每写入 1 字节业务数据, 实际落盘的字节数 ((WAL + Flush + Compaction) / 逻辑写入, 5m 均值). 绿 < 5 正常; 黄 5 ~ 15 Compaction 偏重, 结合下方走势图观察紫色 Compaction 面积; 红 >= 15 后台重写剧烈, 优先排查 Write Stall 与 Compaction 积压. 写入初期落盘滞后瞬时 < 1.0 属正常; 无写入时显示 N/A.",
             "fieldConfig": {
                 "defaults": {
                     "unit": "suffix:x",
@@ -1112,12 +1060,12 @@
                         "type": "prometheus",
                         "uid": "prometheus"
                     },
-                    "expr": "(sum(rate(aidb_block_read_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[5m])) / (sum(rate(aidb_logical_read_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[5m])) > 0))",
+                    "expr": "((sum(rate(aidb_block_seek_count_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[5m]))) / (sum(rate(aidb_logical_read_count_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[5m])) > 0))",
                     "refId": "A",
                     "legendFormat": "读放大"
                 }
             ],
-            "description": "存储引擎读放大倍数 (5m 移动均值): 物理块读取字节 (Block Read) / 逻辑读取字节. Block Cache 高命中时常态可低至 0.0x, 无缓存完全穿透时 > 1.0; 无逻辑读时显示 N/A; 穿透走势与分解下钻见下方时序图.",
+            "description": "每次读操作平均触碰的数据块数 (含 BlockCache 命中, 5m 均值), 反映 LSM 逐层下探开销. 绿 < 3 正常; 黄 3 ~ 8 关注缓存命中率与 LSM 层数; 红 >= 8 排查 L0 堆积与 Bloom 假阳性 (见下方联动面板). 纯用户读口径, 不含 Compaction 内部读; 无读流量时显示 N/A; 磁盘 IO 压力看下方走势图中的读穿透字节比.",
             "fieldConfig": {
                 "defaults": {
                     "unit": "suffix:x",
@@ -1182,14 +1130,14 @@
                         "uid": "prometheus"
                     },
                     "editorMode": "code",
-                    "expr": "((sum(aidb_sstable_size_bytes{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}) + sum(aidb_wal_size_bytes{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"})) / (sum(aikv_db_keys{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}) * $payload_bytes > 0))",
+                    "expr": "((sum(aidb_sstable_size_bytes{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}) + sum(aidb_wal_size_bytes{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"})) / ((sum(aidb_live_bytes{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}) + sum(aidb_memtable_size_bytes{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\", aidb_memtable_state=~\"active|frozen\"})) > 0))",
                     "instant": false,
                     "legendFormat": "空间放大",
                     "range": true,
                     "refId": "A"
                 }
             ],
-            "description": "存储引擎空间放大倍数 (估算): 物理磁盘占用 (SST + WAL) / 存活有效数据体积 (按负载变量 $payload_bytes/Key 估算). Hash/List 等复合类型子字段未计入 key 数, 此类负载下分母偏小导致 SA 虚高; 无数据时显示 N/A; 绝对存储量与走势见下方时序图.",
+            "description": "磁盘实际占用与有效数据体积之比 ((SST + WAL) / (live_bytes + MemTable), 引擎实测无估算). 绿 < 1.5 健康; 黄 1.5 ~ 2.5 关注 Compaction 进度; 红 >= 2.5 多版本与墓碑滞留, 等待 Compaction 回收或检查其是否停滞. 频繁覆盖写/删除后升高属正常, 去重完成后回落; 无数据时显示 N/A.",
             "fieldConfig": {
                 "defaults": {
                     "unit": "suffix:x",
@@ -1474,9 +1422,19 @@
                         "uid": "prometheus"
                     },
                     "editorMode": "code",
-                    "expr": "(sum(rate(aidb_block_read_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval])) / (sum(rate(aidb_logical_read_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval])) > 0))",
+                    "expr": "(sum(rate(aidb_block_seek_count_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval])) / (sum(rate(aidb_logical_read_count_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval])) > 0))",
                     "legendFormat": "读放大 (RA)",
                     "refId": "A"
+                },
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus"
+                    },
+                    "editorMode": "code",
+                    "expr": "(sum(rate(aidb_block_read_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval])) / (sum(rate(aidb_logical_read_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval])) > 0))",
+                    "legendFormat": "读穿透字节比",
+                    "refId": "D"
                 },
                 {
                     "datasource": {
@@ -1499,7 +1457,7 @@
                     "refId": "C"
                 }
             ],
-            "description": "**指标定义**\n\n展示读放大 (RA) 的动态演进趋势, 并对比用户逻辑读取吞吐与穿透至底层磁盘的物理块读取 (Block Read) 吞吐.\n\n**图示说明**\n- 左轴 (实线): `读放大 (RA)` 倍数, 无量纲\n- 右轴 (吞吐折线): 用户逻辑读吞吐 (绿实线) vs 物理磁盘读吞吐 (红实线)\n\n**调优关注**\n正常情况下 Block Cache 拦截 > 99% 的读取, 物理磁盘读应贴近底线, RA 维持在 `< 3.0`; 当缓存命中率骤降或发生大范围点查未命中时, 物理磁盘读攀升, RA 曲线将迅速翘头.",
+            "description": "**指标定义**\n\n展示读放大 (RA, 经典口径) 的动态演进趋势, 并对比用户逻辑读取吞吐与穿透至底层磁盘的物理块读取 (Block Read) 吞吐.\n\n**图示说明**\n- 左轴 (实线): `读放大 (RA)` = block 触碰次数 / 逻辑读次数 (含 BlockCache 命中), 无量纲; `读穿透字节比` = 仅 cache miss 落盘字节 / 逻辑读字节, 二者互补\n- 右轴 (吞吐折线): 用户逻辑读吞吐 (绿实线) vs 物理磁盘读吞吐 (红实线)\n\n**调优关注**\n正常情况下 Block Cache 拦截 > 99% 的读取, 物理磁盘读应贴近底线; RA 反映每次读的逐层下探与 L0 合并开销, 穿透字节比反映磁盘 IO 压力. 当缓存命中率骤降或大范围点查未命中时, 两条曲线将同步翘头.",
             "fieldConfig": {
                 "defaults": {
                     "unit": "binBps",
@@ -1634,7 +1592,7 @@
                         "uid": "prometheus"
                     },
                     "editorMode": "code",
-                    "expr": "((sum(aidb_sstable_size_bytes{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}) + sum(aidb_wal_size_bytes{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"})) / (sum(aikv_db_keys{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}) * $payload_bytes > 0))",
+                    "expr": "((sum(aidb_sstable_size_bytes{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}) + sum(aidb_wal_size_bytes{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"})) / ((sum(aidb_live_bytes{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}) + sum(aidb_memtable_size_bytes{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\", aidb_memtable_state=~\"active|frozen\"})) > 0))",
                     "legendFormat": "空间放大 (SA)",
                     "refId": "A"
                 },
@@ -1654,12 +1612,12 @@
                         "uid": "prometheus"
                     },
                     "editorMode": "code",
-                    "expr": "sum(aikv_db_keys{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}) * $payload_bytes",
-                    "legendFormat": "有效数据净体积",
+                    "expr": "sum(aidb_live_bytes{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}) + sum(aidb_memtable_size_bytes{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\", aidb_memtable_state=~\"active|frozen\"})",
+                    "legendFormat": "有效数据净体积 (live + memtable)",
                     "refId": "C"
                 }
             ],
-            "description": "**指标定义**\n\n展示空间放大 (SA) 的动态演进趋势, 并对比磁盘物理文件总体积 (SSTable + WAL) 与存活数据的逻辑净体积.\n\n**图示说明**\n- 左轴 (实线): `空间放大 (SA)` 倍数, 无量纲\n- 右轴 (存储容量): 物理磁盘占用 (紫实线) vs 有效数据净体积 (绿实线)\n\n**调优关注**\n当频繁更新或大量删除发生后, 墓碑与历史版本滞留导致紫线与绿线间距拉大, SA 曲线攀升; 待 Compaction 充分执行垃圾回收后, SA 应回落至 `< 1.5` 的理想健康区间.",
+            "description": "**指标定义**\n\n展示空间放大 (SA) 的动态演进趋势, 并对比磁盘物理文件总体积 (SSTable + WAL) 与存活数据的引擎实测净体积 (live_bytes + MemTable).\n\n**图示说明**\n- 左轴 (实线): `空间放大 (SA)` 倍数, 无量纲\n- 右轴 (存储容量): 物理磁盘占用 (紫实线) vs 有效数据净体积 (绿实线)\n\n**调优关注**\n当频繁更新或大量删除发生后, 墓碑与历史版本滞留导致紫线与绿线间距拉大, SA 曲线攀升; 待 Compaction 充分执行垃圾回收后, SA 应回落至 `< 1.5` 的理想健康区间.",
             "fieldConfig": {
                 "defaults": {
                     "unit": "bytes",
@@ -2118,7 +2076,7 @@
                         "type": "prometheus",
                         "uid": "prometheus"
                     },
-                    "expr": "(sum(rate(aidb_block_read_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval])) / (sum(rate(aidb_logical_read_bytes_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval])) > 0))",
+                    "expr": "(sum(rate(aidb_block_seek_count_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval])) / (sum(rate(aidb_logical_read_count_total{service_name=\"aikv\", cluster=~\"$cluster\", host_name=~\"$host\", node_id=~\"$node\"}[$__rate_interval])) > 0))",
                     "legendFormat": "读放大 (RA)",
                     "refId": "A"
                 },
@@ -2132,7 +2090,7 @@
                     "refId": "B"
                 }
             ],
-            "description": "**面板作用**\n长稳基准测试过程中综合写放大 (WA) 与综合读放大 (RA) 的动态演进曲线。\n\n- WA = (WAL写 + Flush写 + Compaction写) / 逻辑写入\n- RA = 物理块读取 / 逻辑读取\n\n**数据来源**\nOTLP 链路 (aidb)",
+            "description": "**面板作用**\n长稳基准测试过程中综合写放大 (WA) 与综合读放大 (RA) 的动态演进曲线。\n\n- WA = (WAL写 + Flush写 + Compaction写) / 逻辑写入\n- RA = block 触碰次数 / 逻辑读次数 (含 BlockCache 命中, 经典口径)\n\n**数据来源**\nOTLP 链路 (aidb)",
             "fieldConfig": {
                 "defaults": {
                     "unit": "none",

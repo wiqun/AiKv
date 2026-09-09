@@ -638,6 +638,7 @@ impl<'a> InfoRenderer<'a> {
             append_kv_u64(&mut out, "aidb_sstable_count_total", sst_count);
             let sst_size: u64 = snap.sstable_size_bytes.iter().sum();
             append_kv_u64(&mut out, "aidb_sstable_size_bytes_total", sst_size);
+            append_kv_u64(&mut out, "aidb_live_bytes", snap.live_bytes);
 
             // 写放大 (WA) 指标
             append_kv_u64(&mut out, "aidb_wal_written_bytes", snap.wal_written_bytes);
@@ -660,6 +661,9 @@ impl<'a> InfoRenderer<'a> {
             // 读放大 (RA) 指标
             append_kv_u64(&mut out, "aidb_block_read_bytes", snap.block_read_bytes);
             append_kv_u64(&mut out, "aidb_logical_read_bytes", snap.logical_read_bytes);
+            // 经典读放大 RA 口径: block 触碰次数 (含 BlockCache 命中) / 逻辑读次数
+            append_kv_u64(&mut out, "aidb_block_seek_count", snap.block_seek_count);
+            append_kv_u64(&mut out, "aidb_logical_read_count", snap.logical_read_count);
             append_kv_u64(
                 &mut out,
                 "aidb_compaction_read_bytes",
