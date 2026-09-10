@@ -35,8 +35,10 @@ services:
       - --config.file=/etc/prometheus/prometheus.yaml
       - --storage.tsdb.path=/prometheus
       - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-7d}
+      - --storage.tsdb.retention.size=${PROMETHEUS_RETENTION_SIZE:-10GB}
       - --web.enable-lifecycle
       - --web.enable-remote-write-receiver
+      - --web.enable-admin-api
     deploy:
       resources:
         limits:
@@ -58,7 +60,8 @@ services:
       GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:-admin}"
       GF_USERS_ALLOW_SIGN_UP: "false"
-      GF_METRICS_ENABLED: "false"
+      GF_METRICS_ENABLED: "true"
+      GF_FEATURE_TOGGLES_ENABLE: "grafanaAdvisor"
     volumes:
       - ./config/grafana/datasources:/etc/grafana/provisioning/datasources:ro
       - ./config/grafana/provisioning/dashboards.yaml:/etc/grafana/provisioning/dashboards/dashboards.yaml:ro

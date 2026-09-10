@@ -18,7 +18,7 @@ services:
     command:
       - -port=8080
       - -housekeeping_interval=10s
-      - -disable_metrics=disk,diskIO
+      # - -disable_metrics=disk,diskIO
     deploy:
       resources:
         limits:
