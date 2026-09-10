@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # Multi-stage build: compile aikv with the sibling local AiDb checkout.
-FROM rust:bookworm@sha256:e536cf316987faedfe8ae120f83b70c7df0068fdb4fc9efcce55c71a625001d5 AS builder
+FROM rust:1.98-bookworm AS builder
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
