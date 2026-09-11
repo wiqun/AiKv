@@ -7,3 +7,4 @@
 .worktrees/
 deploy/.runtime/
 *.bak
+deploy/loadgen/target/
