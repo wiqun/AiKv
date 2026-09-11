@@ -1,5 +1,178 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><title>loadgen</title></head>
-<body><h1>loadgen</h1></body>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AiKv Loadgen 控制台</title>
+<style>
+  :root { color-scheme: dark; --bg:#14161a; --panel:#1c1f26; --line:#2b303a;
+          --fg:#e6e9ef; --muted:#8c93a1; --ok:#3fb950; --bad:#f85149; --accent:#4c8dff; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif; }
+  header { display:flex; gap:12px; align-items:center; flex-wrap:wrap; padding:12px 20px;
+           border-bottom:1px solid var(--line); background:var(--panel); position:sticky; top:0; }
+  h1 { font-size:15px; margin:0; font-weight:600; }
+  .badge { padding:2px 10px; border-radius:999px; font-size:12px; border:1px solid var(--line); }
+  .badge.on { color:var(--ok); border-color:var(--ok); }
+  .badge.off { color:var(--muted); }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; }
+  .dot.ok { background:var(--ok); } .dot.bad { background:var(--bad); }
+  main { display:grid; gap:16px; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); padding:20px; }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px 16px; }
+  h2 { font-size:13px; margin:0 0 12px; color:var(--muted); font-weight:600; letter-spacing:.04em; }
+  .row { display:grid; grid-template-columns:1fr 110px; gap:10px; align-items:center; margin-bottom:10px; }
+  label { color:var(--muted); }
+  input, select { width:100%; padding:6px 8px; background:#0f1115; border:1px solid var(--line);
+                  border-radius:6px; color:var(--fg); }
+  button { padding:7px 14px; border-radius:6px; border:1px solid var(--line);
+           background:#232833; color:var(--fg); cursor:pointer; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button.danger { background:transparent; border-color:var(--bad); color:var(--bad); }
+  .mix { display:grid; grid-template-columns:1fr 80px 52px; gap:8px; align-items:center; margin-bottom:6px; }
+  .pct { color:var(--muted); text-align:right; }
+  #error { color:var(--bad); font-size:12px; white-space:pre-wrap; }
+  .hint { color:var(--muted); font-size:12px; }
+  .actions { display:flex; gap:10px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>AiKv Loadgen</h1>
+  <span id="state" class="badge off">已停止</span>
+  <span id="rate" class="badge">目标 -</span>
+  <span id="workers" class="badge">worker -</span>
+  <span id="endpoints"></span>
+</header>
+<main>
+  <section>
+    <h2>压力</h2>
+    <div class="row"><label>目标速率 ops/s (0=不限速)</label><input id="target_ops" type="number" min="0" step="1000"></div>
+    <div class="row"><label>连接数</label><input id="connections" type="number" min="1" max="1024"></div>
+    <div class="row"><label>pipeline</label><input id="pipeline" type="number" min="1" max="256"></div>
+    <div class="row"><label>命令超时 ms</label><input id="timeout_ms" type="number" min="1" max="60000"></div>
+    <div class="actions">
+      <button id="start" class="primary">启动</button>
+      <button id="stop" class="danger">停止</button>
+      <button id="reload">刷新</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>数据</h2>
+    <div class="row"><label>keyspace</label><input id="keyspace" type="number" min="1"></div>
+    <div class="row"><label>key 前缀</label><input id="key_prefix" type="text"></div>
+    <div class="row"><label>value 最小字节</label><input id="value_size_min" type="number" min="1"></div>
+    <div class="row"><label>value 最大字节</label><input id="value_size_max" type="number" min="1"></div>
+    <div class="row"><label>miss 读比例</label><input id="miss_ratio" type="number" min="0" max="1" step="0.05"></div>
+    <div class="row"><label>SET 带 TTL 比例</label><input id="ttl_ratio" type="number" min="0" max="1" step="0.05"></div>
+    <div class="row"><label>单 slot 集中 (hashtag)</label><input id="use_hashtag" type="checkbox"></div>
+    <div class="row"><label>只读模式</label><input id="readonly" type="checkbox"></div>
+  </section>
+
+  <section>
+    <h2>命令混合 (权重, 自动归一化)</h2>
+    <div id="mix"></div>
+  </section>
+
+  <section>
+    <h2>目标</h2>
+    <div class="row"><label>模式</label>
+      <select id="mode"><option value="cluster">cluster</option><option value="single">single</option></select>
+    </div>
+    <div class="row"><label>endpoints (逗号分隔)</label><input id="endpoints_input" type="text"></div>
+    <p class="hint">模式 / endpoints / 超时的变更会重建连接 (约 0.5s 内生效)</p>
+    <h2 style="margin-top:14px">最近错误</h2>
+    <div id="error" class="hint">无</div>
+  </section>
+</main>
+<script>
+const FIELDS = ["target_ops","connections","pipeline","timeout_ms","keyspace","key_prefix",
+                "value_size_min","value_size_max","miss_ratio","ttl_ratio","use_hashtag","readonly"];
+const MIX = ["set","get","del","mget","incr","expire"];
+const NUMERIC = new Set(["target_ops","connections","pipeline","timeout_ms","keyspace",
+                         "value_size_min","value_size_max","miss_ratio","ttl_ratio"]);
+
+function el(id) { return document.getElementById(id); }
+
+function readForm() {
+  const patch = {};
+  for (const field of FIELDS) {
+    const node = el(field);
+    patch[field] = NUMERIC.has(field) ? Number(node.value)
+                 : node.type === "checkbox" ? node.checked : node.value;
+  }
+  patch.mix = {};
+  for (const m of MIX) patch.mix[m] = Number(el("mix_" + m).value);
+  patch.mode = el("mode").value;
+  patch.endpoints = el("endpoints_input").value.split(",").map(s => s.trim()).filter(Boolean);
+  return patch;
+}
+
+function render(cfg, rt) {
+  for (const field of FIELDS) {
+    const node = el(field);
+    if (document.activeElement === node) continue;
+    if (node.type === "checkbox") node.checked = Boolean(cfg[field]);
+    else node.value = cfg[field];
+  }
+  for (const m of MIX) {
+    if (document.activeElement !== el("mix_" + m)) el("mix_" + m).value = cfg.mix[m];
+  }
+  if (document.activeElement !== el("mode")) el("mode").value = cfg.mode;
+  if (document.activeElement !== el("endpoints_input")) {
+    el("endpoints_input").value = cfg.endpoints.join(",");
+  }
+
+  const total = MIX.reduce((sum, m) => sum + Number(cfg.mix[m]), 0) || 1;
+  for (const m of MIX) el("pct_" + m).textContent = (cfg.mix[m] / total * 100).toFixed(0) + "%";
+
+  el("state").textContent = cfg.running ? "运行中" : "已停止";
+  el("state").className = "badge " + (cfg.running ? "on" : "off");
+  el("rate").textContent = "目标 " + cfg.target_ops + " ops/s";
+  el("workers").textContent = "worker " + rt.workers;
+  el("endpoints").innerHTML = rt.endpoints.map(e =>
+    `<span class="badge"><span class="dot ${e.reachable ? "ok" : "bad"}"></span>${e.addr}</span>`).join("");
+  el("error").textContent = rt.last_error
+    ? `${rt.last_error.message} (${rt.last_error.ago_seconds}s 前)` : "无";
+}
+
+async function refresh() {
+  const res = await fetch("/api/config");
+  const json = await res.json();
+  render(json.config, json.runtime);
+}
+
+async function patch(body) {
+  const res = await fetch("/api/config", {
+    method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  });
+  const json = await res.json();
+  if (!res.ok) { el("error").textContent = json.error || res.statusText; return; }
+  render(json.config, json.runtime);
+}
+
+let timer = null;
+function schedulePatch() { clearTimeout(timer); timer = setTimeout(() => patch(readForm()), 300); }
+
+document.addEventListener("DOMContentLoaded", () => {
+  const mixBox = el("mix");
+  for (const m of MIX) {
+    mixBox.insertAdjacentHTML("beforeend",
+      `<div class="mix"><label>${m.toUpperCase()}</label>` +
+      `<input id="mix_${m}" type="number" min="0" step="1">` +
+      `<span class="pct" id="pct_${m}">0%</span></div>`);
+  }
+  for (const field of FIELDS) el(field).addEventListener("change", schedulePatch);
+  for (const m of MIX) el("mix_" + m).addEventListener("change", schedulePatch);
+  el("mode").addEventListener("change", schedulePatch);
+  el("endpoints_input").addEventListener("change", schedulePatch);
+  el("start").addEventListener("click", () => patch({ running: true }));
+  el("stop").addEventListener("click", () => patch({ running: false }));
+  el("reload").addEventListener("click", refresh);
+  refresh();
+  setInterval(refresh, 1000);
+});
+</script>
+</body>
 </html>
