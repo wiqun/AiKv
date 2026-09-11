@@ -139,7 +139,7 @@ fn patch_rejects_invalid_value_and_keeps_base() {
     let base = WorkloadConfig::default();
     let patch: ConfigPatch = serde_json::from_str(r#"{"connections": 0}"#).unwrap();
     assert!(base.patched(&patch).is_err());
-    assert_eq!(base.connections, 32);
+    assert_eq!(base.connections, 6);
 }
 
 #[test]

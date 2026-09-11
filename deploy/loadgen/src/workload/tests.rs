@@ -74,16 +74,23 @@ fn op_distribution_matches_weights() {
 
 #[test]
 fn keys_follow_prefix_and_hashtag() {
-    // miss_ratio 归零, 保证 key 都是常规段 (miss 段由专门用例覆盖)
     let cfg = WorkloadConfig {
         keyspace: 10,
         pipeline: 50,
         miss_ratio: 0.0,
+        mix: Mix {
+            set: 1,
+            get: 1,
+            del: 1,
+            mget: 0,
+            incr: 0,
+            expire: 1,
+        },
         ..Default::default()
     };
     let mut rng = StdRng::seed_from_u64(11);
     let plan = plan_batch(&cfg, &mut rng);
-    assert!(plan.iter().all(|p| p.key.starts_with("loadgen:key:")));
+    assert!(plan.iter().all(|p| p.key.contains("loadgen:key:")));
 
     let tagged = WorkloadConfig {
         use_hashtag: true,
@@ -103,7 +110,95 @@ fn miss_keys_use_miss_segment() {
     };
     let mut rng = StdRng::seed_from_u64(3);
     let plan = plan_batch(&cfg, &mut rng);
-    assert!(plan.iter().all(|p| p.key.contains(":miss:")));
+    assert!(plan
+        .iter()
+        .all(|p| p.op == Op::Incr || p.key.contains(":miss:")));
+    assert!(plan
+        .iter()
+        .filter(|p| p.op == Op::Mget)
+        .all(|p| p.second_key.as_ref().is_some_and(|k| k.contains(":miss:"))));
+}
+
+fn all_keys(plan: &[PlannedOp]) -> Vec<&str> {
+    let mut keys = Vec::new();
+    for planned in plan {
+        keys.push(planned.key.as_str());
+        if let Some(second) = &planned.second_key {
+            keys.push(second.as_str());
+        }
+    }
+    keys
+}
+
+#[test]
+fn cluster_batch_shares_one_hash_tag() {
+    let cfg = WorkloadConfig {
+        pipeline: 32,
+        keyspace: 10_000,
+        miss_ratio: 0.5,
+        mix: Mix {
+            set: 20,
+            get: 20,
+            del: 10,
+            mget: 40,
+            incr: 5,
+            expire: 5,
+        },
+        ..Default::default()
+    };
+    let mut rng = StdRng::seed_from_u64(99);
+    for _ in 0..50 {
+        let plan = plan_batch(&cfg, &mut rng);
+        let keys = all_keys(&plan);
+        let tags: std::collections::HashSet<_> = keys.iter().map(|k| hash_tag(k)).collect();
+        assert_eq!(tags.len(), 1, "cluster 一轮 pipeline 必须同 slot: {keys:?}");
+        assert!(
+            tags.iter().all(|t| t.is_some()),
+            "cluster key 必须带 hash tag"
+        );
+    }
+}
+
+#[test]
+fn single_mode_keys_have_no_hash_tag() {
+    let cfg = WorkloadConfig {
+        mode: crate::config::TargetMode::Single,
+        pipeline: 20,
+        miss_ratio: 0.0,
+        mix: Mix {
+            set: 1,
+            get: 0,
+            del: 0,
+            mget: 0,
+            incr: 0,
+            expire: 0,
+        },
+        ..Default::default()
+    };
+    let mut rng = StdRng::seed_from_u64(4);
+    let plan = plan_batch(&cfg, &mut rng);
+    assert!(plan.iter().all(|p| p.key.starts_with("loadgen:key:")));
+    assert!(all_keys(&plan).iter().all(|k| hash_tag(k).is_none()));
+}
+
+#[test]
+fn incr_uses_int_segment() {
+    let cfg = WorkloadConfig {
+        pipeline: 40,
+        miss_ratio: 1.0,
+        mix: Mix {
+            set: 0,
+            get: 0,
+            del: 0,
+            mget: 0,
+            incr: 1,
+            expire: 0,
+        },
+        ..Default::default()
+    };
+    let mut rng = StdRng::seed_from_u64(21);
+    let plan = plan_batch(&cfg, &mut rng);
+    assert!(plan.iter().all(|p| p.key.contains(":int:")));
 }
 
 #[test]

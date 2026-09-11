@@ -5,6 +5,16 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PID_FILE="$SCRIPT_DIR/../.runtime/loadgen/loadgen.pid"
 BIND="${LOADGEN_BIND:-127.0.0.1:8787}"
+probe_host="${BIND%:*}"
+probe_port="${BIND##*:}"
+if [[ "$probe_host" == "0.0.0.0" || "$probe_host" == "::" ]]; then
+    probe_host="127.0.0.1"
+fi
+probe_url="http://${probe_host}:${probe_port}"
+
+curl_local() {
+    curl -fsS --noproxy '*' --max-time "$1" "$2"
+}
 
 running=0
 if [[ -f "$PID_FILE" ]]; then
@@ -18,11 +28,11 @@ if (( ! running )); then
     printf '进程: 未运行\n'
 fi
 
-if ! curl -fsS --max-time 2 "http://${BIND}/health" >/dev/null 2>&1; then
-    printf '探活: 失败 (%s/health 无响应)\n' "$BIND"
+if ! curl_local 2 "${probe_url}/health" >/dev/null 2>&1; then
+    printf '探活: 失败 (%s/health 无响应)\n' "$probe_url"
     exit 1
 fi
-printf '探活: OK (%s)\n' "$BIND"
+printf '探活: OK (%s)\n' "$probe_url"
 printf '当前配置:\n'
-curl -fsS "http://${BIND}/api/config" | python3 -m json.tool 2>/dev/null ||
-    curl -fsS "http://${BIND}/api/config"
+curl_local 5 "${probe_url}/api/config" | python3 -m json.tool 2>/dev/null ||
+    curl_local 5 "${probe_url}/api/config"

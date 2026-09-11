@@ -5,7 +5,7 @@
 
 use rand::Rng;
 
-use crate::config::{Mix, WorkloadConfig};
+use crate::config::{Mix, TargetMode, WorkloadConfig};
 
 /// 单轮 SET 的 TTL 秒数.
 pub const TTL_SECONDS: u64 = 60;
@@ -69,11 +69,61 @@ pub fn pick_op(mix: &Mix, roll: u32) -> Op {
     Op::Get
 }
 
-/// 生成 key; `use_hashtag` 时包 `{}` 钉在同一 slot (定向单节点).
-pub fn make_key(cfg: &WorkloadConfig, index: u64, miss: bool) -> String {
-    let segment = if miss { "miss" } else { "key" };
+/// key 类型: 字符串命令与 INCR 分开放, 避免 WRONGTYPE.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyKind {
+    Str,
+    Int,
+}
+
+/// 提取 Redis hash tag (`{tag}`); 无 tag 时返回 None.
+pub fn hash_tag(key: &str) -> Option<&str> {
+    let start = key.find('{')?;
+    let inner = &key[start + 1..];
+    let end = inner.find('}')?;
+    if end == 0 {
+        None
+    } else {
+        Some(&inner[..end])
+    }
+}
+
+fn kind_for(op: Op) -> KeyKind {
+    if op == Op::Incr {
+        KeyKind::Int
+    } else {
+        KeyKind::Str
+    }
+}
+
+fn slot_tag_for_batch(cfg: &WorkloadConfig, rng: &mut impl Rng) -> Option<String> {
+    if cfg.mode == TargetMode::Cluster && !cfg.use_hashtag {
+        Some(rng.gen_range(0u16..16_384).to_string())
+    } else {
+        None
+    }
+}
+
+/// 生成 key.
+/// - `use_hashtag`: `{prefix}:...` 全部钉同一 slot
+/// - cluster 且未开 hashtag: 本轮 pipeline 共用一个 `{slot_tag}`, 避免 CROSSSLOT
+/// - INCR 走 `int` 段, 与 SET/GET 字符串 key 隔离
+pub fn make_key(
+    cfg: &WorkloadConfig,
+    index: u64,
+    miss: bool,
+    slot_tag: Option<&str>,
+    kind: KeyKind,
+) -> String {
+    let segment = match kind {
+        KeyKind::Int => "int",
+        KeyKind::Str if miss => "miss",
+        KeyKind::Str => "key",
+    };
     if cfg.use_hashtag {
         format!("{{{}}}:{segment}:{index}", cfg.key_prefix)
+    } else if let Some(tag) = slot_tag {
+        format!("{{{tag}}}:{}:{segment}:{index}", cfg.key_prefix)
     } else {
         format!("{}:{segment}:{index}", cfg.key_prefix)
     }
@@ -91,17 +141,17 @@ pub fn pick_value_size(min: u32, max: u32, rng: &mut impl Rng) -> usize {
 /// 计划一轮 pipeline (长度 = cfg.pipeline).
 pub fn plan_batch(cfg: &WorkloadConfig, rng: &mut impl Rng) -> Vec<PlannedOp> {
     let total = cfg.mix.total();
+    let slot_tag = slot_tag_for_batch(cfg, rng);
+    let tag = slot_tag.as_deref();
     let mut plan = Vec::with_capacity(cfg.pipeline as usize);
     for _ in 0..cfg.pipeline {
         let mut op = pick_op(&cfg.mix, rng.gen_range(0..total));
         if cfg.readonly {
             op = op.read_only_fallback();
         }
-        let key = make_key(
-            cfg,
-            rng.gen_range(0..cfg.keyspace),
-            rng.gen_bool(cfg.miss_ratio),
-        );
+        let kind = kind_for(op);
+        let miss = kind == KeyKind::Str && rng.gen_bool(cfg.miss_ratio);
+        let key = make_key(cfg, rng.gen_range(0..cfg.keyspace), miss, tag, kind);
         let (second_key, value_size, ttl_seconds) = match op {
             Op::Set => (
                 None,
@@ -117,6 +167,8 @@ pub fn plan_batch(cfg: &WorkloadConfig, rng: &mut impl Rng) -> Vec<PlannedOp> {
                     cfg,
                     rng.gen_range(0..cfg.keyspace),
                     rng.gen_bool(cfg.miss_ratio),
+                    tag,
+                    KeyKind::Str,
                 )),
                 0,
                 None,

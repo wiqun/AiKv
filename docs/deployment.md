@@ -167,7 +167,7 @@ AIKV_BIND_IP=0.0.0.0 AIKV_ANNOUNCE_IP=192.168.1.112 ./deploy/up-cluster.sh
 ### 3.6 交互式加压工具 (loadgen)
 
 `deploy/loadgen/` 提供 Rust 独立 crate 的交互式加压工具: 对单机或集群持续加压,
-浏览器单页控制台动态调节速率/混合/数据规模, **不记录任何统计结果** (观测走 §7 监控栈).
+浏览器单页控制台设完参数后点启动, **不记录任何统计结果** (观测走 §7 监控栈).
 
 ```bash
 ./deploy/loadgen/up.sh              # 默认 cluster, 入口 127.0.0.1:6379, 控制台 http://127.0.0.1:8787
@@ -177,6 +177,8 @@ AIKV_BIND_IP=0.0.0.0 AIKV_ANNOUNCE_IP=192.168.1.112 ./deploy/up-cluster.sh
 ```
 
 - crate 为独立 workspace, 不参与 `aikv` 的 `cargo test --workspace`; 门禁: `./deploy/loadgen/build.sh --check`.
+- 探活间隔 30s; 启动前检查 seed / 集群状态, 运行中全挂或 CLUSTERDOWN 时暂停派发.
+- 改表单不影响正在跑的任务; 只有点启动才按当前表单开新任务 (已在跑则先停再起).
 - 运行时文件 (pid/log) 位于 `deploy/.runtime/loadgen/` (已 gitignore).
 - 控制台无鉴权, 仅限本机/可信网段使用.
 

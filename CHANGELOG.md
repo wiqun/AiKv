@@ -9,7 +9,14 @@
 
 ### Added
 
-- `deploy/loadgen/`: 交互式加压工具 (Rust 独立 crate), 单页控制台热调参, 支持单机/集群, 不含结果统计.
+- `deploy/loadgen/`: 交互式加压工具 (Rust 独立 crate), 单页控制台设参后点启动, 支持单机/集群, 不含结果统计.
+
+### Changed
+
+- loadgen: 探活改为 30s; 启动前拒绝不健康目标; 全节点不可达或 CLUSTERDOWN 时暂停派发、保留 worker.
+- loadgen: 改表单不影响正在跑的任务; 只有点启动才按当前表单开新任务 (已在跑则先停再起), 不做差值缩放.
+- loadgen: 默认限速 3000 ops/s、连接数 6.
+- loadgen: 控制台目标改为 IP/端口拆分, cluster 只需一个 seed; 失败改为底部提示.
 
 ### Performance
 

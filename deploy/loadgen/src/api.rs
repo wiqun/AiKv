@@ -7,6 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use arc_swap::ArcSwap;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::State;
+use axum::http::header::CACHE_CONTROL;
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse};
 use axum::routing::get;
@@ -56,8 +57,8 @@ pub fn router(app: AppState) -> Router {
         .with_state(app)
 }
 
-async fn index() -> Html<&'static str> {
-    Html(INDEX_HTML)
+async fn index() -> impl IntoResponse {
+    ([(CACHE_CONTROL, "no-store")], Html(INDEX_HTML))
 }
 
 async fn health() -> impl IntoResponse {
@@ -77,6 +78,11 @@ async fn put_config(
     let next = current
         .patched(&patch)
         .map_err(|err| bad_request(err.to_string()))?;
+    if patch.running == Some(true) {
+        crate::conn::check_ready(&next).await.map_err(bad_request)?;
+        app.state.resume_dispatch();
+        app.state.bump_run_epoch();
+    }
     app.cfg.store(Arc::new(next));
     Ok(Json(view(&app).await))
 }
@@ -90,12 +96,22 @@ async fn view(app: &AppState) -> ConfigResponse {
     });
     ConfigResponse {
         runtime: RuntimeView {
-            state: if config.running { "running" } else { "stopped" },
+            state: runtime_state_label(config.running, app.state.is_paused()),
             workers: app.state.workers.load(Ordering::Relaxed),
             endpoints,
             last_error,
         },
         config: (*config).clone(),
+    }
+}
+
+fn runtime_state_label(running: bool, paused: bool) -> &'static str {
+    if !running {
+        "stopped"
+    } else if paused {
+        "paused"
+    } else {
+        "running"
     }
 }
 
@@ -134,6 +150,13 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
+    #[test]
+    fn runtime_state_label_covers_pause() {
+        assert_eq!(runtime_state_label(false, true), "stopped");
+        assert_eq!(runtime_state_label(true, true), "paused");
+        assert_eq!(runtime_state_label(true, false), "running");
+    }
+
     #[tokio::test]
     async fn health_is_ok() {
         let response = app()
@@ -150,8 +173,22 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        let cache = response
+            .headers()
+            .get(CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert_eq!(cache, "no-store");
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
-        assert!(String::from_utf8_lossy(&bytes).contains("<html"));
+        let html = String::from_utf8_lossy(&bytes);
+        assert!(html.contains("<html"));
+        assert!(
+            html.contains("readForm(), running: true"),
+            "启动必须提交整张表单, 不能只发 running"
+        );
+        assert!(html.contains("id=\"endpoint_host\""));
+        assert!(html.contains("id=\"endpoint_port\""));
+        assert!(!html.contains("endpoints_input"));
     }
 
     #[tokio::test]
@@ -162,8 +199,8 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let json = body_json(response).await;
-        assert_eq!(json["config"]["connections"], 32);
-        assert_eq!(json["config"]["target_ops"], 20000);
+        assert_eq!(json["config"]["connections"], 6);
+        assert_eq!(json["config"]["target_ops"], 3000);
         assert_eq!(json["runtime"]["state"], "stopped");
     }
 
@@ -171,14 +208,63 @@ mod tests {
     async fn put_config_applies_patch() {
         let request = Request::put("/api/config")
             .header("content-type", "application/json")
-            .body(Body::from(r#"{"target_ops": 5000, "running": true}"#))
+            .body(Body::from(r#"{"target_ops": 5000}"#))
             .unwrap();
         let response = app().oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let json = body_json(response).await;
         assert_eq!(json["config"]["target_ops"], 5000);
-        assert_eq!(json["config"]["running"], true);
-        assert_eq!(json["config"]["connections"], 32);
+        assert_eq!(json["config"]["running"], false);
+        assert_eq!(json["config"]["connections"], 6);
+    }
+
+    #[tokio::test]
+    async fn put_without_start_does_not_bump_epoch() {
+        let state = Arc::new(RuntimeState::default());
+        let app = router(AppState {
+            cfg: Arc::new(ArcSwap::from_pointee(WorkloadConfig::default())),
+            state: state.clone(),
+        });
+        let request = Request::put("/api/config")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"target_ops": 5000}"#))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(state.run_epoch(), 0);
+    }
+
+    #[tokio::test]
+    async fn put_start_failure_does_not_bump_epoch() {
+        let state = Arc::new(RuntimeState::default());
+        let app = router(AppState {
+            cfg: Arc::new(ArcSwap::from_pointee(WorkloadConfig::default())),
+            state: state.clone(),
+        });
+        let request = Request::put("/api/config")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"running":true,"mode":"single","endpoints":["127.0.0.1:1"],"timeout_ms":50}"#,
+            ))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(state.run_epoch(), 0);
+    }
+
+    #[tokio::test]
+    async fn put_config_rejects_start_when_seed_down() {
+        let request = Request::put("/api/config")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"running":true,"mode":"single","endpoints":["127.0.0.1:1"],"timeout_ms":50}"#,
+            ))
+            .unwrap();
+        let response = app().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let json = body_json(response).await;
+        let err = json["error"].as_str().unwrap();
+        assert!(err.contains("拒绝启动") || err.contains("不通"), "{err}");
     }
 
     #[tokio::test]

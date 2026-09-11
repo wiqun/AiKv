@@ -104,8 +104,8 @@ impl Default for WorkloadConfig {
         Self {
             mode: TargetMode::Cluster,
             endpoints: vec!["127.0.0.1:6379".to_string()],
-            target_ops: 20_000,
-            connections: 32,
+            target_ops: 3_000,
+            connections: 6,
             pipeline: 16,
             keyspace: 100_000,
             key_prefix: "loadgen".to_string(),

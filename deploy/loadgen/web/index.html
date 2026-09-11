@@ -1,99 +1,603 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="hybrid">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>AiKv Loadgen 控制台</title>
 <style>
-  :root { color-scheme: dark; --bg:#14161a; --panel:#1c1f26; --line:#2b303a;
-          --fg:#e6e9ef; --muted:#8c93a1; --ok:#3fb950; --bad:#f85149; --accent:#4c8dff; }
-  * { box-sizing:border-box; }
-  body { margin:0; background:var(--bg); color:var(--fg);
-         font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif; }
-  header { display:flex; gap:12px; align-items:center; flex-wrap:wrap; padding:12px 20px;
-           border-bottom:1px solid var(--line); background:var(--panel); position:sticky; top:0; }
-  h1 { font-size:15px; margin:0; font-weight:600; }
-  .badge { padding:2px 10px; border-radius:999px; font-size:12px; border:1px solid var(--line); }
-  .badge.on { color:var(--ok); border-color:var(--ok); }
-  .badge.off { color:var(--muted); }
-  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; }
-  .dot.ok { background:var(--ok); } .dot.bad { background:var(--bad); }
-  main { display:grid; gap:16px; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); padding:20px; }
-  section { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px 16px; }
-  h2 { font-size:13px; margin:0 0 12px; color:var(--muted); font-weight:600; letter-spacing:.04em; }
-  .row { display:grid; grid-template-columns:1fr 110px; gap:10px; align-items:center; margin-bottom:10px; }
-  label { color:var(--muted); }
-  input, select { width:100%; padding:6px 8px; background:#0f1115; border:1px solid var(--line);
-                  border-radius:6px; color:var(--fg); }
-  button { padding:7px 14px; border-radius:6px; border:1px solid var(--line);
-           background:#232833; color:var(--fg); cursor:pointer; }
-  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
-  button.danger { background:transparent; border-color:var(--bad); color:var(--bad); }
-  .mix { display:grid; grid-template-columns:1fr 80px 52px; gap:8px; align-items:center; margin-bottom:6px; }
-  .pct { color:var(--muted); text-align:right; }
-  #error { color:var(--bad); font-size:12px; white-space:pre-wrap; }
-  .hint { color:var(--muted); font-size:12px; }
-  .actions { display:flex; gap:10px; }
+  :root {
+    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --c-set: #10b981; --c-get: #3b82f6; --c-del: #ef4444;
+    --c-mget: #8b5cf6; --c-incr: #f59e0b; --c-expire: #ec4899;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--fg); font-family: var(--font-main);
+    font-size: 13px; line-height: 1.5; min-height: 100vh;
+    letter-spacing: -0.01em; transition: background 0.2s, color 0.2s;
+  }
+
+  /* ========================================================
+     THEME 1:  APPLE PRO APP (macOS Window + Split-View Sidebar)
+     ======================================================== */
+  html[data-theme="apple"] {
+    --bg: #090a0f; --panel: rgba(26, 29, 38, 0.72); --panel-border: rgba(255, 255, 255, 0.1);
+    --panel-sub: rgba(0, 0, 0, 0.2); --fg: #f5f5f7; --fg-muted: #86868b; --fg-sub: #cbd5e1;
+    --accent: #0071e3; --accent-hover: #0077ed; --ok: #30d158; --bad: #ff453a; --warn: #ffd60a;
+    --card-radius: 12px; --btn-radius: 999px; --input-radius: 8px;
+    --font-main: -apple-system, BlinkMacSystemFont, "SF Pro Text", var(--font-sans);
+  }
+  html[data-theme="apple"] .window-titlebar { display: flex; }
+  html[data-theme="apple"] .github-banner,
+  html[data-theme="apple"] .hybrid-kpi-strip,
+  html[data-theme="apple"] .chatgpt-hero { display: none; }
+  html[data-theme="apple"] .app-window {
+    max-width: 1240px; margin: 24px auto 90px; border-radius: 16px;
+    background: var(--panel); border: 1px solid var(--panel-border);
+    box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6); overflow: hidden;
+    backdrop-filter: blur(30px); -webkit-backdrop-filter: blur(30px);
+  }
+  html[data-theme="apple"] .workspace-layout {
+    display: grid; grid-template-columns: 310px 1fr;
+    grid-template-areas: "sidebar main-content"; min-height: 560px;
+  }
+  html[data-theme="apple"] .sidebar-col {
+    grid-area: sidebar; background: rgba(0, 0, 0, 0.22);
+    border-right: 1px solid var(--panel-border); padding: 16px;
+    display: flex; flex-direction: column; gap: 14px;
+  }
+  html[data-theme="apple"] .main-col {
+    grid-area: main-content; padding: 20px;
+    display: flex; flex-direction: column; gap: 16px;
+  }
+  html[data-theme="apple"] .floating-dock { display: flex; }
+
+  /* ========================================================
+     THEME 2: ⚡ CHATGPT (Centered Single-Column Stream + Prompts)
+     ======================================================== */
+  html[data-theme="chatgpt"] {
+    --bg: #09090b; --panel: #18181b; --panel-border: #27272a;
+    --panel-sub: #202024; --fg: #fafafa; --fg-muted: #71717a; --fg-sub: #a1a1aa;
+    --accent: #10a37f; --accent-hover: #1a7f64; --ok: #10a37f; --bad: #ef4444; --warn: #f59e0b;
+    --card-radius: 10px; --btn-radius: 8px; --input-radius: 8px;
+    --font-main: "Söhne", Inter, var(--font-sans);
+  }
+  html[data-theme="chatgpt"] .chatgpt-hero { display: flex; }
+  html[data-theme="chatgpt"] .window-titlebar,
+  html[data-theme="chatgpt"] .github-banner,
+  html[data-theme="chatgpt"] .hybrid-kpi-strip { display: none; }
+  html[data-theme="chatgpt"] .app-window {
+    max-width: 740px; margin: 30px auto 110px; padding: 0 16px;
+    background: transparent; border: none; box-shadow: none;
+  }
+  html[data-theme="chatgpt"] .workspace-layout { display: flex; flex-direction: column; gap: 18px; }
+  html[data-theme="chatgpt"] .sidebar-col,
+  html[data-theme="chatgpt"] .main-col { display: contents; }
+  html[data-theme="chatgpt"] .block-presets .presets-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
+  }
+  html[data-theme="chatgpt"] .preset-card {
+    background: var(--panel); border: 1px solid var(--panel-border);
+    border-radius: var(--card-radius); padding: 12px 14px; cursor: pointer; transition: 0.15s;
+  }
+  html[data-theme="chatgpt"] .preset-card:hover { border-color: var(--accent); }
+  html[data-theme="chatgpt"] .preset-title { font-size: 12px; font-weight: 600; color: var(--fg); }
+  html[data-theme="chatgpt"] .preset-desc { font-size: 11px; color: var(--fg-muted); margin-top: 3px; }
+  html[data-theme="chatgpt"] .floating-dock { display: flex; width: 740px; max-width: calc(100vw - 32px); }
+
+  /* ========================================================
+     THEME 3: 🐙 GITHUB (Workflow Summary + 70/30 Repository Layout)
+     ======================================================== */
+  html[data-theme="github"] {
+    --bg: #0d1117; --panel: #161b22; --panel-border: #30363d;
+    --panel-sub: #0d1117; --fg: #e6edf3; --fg-muted: #7d8590; --fg-sub: #8b949e;
+    --accent: #58a6ff; --accent-hover: #79b8ff; --ok: #238636; --bad: #da3633; --warn: #d29922;
+    --card-radius: 6px; --btn-radius: 6px; --input-radius: 6px;
+    --font-main: -apple-system, BlinkMacSystemFont, "Segoe UI", var(--font-sans);
+  }
+  html[data-theme="github"] .github-banner { display: flex; }
+  html[data-theme="github"] .window-titlebar,
+  html[data-theme="github"] .hybrid-kpi-strip,
+  html[data-theme="github"] .chatgpt-hero { display: none; }
+  html[data-theme="github"] .app-window { max-width: 1360px; margin: 20px auto; padding: 0 20px; }
+  html[data-theme="github"] .workspace-layout {
+    display: grid; grid-template-columns: 1fr 340px; gap: 20px;
+  }
+  html[data-theme="github"] .main-col { display: flex; flex-direction: column; gap: 16px; }
+  html[data-theme="github"] .sidebar-col { display: flex; flex-direction: column; gap: 16px; }
+  html[data-theme="github"] .floating-dock { display: none; }
+
+  /* ========================================================
+     THEME 4: 💎 HYBRID (Modular 4-Quadrant Cloud Dashboard)
+     ======================================================== */
+  html[data-theme="hybrid"] {
+    --bg: #0b0f19; --panel: rgba(17, 24, 39, 0.85); --panel-border: rgba(55, 65, 81, 0.6);
+    --panel-sub: #161f30; --fg: #f8fafc; --fg-muted: #94a3b8; --fg-sub: #cbd5e1;
+    --accent: #3b82f6; --accent-hover: #2563eb; --ok: #10b981; --bad: #f43f5e; --warn: #f59e0b;
+    --card-radius: 12px; --btn-radius: 8px; --input-radius: 8px;
+    --font-main: var(--font-sans);
+  }
+  html[data-theme="hybrid"] .hybrid-kpi-strip { display: grid; }
+  html[data-theme="hybrid"] .window-titlebar,
+  html[data-theme="hybrid"] .github-banner,
+  html[data-theme="hybrid"] .chatgpt-hero { display: none; }
+  html[data-theme="hybrid"] .app-window { max-width: 1380px; margin: 16px auto; padding: 0 20px; }
+  html[data-theme="hybrid"] .workspace-layout {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px;
+  }
+  html[data-theme="hybrid"] .sidebar-col,
+  html[data-theme="hybrid"] .main-col { display: contents; }
+  html[data-theme="hybrid"] .block-mix { grid-column: 1 / -1; }
+  html[data-theme="hybrid"] .floating-dock { display: none; }
+
+  /* ========================================================
+     UNIVERSAL SHARED COMPONENTS & CONTROLS
+     ======================================================== */
+  /* Top Global Header */
+  .top-nav {
+    display: flex; align-items: center; justify-content: space-between;
+    flex-wrap: wrap; gap: 12px; padding: 10px 20px;
+    background: var(--panel); border-bottom: 1px solid var(--panel-border);
+    position: sticky; top: 0; z-index: 40; backdrop-filter: blur(16px);
+  }
+  .brand { display: flex; align-items: center; gap: 10px; font-size: 15px; font-weight: 700; color: var(--fg); }
+  .badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 2px 10px; border-radius: 999px; font-size: 11px;
+    background: var(--panel-sub); border: 1px solid var(--panel-border); color: var(--fg-sub);
+  }
+  .badge.on { background: rgba(48, 209, 88, 0.12); color: var(--ok); border-color: var(--ok); }
+  .badge.off { color: var(--fg-muted); }
+  .badge.pause { background: rgba(255, 214, 10, 0.12); color: var(--warn); border-color: var(--warn); }
+  .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+  .dot.ok { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+  .dot.bad { background: var(--bad); }
+
+  /* Style Switcher */
+  .theme-switcher {
+    display: inline-flex; background: var(--panel-sub);
+    padding: 2px; border-radius: var(--btn-radius); border: 1px solid var(--panel-border);
+  }
+  .theme-btn {
+    border: none; background: transparent; color: var(--fg-muted);
+    font-size: 11px; font-weight: 600; padding: 4px 10px;
+    border-radius: var(--btn-radius); cursor: pointer; transition: 0.15s;
+  }
+  .theme-btn.active { background: var(--accent); color: #ffffff; }
+
+  /* Buttons */
+  button {
+    font-family: inherit; font-size: 12px; font-weight: 600;
+    padding: 6px 14px; border-radius: var(--btn-radius); border: 1px solid var(--panel-border);
+    background: var(--panel-sub); color: var(--fg); cursor: pointer;
+    transition: 0.15s; display: inline-flex; align-items: center; gap: 6px;
+  }
+  button:hover { border-color: var(--fg-muted); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #ffffff; }
+  button.danger { background: rgba(239, 68, 68, 0.15); border-color: var(--bad); color: var(--bad); }
+  button.danger:hover { background: var(--bad); color: #ffffff; }
+
+  /* macOS Titlebar Chrome */
+  .window-titlebar {
+    height: 38px; align-items: center; justify-content: space-between;
+    padding: 0 16px; background: rgba(255, 255, 255, 0.04);
+    border-bottom: 1px solid var(--panel-border);
+  }
+  .traffic-lights { display: flex; gap: 8px; }
+  .traffic-dot { width: 11px; height: 11px; border-radius: 50%; }
+  .traffic-close { background: #ff5f56; }
+  .traffic-min { background: #ffbd2e; }
+  .traffic-max { background: #27c93f; }
+  .window-title { font-size: 12px; font-weight: 600; color: var(--fg-muted); }
+
+  /* GitHub Banner */
+  .github-banner {
+    justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 14px;
+    background: var(--panel); border: 1px solid var(--panel-border);
+    border-radius: var(--card-radius); padding: 14px 18px; margin-bottom: 16px;
+  }
+  .gh-left { display: flex; align-items: center; gap: 12px; }
+  .gh-icon-box {
+    width: 32px; height: 32px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(35, 134, 54, 0.15); color: var(--ok);
+  }
+  .gh-title { font-size: 14px; font-weight: 600; color: var(--fg); }
+  .gh-sub { font-size: 11px; color: var(--fg-muted); font-family: var(--font-mono); }
+
+  /* Hybrid 4-KPI Strip */
+  .hybrid-kpi-strip {
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 12px; margin-bottom: 16px;
+  }
+  .kpi-card {
+    background: var(--panel); border: 1px solid var(--panel-border);
+    border-radius: var(--card-radius); padding: 12px 16px;
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  .kpi-name { font-size: 11px; font-weight: 600; color: var(--fg-muted); text-transform: uppercase; }
+  .kpi-value { font-size: 20px; font-weight: 700; color: var(--fg); font-variant-numeric: tabular-nums; }
+
+  /* ChatGPT Hero */
+  .chatgpt-hero {
+    flex-direction: column; align-items: center; text-align: center;
+    margin: 10px 0 24px; gap: 6px;
+  }
+  .chatgpt-title { font-size: 20px; font-weight: 700; color: var(--fg); }
+  .chatgpt-desc { font-size: 13px; color: var(--fg-muted); }
+
+  /* Cards */
+  .card {
+    background: var(--panel); border: 1px solid var(--panel-border);
+    border-radius: var(--card-radius); padding: 16px;
+    display: flex; flex-direction: column; gap: 12px;
+  }
+  .card-title {
+    font-size: 11px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.05em; color: var(--fg-muted);
+  }
+
+  /* Form Elements */
+  .form-row { display: grid; grid-template-columns: 1fr 120px; align-items: center; gap: 10px; }
+  .form-row.slider-row { grid-template-columns: 1fr 1fr 60px; }
+  label { font-size: 12px; color: var(--fg-sub); }
+  input[type="number"], input[type="text"] {
+    width: 100%; padding: 6px 10px; font-size: 12px; font-family: var(--font-mono);
+    background: var(--panel-sub); border: 1px solid var(--panel-border);
+    border-radius: var(--input-radius); color: var(--fg);
+  }
+  input:focus { outline: none; border-color: var(--accent); }
+  input[type="range"] {
+    -webkit-appearance: none; appearance: none; width: 100%; height: 5px;
+    background: var(--panel-sub); border-radius: 999px; outline: none;
+  }
+  input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none; width: 14px; height: 14px;
+    border-radius: 50%; background: var(--accent); cursor: pointer;
+  }
+
+  /* Segmented Control & Switch */
+  .seg-control {
+    display: inline-flex; width: 100%; background: var(--panel-sub);
+    padding: 2px; border-radius: var(--input-radius); border: 1px solid var(--panel-border);
+  }
+  .seg-btn {
+    flex: 1; border: none; background: transparent; color: var(--fg-muted);
+    font-size: 12px; font-weight: 600; padding: 5px 10px; border-radius: calc(var(--input-radius) - 2px);
+    cursor: pointer; text-align: center;
+  }
+  .seg-btn.active { background: var(--accent); color: #ffffff; }
+
+  .switch-row { display: flex; justify-content: space-between; align-items: center; }
+  .switch { position: relative; display: inline-block; width: 36px; height: 20px; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .switch-slider {
+    position: absolute; cursor: pointer; inset: 0;
+    background: var(--panel-sub); border: 1px solid var(--panel-border);
+    border-radius: 999px; transition: 0.2s;
+  }
+  .switch-slider:before {
+    position: absolute; content: ""; height: 14px; width: 14px; left: 2px; bottom: 2px;
+    background: var(--fg-sub); border-radius: 50%; transition: 0.2s;
+  }
+  .switch input:checked + .switch-slider { background: var(--accent); border-color: var(--accent); }
+  .switch input:checked + .switch-slider:before { transform: translateX(16px); background: #ffffff; }
+
+  /* Stacked Language Bar & Mix */
+  .stacked-bar {
+    display: flex; height: 9px; width: 100%; border-radius: 999px;
+    overflow: hidden; background: var(--panel-sub); border: 1px solid var(--panel-border);
+  }
+  .bar-seg { height: 100%; transition: width 0.2s; min-width: 0; }
+  .bar-set { background: var(--c-set); }
+  .bar-get { background: var(--c-get); }
+  .bar-del { background: var(--c-del); }
+  .bar-mget { background: var(--c-mget); }
+  .bar-incr { background: var(--c-incr); }
+  .bar-expire { background: var(--c-expire); }
+
+  .mix-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin-top: 10px; }
+  .mix-item {
+    background: var(--panel-sub); border: 1px solid var(--panel-border);
+    border-radius: var(--input-radius); padding: 8px 10px;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .mix-header { display: flex; justify-content: space-between; align-items: center; }
+  .cmd-tag { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 700; font-family: var(--font-mono); }
+  .cmd-dot { width: 8px; height: 8px; border-radius: 50%; }
+  .cmd-pct { font-size: 11px; font-weight: 600; color: var(--fg); font-variant-numeric: tabular-nums; }
+  .mix-item input { text-align: right; padding: 4px 8px; }
+
+  /* Floating Dock (Apple / ChatGPT) */
+  .floating-dock {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: var(--panel); border: 1px solid var(--panel-border);
+    border-radius: var(--btn-radius); padding: 8px 16px;
+    display: flex; align-items: center; justify-content: space-between; gap: 16px;
+    box-shadow: 0 12px 36px rgba(0,0,0,0.5); z-index: 50;
+    backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+  }
+  .dock-status { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+
+  /* Presets (Hybrid Horizontal Bar) */
+  .presets-wrap { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .preset-tag {
+    padding: 3px 10px; border-radius: 999px; font-size: 11px;
+    background: var(--panel-sub); border: 1px solid var(--panel-border);
+    color: var(--fg-sub); cursor: pointer; transition: 0.15s;
+  }
+  .preset-tag:hover { border-color: var(--accent); color: var(--accent); }
+
+  /* Toast */
+  #toast {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(20px);
+    opacity: 0; pointer-events: none; z-index: 100;
+    padding: 10px 18px; border-radius: var(--btn-radius);
+    background: rgba(239, 68, 68, 0.95); color: #ffffff;
+    font-size: 12px; font-weight: 500; box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); pointer-events: auto; }
 </style>
 </head>
 <body>
-<header>
-  <h1>AiKv Loadgen</h1>
-  <span id="state" class="badge off">已停止</span>
-  <span id="rate" class="badge">目标 -</span>
-  <span id="workers" class="badge">worker -</span>
-  <span id="endpoints"></span>
-</header>
-<main>
-  <section>
-    <h2>压力</h2>
-    <div class="row"><label>目标速率 ops/s (0=不限速)</label><input id="target_ops" type="number" min="0" step="1000"></div>
-    <div class="row"><label>连接数</label><input id="connections" type="number" min="1" max="1024"></div>
-    <div class="row"><label>pipeline</label><input id="pipeline" type="number" min="1" max="256"></div>
-    <div class="row"><label>命令超时 ms</label><input id="timeout_ms" type="number" min="1" max="60000"></div>
-    <div class="actions">
-      <button id="start" class="primary">启动</button>
-      <button id="stop" class="danger">停止</button>
-      <button id="reload">刷新</button>
+
+<!-- Global Navigation Bar -->
+<nav class="top-nav">
+  <div class="brand">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M4 14.899A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.242"/><path d="m8 11 4-4 4 4"/><path d="M12 7v10"/></svg>
+    AiKv Loadgen
+    <span id="state" class="badge off"><span class="dot bad"></span>已停止</span>
+    <span id="rate" class="badge">限速 -</span>
+    <span id="workers" class="badge">worker -</span>
+    <span id="endpoints"></span>
+  </div>
+
+  <div style="display:flex;align-items:center;gap:12px;">
+    <div class="theme-switcher">
+      <button class="theme-btn" data-theme="apple" onclick="setTheme('apple')"> Apple</button>
+      <button class="theme-btn" data-theme="chatgpt" onclick="setTheme('chatgpt')">⚡ ChatGPT</button>
+      <button class="theme-btn" data-theme="github" onclick="setTheme('github')">🐙 GitHub</button>
+      <button class="theme-btn active" data-theme="hybrid" onclick="setTheme('hybrid')">💎 Hybrid</button>
     </div>
-  </section>
-
-  <section>
-    <h2>数据</h2>
-    <div class="row"><label>keyspace</label><input id="keyspace" type="number" min="1"></div>
-    <div class="row"><label>key 前缀</label><input id="key_prefix" type="text"></div>
-    <div class="row"><label>value 最小字节</label><input id="value_size_min" type="number" min="1"></div>
-    <div class="row"><label>value 最大字节</label><input id="value_size_max" type="number" min="1"></div>
-    <div class="row"><label>miss 读比例</label><input id="miss_ratio" type="number" min="0" max="1" step="0.05"></div>
-    <div class="row"><label>SET 带 TTL 比例</label><input id="ttl_ratio" type="number" min="0" max="1" step="0.05"></div>
-    <div class="row"><label>单 slot 集中 (hashtag)</label><input id="use_hashtag" type="checkbox"></div>
-    <div class="row"><label>只读模式</label><input id="readonly" type="checkbox"></div>
-  </section>
-
-  <section>
-    <h2>命令混合 (权重, 自动归一化)</h2>
-    <div id="mix"></div>
-  </section>
-
-  <section>
-    <h2>目标</h2>
-    <div class="row"><label>模式</label>
-      <select id="mode"><option value="cluster">cluster</option><option value="single">single</option></select>
+    <div id="nav-actions" style="display:flex;gap:8px;">
+      <button class="primary" onclick="triggerStart()">启动</button>
+      <button class="danger" onclick="triggerStop()">停止</button>
+      <button onclick="triggerReload()">刷新</button>
     </div>
-    <div class="row"><label>endpoints (逗号分隔)</label><input id="endpoints_input" type="text"></div>
-    <p class="hint">模式 / endpoints / 超时的变更会重建连接 (约 0.5s 内生效)</p>
-    <h2 style="margin-top:14px">最近错误</h2>
-    <div id="error" class="hint">无</div>
-  </section>
-</main>
+  </div>
+</nav>
+
+<!-- Main Container (Adapts into 4 distinct Layout structures) -->
+<div class="app-window">
+  <!-- Layout Variant 1: macOS Window Titlebar Chrome -->
+  <div class="window-titlebar">
+    <div class="traffic-lights">
+      <div class="traffic-dot traffic-close"></div>
+      <div class="traffic-dot traffic-min"></div>
+      <div class="traffic-dot traffic-max"></div>
+    </div>
+    <div class="window-title">AiKv Loadgen — Inspector &amp; Control</div>
+    <div style="width:50px;"></div>
+  </div>
+
+  <!-- Layout Variant 2: GitHub Actions Workflow Summary Banner -->
+  <div class="github-banner">
+    <div class="gh-left">
+      <div class="gh-icon-box">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+      </div>
+      <div>
+        <div class="gh-title">Workflow Run: loadgen-dispatch <span style="color:var(--fg-muted);font-weight:400;">#452139</span></div>
+        <div class="gh-sub">main · 触发源: Web Console · 状态: <span id="gh-state-text">已停止</span></div>
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;">
+      <button class="primary" onclick="triggerStart()">Run Workflow</button>
+      <button class="danger" onclick="triggerStop()">Cancel Run</button>
+    </div>
+  </div>
+
+  <!-- Layout Variant 3: Hybrid 4-KPI Metric Cards Strip -->
+  <div class="hybrid-kpi-strip">
+    <div class="kpi-card"><span class="kpi-name">运行状态</span><span id="kpi-state" class="kpi-value" style="color:var(--bad);">已停止</span></div>
+    <div class="kpi-card"><span class="kpi-name">目标限速 OPS</span><span id="kpi-rate" class="kpi-value">-</span></div>
+    <div class="kpi-card"><span class="kpi-name">活跃 WORKERS</span><span id="kpi-workers" class="kpi-value">-</span></div>
+    <div class="kpi-card"><span class="kpi-name">在线节点数</span><span id="kpi-nodes" class="kpi-value">1 / 1</span></div>
+  </div>
+
+  <!-- Layout Variant 4: ChatGPT Centered Prompt Hero -->
+  <div class="chatgpt-hero">
+    <div class="chatgpt-title">AiKv 压测助手</div>
+    <div class="chatgpt-desc">选择场景预设或自定义配置并启动加压</div>
+  </div>
+
+  <!-- Multi-Layout Workspace Grid -->
+  <div class="workspace-layout">
+    <!-- Sidebar Column (In Apple: left sidebar; In GitHub: right rail; In Hybrid/ChatGPT: flow) -->
+    <div class="sidebar-col">
+      <!-- Block 1: Presets -->
+      <div class="card block-presets">
+        <div class="card-title">🎯 压测场景预设</div>
+        <div class="presets-grid presets-wrap">
+          <div class="preset-card preset-tag" onclick="applyPreset('balanced')">
+            <div class="preset-title">⚡ 均衡读写 5:5</div>
+            <div class="preset-desc">50% GET / 50% SET, Pipeline 16</div>
+          </div>
+          <div class="preset-card preset-tag" onclick="applyPreset('read_heavy')">
+            <div class="preset-title">🚀 极速读密集</div>
+            <div class="preset-desc">90% GET 只读, 100k OPS</div>
+          </div>
+          <div class="preset-card preset-tag" onclick="applyPreset('write_heavy')">
+            <div class="preset-title">💥 极限写入冲击</div>
+            <div class="preset-desc">80% SET, Pipeline 32</div>
+          </div>
+          <div class="preset-card preset-tag" onclick="applyPreset('cache_miss')">
+            <div class="preset-title">🔍 缓存击穿与 TTL</div>
+            <div class="preset-desc">35% Miss, 80% SET 带 TTL</div>
+          </div>
+          <div class="preset-card preset-tag" onclick="applyPreset('hotspot')">
+            <div class="preset-title">🔥 单 Slot 热点</div>
+            <div class="preset-desc">Hashtag 锁定, 50% INCR</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Block 2: Target & Endpoints -->
+      <div class="card block-target">
+        <div class="card-title">集群与目标配置</div>
+        <div class="seg-control">
+          <button type="button" id="btn-mode-cluster" class="seg-btn active" onclick="selectMode('cluster')">Cluster 集群</button>
+          <button type="button" id="btn-mode-single" class="seg-btn" onclick="selectMode('single')">Single 单机</button>
+        </div>
+        <select id="mode" style="display:none;"><option value="cluster">cluster</option><option value="single">single</option></select>
+        <div class="form-row">
+          <label for="endpoint_host">Seed IP</label>
+          <input id="endpoint_host" type="text" value="127.0.0.1" spellcheck="false">
+        </div>
+        <div class="form-row">
+          <label for="endpoint_port">端口</label>
+          <input id="endpoint_port" type="number" min="1" max="65535" value="6379">
+        </div>
+      </div>
+
+      <!-- Block 3: Data Attributes -->
+      <div class="card block-data">
+        <div class="card-title">数据特征与负载行为</div>
+        <div class="form-row">
+          <label for="keyspace">Keyspace</label>
+          <input id="keyspace" type="number" min="1">
+        </div>
+        <div class="form-row">
+          <label for="key_prefix">Key 前缀</label>
+          <input id="key_prefix" type="text">
+        </div>
+        <div class="form-row">
+          <label>Value 字节范围</label>
+          <div style="display:flex;gap:4px;">
+            <input id="value_size_min" type="number" min="1" placeholder="最小">
+            <input id="value_size_max" type="number" min="1" placeholder="最大">
+          </div>
+        </div>
+        <div class="form-row slider-row">
+          <label for="miss_ratio">Miss 读比例</label>
+          <input type="range" id="miss_ratio_slider" min="0" max="1" step="0.05" oninput="syncRange('miss_ratio', this.value)">
+          <input id="miss_ratio" type="number" min="0" max="1" step="0.05" oninput="syncInput('miss_ratio_slider', this.value)">
+        </div>
+        <div class="form-row slider-row">
+          <label for="ttl_ratio">TTL 写入比例</label>
+          <input type="range" id="ttl_ratio_slider" min="0" max="1" step="0.05" oninput="syncRange('ttl_ratio', this.value)">
+          <input id="ttl_ratio" type="number" min="0" max="1" step="0.05" oninput="syncInput('ttl_ratio_slider', this.value)">
+        </div>
+        <div class="switch-row">
+          <label for="use_hashtag">集中单 Slot (Hashtag)</label>
+          <label class="switch"><input id="use_hashtag" type="checkbox"><span class="switch-slider"></span></label>
+        </div>
+        <div class="switch-row">
+          <label for="readonly">只读模式 (Readonly)</label>
+          <label class="switch"><input id="readonly" type="checkbox"><span class="switch-slider"></span></label>
+        </div>
+      </div>
+    </div>
+
+    <!-- Main Content Column -->
+    <div class="main-col">
+      <!-- Block 4: Pressure -->
+      <div class="card block-pressure">
+        <div class="card-title">压力与吞吐控制</div>
+        <div class="form-row">
+          <label for="target_ops">限速 ops/s (0=不限速)</label>
+          <input id="target_ops" type="number" min="0" step="1000">
+        </div>
+        <div class="form-row">
+          <label for="connections">并发连接数 (Worker)</label>
+          <input id="connections" type="number" min="1" max="1024">
+        </div>
+        <div class="form-row">
+          <label for="pipeline">Pipeline 打包深度</label>
+          <input id="pipeline" type="number" min="1" max="256">
+        </div>
+        <div class="form-row">
+          <label for="timeout_ms">命令超时 ms</label>
+          <input id="timeout_ms" type="number" min="1" max="60000">
+        </div>
+      </div>
+
+      <!-- Block 5: Command Mix & Stacked Bar -->
+      <div class="card block-mix">
+        <div class="card-title">命令配比分布 (GitHub 语言条风格)</div>
+        <div class="stacked-bar">
+          <div id="bar_set" class="bar-seg bar-set" style="flex-grow:0;"></div>
+          <div id="bar_get" class="bar-seg bar-get" style="flex-grow:0;"></div>
+          <div id="bar_del" class="bar-seg bar-del" style="flex-grow:0;"></div>
+          <div id="bar_mget" class="bar-seg bar-mget" style="flex-grow:0;"></div>
+          <div id="bar_incr" class="bar-seg bar-incr" style="flex-grow:0;"></div>
+          <div id="bar_expire" class="bar-seg bar-expire" style="flex-grow:0;"></div>
+        </div>
+        <div class="mix-grid" id="mix"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Floating Dock (Visible in Apple & ChatGPT modes) -->
+  <div class="floating-dock">
+    <div class="dock-status">
+      <span id="dock-dot" class="dot bad"></span>
+      <span id="dock-state-text">任务已停止</span>
+    </div>
+    <div style="display:flex;gap:8px;">
+      <button class="primary" onclick="triggerStart()">启动任务</button>
+      <button class="danger" onclick="triggerStop()">停止</button>
+      <button onclick="triggerReload()">刷新</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" role="status"></div>
+
 <script>
 const FIELDS = ["target_ops","connections","pipeline","timeout_ms","keyspace","key_prefix",
                 "value_size_min","value_size_max","miss_ratio","ttl_ratio","use_hashtag","readonly"];
 const MIX = ["set","get","del","mget","incr","expire"];
 const NUMERIC = new Set(["target_ops","connections","pipeline","timeout_ms","keyspace",
                          "value_size_min","value_size_max","miss_ratio","ttl_ratio"]);
+const PRESETS = {
+  balanced: { target_ops: 50000, connections: 32, pipeline: 16, timeout_ms: 1000, keyspace: 1000000, key_prefix: "kv:", value_size_min: 64, value_size_max: 256, miss_ratio: 0.05, ttl_ratio: 0.1, use_hashtag: false, readonly: false, mix: { set: 50, get: 50, del: 0, mget: 0, incr: 0, expire: 0 } },
+  read_heavy: { target_ops: 100000, connections: 64, pipeline: 32, timeout_ms: 500, keyspace: 2000000, key_prefix: "cache:", value_size_min: 128, value_size_max: 512, miss_ratio: 0.02, ttl_ratio: 0, use_hashtag: false, readonly: true, mix: { set: 0, get: 90, del: 0, mget: 10, incr: 0, expire: 0 } },
+  write_heavy: { target_ops: 60000, connections: 48, pipeline: 32, timeout_ms: 1000, keyspace: 1000000, key_prefix: "data:", value_size_min: 256, value_size_max: 1024, miss_ratio: 0, ttl_ratio: 0.2, use_hashtag: false, readonly: false, mix: { set: 80, get: 10, del: 5, mget: 0, incr: 5, expire: 0 } },
+  cache_miss: { target_ops: 30000, connections: 32, pipeline: 8, timeout_ms: 1500, keyspace: 500000, key_prefix: "ttl:", value_size_min: 64, value_size_max: 256, miss_ratio: 0.35, ttl_ratio: 0.8, use_hashtag: false, readonly: false, mix: { set: 40, get: 50, del: 5, mget: 0, incr: 0, expire: 5 } },
+  hotspot: { target_ops: 50000, connections: 32, pipeline: 16, timeout_ms: 1000, keyspace: 1000, key_prefix: "hot:", value_size_min: 16, value_size_max: 64, miss_ratio: 0.01, ttl_ratio: 0, use_hashtag: true, readonly: false, mix: { set: 20, get: 30, del: 0, mget: 0, incr: 50, expire: 0 } }
+};
+
+let dirty = false;
+let lastToast = "";
+let toastTimer = null;
 
 function el(id) { return document.getElementById(id); }
+
+function setTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  localStorage.setItem('aikv_loadgen_theme', theme);
+  document.querySelectorAll('.theme-btn').forEach(b => b.classList.toggle('active', b.dataset.theme === theme));
+}
+
+function selectMode(m) {
+  el("mode").value = m;
+  el("btn-mode-cluster").classList.toggle('active', m === 'cluster');
+  el("btn-mode-single").classList.toggle('active', m === 'single');
+  markDirty();
+}
+
+function syncRange(targetId, val) { el(targetId).value = val; markDirty(); }
+function syncInput(sliderId, val) { el(sliderId).value = val; markDirty(); }
+
+function splitEndpoint(addr) {
+  const value = (addr || "127.0.0.1:6379").trim();
+  const cut = value.lastIndexOf(":");
+  if (cut <= 0) return { host: value || "127.0.0.1", port: "6379" };
+  return { host: value.slice(0, cut), port: value.slice(cut + 1) };
+}
 
 function readForm() {
   const patch = {};
@@ -105,71 +609,147 @@ function readForm() {
   patch.mix = {};
   for (const m of MIX) patch.mix[m] = Number(el("mix_" + m).value);
   patch.mode = el("mode").value;
-  patch.endpoints = el("endpoints_input").value.split(",").map(s => s.trim()).filter(Boolean);
+  patch.endpoints = [`${el("endpoint_host").value.trim()}:${el("endpoint_port").value.trim()}`];
   return patch;
 }
 
-function render(cfg, rt) {
+function renderForm(cfg) {
   for (const field of FIELDS) {
     const node = el(field);
     if (document.activeElement === node) continue;
     if (node.type === "checkbox") node.checked = Boolean(cfg[field]);
     else node.value = cfg[field];
   }
+  if (el("miss_ratio_slider")) el("miss_ratio_slider").value = cfg.miss_ratio ?? 0;
+  if (el("ttl_ratio_slider")) el("ttl_ratio_slider").value = cfg.ttl_ratio ?? 0;
+
   for (const m of MIX) {
     if (document.activeElement !== el("mix_" + m)) el("mix_" + m).value = cfg.mix[m];
   }
-  if (document.activeElement !== el("mode")) el("mode").value = cfg.mode;
-  if (document.activeElement !== el("endpoints_input")) {
-    el("endpoints_input").value = cfg.endpoints.join(",");
+  if (document.activeElement !== el("mode")) {
+    el("mode").value = cfg.mode;
+    selectMode(cfg.mode);
   }
+  const parsed = splitEndpoint((cfg.endpoints || [])[0]);
+  if (document.activeElement !== el("endpoint_host")) el("endpoint_host").value = parsed.host;
+  if (document.activeElement !== el("endpoint_port")) el("endpoint_port").value = parsed.port;
+  updateMixPct();
+}
 
-  const total = MIX.reduce((sum, m) => sum + Number(cfg.mix[m]), 0) || 1;
-  for (const m of MIX) el("pct_" + m).textContent = (cfg.mix[m] / total * 100).toFixed(0) + "%";
+function updateMixPct() {
+  const total = MIX.reduce((sum, m) => sum + Number(el("mix_" + m).value || 0), 0) || 1;
+  for (const m of MIX) {
+    const val = Number(el("mix_" + m).value || 0);
+    const pct = (val / total * 100).toFixed(0);
+    el("pct_" + m).textContent = pct + "%";
+    const bar = el("bar_" + m);
+    if (bar) bar.style.flexGrow = val;
+  }
+}
 
-  el("state").textContent = cfg.running ? "运行中" : "已停止";
-  el("state").className = "badge " + (cfg.running ? "on" : "off");
-  el("rate").textContent = "目标 " + cfg.target_ops + " ops/s";
+function renderRuntime(cfg, rt) {
+  const labels = { running: "运行中", stopped: "已停止", paused: "派发已暂停" };
+  const stateLabel = labels[rt.state] || rt.state;
+  const isOk = rt.state === "running";
+  const dotCls = isOk ? "ok" : "bad";
+
+  el("state").innerHTML = `<span class="dot ${dotCls}"></span>${stateLabel}`;
+  el("state").className = "badge " + (isOk ? "on" : rt.state === "paused" ? "pause" : "off");
+  el("rate").textContent = "限速 " + cfg.target_ops + " ops/s";
   el("workers").textContent = "worker " + rt.workers;
   el("endpoints").innerHTML = rt.endpoints.map(e =>
     `<span class="badge"><span class="dot ${e.reachable ? "ok" : "bad"}"></span>${e.addr}</span>`).join("");
-  el("error").textContent = rt.last_error
-    ? `${rt.last_error.message} (${rt.last_error.ago_seconds}s 前)` : "无";
+
+  if (el("kpi-state")) {
+    el("kpi-state").textContent = stateLabel;
+    el("kpi-state").style.color = isOk ? "var(--ok)" : "var(--bad)";
+    el("kpi-rate").textContent = cfg.target_ops || "不限速";
+    el("kpi-workers").textContent = rt.workers;
+    const okNodes = rt.endpoints.filter(e => e.reachable).length;
+    el("kpi-nodes").textContent = `${okNodes} / ${rt.endpoints.length}`;
+  }
+  if (el("gh-state-text")) el("gh-state-text").textContent = stateLabel;
+  if (el("dock-state-text")) el("dock-state-text").textContent = `任务${stateLabel}`;
+  if (el("dock-dot")) el("dock-dot").className = `dot ${dotCls}`;
+
+  const msg = rt.last_error ? rt.last_error.message : "";
+  if (msg && msg !== lastToast) showToast(msg);
+  lastToast = msg;
 }
+
+function render(cfg, rt) { renderForm(cfg); renderRuntime(cfg, rt); }
 
 async function refresh() {
-  const res = await fetch("/api/config");
-  const json = await res.json();
-  render(json.config, json.runtime);
+  try {
+    const res = await fetch("/api/config");
+    const json = await res.json();
+    if (!dirty) renderForm(json.config);
+    renderRuntime(json.config, json.runtime);
+  } catch (err) {}
 }
 
-async function patch(body) {
-  const res = await fetch("/api/config", {
-    method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
-  });
-  const json = await res.json();
-  if (!res.ok) { el("error").textContent = json.error || res.statusText; return; }
-  render(json.config, json.runtime);
+function showToast(message) {
+  const node = el("toast");
+  node.textContent = message;
+  node.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => node.classList.remove("show"), 6000);
 }
 
-let timer = null;
-function schedulePatch() { clearTimeout(timer); timer = setTimeout(() => patch(readForm()), 300); }
+function markDirty() { dirty = true; updateMixPct(); }
+
+async function patch(body, keepForm) {
+  try {
+    const res = await fetch("/api/config", {
+      method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+    });
+    const json = await res.json();
+    if (!res.ok) { showToast(json.error || res.statusText); return; }
+    if (keepForm) { renderRuntime(json.config, json.runtime); return; }
+    dirty = false;
+    render(json.config, json.runtime);
+  } catch (err) { showToast("请求失败: " + err.message); }
+}
+
+function triggerStart() { patch({ ...readForm(), running: true }); }
+function triggerStop() { patch({ running: false }, true); }
+function triggerReload() { dirty = false; refresh(); }
+
+function applyPreset(key) {
+  const p = PRESETS[key];
+  if (!p) return;
+  for (const k of FIELDS) {
+    if (k === 'readonly' || k === 'use_hashtag') el(k).checked = Boolean(p[k]);
+    else if (p[k] !== undefined) el(k).value = p[k];
+  }
+  if (el("miss_ratio_slider")) el("miss_ratio_slider").value = p.miss_ratio;
+  if (el("ttl_ratio_slider")) el("ttl_ratio_slider").value = p.ttl_ratio;
+  for (const m of MIX) el("mix_" + m).value = p.mix[m] || 0;
+  markDirty();
+  showToast("已应用场景预设: " + key);
+}
 
 document.addEventListener("DOMContentLoaded", () => {
+  const savedTheme = localStorage.getItem('aikv_loadgen_theme');
+  if (savedTheme) setTheme(savedTheme);
+
   const mixBox = el("mix");
   for (const m of MIX) {
     mixBox.insertAdjacentHTML("beforeend",
-      `<div class="mix"><label>${m.toUpperCase()}</label>` +
-      `<input id="mix_${m}" type="number" min="0" step="1">` +
-      `<span class="pct" id="pct_${m}">0%</span></div>`);
+      `<div class="mix-item">` +
+        `<div class="mix-header">` +
+          `<span class="cmd-tag"><span class="cmd-dot bar-${m}"></span>${m.toUpperCase()}</span>` +
+          `<span class="cmd-pct" id="pct_${m}">0%</span>` +
+        `</div>` +
+        `<input id="mix_${m}" type="number" min="0" step="1">` +
+      `</div>`);
   }
-  for (const field of FIELDS) el(field).addEventListener("change", schedulePatch);
-  for (const m of MIX) el("mix_" + m).addEventListener("change", schedulePatch);
-  el("mode").addEventListener("change", schedulePatch);
-  el("endpoints_input").addEventListener("change", schedulePatch);
-  el("start").addEventListener("click", () => patch({ running: true }));
-  el("stop").addEventListener("click", () => patch({ running: false }));
-  el("reload").addEventListener("click", refresh);
+  for (const field of FIELDS) el(field).addEventListener("input", markDirty);
+  for (const field of FIELDS) el(field).addEventListener("change", markDirty);
+  for (const m of MIX) el("mix_" + m).addEventListener("input", markDirty);
+  el("mode").addEventListener("change", markDirty);
+  el("endpoint_host").addEventListener("input", markDirty);
+  el("endpoint_port").addEventListener("input", markDirty);
   refresh();
   setInterval(refresh, 1000);
 });

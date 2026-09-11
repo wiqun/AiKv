@@ -62,6 +62,7 @@ async fn run(bind: String, cfg: WorkloadConfig) -> anyhow::Result<()> {
     let probe_task = tokio::spawn(loadgen::engine::probe_loop(
         cfg.clone(),
         state.clone(),
+        engine.connect_limit(),
         stop.clone(),
     ));
 
