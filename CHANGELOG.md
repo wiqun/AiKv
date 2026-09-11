@@ -7,6 +7,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `deploy/loadgen/`: 交互式加压工具 (Rust 独立 crate), 单页控制台热调参, 支持单机/集群, 不含结果统计.
+
 ### Performance
 
 - SET/DEL 热路径: 仅当本节点有 WATCH 时才写 watch meta, 并与用户写同一次 Raft propose; meta 使用相同 hash tag 同 slot (`#83`).

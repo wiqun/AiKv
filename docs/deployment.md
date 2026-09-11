@@ -164,6 +164,22 @@ AIKV_BIND_IP=0.0.0.0 AIKV_ANNOUNCE_IP=192.168.1.112 ./deploy/up-cluster.sh
 
 一般 AiKv 布尔环境变量采用宽松解析, 无法识别或空字符串会跳过并继承下层配置. `AIKV_LINEARIZABLE_READ` 为 legacy 兼容例外: key 存在即覆盖 TOML 层, 只有 `1` 或大小写不敏感的 `true` 表示真, 空字符串、`0`、`false` 及其他值均表示假. 该例外不改变整体 TOML → env → CLI 优先级.
 
+### 3.6 交互式加压工具 (loadgen)
+
+`deploy/loadgen/` 提供 Rust 独立 crate 的交互式加压工具: 对单机或集群持续加压,
+浏览器单页控制台动态调节速率/混合/数据规模, **不记录任何统计结果** (观测走 §7 监控栈).
+
+```bash
+./deploy/loadgen/up.sh              # 默认 cluster, 入口 127.0.0.1:6379, 控制台 http://127.0.0.1:8787
+./deploy/loadgen/up.sh --mode single
+./deploy/loadgen/status.sh
+./deploy/loadgen/down.sh
+```
+
+- crate 为独立 workspace, 不参与 `aikv` 的 `cargo test --workspace`; 门禁: `./deploy/loadgen/build.sh --check`.
+- 运行时文件 (pid/log) 位于 `deploy/.runtime/loadgen/` (已 gitignore).
+- 控制台无鉴权, 仅限本机/可信网段使用.
+
 ---
 
 ## 4. 命令行参数与环境变量
