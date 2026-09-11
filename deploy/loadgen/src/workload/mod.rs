@@ -139,7 +139,7 @@ pub fn plan_batch(cfg: &WorkloadConfig, rng: &mut impl Rng) -> Vec<PlannedOp> {
 pub fn build_pipeline(plan: &[PlannedOp], value: &[u8]) -> redis::Pipeline {
     let mut pipe = redis::pipe();
     for planned in plan {
-        let mut cmd = match planned.op {
+        let cmd = match planned.op {
             Op::Set => {
                 let size = planned.value_size.min(value.len());
                 let mut cmd = redis::cmd("SET");
