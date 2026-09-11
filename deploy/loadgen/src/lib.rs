@@ -4,5 +4,6 @@
 
 pub mod config;
 pub mod conn;
+pub mod engine;
 pub mod ratelimit;
 pub mod workload;
