@@ -3,7 +3,15 @@
 use std::fmt;
 
 use clap::ValueEnum;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+fn deserialize_double_option<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: Deserializer<'de>,
+{
+    Deserialize::deserialize(deserializer).map(Some)
+}
 
 /// 目标拓扑: 单机直连或集群路由.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
@@ -49,6 +57,8 @@ pub const MAX_PIPELINE: u32 = 256;
 pub const MAX_KEYSPACE: u64 = 100_000_000;
 pub const MAX_VALUE_SIZE: u32 = 1_048_576;
 pub const MAX_TIMEOUT_MS: u64 = 60_000;
+pub const MAX_SLOT: u16 = 16_383;
+pub const MAX_TTL_SECONDS: u64 = 86_400 * 365;
 
 /// 校验错误: 直接携带面向用户的中文原因.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -85,10 +95,14 @@ pub struct WorkloadConfig {
     pub key_prefix: String,
     /// true: key 包 `{}`, 全部压到同一 slot (定向单节点)
     pub use_hashtag: bool,
+    /// 集中单槽时的目标槽位 (0..=16383); None 表示由 key_prefix 哈希决定
+    pub target_slot: Option<u16>,
     pub value_size_min: u32,
     pub value_size_max: u32,
     /// SET 带 TTL 的比例
     pub ttl_ratio: f64,
+    /// SET/EXPIRE 的 TTL 过期秒数
+    pub ttl_seconds: u64,
     /// 读不存在 key 的比例
     pub miss_ratio: f64,
     pub mix: Mix,
@@ -104,15 +118,17 @@ impl Default for WorkloadConfig {
         Self {
             mode: TargetMode::Cluster,
             endpoints: vec!["127.0.0.1:6379".to_string()],
-            target_ops: 3_000,
-            connections: 6,
-            pipeline: 16,
+            target_ops: 5_000,
+            connections: 8,
+            pipeline: 8,
             keyspace: 100_000,
             key_prefix: "loadgen".to_string(),
             use_hashtag: false,
+            target_slot: None,
             value_size_min: 64,
-            value_size_max: 64,
+            value_size_max: 256,
             ttl_ratio: 0.0,
+            ttl_seconds: 60,
             miss_ratio: 0.1,
             mix: Mix::default(),
             timeout_ms: 1_000,
@@ -134,9 +150,12 @@ pub struct ConfigPatch {
     pub keyspace: Option<u64>,
     pub key_prefix: Option<String>,
     pub use_hashtag: Option<bool>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub target_slot: Option<Option<u16>>,
     pub value_size_min: Option<u32>,
     pub value_size_max: Option<u32>,
     pub ttl_ratio: Option<f64>,
+    pub ttl_seconds: Option<u64>,
     pub miss_ratio: Option<f64>,
     pub mix: Option<Mix>,
     pub timeout_ms: Option<u64>,
@@ -170,6 +189,9 @@ impl ConfigPatch {
         if let Some(v) = self.use_hashtag {
             cfg.use_hashtag = v;
         }
+        if let Some(v) = self.target_slot {
+            cfg.target_slot = v;
+        }
         if let Some(v) = self.value_size_min {
             cfg.value_size_min = v;
         }
@@ -178,6 +200,9 @@ impl ConfigPatch {
         }
         if let Some(v) = self.ttl_ratio {
             cfg.ttl_ratio = v;
+        }
+        if let Some(v) = self.ttl_seconds {
+            cfg.ttl_seconds = v;
         }
         if let Some(v) = self.miss_ratio {
             cfg.miss_ratio = v;
@@ -226,6 +251,13 @@ impl WorkloadConfig {
         if self.key_prefix.contains('{') || self.key_prefix.contains('}') {
             return Err(ConfigError::new("key_prefix 不能包含大括号"));
         }
+        if let Some(slot) = self.target_slot {
+            if slot > MAX_SLOT {
+                return Err(ConfigError::new(format!(
+                    "target_slot 必须在 0..={MAX_SLOT}"
+                )));
+            }
+        }
         if !(1..=MAX_VALUE_SIZE).contains(&self.value_size_min)
             || !(1..=MAX_VALUE_SIZE).contains(&self.value_size_max)
         {
@@ -238,6 +270,11 @@ impl WorkloadConfig {
         }
         if !(0.0..=1.0).contains(&self.ttl_ratio) {
             return Err(ConfigError::new("ttl_ratio 必须在 0.0..=1.0"));
+        }
+        if !(1..=MAX_TTL_SECONDS).contains(&self.ttl_seconds) {
+            return Err(ConfigError::new(format!(
+                "ttl_seconds 必须在 1..={MAX_TTL_SECONDS}"
+            )));
         }
         if !(0.0..=1.0).contains(&self.miss_ratio) {
             return Err(ConfigError::new("miss_ratio 必须在 0.0..=1.0"));

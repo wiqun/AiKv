@@ -21,16 +21,16 @@
 
 | 分组 | 参数 | 默认 | 说明 |
 |---|---|---|---|
-| 压力 | target_ops | 3000 | 限速上限; `0` = 不限速尽力压 |
-| | connections | 6 | 并行 worker 数 (每 worker 一条逻辑连接) |
-| | pipeline | 16 | 每个 worker 一次网络往返打包的命令条数 |
-| 数据 | keyspace / key_prefix | 100000 / loadgen | key 数量与前缀 (`loadgen:key:N`) |
-| | value_size_min/max | 64 / 64 | SET 值大小 |
-| | miss_ratio | 0.1 | 读不存在 key 的比例 |
-| | ttl_ratio | 0 | SET 带 60s TTL 的比例 |
-| | use_hashtag | false | true 时全部 key 钉同一 slot; cluster 默认每轮 pipeline 已自动同 slot |
+| 压力 | target_ops | 5000 | 限速上限; `0` = 不限速尽力压 |
+| | connections | 8 | 并行 worker 数 (每 worker 一条逻辑连接) |
+| | pipeline | 8 | 每个 worker 一次网络往返打包的命令条数 |
+| 数据 | keyspace / key_prefix | 100000 / loadgen | key 数量与前缀 (`loadgen:key:N` / `loadgen:churn:N` 等) |
+| | value_size_min/max | 64 / 256 | SET 值大小 |
+| | miss_ratio | 0.1 | 读未命中比例 (前端呈现为键命中率 `0.9`); 引擎采用意图分层隔离机制 (key/miss/churn/ttl/int), 保证主数据段命中率精准恒定, 彻底消除 DEL/TTL 腐蚀 |
+| | ttl_ratio / ttl_seconds | 0 / 60 | SET 带 TTL 的写入比例与过期时长 (秒) |
+| | use_hashtag / target_slot | false / null | 集中单槽及目标槽位 (0..=16383); target_slot 为 null 时跟随 key_prefix 默认哈希 |
 | 混合 | set/get/del/mget/incr/expire | 40/40/5/10/3/2 | 权重自动归一化 |
-| 行为 | timeout_ms / readonly | 1000 / false | 只读模式下写命令降级为读 |
+| 行为 | timeout_ms | 1000 | 命令超时时间 (毫秒) |
 
 - 改表单不影响正在跑的任务, 也不会自动停止; 运行中状态由后台自己维护. 点「启动」才按当前表单开新任务 (若已在跑则先停再起, 整批重建 worker, 不是差值加减).
 - 令牌桶按 `target_ops` 限速发卡, 这是天花板不是机器性能承诺; 实际发出速率还受 `连接数 × pipeline / 往返时延` 限制. `0` 表示不限速.

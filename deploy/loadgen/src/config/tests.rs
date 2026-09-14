@@ -139,7 +139,7 @@ fn patch_rejects_invalid_value_and_keeps_base() {
     let base = WorkloadConfig::default();
     let patch: ConfigPatch = serde_json::from_str(r#"{"connections": 0}"#).unwrap();
     assert!(base.patched(&patch).is_err());
-    assert_eq!(base.connections, 6);
+    assert_eq!(base.connections, 8);
 }
 
 #[test]
@@ -158,4 +158,45 @@ fn endpoint_parsing() {
     assert!(parse_endpoint(":6379").is_err());
     assert!(parse_endpoint("127.0.0.1:0").is_err());
     assert!(parse_endpoint("127.0.0.1:70000").is_err());
+}
+
+#[test]
+fn rejects_invalid_target_slot_and_ttl_seconds() {
+    let bad_slot = WorkloadConfig {
+        target_slot: Some(16_384),
+        ..Default::default()
+    };
+    assert!(bad_slot.validate().is_err());
+
+    let good_slot = WorkloadConfig {
+        target_slot: Some(16_383),
+        ..Default::default()
+    };
+    assert!(good_slot.validate().is_ok());
+
+    let zero_ttl = WorkloadConfig {
+        ttl_seconds: 0,
+        ..Default::default()
+    };
+    assert!(zero_ttl.validate().is_err());
+
+    let good_ttl = WorkloadConfig {
+        ttl_seconds: 300,
+        ..Default::default()
+    };
+    assert!(good_ttl.validate().is_ok());
+}
+
+#[test]
+fn patch_target_slot_and_ttl_seconds() {
+    let base = WorkloadConfig::default();
+    let patch: ConfigPatch =
+        serde_json::from_str(r#"{"target_slot": 1024, "ttl_seconds": 120}"#).unwrap();
+    let next = base.patched(&patch).unwrap();
+    assert_eq!(next.target_slot, Some(1024));
+    assert_eq!(next.ttl_seconds, 120);
+
+    let clear_patch: ConfigPatch = serde_json::from_str(r#"{"target_slot": null}"#).unwrap();
+    let restored = next.patched(&clear_patch).unwrap();
+    assert_eq!(restored.target_slot, None);
 }

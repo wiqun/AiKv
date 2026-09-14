@@ -136,6 +136,17 @@ pub(crate) fn pause_reason(all_unreachable: bool, cluster_state: Option<&str>) -
     None
 }
 
+/// CLUSTER INFO 成功则交出真实 cluster_state; 读失败返回 None, 不臆造 unreachable.
+pub(crate) fn cluster_view_after_probe(info: redis::RedisResult<String>) -> Option<String> {
+    match info {
+        Ok(state) => Some(state),
+        Err(err) => {
+            tracing::warn!(%err, "CLUSTER INFO 读取失败, 本次探活不据此暂停");
+            None
+        }
+    }
+}
+
 /// 单地址 PING 探活 (供 UI 展示连接可用性).
 pub async fn ping(addr: &str, timeout: Duration) -> bool {
     let attempt = async {
@@ -192,5 +203,17 @@ mod tests {
         assert!(pause_reason(false, Some("fail")).is_some());
         assert!(pause_reason(false, Some("ok")).is_none());
         assert!(pause_reason(false, None).is_none());
+    }
+
+    /// CLUSTER INFO 读失败不是 Redis 的 cluster_state, 不能写成 unreachable 去暂停派发.
+    #[test]
+    fn cluster_info_read_error_does_not_invent_unreachable() {
+        let err = redis::RedisError::from((redis::ErrorKind::Io, "timeout"));
+        assert_eq!(cluster_view_after_probe(Err(err)), None);
+        assert_eq!(cluster_view_after_probe(Ok("ok".into())), Some("ok".into()));
+        assert_eq!(
+            cluster_view_after_probe(Ok("fail".into())),
+            Some("fail".into())
+        );
     }
 }

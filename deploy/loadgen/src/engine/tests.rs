@@ -120,3 +120,45 @@ fn doubles_connect_backoff_until_cap() {
         Duration::from_secs(10)
     );
 }
+
+#[test]
+fn runtime_state_watermarks_reset_on_epoch_bump() {
+    let state = RuntimeState::default();
+    state.watermarks.main.store(100, Ordering::Relaxed);
+    state.watermarks.ttl.store(50, Ordering::Relaxed);
+    state.watermarks.churn.store(25, Ordering::Relaxed);
+
+    state.bump_run_epoch();
+
+    assert_eq!(state.watermarks.main.load(Ordering::Relaxed), 0);
+    assert_eq!(state.watermarks.ttl.load(Ordering::Relaxed), 0);
+    assert_eq!(state.watermarks.churn.load(Ordering::Relaxed), 0);
+}
+
+/// 派发从暂停恢复后应清掉暂停原因, 避免控制台一直 toast 过期的「已暂停派发」.
+#[tokio::test]
+async fn resume_clears_stale_pause_error() {
+    let state = RuntimeState::default();
+    state
+        .set_paused(true, Some("集群状态为 unreachable, 已暂停派发".into()))
+        .await;
+    assert!(state.is_paused());
+    assert!(state.last_error().await.is_some());
+
+    state.set_paused(false, None).await;
+    assert!(!state.is_paused());
+    assert!(
+        state.last_error().await.is_none(),
+        "恢复派发后 last_error 应清空"
+    );
+
+    state
+        .set_paused(true, Some("全部节点不可达, 已暂停派发".into()))
+        .await;
+    state.resume_dispatch().await;
+    assert!(!state.is_paused());
+    assert!(
+        state.last_error().await.is_none(),
+        "点启动 resume_dispatch 也应清掉过期暂停错误"
+    );
+}

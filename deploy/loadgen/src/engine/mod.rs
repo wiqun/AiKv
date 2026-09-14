@@ -99,6 +99,7 @@ pub fn plan_actions(
 #[derive(Debug, Default)]
 pub struct RuntimeState {
     pub workers: AtomicU64,
+    pub watermarks: crate::workload::Watermarks,
     run_epoch: AtomicU64,
     dispatch_paused: AtomicBool,
     endpoint_status: Mutex<Vec<EndpointStatus>>,
@@ -135,12 +136,21 @@ impl RuntimeState {
         self.dispatch_paused.load(Ordering::Relaxed)
     }
 
-    pub fn resume_dispatch(&self) {
-        self.dispatch_paused.store(false, Ordering::Relaxed);
+    pub async fn resume_dispatch(&self) {
+        self.set_paused(false, None).await;
     }
 
     pub fn bump_run_epoch(&self) -> u64 {
+        self.watermarks.reset();
         self.run_epoch.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    pub fn reset_watermark(&self) {
+        self.watermarks.reset();
+    }
+
+    pub fn write_watermark(&self) -> u64 {
+        self.watermarks.main.load(Ordering::Relaxed)
     }
 
     pub fn run_epoch(&self) -> u64 {
@@ -153,6 +163,8 @@ impl RuntimeState {
             if let Some(reason) = reason {
                 self.record_error(reason).await;
             }
+        } else if !paused && was {
+            *self.last_error.lock().await = None;
         }
     }
 
@@ -401,8 +413,8 @@ async fn run_worker_ticks(tick: WorkerTick<'_>) -> bool {
             Tick::Retry => continue,
             Tick::Go => {}
         }
-        let plan = plan_batch(tick.frozen, tick.rng);
-        let pipe = build_pipeline(&plan, tick.value);
+        let plan = plan_batch(tick.frozen, &tick.state.watermarks, tick.rng);
+        let pipe = build_pipeline(&plan, tick.frozen.keyspace, tick.value);
         if let Err(err) = tick.conn.exec(&pipe).await {
             tick.state.record_error(format!("执行失败: {err}")).await;
             if needs_reconnect(&err) {
@@ -528,14 +540,7 @@ async fn probe_once(
     let any_up = statuses.iter().any(|item| item.reachable);
     let cluster_view = if current.mode == TargetMode::Cluster {
         let seed = current.endpoints.first().cloned().unwrap_or_default();
-        let seed_up = statuses
-            .iter()
-            .any(|item| item.addr == seed && item.reachable);
-        match crate::conn::cluster_state(&seed, timeout).await {
-            Ok(status) => Some(status),
-            Err(_) if seed_up => Some("unreachable".to_string()),
-            Err(_) => None,
-        }
+        crate::conn::cluster_view_after_probe(crate::conn::cluster_state(&seed, timeout).await)
     } else {
         None
     };

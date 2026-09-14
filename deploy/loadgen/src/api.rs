@@ -80,7 +80,7 @@ async fn put_config(
         .map_err(|err| bad_request(err.to_string()))?;
     if patch.running == Some(true) {
         crate::conn::check_ready(&next).await.map_err(bad_request)?;
-        app.state.resume_dispatch();
+        app.state.resume_dispatch().await;
         app.state.bump_run_epoch();
     }
     app.cfg.store(Arc::new(next));
@@ -199,8 +199,8 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let json = body_json(response).await;
-        assert_eq!(json["config"]["connections"], 6);
-        assert_eq!(json["config"]["target_ops"], 3000);
+        assert_eq!(json["config"]["connections"], 8);
+        assert_eq!(json["config"]["target_ops"], 5000);
         assert_eq!(json["runtime"]["state"], "stopped");
     }
 
@@ -208,14 +208,14 @@ mod tests {
     async fn put_config_applies_patch() {
         let request = Request::put("/api/config")
             .header("content-type", "application/json")
-            .body(Body::from(r#"{"target_ops": 5000}"#))
+            .body(Body::from(r#"{"target_ops": 8000}"#))
             .unwrap();
         let response = app().oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let json = body_json(response).await;
-        assert_eq!(json["config"]["target_ops"], 5000);
+        assert_eq!(json["config"]["target_ops"], 8000);
         assert_eq!(json["config"]["running"], false);
-        assert_eq!(json["config"]["connections"], 6);
+        assert_eq!(json["config"]["connections"], 8);
     }
 
     #[tokio::test]
