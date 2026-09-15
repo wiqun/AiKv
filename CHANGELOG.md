@@ -9,15 +9,18 @@
 
 ### Added
 
+- `deploy/README.md`: 增加部署模块总览与架构说明, 涵盖单机, 集群, 可观测性与压测工具的拓扑关系及快速上手链路.
 - `deploy/loadgen/`: 交互式加压工具 (Rust 独立 crate), 单页控制台设参后点启动, 支持单机/集群, 不含结果统计.
 
 ### Changed
 
-- deploy: 一级入口改为 `aikv-single.sh` / `aikv-cluster.sh` / `observability.sh` / `loadgen.sh` (`build|up|down`, 容器栈无 `status`); 删除 `build-image.sh` / `up-*.sh` / `status.sh` / `down.sh`.
+- deploy: 统一 4 个部署脚本风格 (`die`, `need`, `load_dotenv`), 适配 macOS/Linux 双系统 (消除 `sed -i` 跨平台差异, `loadgen.sh` 采用 POSIX `nohup ... &` 后台解绑); 修复自定义 bind IP 时的本地探活与集群管理链路.
+- deploy: 规范化 Docker Compose 配置, 为数据库节点注入 `ulimits: nofile` 与 `logging` 日志轮转限制; 单机与集群数据目录统一收口至本地 `.runtime/` 挂载并支持 `--purge` 级联清理; 可观测性监控栈支持按平台自适应 cAdvisor, Prometheus 升级为原生健康检查.
+- deploy/docs: 全面清洗并规范化 `deploy/loadgen/README.md` 与 `deploy/observability/README.md` 的标点, 格式与技术对齐.
 - loadgen: 控制台 html/css/js 从 `web/` 磁盘读取; 默认值与预设来自 `loadgen.example.toml`, 本机 `loadgen.toml` 不进仓库.
-- loadgen: 探活改为 30s; 启动前拒绝不健康目标; 全节点不可达或 CLUSTERDOWN 时暂停派发、保留 worker.
+- loadgen: 探活改为 30s; 启动前拒绝不健康目标; 全节点不可达或 CLUSTERDOWN 时暂停派发, 保留 worker.
 - loadgen: 改表单不影响正在跑的任务; 只有点启动才按当前表单开新任务 (已在跑则先停再起), 不做差值缩放.
-- loadgen: 默认限速 3000 ops/s、连接数 6.
+- loadgen: 默认限速 3000 ops/s, 连接数 6.
 - loadgen: 控制台目标改为 IP/端口拆分, cluster 只需一个 seed; 失败改为底部提示.
 
 ### Performance

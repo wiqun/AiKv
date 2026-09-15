@@ -16,6 +16,11 @@ services:
           memory: 128M
         reservations:
           memory: 64M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
     networks:
       - aikv-net
 
@@ -39,12 +44,23 @@ services:
       - --web.enable-lifecycle
       - --web.enable-remote-write-receiver
       - --web.enable-admin-api
+    healthcheck:
+      test: ["CMD", "/bin/wget", "-q", "--tries=1", "--spider", "http://127.0.0.1:9090/-/ready"]
+      interval: 10s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
     deploy:
       resources:
         limits:
           memory: 256M
         reservations:
           memory: 128M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
     networks:
       - aikv-net
 
@@ -68,19 +84,33 @@ services:
       - ./config/grafana/dashboards:/var/lib/grafana/dashboards:ro
       - grafana-data:/var/lib/grafana
     depends_on:
-      - prometheus
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/api/health"]
+      interval: 10s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
     deploy:
       resources:
         limits:
           memory: 1G
         reservations:
           memory: 256M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
     networks:
       - aikv-net
 
 volumes:
   prom-data:
+    name: aikv-prom-data
   grafana-data:
+    name: aikv-grafana-data
 
 networks:
   aikv-net:

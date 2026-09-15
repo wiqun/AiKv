@@ -2,8 +2,10 @@ name: aikv-single
 services:
   aikv-single:
     image: ${AIKV_IMAGE:-aikv:dev}
+    container_name: aikv-single
     command: ["--config", "/etc/aikv/aikv.toml"]
     restart: unless-stopped
+    stop_grace_period: 30s
     environment:
       OTEL_RESOURCE_ATTRIBUTES: "${OTEL_RESOURCE_ATTRIBUTES:-cluster=single}"
       AIKV_HOST_LABEL: "${AIKV_HOST_LABEL:-localhost}"
@@ -15,7 +17,18 @@ services:
         source: ./.runtime/single/aikv.toml
         target: /etc/aikv/aikv.toml
         read_only: true
-      - aikv:/var/lib/aikv/data
+      - type: bind
+        source: ./.runtime/single/data
+        target: /var/lib/aikv/data
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9191/health"]
       interval: 10s
@@ -24,10 +37,6 @@ services:
       retries: 3
     networks:
       - aikv-net
-
-volumes:
-  aikv:
-    name: aikv
 
 networks:
   aikv-net:

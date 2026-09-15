@@ -2,9 +2,19 @@ x-aikv-node: &aikv-node
   image: ${AIKV_IMAGE:-aikv:dev}
   command: ["--config", "/etc/aikv/aikv.toml"]
   restart: unless-stopped
+  stop_grace_period: 30s
   environment:
     OTEL_RESOURCE_ATTRIBUTES: "${OTEL_RESOURCE_ATTRIBUTES:-cluster=dev}"
     AIKV_HOST_LABEL: "${AIKV_HOST_LABEL:-localhost}"
+  ulimits:
+    nofile:
+      soft: 65535
+      hard: 65535
+  logging:
+    driver: "json-file"
+    options:
+      max-size: "50m"
+      max-file: "3"
   networks:
     - aikv-net
 
@@ -23,7 +33,9 @@ services:
         source: ./.runtime/cluster/node1/aikv.toml
         target: /etc/aikv/aikv.toml
         read_only: true
-      - aikv1-data:/var/lib/aikv/data
+      - type: bind
+        source: ./.runtime/cluster/node1/data
+        target: /var/lib/aikv/data
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9191/health"]
       interval: 10s
@@ -44,7 +56,9 @@ services:
         source: ./.runtime/cluster/node2/aikv.toml
         target: /etc/aikv/aikv.toml
         read_only: true
-      - aikv2-data:/var/lib/aikv/data
+      - type: bind
+        source: ./.runtime/cluster/node2/data
+        target: /var/lib/aikv/data
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9192/health"]
       interval: 10s
@@ -65,7 +79,9 @@ services:
         source: ./.runtime/cluster/node3/aikv.toml
         target: /etc/aikv/aikv.toml
         read_only: true
-      - aikv3-data:/var/lib/aikv/data
+      - type: bind
+        source: ./.runtime/cluster/node3/data
+        target: /var/lib/aikv/data
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9193/health"]
       interval: 10s
@@ -86,7 +102,9 @@ services:
         source: ./.runtime/cluster/node4/aikv.toml
         target: /etc/aikv/aikv.toml
         read_only: true
-      - aikv4-data:/var/lib/aikv/data
+      - type: bind
+        source: ./.runtime/cluster/node4/data
+        target: /var/lib/aikv/data
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9194/health"]
       interval: 10s
@@ -107,7 +125,9 @@ services:
         source: ./.runtime/cluster/node5/aikv.toml
         target: /etc/aikv/aikv.toml
         read_only: true
-      - aikv5-data:/var/lib/aikv/data
+      - type: bind
+        source: ./.runtime/cluster/node5/data
+        target: /var/lib/aikv/data
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9195/health"]
       interval: 10s
@@ -128,7 +148,9 @@ services:
         source: ./.runtime/cluster/node6/aikv.toml
         target: /etc/aikv/aikv.toml
         read_only: true
-      - aikv6-data:/var/lib/aikv/data
+      - type: bind
+        source: ./.runtime/cluster/node6/data
+        target: /var/lib/aikv/data
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9196/health"]
       interval: 10s
@@ -139,17 +161,3 @@ services:
 networks:
   aikv-net:
     name: aikv-net
-
-volumes:
-  aikv1-data:
-    name: aikv1-data
-  aikv2-data:
-    name: aikv2-data
-  aikv3-data:
-    name: aikv3-data
-  aikv4-data:
-    name: aikv4-data
-  aikv5-data:
-    name: aikv5-data
-  aikv6-data:
-    name: aikv6-data

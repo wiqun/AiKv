@@ -22,6 +22,7 @@ METRICS_PORTS=(9191 9192 9193 9194 9195 9196)
 NODE_NAMES=(aikv-1 aikv-2 aikv-3 aikv-4 aikv-5 aikv-6)
 STARTUP_TIMEOUT_SECONDS=""
 ANNOUNCE_IP=""
+PROBE_IP="127.0.0.1"
 OTLP_ENDPOINT=""
 
 usage() {
@@ -30,6 +31,11 @@ usage() {
     printf '  up [-b|--bind IP] [-a|--announce IP]\n' >&2
     printf '  down [--purge]\n' >&2
     exit 2
+}
+
+die() {
+    printf 'error: %s\n' "$*" >&2
+    exit 1
 }
 
 load_dotenv() {
@@ -52,14 +58,11 @@ load_dotenv() {
     done < "$SCRIPT_DIR/.env"
 }
 
-die() {
-    printf 'error: %s\n' "$*" >&2
-    exit 1
-}
-
-require_command() {
-    command -v "$1" >/dev/null 2>&1 ||
-        die "required command not found: $1"
+need() {
+    local cmd
+    for cmd in "$@"; do
+        command -v "$cmd" >/dev/null 2>&1 || die "required command not found: $cmd"
+    done
 }
 
 compose() {
@@ -88,14 +91,11 @@ cmd_build() {
             *) usage ;;
         esac
     done
-    require_command docker
+    need docker
     local image="${AIKV_IMAGE:-aikv:dev}"
     if (( use_local )); then
-        if [[ ! -d "$WORKSPACE_ROOT/aidb" ]]; then
-            printf 'error: local AiDb checkout not found: %s\n' "$WORKSPACE_ROOT/aidb" >&2
-            exit 1
-        fi
-        printf 'Building %s with local AiDb source at %s...\n' "$image" "$WORKSPACE_ROOT/aidb"
+        [[ -d "$WORKSPACE_ROOT/aidb" ]] || die "未找到本地 AiDb 源码目录: $WORKSPACE_ROOT/aidb"
+        printf '正在基于本地 AiDb 源码 (%s) 构建镜像 %s...\n' "$WORKSPACE_ROOT/aidb" "$image"
         local ctx
         ctx="$(mktemp -d "${TMPDIR:-/tmp}/aikv-local-context.XXXXXX")"
         cleanup_local_context() { rm -rf -- "$ctx"; }
@@ -107,10 +107,10 @@ cmd_build() {
         trap - EXIT
         cleanup_local_context
     else
-        printf 'Building %s with GitHub main aidb dependency...\n' "$image"
+        printf '正在基于 GitHub 主分支构建镜像 %s...\n' "$image"
         docker build -f "$AIKV_ROOT/deploy/Dockerfile" -t "$image" "$AIKV_ROOT"
     fi
-    printf 'Successfully built %s\n' "$image"
+    printf '镜像构建成功: %s\n' "$image"
 }
 
 cmd_down() {
@@ -122,14 +122,21 @@ cmd_down() {
             *) usage ;;
         esac
     done
-    require_command docker
+    need docker
     docker compose version >/dev/null
     if [[ -z "$(compose ps -aq 2>/dev/null || true)" ]]; then
-        printf 'aikv-cluster 未运行\n'
+        if (( purge )) && [[ -d "$RUNTIME_ROOT" ]]; then
+            rm -rf -- "$RUNTIME_ROOT"
+            printf 'aikv-cluster 未运行, 已清理残留的节点数据与配置\n'
+        else
+            printf 'aikv-cluster 未运行\n'
+        fi
         exit 0
     fi
     if (( purge )); then
         compose down --volumes
+        rm -rf -- "$RUNTIME_ROOT"
+        printf 'aikv-cluster 已停止并清理全部节点数据与配置\n'
     else
         compose down
     fi
@@ -138,11 +145,11 @@ cmd_down() {
 redis_command() {
     local port="$1"
     shift
-    redis-cli -h 127.0.0.1 -p "$port" -t 1 --raw "$@"
+    redis-cli -h "$PROBE_IP" -p "$port" -t 1 --raw "$@"
 }
 
 generate_configs() {
-    local node index client_port rpc_port metrics_port node_name node_dir
+    local node index client_port rpc_port metrics_port node_name node_dir sed_exprs
     mkdir -p "$RUNTIME_ROOT"
 
     for index in "${!NODE_NAMES[@]}"; do
@@ -153,8 +160,7 @@ generate_configs() {
         node_name="${NODE_NAMES[$index]}"
         node_dir="$RUNTIME_ROOT/node$node"
 
-        mkdir -p "$node_dir"
-        cp "$TEMPLATE" "$node_dir/aikv.toml"
+        mkdir -p "$node_dir/data"
         sed_exprs=(
             -e "s|^bind = .*|bind = \"0.0.0.0:$client_port\"|"
             -e 's|^metrics_addr = .*|metrics_addr = "0.0.0.0"|'
@@ -163,7 +169,8 @@ generate_configs() {
         if [[ -n "$OTLP_ENDPOINT" && "$OTLP_ENDPOINT" != "none" ]]; then
             sed_exprs+=(-e "s|^#\? *otlp_endpoint = .*|otlp_endpoint = \"$OTLP_ENDPOINT\"|")
         fi
-        sed -i "${sed_exprs[@]}" "$node_dir/aikv.toml"
+        sed "${sed_exprs[@]}" "$TEMPLATE" > "$node_dir/aikv.toml"
+
         {
             printf '\n[cluster]\n'
             printf 'node_id = %d\n' "$node"
@@ -192,7 +199,7 @@ wait_for_pong() {
         sleep 1
     done
 
-    die "$node did not answer PONG on 127.0.0.1:$port within ${STARTUP_TIMEOUT_SECONDS}s"
+    die "$node 未能在 ${STARTUP_TIMEOUT_SECONDS}s 内响应 PONG ($PROBE_IP:$port)"
 }
 
 wait_for_all_nodes() {
@@ -246,11 +253,11 @@ validate_known_nodes() {
 
     known_count="$(awk 'NF { count++ } END { print count + 0 }' <<< "$nodes")"
     [[ "$known_count" == "6" ]] ||
-        die "conflicting cluster topology: expected 6 known nodes, found $known_count"
+        die "集群拓扑冲突: 期望 6 个已知节点, 实际发现 $known_count"
 
     for port in "${CLIENT_PORTS[@]}"; do
         [[ -n "$(node_line "$nodes" "$port")" ]] ||
-            die "conflicting cluster topology: no node advertises $ANNOUNCE_IP:$port"
+            die "集群拓扑冲突: 节点列表未包含端口 $port"
     done
 }
 
@@ -268,7 +275,7 @@ wait_for_known_nodes() {
         sleep 1
     done
 
-    die "cluster did not converge to 6 known nodes within ${STARTUP_TIMEOUT_SECONDS}s"
+    die "集群未能在 ${STARTUP_TIMEOUT_SECONDS}s 内收敛至 6 个已知节点"
 }
 
 meet_missing_nodes() {
@@ -287,7 +294,7 @@ meet_missing_nodes() {
 
         response="$(redis_command 6379 CLUSTER MEET "$node_name" "$port" "$rpc_port" "$ANNOUNCE_IP")"
         [[ "$response" == "OK" ]] ||
-            die "CLUSTER MEET for $node_name returned: $response"
+            die "对 $node_name 执行 CLUSTER MEET 失败, 返回: $response"
     done
 }
 
@@ -298,26 +305,26 @@ replicate_if_needed() {
     local line flags slots response
 
     line="$(node_line "$nodes" "$replica_port")"
-    [[ -n "$line" ]] || die "missing node for client port $replica_port"
+    [[ -n "$line" ]] || die "未找到客户端端口为 $replica_port 的节点"
     flags="$(node_flags_from_line "$line")"
     slots="$(node_slots_from_line "$line")"
 
     case ",$flags," in
         *,slave,*)
             [[ "$(node_primary_from_line "$line")" == "$primary_id" ]] ||
-                die "conflicting replica relationship on port $replica_port"
+                die "端口 $replica_port 上的副本关系冲突"
             [[ -z "$slots" ]] ||
-                die "conflicting slot ownership on replica port $replica_port"
+                die "端口 $replica_port 上的副本异常持有 slot"
             ;;
         *,master,*)
             [[ -z "$slots" ]] ||
-                die "conflicting master slot ownership on port $replica_port"
+                die "端口 $replica_port 上的节点已有 slot 分配冲突"
             response="$(redis_command "$replica_port" CLUSTER REPLICATE "$primary_id")"
             [[ "$response" == "OK" ]] ||
-                die "CLUSTER REPLICATE on port $replica_port returned: $response"
+                die "在端口 $replica_port 执行 CLUSTER REPLICATE 失败, 返回: $response"
             ;;
         *)
-            die "unexpected role flags on port $replica_port: $flags"
+            die "端口 $replica_port 上的节点角色标签异常: $flags"
             ;;
     esac
 }
@@ -333,21 +340,21 @@ add_slots_if_needed() {
 
     nodes="$(cluster_nodes)"
     line="$(node_line "$nodes" "$port")"
-    [[ -n "$line" ]] || die "missing node for slot owner port $port"
+    [[ -n "$line" ]] || die "未找到 slot 目标端口为 $port 的节点"
     slots="$(node_slots_from_line "$line")"
 
     if [[ "$slots" == "$expected_slots" ]]; then
         return 0
     fi
     [[ -z "$slots" ]] ||
-        die "conflicting slot ownership on port $port: $slots"
+        die "端口 $port 上的 slot 分配冲突: $slots"
 
     for (( slot = start; slot <= end; slot++ )); do
         slot_args+=("$slot")
     done
     response="$(redis_command "$port" CLUSTER ADDSLOTS "${slot_args[@]}")"
     [[ "$response" == "OK" ]] ||
-        die "CLUSTER ADDSLOTS on port $port returned: $response"
+        die "在端口 $port 执行 CLUSTER ADDSLOTS 失败, 返回: $response"
 }
 
 add_replica_if_needed() {
@@ -358,7 +365,7 @@ add_replica_if_needed() {
 
     nodes="$(cluster_nodes)"
     line="$(node_line "$nodes" "$replica_port")"
-    [[ -n "$line" ]] || die "missing node for replica port $replica_port"
+    [[ -n "$line" ]] || die "未找到端口为 $replica_port 的副本节点"
     flags="$(node_flags_from_line "$line")"
     primary="$(node_primary_from_line "$line")"
     slots="$(node_slots_from_line "$line")"
@@ -366,20 +373,20 @@ add_replica_if_needed() {
     case ",$flags," in
         *,slave,*)
             [[ "$primary" == "$primary_id" ]] ||
-                die "conflicting replica relationship on port $replica_port"
+                die "端口 $replica_port 上的副本主节点从属关系冲突"
             [[ -z "$slots" ]] ||
-                die "replica on port $replica_port owns slots"
+                die "端口 $replica_port 上的副本节点异常持有 slot"
             ;;
         *,master,*)
             [[ -z "$slots" ]] ||
-                die "conflicting master slot ownership on port $replica_port"
+                die "端口 $replica_port 上的主节点已有 slot 分配冲突"
             response="$(redis_command "$primary_port" CLUSTER ADD_REPLICA \
                 "$primary_id" "$(node_id_from_line "$line")")"
             [[ "$response" == "OK" ]] ||
-                die "CLUSTER ADD_REPLICA for port $replica_port returned: $response"
+                die "对端口 $replica_port 执行 CLUSTER ADD_REPLICA 失败, 返回: $response"
             ;;
         *)
-            die "unexpected role flags on port $replica_port: $flags"
+            die "端口 $replica_port 上的节点角色标签异常: $flags"
             ;;
     esac
 }
@@ -401,9 +408,9 @@ validate_final_topology() {
         flags="$(node_flags_from_line "$line")"
         slots="$(node_slots_from_line "$line")"
         [[ ",$flags," == *,master,* ]] ||
-            die "expected master on port $port, got flags: $flags"
+            die "端口 $port 期望为主节点, 实际角色标签: $flags"
         [[ -n "$slots" ]] ||
-            die "master on port $port has no slots"
+            die "端口 $port 上的主节点未持有 slot"
     done
 
     for port in 6380 6381; do
@@ -411,9 +418,9 @@ validate_final_topology() {
         flags="$(node_flags_from_line "$line")"
         primary="$(node_primary_from_line "$line")"
         [[ ",$flags," == *,slave,* && "$primary" == "$master_id" ]] ||
-            die "expected port $port to replicate $master_id"
+            die "端口 $port 期望复制主节点 $master_id"
         [[ -z "$(node_slots_from_line "$line")" ]] ||
-            die "replica on port $port owns slots"
+            die "端口 $port 上的副本节点异常持有 slot"
     done
 
     for port in 7380 7381; do
@@ -421,26 +428,26 @@ validate_final_topology() {
         flags="$(node_flags_from_line "$line")"
         primary="$(node_primary_from_line "$line")"
         [[ ",$flags," == *,slave,* && "$primary" == "$shard2_id" ]] ||
-            die "expected port $port to replicate $shard2_id"
+            die "端口 $port 期望复制分片主节点 $shard2_id"
         [[ -z "$(node_slots_from_line "$line")" ]] ||
-            die "replica on port $port owns slots"
+            die "端口 $port 上的副本节点异常持有 slot"
     done
 
     master_count="$(awk -F' ' '$3 ~ /(^|,)master(,|$)/ { count++ } END { print count + 0 }' <<< "$nodes")"
     replica_count="$(awk -F' ' '$3 ~ /(^|,)slave(,|$)/ { count++ } END { print count + 0 }' <<< "$nodes")"
     [[ "$master_count" == "2" && "$replica_count" == "4" ]] ||
-        die "expected 2 masters and 4 replicas, found $master_count masters and $replica_count replicas"
+        die "期望 2 个主节点与 4 个副本节点, 实际发现 $master_count 个主节点, $replica_count 个副本节点"
 
     info="$(redis_command 6379 CLUSTER INFO)"
     state="$(awk -F: '$1 == "cluster_state" { print $2 }' <<< "$info")"
     known="$(awk -F: '$1 == "cluster_known_nodes" { print $2 }' <<< "$info")"
     size="$(awk -F: '$1 == "cluster_size" { print $2 }' <<< "$info")"
     assigned="$(awk -F: '$1 == "cluster_slots_assigned" { print $2 }' <<< "$info")"
-    [[ "$state" == "ok" ]] || die "cluster_state is $state, expected ok"
-    [[ "$known" == "6" ]] || die "cluster_known_nodes is $known, expected 6"
-    [[ "$size" == "2" ]] || die "cluster_size is $size, expected 2"
+    [[ "$state" == "ok" ]] || die "cluster_state 为 $state, 期望为 ok"
+    [[ "$known" == "6" ]] || die "cluster_known_nodes 为 $known, 期望为 6"
+    [[ "$size" == "2" ]] || die "cluster_size 为 $size, 期望为 2"
     [[ "$assigned" == "16384" ]] ||
-        die "cluster_slots_assigned is $assigned, expected 16384"
+        die "cluster_slots_assigned 为 $assigned, 期望为 16384"
 }
 
 cmd_up() {
@@ -470,9 +477,14 @@ cmd_up() {
     done
     export AIKV_BIND_IP="$bind_ip"
 
+    PROBE_IP="$bind_ip"
+    if [[ "$PROBE_IP" == "0.0.0.0" ]]; then
+        PROBE_IP="127.0.0.1"
+    fi
+
     STARTUP_TIMEOUT_SECONDS="${AIKV_CLUSTER_TIMEOUT_SECONDS:-120}"
     if ! [[ "$STARTUP_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
-        die "AIKV_CLUSTER_TIMEOUT_SECONDS must be a positive integer"
+        die "AIKV_CLUSTER_TIMEOUT_SECONDS 必须为正整数"
     fi
     OTLP_ENDPOINT="${AIKV_OTLP_ENDPOINT:-}"
     if [[ -z "$OTLP_ENDPOINT" ]]; then
@@ -483,18 +495,14 @@ cmd_up() {
         fi
     fi
 
-    require_command docker
-    require_command redis-cli
-    require_command curl
+    need docker redis-cli curl
     docker compose version >/dev/null
     local image="${AIKV_IMAGE:-aikv:dev}"
     if ! docker image inspect "$image" >/dev/null 2>&1; then
-        printf 'error: 镜像不存在: %s\n先运行: %s build\n' "$image" "$(basename "$0")" >&2
-        exit 1
+        die "镜像不存在: $image (请先执行: $(basename "$0") build)"
     fi
 
     generate_configs
-    # Remove containers from the previous service names before rebinding ports.
     compose up -d --remove-orphans
     wait_for_all_nodes
 
@@ -502,7 +510,7 @@ cmd_up() {
     nodes="$(cluster_nodes)"
     known_count="$(awk 'NF { count++ } END { print count + 0 }' <<< "$nodes")"
     if (( known_count > 6 )); then
-        die "conflicting cluster topology: found $known_count known nodes"
+        die "集群拓扑冲突: 发现 $known_count 个已知节点"
     fi
     meet_missing_nodes "$nodes"
     nodes="$(wait_for_known_nodes)"
@@ -510,7 +518,7 @@ cmd_up() {
     node1_id="$(node_id_from_line "$(node_line "$nodes" 6379)")"
     node4_id="$(node_id_from_line "$(node_line "$nodes" 7379)")"
     [[ "$node1_id" != "$node4_id" && -n "$node1_id" && -n "$node4_id" ]] ||
-        die "could not obtain distinct master node IDs"
+        die "未能获取到互不相同的主节点 ID"
 
     replicate_if_needed "$nodes" 6380 "$node1_id"
     replicate_if_needed "$nodes" 6381 "$node1_id"
@@ -527,9 +535,9 @@ cmd_up() {
 
     validate_final_topology
     if [[ -n "$OTLP_ENDPOINT" && "$OTLP_ENDPOINT" != "none" ]]; then
-        printf 'aikv cluster is ready: 2 masters, 4 replicas, 16384 slots (OTel: %s)\n' "$OTLP_ENDPOINT"
+        printf 'aikv 集群已就绪: 2 主节点, 4 副本节点, 16384 槽位 (OTel: %s)\n' "$OTLP_ENDPOINT"
     else
-        printf 'aikv cluster is ready: 2 masters, 4 replicas, 16384 slots\n'
+        printf 'aikv 集群已就绪: 2 主节点, 4 副本节点, 16384 槽位\n'
     fi
 }
 

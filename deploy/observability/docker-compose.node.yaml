@@ -4,6 +4,7 @@ services:
     image: prom/node-exporter:v1.9.0
     container_name: node-exporter
     restart: unless-stopped
+    pid: "host"
     command:
       - --path.procfs=/host/proc
       - --path.sysfs=/host/sys
@@ -19,6 +20,11 @@ services:
           memory: 64M
         reservations:
           memory: 32M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
     networks:
       - aikv-net
 

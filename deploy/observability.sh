@@ -16,18 +16,58 @@ usage() {
     exit 2
 }
 
+die() {
+    printf 'error: %s\n' "$*" >&2
+    exit 1
+}
+
+load_dotenv() {
+    local line _k _v
+    [[ -f "$ENV_FILE" ]] || return 0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+        if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+            _k="${BASH_REMATCH[1]}"
+            _v="${BASH_REMATCH[2]}"
+            _v="${_v%\"}"
+            _v="${_v#\"}"
+            _v="${_v%\'}"
+            _v="${_v#\'}"
+            if [[ -z "${!_k+x}" ]]; then
+                export "$_k=$_v"
+            fi
+        fi
+    done < "$ENV_FILE"
+}
+
 need() {
     local cmd
     for cmd in "$@"; do
-        command -v "$cmd" >/dev/null 2>&1 || {
-            printf 'error: required command not found: %s\n' "$cmd" >&2
-            exit 1
-        }
+        command -v "$cmd" >/dev/null 2>&1 || die "required command not found: $cmd"
     done
 }
 
 probe_native_node_exporter() {
     curl -fsS -m 2 "http://127.0.0.1:9100/metrics" 2>/dev/null | grep -qE '^node_'
+}
+
+has_cadvisor_support() {
+    [[ -f "$CADVISOR_COMPOSE_FILE" ]] || return 1
+    # macOS 或缺少 /dev/kmsg 设备的环境自动跳过 cAdvisor, 避免容器挂载崩溃
+    if [[ "$OSTYPE" != "linux"* ]] || [[ ! -e "/dev/kmsg" ]]; then
+        return 1
+    fi
+    return 0
+}
+
+write_target_if_changed() {
+    local target_file="$1"
+    local content="$2"
+    if [[ -f "$target_file" ]] && [[ "$(<"$target_file")" == "$content" ]]; then
+        return 0
+    fi
+    printf '%s\n' "$content" > "$target_file"
 }
 
 ensure_env() {
@@ -43,26 +83,22 @@ prepare_compose_files() {
     local targets_dir="$OBS_DIR/config/prometheus/targets"
     COMPOSE_FILES=("-f" "$COMPOSE_FILE")
     mkdir -p "$targets_dir"
-    if [[ ! -f "$targets_dir/cadvisor.yaml" ]]; then
-        cat <<'EOF' >"$targets_dir/cadvisor.yaml"
-- targets:
-    - cadvisor:8080
-EOF
+
+    if has_cadvisor_support; then
+        COMPOSE_FILES+=("-f" "$CADVISOR_COMPOSE_FILE")
+        write_target_if_changed "$targets_dir/cadvisor.yaml" "- targets:
+    - cadvisor:8080"
+    else
+        write_target_if_changed "$targets_dir/cadvisor.yaml" "- targets: []"
     fi
+
     if probe_native_node_exporter; then
-        cat <<'EOF' >"$targets_dir/node.yaml"
-- targets:
-    - host.docker.internal:9100
-EOF
+        write_target_if_changed "$targets_dir/node.yaml" "- targets:
+    - host.docker.internal:9100"
     else
         COMPOSE_FILES+=("-f" "$NODE_COMPOSE_FILE")
-        cat <<'EOF' >"$targets_dir/node.yaml"
-- targets:
-    - node-exporter:9100
-EOF
-    fi
-    if [[ -f "$CADVISOR_COMPOSE_FILE" ]]; then
-        COMPOSE_FILES+=("-f" "$CADVISOR_COMPOSE_FILE")
+        write_target_if_changed "$targets_dir/node.yaml" "- targets:
+    - node-exporter:9100"
     fi
 }
 
@@ -77,8 +113,13 @@ cmd_up() {
     need docker curl
     docker compose version >/dev/null
     ensure_env
+    load_dotenv
     prepare_compose_files
-    printf '正在启动可观测性容器服务...\n'
+    if has_cadvisor_support; then
+        printf '正在启动可观测性容器服务 (含 cAdvisor)...\n'
+    else
+        printf '正在启动可观测性容器服务 (非 Linux/无 /dev/kmsg 环境, 已自动跳过 cAdvisor)...\n'
+    fi
     compose up -d
 
     local i prom_ready=0 grafana_ready=0 health_resp
@@ -101,10 +142,9 @@ cmd_up() {
         sleep 2
     done
     if (( !prom_ready || !grafana_ready )); then
-        printf 'error: 服务在 60s 内未完全就绪\n' >&2
         compose ps >&2 || true
         compose logs --tail 20 >&2 || true
-        exit 1
+        die "服务在 60s 内未完全就绪"
     fi
     printf '可观测性监控栈已就绪\n'
     printf '  Grafana:     http://127.0.0.1:3000 (admin/admin)\n'
@@ -125,6 +165,7 @@ cmd_down() {
     need docker
     docker compose version >/dev/null
     ensure_env
+    load_dotenv
     prepare_compose_files
     if [[ -z "$(compose ps -aq 2>/dev/null || true)" ]]; then
         printf 'observability 未运行\n'
@@ -137,6 +178,7 @@ cmd_down() {
     fi
 }
 
+load_dotenv
 cmd="${1:-}"
 if [[ -z "$cmd" ]]; then
     usage

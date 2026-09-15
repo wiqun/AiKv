@@ -1,2 +1,1 @@
-- targets:
-    - cadvisor:8080
+- targets: []

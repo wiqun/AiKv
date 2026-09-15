@@ -19,13 +19,35 @@ usage() {
     exit 2
 }
 
+die() {
+    printf 'error: %s\n' "$*" >&2
+    exit 1
+}
+
+load_dotenv() {
+    local line _k _v
+    [[ -f "$SCRIPT_DIR/.env" ]] || return 0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+        if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+            _k="${BASH_REMATCH[1]}"
+            _v="${BASH_REMATCH[2]}"
+            _v="${_v%\"}"
+            _v="${_v#\"}"
+            _v="${_v%\'}"
+            _v="${_v#\'}"
+            if [[ -z "${!_k+x}" ]]; then
+                export "$_k=$_v"
+            fi
+        fi
+    done < "$SCRIPT_DIR/.env"
+}
+
 need() {
     local cmd
     for cmd in "$@"; do
-        command -v "$cmd" >/dev/null 2>&1 || {
-            printf 'error: required command not found: %s\n' "$cmd" >&2
-            exit 1
-        }
+        command -v "$cmd" >/dev/null 2>&1 || die "required command not found: $cmd"
     done
 }
 
@@ -56,10 +78,10 @@ load_saved_bind() {
 }
 
 cmd_build() {
-    need cargo
     if (( $# > 0 )); then
         usage
     fi
+    need cargo
     (cd "$CRATE_DIR" && cargo build --release)
     printf '构建完成: %s\n' "$BIN"
 }
@@ -94,10 +116,10 @@ cmd_down() {
 }
 
 cmd_status() {
-    need curl
     if (( $# > 0 )); then
         usage
     fi
+    need curl
     load_saved_bind
     local probe_url pid
     probe_url="$(probe_url_from_bind)"
@@ -106,7 +128,7 @@ cmd_status() {
         printf '进程: 运行中 (PID %s)\n' "$pid"
     else
         printf '进程: 未运行\n'
-        exit 0
+        exit 1
     fi
     if ! curl_local 2 "${probe_url}/health" >/dev/null 2>&1; then
         printf '探活: 失败 (%s/health 无响应)\n' "$probe_url"
@@ -119,7 +141,6 @@ cmd_status() {
 }
 
 cmd_up() {
-    need curl
     local config=""
     while (( $# > 0 )); do
         case "$1" in
@@ -144,6 +165,7 @@ cmd_up() {
         esac
     done
 
+    need curl
     local probe_url
     probe_url="$(probe_url_from_bind)"
 
@@ -164,23 +186,20 @@ cmd_up() {
         args+=(--config "$DEFAULT_CONFIG")
     fi
 
-    setsid -f -- "$BIN" "${args[@]}" </dev/null >>"$LOG_FILE" 2>&1
-    local pid="" _
-    for _ in $(seq 1 20); do
-        pid="$(pgrep -n -f -- "$BIN" || true)"
-        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-            break
-        fi
-        sleep 0.1
-    done
-    if [[ -z "$pid" ]]; then
+    nohup "$BIN" "${args[@]}" </dev/null >>"$LOG_FILE" 2>&1 &
+    local pid=$!
+
+    sleep 0.1
+    if ! kill -0 "$pid" 2>/dev/null; then
         printf 'error: 未能启动 loadgen, 请检查日志: %s\n' "$LOG_FILE" >&2
         tail -n 20 "$LOG_FILE" >&2 || true
         exit 1
     fi
+
     printf '%s' "$pid" > "$PID_FILE"
     printf '%s' "$BIND" > "$BIND_FILE"
 
+    local _
     for _ in $(seq 1 50); do
         if curl_local 1 "${probe_url}/health" >/dev/null 2>&1; then
             printf 'loadgen 已启动 (PID %s)\n控制台: %s\n日志: %s\n' "$pid" "$probe_url" "$LOG_FILE"
@@ -194,6 +213,7 @@ cmd_up() {
     exit 1
 }
 
+load_dotenv
 cmd="${1:-}"
 if [[ -z "$cmd" ]]; then
     usage
