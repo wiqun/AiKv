@@ -44,7 +44,7 @@ flowchart LR
 
 ```bash
 cd deploy
-./up-observability.sh
+./observability.sh up
 ```
 
 脚本将自动检测 Docker/Compose 环境、自 `deploy/.env.example` 复制默认环境变量、启动服务并执行 60 秒轮询探活。
@@ -57,10 +57,10 @@ cd deploy
 
 ```bash
 # 停止容器并保留历史监控数据卷 (prom-data, grafana-data)
-docker compose --project-directory deploy/observability -f deploy/observability/docker-compose.yaml --env-file deploy/.env down
+./observability.sh down
 
 # 停止容器并彻底清空历史监控数据卷
-docker compose --project-directory deploy/observability -f deploy/observability/docker-compose.yaml --env-file deploy/.env down -v
+./observability.sh down --purge
 ```
 
 ---

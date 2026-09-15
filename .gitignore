@@ -8,3 +8,4 @@
 deploy/.runtime/
 *.bak
 deploy/loadgen/target/
+deploy/loadgen/loadgen.toml

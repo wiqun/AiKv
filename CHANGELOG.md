@@ -13,6 +13,8 @@
 
 ### Changed
 
+- deploy: 一级入口改为 `aikv-single.sh` / `aikv-cluster.sh` / `observability.sh` / `loadgen.sh` (`build|up|down`, 容器栈无 `status`); 删除 `build-image.sh` / `up-*.sh` / `status.sh` / `down.sh`.
+- loadgen: 控制台 html/css/js 从 `web/` 磁盘读取; 默认值与预设来自 `loadgen.example.toml`, 本机 `loadgen.toml` 不进仓库.
 - loadgen: 探活改为 30s; 启动前拒绝不健康目标; 全节点不可达或 CLUSTERDOWN 时暂停派发、保留 worker.
 - loadgen: 改表单不影响正在跑的任务; 只有点启动才按当前表单开新任务 (已在跑则先停再起), 不做差值缩放.
 - loadgen: 默认限速 3000 ops/s、连接数 6.

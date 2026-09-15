@@ -1,8 +1,40 @@
 #!/usr/bin/env bash
+# aikv 集群容器: build | up | down
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f "$SCRIPT_DIR/.env" ]]; then
+AIKV_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+AIKV_PARENT="$(dirname -- "$AIKV_ROOT")"
+if [[ "$(basename -- "$AIKV_PARENT")" == ".worktrees" ]]; then
+    WORKSPACE_ROOT="$(cd -- "$AIKV_ROOT/../.." && pwd)"
+else
+    WORKSPACE_ROOT="$(cd -- "$AIKV_ROOT/.." && pwd)"
+fi
+COMPOSE_FILE="$SCRIPT_DIR/docker-compose.cluster.yaml"
+TEMPLATE="$SCRIPT_DIR/aikv.example.toml"
+RUNTIME_ROOT="$SCRIPT_DIR/.runtime/cluster"
+PROJECT_NAME="aikv-cluster"
+export DOCKER_BUILDKIT=1
+
+CLIENT_PORTS=(6379 6380 6381 7379 7380 7381)
+RPC_PORTS=(16379 16380 16381 17379 17380 17381)
+METRICS_PORTS=(9191 9192 9193 9194 9195 9196)
+NODE_NAMES=(aikv-1 aikv-2 aikv-3 aikv-4 aikv-5 aikv-6)
+STARTUP_TIMEOUT_SECONDS=""
+ANNOUNCE_IP=""
+OTLP_ENDPOINT=""
+
+usage() {
+    printf '用法: %s build|up|down\n' "$(basename "$0")" >&2
+    printf '  build [--local]\n' >&2
+    printf '  up [-b|--bind IP] [-a|--announce IP]\n' >&2
+    printf '  down [--purge]\n' >&2
+    exit 2
+}
+
+load_dotenv() {
+    local line _k _v
+    [[ -f "$SCRIPT_DIR/.env" ]] || return 0
     while IFS= read -r line || [[ -n "$line" ]]; do
         [[ "$line" =~ ^[[:space:]]*# ]] && continue
         [[ "$line" =~ ^[[:space:]]*$ ]] && continue
@@ -18,27 +50,7 @@ if [[ -f "$SCRIPT_DIR/.env" ]]; then
             fi
         fi
     done < "$SCRIPT_DIR/.env"
-    unset _k _v
-fi
-COMPOSE_FILE="$SCRIPT_DIR/docker-compose.cluster.yaml"
-TEMPLATE="$SCRIPT_DIR/aikv.example.toml"
-RUNTIME_ROOT="$SCRIPT_DIR/.runtime/cluster"
-PROJECT_NAME="aikv-cluster"
-STARTUP_TIMEOUT_SECONDS="${AIKV_CLUSTER_TIMEOUT_SECONDS:-120}"
-ANNOUNCE_IP="${AIKV_ANNOUNCE_IP:-127.0.0.1}"
-OTLP_ENDPOINT="${AIKV_OTLP_ENDPOINT:-}"
-if [[ -z "$OTLP_ENDPOINT" ]]; then
-    if docker ps --format '{{.Names}}' 2>/dev/null | grep -qE '^(aikv-)?otel-collector$'; then
-        OTLP_ENDPOINT="http://aikv-otel-collector:4317"
-    else
-        OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
-    fi
-fi
-
-CLIENT_PORTS=(6379 6380 6381 7379 7380 7381)
-RPC_PORTS=(16379 16380 16381 17379 17380 17381)
-METRICS_PORTS=(9191 9192 9193 9194 9195 9196)
-NODE_NAMES=(aikv-1 aikv-2 aikv-3 aikv-4 aikv-5 aikv-6)
+}
 
 die() {
     printf 'error: %s\n' "$*" >&2
@@ -50,17 +62,77 @@ require_command() {
         die "required command not found: $1"
 }
 
-if ! [[ "$STARTUP_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
-    die "AIKV_CLUSTER_TIMEOUT_SECONDS must be a positive integer"
-fi
-
-require_command docker
-require_command redis-cli
-require_command curl
-docker compose version >/dev/null
-
 compose() {
     docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" "$@"
+}
+
+copy_context_tree() {
+    tar -C "$1" \
+        --exclude='.git' \
+        --exclude='target' \
+        --exclude='.runtime' \
+        --exclude='.env' \
+        --exclude='.env.*' \
+        --exclude='.venv*' \
+        --exclude='*.log' \
+        --exclude='*.pid' \
+        -cf - . | tar -C "$2" -xf -
+}
+
+cmd_build() {
+    local use_local=0
+    while (( $# > 0 )); do
+        case "$1" in
+            --local) use_local=1; shift ;;
+            -h|--help) usage ;;
+            *) usage ;;
+        esac
+    done
+    require_command docker
+    local image="${AIKV_IMAGE:-aikv:dev}"
+    if (( use_local )); then
+        if [[ ! -d "$WORKSPACE_ROOT/aidb" ]]; then
+            printf 'error: local AiDb checkout not found: %s\n' "$WORKSPACE_ROOT/aidb" >&2
+            exit 1
+        fi
+        printf 'Building %s with local AiDb source at %s...\n' "$image" "$WORKSPACE_ROOT/aidb"
+        local ctx
+        ctx="$(mktemp -d "${TMPDIR:-/tmp}/aikv-local-context.XXXXXX")"
+        cleanup_local_context() { rm -rf -- "$ctx"; }
+        trap cleanup_local_context EXIT
+        mkdir -p "$ctx/aikv" "$ctx/aidb"
+        copy_context_tree "$AIKV_ROOT" "$ctx/aikv"
+        copy_context_tree "$WORKSPACE_ROOT/aidb" "$ctx/aidb"
+        docker build -f "$ctx/aikv/deploy/Dockerfile.local" -t "$image" "$ctx"
+        trap - EXIT
+        cleanup_local_context
+    else
+        printf 'Building %s with GitHub main aidb dependency...\n' "$image"
+        docker build -f "$AIKV_ROOT/deploy/Dockerfile" -t "$image" "$AIKV_ROOT"
+    fi
+    printf 'Successfully built %s\n' "$image"
+}
+
+cmd_down() {
+    local purge=0
+    while (( $# > 0 )); do
+        case "$1" in
+            --purge) purge=1; shift ;;
+            -h|--help) usage ;;
+            *) usage ;;
+        esac
+    done
+    require_command docker
+    docker compose version >/dev/null
+    if [[ -z "$(compose ps -aq 2>/dev/null || true)" ]]; then
+        printf 'aikv-cluster 未运行\n'
+        exit 0
+    fi
+    if (( purge )); then
+        compose down --volumes
+    else
+        compose down
+    fi
 }
 
 redis_command() {
@@ -371,40 +443,106 @@ validate_final_topology() {
         die "cluster_slots_assigned is $assigned, expected 16384"
 }
 
-generate_configs
-# Remove containers from the previous service names before rebinding ports.
-compose up -d --remove-orphans
-wait_for_all_nodes
+cmd_up() {
+    local bind_ip="${AIKV_BIND_IP:-127.0.0.1}"
+    ANNOUNCE_IP="${AIKV_ANNOUNCE_IP:-127.0.0.1}"
+    while (( $# > 0 )); do
+        case "$1" in
+            -b|--bind)
+                if (( $# < 2 )); then
+                    printf 'error: %s 需要参数\n' "$1" >&2
+                    usage
+                fi
+                bind_ip="$2"
+                shift 2
+                ;;
+            -a|--announce)
+                if (( $# < 2 )); then
+                    printf 'error: %s 需要参数\n' "$1" >&2
+                    usage
+                fi
+                ANNOUNCE_IP="$2"
+                shift 2
+                ;;
+            -h|--help) usage ;;
+            *) usage ;;
+        esac
+    done
+    export AIKV_BIND_IP="$bind_ip"
 
-nodes="$(cluster_nodes)"
-known_count="$(awk 'NF { count++ } END { print count + 0 }' <<< "$nodes")"
-if (( known_count > 6 )); then
-    die "conflicting cluster topology: found $known_count known nodes"
+    STARTUP_TIMEOUT_SECONDS="${AIKV_CLUSTER_TIMEOUT_SECONDS:-120}"
+    if ! [[ "$STARTUP_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+        die "AIKV_CLUSTER_TIMEOUT_SECONDS must be a positive integer"
+    fi
+    OTLP_ENDPOINT="${AIKV_OTLP_ENDPOINT:-}"
+    if [[ -z "$OTLP_ENDPOINT" ]]; then
+        if docker ps --format '{{.Names}}' 2>/dev/null | grep -qE '^(aikv-)?otel-collector$'; then
+            OTLP_ENDPOINT="http://aikv-otel-collector:4317"
+        else
+            OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
+        fi
+    fi
+
+    require_command docker
+    require_command redis-cli
+    require_command curl
+    docker compose version >/dev/null
+    local image="${AIKV_IMAGE:-aikv:dev}"
+    if ! docker image inspect "$image" >/dev/null 2>&1; then
+        printf 'error: 镜像不存在: %s\n先运行: %s build\n' "$image" "$(basename "$0")" >&2
+        exit 1
+    fi
+
+    generate_configs
+    # Remove containers from the previous service names before rebinding ports.
+    compose up -d --remove-orphans
+    wait_for_all_nodes
+
+    local nodes known_count node1_id node4_id
+    nodes="$(cluster_nodes)"
+    known_count="$(awk 'NF { count++ } END { print count + 0 }' <<< "$nodes")"
+    if (( known_count > 6 )); then
+        die "conflicting cluster topology: found $known_count known nodes"
+    fi
+    meet_missing_nodes "$nodes"
+    nodes="$(wait_for_known_nodes)"
+
+    node1_id="$(node_id_from_line "$(node_line "$nodes" 6379)")"
+    node4_id="$(node_id_from_line "$(node_line "$nodes" 7379)")"
+    [[ "$node1_id" != "$node4_id" && -n "$node1_id" && -n "$node4_id" ]] ||
+        die "could not obtain distinct master node IDs"
+
+    replicate_if_needed "$nodes" 6380 "$node1_id"
+    replicate_if_needed "$nodes" 6381 "$node1_id"
+    replicate_if_needed "$nodes" 7380 "$node4_id"
+    replicate_if_needed "$nodes" 7381 "$node4_id"
+
+    add_slots_if_needed 6379 "0-8191" 0 8191
+    add_slots_if_needed 7379 "8192-16383" 8192 16383
+
+    add_replica_if_needed 6379 6380 "$node1_id"
+    add_replica_if_needed 6379 6381 "$node1_id"
+    add_replica_if_needed 7379 7380 "$node4_id"
+    add_replica_if_needed 7379 7381 "$node4_id"
+
+    validate_final_topology
+    if [[ -n "$OTLP_ENDPOINT" && "$OTLP_ENDPOINT" != "none" ]]; then
+        printf 'aikv cluster is ready: 2 masters, 4 replicas, 16384 slots (OTel: %s)\n' "$OTLP_ENDPOINT"
+    else
+        printf 'aikv cluster is ready: 2 masters, 4 replicas, 16384 slots\n'
+    fi
+}
+
+load_dotenv
+cmd="${1:-}"
+if [[ -z "$cmd" ]]; then
+    usage
 fi
-meet_missing_nodes "$nodes"
-nodes="$(wait_for_known_nodes)"
-
-node1_id="$(node_id_from_line "$(node_line "$nodes" 6379)")"
-node4_id="$(node_id_from_line "$(node_line "$nodes" 7379)")"
-[[ "$node1_id" != "$node4_id" && -n "$node1_id" && -n "$node4_id" ]] ||
-    die "could not obtain distinct master node IDs"
-
-replicate_if_needed "$nodes" 6380 "$node1_id"
-replicate_if_needed "$nodes" 6381 "$node1_id"
-replicate_if_needed "$nodes" 7380 "$node4_id"
-replicate_if_needed "$nodes" 7381 "$node4_id"
-
-add_slots_if_needed 6379 "0-8191" 0 8191
-add_slots_if_needed 7379 "8192-16383" 8192 16383
-
-add_replica_if_needed 6379 6380 "$node1_id"
-add_replica_if_needed 6379 6381 "$node1_id"
-add_replica_if_needed 7379 7380 "$node4_id"
-add_replica_if_needed 7379 7381 "$node4_id"
-
-validate_final_topology
-if [[ -n "$OTLP_ENDPOINT" && "$OTLP_ENDPOINT" != "none" ]]; then
-    printf 'aikv cluster is ready: 2 masters, 4 replicas, 16384 slots (OTel: %s)\n' "$OTLP_ENDPOINT"
-else
-    printf 'aikv cluster is ready: 2 masters, 4 replicas, 16384 slots\n'
-fi
+shift
+case "$cmd" in
+    build) cmd_build "$@" ;;
+    up) cmd_up "$@" ;;
+    down) cmd_down "$@" ;;
+    -h|--help) usage ;;
+    *) usage ;;
+esac

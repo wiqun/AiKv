@@ -101,24 +101,24 @@ fn rejects_bad_prefix() {
 }
 
 #[test]
-fn rejects_bad_endpoints() {
+fn rejects_bad_endpoint() {
     let cfg = WorkloadConfig {
-        endpoints: vec![],
+        endpoint: "".to_string(),
         ..Default::default()
     };
     assert!(cfg.validate().is_err());
     let cfg = WorkloadConfig {
-        endpoints: vec!["127.0.0.1".to_string()],
+        endpoint: "127.0.0.1".to_string(),
         ..Default::default()
     };
     assert!(cfg.validate().is_err());
     let cfg = WorkloadConfig {
-        endpoints: vec!["127.0.0.1:0".to_string()],
+        endpoint: "127.0.0.1:0".to_string(),
         ..Default::default()
     };
     assert!(cfg.validate().is_err());
     let cfg = WorkloadConfig {
-        endpoints: vec!["127.0.0.1:70000".to_string()],
+        endpoint: "127.0.0.1:70000".to_string(),
         ..Default::default()
     };
     assert!(cfg.validate().is_err());

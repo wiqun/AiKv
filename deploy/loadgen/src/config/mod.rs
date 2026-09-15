@@ -118,13 +118,16 @@ impl fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
+mod file;
+pub use file::{code_defaults, load_ui, LoadedUi, Preset};
+
 /// 加压参数快照 (整体原子替换).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct WorkloadConfig {
     pub mode: TargetMode,
-    /// 目标地址列表 (`host:port`)
-    pub endpoints: Vec<String>,
+    /// 目标地址 (`host:port`)
+    pub endpoint: String,
     /// 目标总速率 (ops/s); 0 = 不限速尽力压
     pub target_ops: u64,
     /// worker 数 (每 worker 一条连接)
@@ -155,7 +158,7 @@ impl Default for WorkloadConfig {
     fn default() -> Self {
         Self {
             mode: TargetMode::Cluster,
-            endpoints: vec!["127.0.0.1:6379".to_string()],
+            endpoint: "127.0.0.1:6379".to_string(),
             target_ops: 5_000,
             connections: 8,
             pipeline: 8,
@@ -180,7 +183,7 @@ impl Default for WorkloadConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct ConfigPatch {
     pub mode: Option<TargetMode>,
-    pub endpoints: Option<Vec<String>>,
+    pub endpoint: Option<String>,
     pub target_ops: Option<u64>,
     pub connections: Option<u32>,
     pub pipeline: Option<u32>,
@@ -206,8 +209,8 @@ impl ConfigPatch {
         if let Some(v) = self.mode {
             cfg.mode = v;
         }
-        if let Some(v) = &self.endpoints {
-            cfg.endpoints = v.clone();
+        if let Some(v) = &self.endpoint {
+            cfg.endpoint = v.clone();
         }
         if let Some(v) = self.target_ops {
             cfg.target_ops = v;
@@ -259,12 +262,10 @@ impl ConfigPatch {
 
 impl WorkloadConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.endpoints.is_empty() {
-            return Err(ConfigError::new("endpoints 不能为空"));
+        if self.endpoint.trim().is_empty() {
+            return Err(ConfigError::new("endpoint 不能为空"));
         }
-        for endpoint in &self.endpoints {
-            parse_endpoint(endpoint)?;
-        }
+        parse_endpoint(&self.endpoint)?;
         if !(1..=MAX_CONNECTIONS).contains(&self.connections) {
             return Err(ConfigError::new(format!(
                 "connections 必须在 1..={MAX_CONNECTIONS}"

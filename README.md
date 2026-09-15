@@ -111,27 +111,26 @@ redis-cli -p 6379 GET mykey
 
 ```bash
 # 默认 GitHub main 构建 (aidb)
-./deploy/build-image.sh
-./deploy/up-single.sh
-./deploy/status.sh
-./deploy/down.sh
+./deploy/aikv-single.sh build
+./deploy/aikv-single.sh up
+./deploy/aikv-single.sh down
 
 # 本地同层级 ../aidb 构建并启动六节点集群
-./deploy/build-image.sh --local
-./deploy/up-cluster.sh
-./deploy/status.sh cluster
-./deploy/down.sh cluster --purge
+./deploy/aikv-cluster.sh build --local
+./deploy/aikv-cluster.sh up
+./deploy/aikv-cluster.sh down --purge
 ```
 
 默认 Docker 构建使用 GitHub `main` 分支上的 `aidb`; `--local` 使用 aikv 同层级的
 `../aidb`. Compose 文件只引用预构建镜像, 不负责 build 或 pull; 镜像名默认为
 `aikv:dev`, 可用 `AIKV_IMAGE` 覆盖.
 
-`up-single.sh` 只启动一个容器, 使用 named volume `aikv`. `up-cluster.sh` 会
+`aikv-single.sh up` 只启动一个容器, 使用 named volume `aikv`. `aikv-cluster.sh up` 会
 生成六份节点配置并启动 2 个分片、每个分片 1 主 2 从的 Redis Cluster 拓扑.
 启动时会清理同一 Compose project 中旧服务名产生的 orphan 容器. 运行时配置位于
-`deploy/.runtime/`, 默认 `down.sh` 保留 named volumes; 只有显式 `--purge`
+`deploy/.runtime/`, 默认 `down` 保留 named volumes; 只有显式 `--purge`
 才删除数据卷. 该开发阶段快速部署参考不提供旧卷到新卷的数据迁移.
+运行状态用 `docker ps` 查看.
 
 集群容器名称为 `aikv-1` 至 `aikv-6`. 宿主机客户端端口依次为
 `6379`, `6380`, `6381`, `7379`, `7380`, `7381`; MetaRaft 端口依次为
@@ -142,13 +141,15 @@ redis-cli -p 6379 GET mykey
 远程或跨主机访问时需同时设置宿主机绑定与公布地址:
 
 ```bash
-AIKV_BIND_IP=0.0.0.0 AIKV_ANNOUNCE_IP=192.168.1.112 ./deploy/up-cluster.sh
+./deploy/aikv-cluster.sh up -b 0.0.0.0 -a 192.168.1.112
 ```
 
 - `AIKV_BIND_IP`: Compose 端口映射的宿主机地址, 默认 `127.0.0.1`
 - `AIKV_ANNOUNCE_IP`: 写入 `client_addr` / `CLUSTER MEET` 的公布 IP, 默认 `127.0.0.1`
 
-单机 Compose (`up-single.sh`) 同样支持 `AIKV_BIND_IP`, 默认仍仅本机可连.
+单机 Compose (`aikv-single.sh up`) 同样支持 `-b/--bind`, 默认仍仅本机可连.
+
+监控栈: `./deploy/observability.sh up`. 加压控制台: `./deploy/loadgen.sh up` (http://127.0.0.1:8787).
 
 ### 集群部署与运维
 

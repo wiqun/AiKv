@@ -82,15 +82,20 @@ AiKv 采用四层配置合并, 优先级从低到高: **内置默认值 → TOML
 `deploy/` 目录提供基于 Docker 的一键部署脚本, 运行时配置由模板复制至 `deploy/.runtime/` (已加入 `.gitignore`):
 
 ```bash
-./deploy/build-image.sh
-./deploy/up-single.sh
-./deploy/up-cluster.sh
-./deploy/status.sh
-./deploy/down.sh
+./deploy/aikv-single.sh build
+./deploy/aikv-single.sh up
+./deploy/aikv-single.sh down
+
+./deploy/aikv-cluster.sh build --local
+./deploy/aikv-cluster.sh up
+./deploy/aikv-cluster.sh down --purge
 ```
 
-- `up-single.sh`: 单机 aidb 模式, 使用 [`deploy/aikv.example.toml`](../deploy/aikv.example.toml) 中的容器路径与 Metrics 端口.
-- `up-cluster.sh`: 启动 **6 个节点** 的 Redis Cluster 拓扑.
+- `aikv-single.sh`: 单机 aidb 模式, 使用 [`deploy/aikv.example.toml`](../deploy/aikv.example.toml) 中的容器路径与 Metrics 端口.
+- `aikv-cluster.sh`: 启动 **6 个节点** 的 Redis Cluster 拓扑.
+- `observability.sh`: 本地 Prometheus / Grafana / OTel Collector (`up` / `down [--purge]`).
+- `loadgen.sh`: 交互式加压控制台, 见 §3.6.
+- 运行状态用 `docker compose ps` / `docker ps` 查看, 容器脚本不提供 `status`.
 - 集群客户端入口: `redis-cli -c -p 6379` (智能客户端, 自动跟随 `-MOVED` / `-ASK` 重定向).
 
 ### 3.4 Docker 镜像来源与 Compose 拓扑
@@ -103,15 +108,13 @@ AiKv 采用四层配置合并, 优先级从低到高: **内置默认值 → TOML
 推荐工作流:
 
 ```bash
-./deploy/build-image.sh
-./deploy/up-single.sh
-./deploy/status.sh
-./deploy/down.sh
+./deploy/aikv-single.sh build
+./deploy/aikv-single.sh up
+./deploy/aikv-single.sh down
 
-./deploy/build-image.sh --local
-./deploy/up-cluster.sh
-./deploy/status.sh cluster
-./deploy/down.sh cluster --purge
+./deploy/aikv-cluster.sh build --local
+./deploy/aikv-cluster.sh up
+./deploy/aikv-cluster.sh down --purge
 ```
 
 单机模式使用一个容器, 映射客户端 `6379` 和 Metrics `9191`, 数据卷名称为
@@ -123,11 +126,10 @@ AiKv 采用四层配置合并, 优先级从低到高: **内置默认值 → TOML
 `9191-9196`. 集群数据卷名称为 `aikv1-data` 至 `aikv6-data`.
 
 启动脚本将基线模板复制到 `deploy/.runtime/`; 集群模式再为每个节点追加
-`[cluster]` 配置. `up-cluster.sh` 启动时会移除同一 Compose project 中旧服务名
-产生的 orphan 容器, 以避免升级后旧容器继续占用端口. 默认 `down.sh` 停止并移除
+`[cluster]` 配置. `aikv-cluster.sh up` 会移除同一 Compose project 中旧服务名
+产生的 orphan 容器, 以避免升级后旧容器继续占用端口. 默认 `down` 停止并移除
 容器但保留 named volumes, 只有显式 `--purge` 才删除数据; 该快速部署参考不提供
-旧卷到新卷的数据迁移. 如果 single 和 cluster 容器同时存在, `down.sh` 必须显式
-指定模式以避免误删.
+旧卷到新卷的数据迁移. 单机与集群是两套独立脚本, 互不影响.
 
 集群对外公布的 client 地址默认仍为 `127.0.0.1:<宿主客户端端口>`, 适合本机
 `redis-cli -c -p 6379` 跟随 `MOVED` 重定向. 远程或跨主机访问时须同时设置:
@@ -144,7 +146,7 @@ AiKv 采用四层配置合并, 优先级从低到高: **内置默认值 → TOML
 示例 (局域网单机六节点, 对外公布本机局域网 IP):
 
 ```bash
-AIKV_BIND_IP=0.0.0.0 AIKV_ANNOUNCE_IP=192.168.1.112 ./deploy/up-cluster.sh
+./deploy/aikv-cluster.sh up -b 0.0.0.0 -a 192.168.1.112
 ```
 
 ### 3.5 环境变量概要
@@ -157,7 +159,7 @@ AIKV_BIND_IP=0.0.0.0 AIKV_ANNOUNCE_IP=192.168.1.112 ./deploy/up-cluster.sh
 | 可观测 | `AIKV_JSON_LOG`, `AIKV_METRICS_ADDR`, `AIKV_OTLP_ENDPOINT` | 对应 `[observability]`; OTLP 端点 `OTEL_EXPORTER_OTLP_ENDPOINT` 优先于 `AIKV_OTLP_ENDPOINT` |
 | 集群 | `AIKV_CLUSTER_NODE_ID`, `AIKV_CLUSTER_RPC_ADDR`, `AIKV_CLUSTER_PEERS` | 对应 `[cluster]`; peers 逗号分隔 |
 | 已有 env | `AIKV_CLIENT_ADDR`, `AIKV_CLUSTER_ANNOUNCE_MODE`, `AIKV_LINEARIZABLE_READ` | 名称不变, 纳入 env 层 merge; `AIKV_LINEARIZABLE_READ` 仅 `1`/大小写不敏感的 `true` 为真, 其他值均为假 |
-| 部署脚本 | `AIKV_BIND_IP`, `AIKV_ANNOUNCE_IP`, `AIKV_IMAGE`, `AIKV_CLUSTER_TIMEOUT_SECONDS` | 仅 `deploy/` Compose / `up-*.sh` 使用, 不进入进程四层配置 merge |
+| 部署脚本 | `AIKV_BIND_IP`, `AIKV_ANNOUNCE_IP`, `AIKV_IMAGE`, `AIKV_CLUSTER_TIMEOUT_SECONDS` | 仅 `deploy/` Compose / `aikv-*.sh` 使用, 不进入进程四层配置 merge |
 | 日志 | `RUST_LOG` | 仅 env, 不参与四层 merge struct |
 
 `--print-config` 可将合并后有效配置以 TOML 格式输出到 stdout (然后继续启动), 便于排查优先级.
@@ -170,13 +172,13 @@ AIKV_BIND_IP=0.0.0.0 AIKV_ANNOUNCE_IP=192.168.1.112 ./deploy/up-cluster.sh
 浏览器单页控制台设完参数后点启动, **不记录任何统计结果** (观测走 §7 监控栈).
 
 ```bash
-./deploy/loadgen/up.sh              # 默认 cluster, 入口 127.0.0.1:6379, 控制台 http://127.0.0.1:8787
-./deploy/loadgen/up.sh --mode single
-./deploy/loadgen/status.sh
-./deploy/loadgen/down.sh
+./deploy/loadgen.sh up      # 读 loadgen/loadgen.toml, 控制台 http://127.0.0.1:8787
+./deploy/loadgen.sh status
+./deploy/loadgen.sh down
 ```
 
-- crate 为独立 workspace, 不参与 `aikv` 的 `cargo test --workspace`; 门禁: `./deploy/loadgen/build.sh --check`.
+- crate 为独立 workspace, 不参与 `aikv` 的 `cargo test --workspace`; 门禁在 `deploy/loadgen/` 下 `cargo fmt --check` 与 `RUSTFLAGS='-D warnings' cargo clippy --all-targets`.
+- 控制台静态文件来自 `deploy/loadgen/web/` (改 UI 刷新即可; 改 Rust 才 `./deploy/loadgen.sh build`).
 - 探活间隔 30s; 启动前检查 seed / 集群状态, 运行中全挂或 CLUSTERDOWN 时暂停派发.
 - 改表单不影响正在跑的任务; 只有点启动才按当前表单开新任务 (已在跑则先停再起).
 - 运行时文件 (pid/log) 位于 `deploy/.runtime/loadgen/` (已 gitignore).
@@ -371,9 +373,10 @@ flowchart LR
 ```
 
 1. **编译要求**: 必须启用 `--features monitoring`;
-2. **端点配置**: 设置 `OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector_host>:4317`;
-3. **健康探针**: Kubernetes Liveness / Readiness 探针配置 `http://<aikv_ip>:9191/health`;
-4. **日志输出**: 结构化 JSON 日志通过标准错误输出由 Fluentbit / Vector 收集至 Loki; 标准输出可专用于 `--print-config` 的 TOML.
+2. **本地监控栈**: `./deploy/observability.sh up` (Grafana `http://127.0.0.1:3000`, 详见 [`deploy/observability/README.md`](../deploy/observability/README.md));
+3. **端点配置**: 设置 `OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector_host>:4317`;
+4. **健康探针**: Kubernetes Liveness / Readiness 探针配置 `http://<aikv_ip>:9191/health`;
+5. **日志输出**: 结构化 JSON 日志通过标准错误输出由 Fluentbit / Vector 收集至 Loki; 标准输出可专用于 `--print-config` 的 TOML.
 
 ### 7.2 关键生产监控告警指标
 

@@ -311,18 +311,36 @@ fn plan_single_op(
             let key = make_key(cfg, index, ty, KeySegment::Churn, tag);
             if matches!(
                 spec.tmpl,
-                ArgTmpl::TwoKey | ArgTmpl::Lmove | ArgTmpl::Union | ArgTmpl::UnionStore | ArgTmpl::Zinter | ArgTmpl::JsonMset | ArgTmpl::JsonMget | ArgTmpl::Mset | ArgTmpl::Mget
+                ArgTmpl::TwoKey
+                    | ArgTmpl::Lmove
+                    | ArgTmpl::Union
+                    | ArgTmpl::UnionStore
+                    | ArgTmpl::Zinter
+                    | ArgTmpl::JsonMset
+                    | ArgTmpl::JsonMget
+                    | ArgTmpl::Mset
+                    | ArgTmpl::Mget
             ) {
-                second_key = Some(make_key(cfg, next_index(cfg, seq + 1), ty, KeySegment::Churn, tag));
+                second_key = Some(make_key(
+                    cfg,
+                    next_index(cfg, seq + 1),
+                    ty,
+                    KeySegment::Churn,
+                    tag,
+                ));
             }
             if matches!(spec.tmpl, ArgTmpl::UnionStore) {
-                third_key = Some(make_key(cfg, next_index(cfg, seq + 2), ty, KeySegment::Churn, tag));
+                third_key = Some(make_key(
+                    cfg,
+                    next_index(cfg, seq + 2),
+                    ty,
+                    KeySegment::Churn,
+                    tag,
+                ));
             }
             key
         }
-        OpKind::Ttl => {
-            pick_existing_key(cfg, &marks.ttl, ty, KeySegment::Ttl, tag, rng)
-        }
+        OpKind::Ttl => pick_existing_key(cfg, &marks.ttl, ty, KeySegment::Ttl, tag, rng),
         OpKind::PopulateTtl => {
             let seq = marks.ttl.fetch_add(1, Ordering::Relaxed);
             set_seq = Some(seq);
@@ -462,7 +480,11 @@ fn build_op_cmd(planned: &PlannedOp, keyspace: u64, value: &[u8]) -> redis::Cmd 
         ArgTmpl::Echo => {
             cmd.arg("loadgen");
         }
-        ArgTmpl::Time | ArgTmpl::Dbsize | ArgTmpl::Command | ArgTmpl::Lastsave | ArgTmpl::Randomkey => {}
+        ArgTmpl::Time
+        | ArgTmpl::Dbsize
+        | ArgTmpl::Command
+        | ArgTmpl::Lastsave
+        | ArgTmpl::Randomkey => {}
         ArgTmpl::Info => {
             cmd.arg("server");
         }
@@ -489,7 +511,12 @@ fn build_op_cmd(planned: &PlannedOp, keyspace: u64, value: &[u8]) -> redis::Cmd 
                 .arg("COUNT")
                 .arg(10);
         }
-        ArgTmpl::KeyOnly | ArgTmpl::TypeKey | ArgTmpl::Dump | ArgTmpl::Ttl | ArgTmpl::Pttl | ArgTmpl::Persist => {
+        ArgTmpl::KeyOnly
+        | ArgTmpl::TypeKey
+        | ArgTmpl::Dump
+        | ArgTmpl::Ttl
+        | ArgTmpl::Pttl
+        | ArgTmpl::Persist => {
             cmd.arg(&planned.key);
         }
         ArgTmpl::ObjectEncoding => {
@@ -519,11 +546,7 @@ fn build_op_cmd(planned: &PlannedOp, keyspace: u64, value: &[u8]) -> redis::Cmd 
             }
         }
         ArgTmpl::KeyScoreMember => {
-            if spec.mix_key == "zincrby" {
-                cmd.arg(&planned.key).arg(1).arg(MEMBER);
-            } else {
-                cmd.arg(&planned.key).arg(1).arg(MEMBER);
-            }
+            cmd.arg(&planned.key).arg(1).arg(MEMBER);
         }
         ArgTmpl::KeyRange => {
             cmd.arg(&planned.key).arg(0).arg(-1);
@@ -648,7 +671,9 @@ fn build_op_cmd(planned: &PlannedOp, keyspace: u64, value: &[u8]) -> redis::Cmd 
             cmd.arg(&planned.key).arg(ttl).arg(&val);
         }
         ArgTmpl::Psetex => {
-            cmd.arg(&planned.key).arg(ttl.saturating_mul(1000)).arg(&val);
+            cmd.arg(&planned.key)
+                .arg(ttl.saturating_mul(1000))
+                .arg(&val);
         }
         ArgTmpl::KeyScan => {
             cmd.arg(&planned.key).arg("0").arg("COUNT").arg(10);

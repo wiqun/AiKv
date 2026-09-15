@@ -92,7 +92,7 @@ fn stops_all_workers_when_not_running() {
 fn endpoint_change_without_new_epoch_does_not_restart() {
     let base = cfg(true, 4, 20000);
     let moved = WorkloadConfig {
-        endpoints: vec!["127.0.0.1:6380".to_string()],
+        endpoint: "127.0.0.1:6380".to_string(),
         ..base.clone()
     };
     assert!(plan_actions(&snapshot(4, &base, 1), &moved, 1).is_empty());
@@ -169,10 +169,7 @@ async fn user_pause_survives_probe_clearing_dispatch_pause() {
     state.set_user_paused(true);
     assert!(state.is_paused());
     state.set_paused(false, None).await;
-    assert!(
-        state.is_paused(),
-        "探活恢复不得清掉用户点的暂停"
-    );
+    assert!(state.is_paused(), "探活恢复不得清掉用户点的暂停");
     state.resume_dispatch().await;
     assert!(!state.is_paused());
 }

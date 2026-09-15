@@ -162,8 +162,22 @@ pub static CATALOG: &[CommandSpec] = &[
     spec!("del", "DEL", "string", String, Churn, KeyOnly),
     spec!("exists", "EXISTS", "string", String, HitMiss, KeyOnly),
     spec!("strlen", "STRLEN", "string", String, HitMiss, KeyOnly),
-    spec!("getrange", "GETRANGE", "string", String, HitMiss, KeyRangeBytes),
-    spec!("setrange", "SETRANGE", "string", String, Populate, KeySetRange),
+    spec!(
+        "getrange",
+        "GETRANGE",
+        "string",
+        String,
+        HitMiss,
+        KeyRangeBytes
+    ),
+    spec!(
+        "setrange",
+        "SETRANGE",
+        "string",
+        String,
+        Populate,
+        KeySetRange
+    ),
     spec!("setbit", "SETBIT", "string", String, Populate, KeyBitSet),
     spec!("getbit", "GETBIT", "string", String, HitMiss, KeyBitGet),
     spec!("append", "APPEND", "string", String, Populate, KeyValue),
@@ -171,7 +185,14 @@ pub static CATALOG: &[CommandSpec] = &[
     spec!("decr", "DECR", "string", Int, Int, KeyOnly),
     spec!("incrby", "INCRBY", "string", Int, Int, KeyIncrBy),
     spec!("decrby", "DECRBY", "string", Int, Int, KeyIncrBy),
-    spec!("incrbyfloat", "INCRBYFLOAT", "string", Int, Int, KeyIncrByFloat),
+    spec!(
+        "incrbyfloat",
+        "INCRBYFLOAT",
+        "string",
+        Int,
+        Int,
+        KeyIncrByFloat
+    ),
     spec!("getdel", "GETDEL", "string", String, Churn, KeyOnly),
     spec!("getex", "GETEX", "string", String, Ttl, Getex),
     spec!("setnx", "SETNX", "string", String, Populate, KeyValue),
@@ -183,12 +204,54 @@ pub static CATALOG: &[CommandSpec] = &[
     spec!("json_set", "JSON.SET", "json", Json, Populate, JsonSet),
     spec!("json_del", "JSON.DEL", "json", Json, Churn, JsonRoot),
     spec!("json_type", "JSON.TYPE", "json", Json, HitMiss, JsonRoot),
-    spec!("json_strlen", "JSON.STRLEN", "json", Json, HitMiss, JsonPathStr),
-    spec!("json_arrlen", "JSON.ARRLEN", "json", Json, HitMiss, JsonPathArr),
-    spec!("json_objlen", "JSON.OBJLEN", "json", Json, HitMiss, JsonPathObj),
-    spec!("json_numincrby", "JSON.NUMINCRBY", "json", Json, Populate, JsonNumIncr),
-    spec!("json_arrappend", "JSON.ARRAPPEND", "json", Json, Populate, JsonArrAppend),
-    spec!("json_update", "JSON.UPDATE", "json", Json, Populate, JsonUpdate),
+    spec!(
+        "json_strlen",
+        "JSON.STRLEN",
+        "json",
+        Json,
+        HitMiss,
+        JsonPathStr
+    ),
+    spec!(
+        "json_arrlen",
+        "JSON.ARRLEN",
+        "json",
+        Json,
+        HitMiss,
+        JsonPathArr
+    ),
+    spec!(
+        "json_objlen",
+        "JSON.OBJLEN",
+        "json",
+        Json,
+        HitMiss,
+        JsonPathObj
+    ),
+    spec!(
+        "json_numincrby",
+        "JSON.NUMINCRBY",
+        "json",
+        Json,
+        Populate,
+        JsonNumIncr
+    ),
+    spec!(
+        "json_arrappend",
+        "JSON.ARRAPPEND",
+        "json",
+        Json,
+        Populate,
+        JsonArrAppend
+    ),
+    spec!(
+        "json_update",
+        "JSON.UPDATE",
+        "json",
+        Json,
+        Populate,
+        JsonUpdate
+    ),
     spec!("json_mset", "JSON.MSET", "json", Json, Populate, JsonMset),
     // Hash
     spec!("hset", "HSET", "hash", Hash, Populate, KeyFieldValue),
@@ -203,7 +266,14 @@ pub static CATALOG: &[CommandSpec] = &[
     spec!("hmget", "HMGET", "hash", Hash, HitMiss, KeyField),
     spec!("hsetnx", "HSETNX", "hash", Hash, Populate, KeyFieldValue),
     spec!("hincrby", "HINCRBY", "hash", Hash, Populate, KeyHashIncr),
-    spec!("hincrbyfloat", "HINCRBYFLOAT", "hash", Hash, Populate, KeyHashIncrFloat),
+    spec!(
+        "hincrbyfloat",
+        "HINCRBYFLOAT",
+        "hash",
+        Hash,
+        Populate,
+        KeyHashIncrFloat
+    ),
     spec!("hscan", "HSCAN", "hash", Hash, HitMiss, KeyScan),
     // List (BLPOP/BRPOP/BLMOVE 降级为非阻塞)
     spec!("lpush", "LPUSH", "list", List, Populate, KeyValue),
@@ -233,8 +303,22 @@ pub static CATALOG: &[CommandSpec] = &[
     spec!("sunion", "SUNION", "set", Set, HitMiss, Union),
     spec!("sinter", "SINTER", "set", Set, HitMiss, Union),
     spec!("sdiff", "SDIFF", "set", Set, HitMiss, Union),
-    spec!("sunionstore", "SUNIONSTORE", "set", Set, Populate, UnionStore),
-    spec!("sinterstore", "SINTERSTORE", "set", Set, Populate, UnionStore),
+    spec!(
+        "sunionstore",
+        "SUNIONSTORE",
+        "set",
+        Set,
+        Populate,
+        UnionStore
+    ),
+    spec!(
+        "sinterstore",
+        "SINTERSTORE",
+        "set",
+        Set,
+        Populate,
+        UnionStore
+    ),
     spec!("sdiffstore", "SDIFFSTORE", "set", Set, Populate, UnionStore),
     spec!("smove", "SMOVE", "set", Set, Churn, TwoKey),
     spec!("sscan", "SSCAN", "set", Set, HitMiss, KeyScan),
@@ -246,8 +330,22 @@ pub static CATALOG: &[CommandSpec] = &[
     spec!("zrevrank", "ZREVRANK", "zset", ZSet, HitMiss, KeyMember),
     spec!("zrange", "ZRANGE", "zset", ZSet, HitMiss, KeyRange),
     spec!("zrevrange", "ZREVRANGE", "zset", ZSet, HitMiss, KeyRange),
-    spec!("zrangebyscore", "ZRANGEBYSCORE", "zset", ZSet, HitMiss, ZrangeByScore),
-    spec!("zrevrangebyscore", "ZREVRANGEBYSCORE", "zset", ZSet, HitMiss, ZrangeByScore),
+    spec!(
+        "zrangebyscore",
+        "ZRANGEBYSCORE",
+        "zset",
+        ZSet,
+        HitMiss,
+        ZrangeByScore
+    ),
+    spec!(
+        "zrevrangebyscore",
+        "ZREVRANGEBYSCORE",
+        "zset",
+        ZSet,
+        HitMiss,
+        ZrangeByScore
+    ),
     spec!("zcard", "ZCARD", "zset", ZSet, HitMiss, KeyOnly),
     spec!("zcount", "ZCOUNT", "zset", ZSet, HitMiss, Zcount),
     spec!("zincrby", "ZINCRBY", "zset", ZSet, Populate, KeyScoreMember),
@@ -256,8 +354,22 @@ pub static CATALOG: &[CommandSpec] = &[
     spec!("zpopmax", "ZPOPMAX", "zset", ZSet, Churn, KeyOnly),
     spec!("bzpopmin", "ZPOPMIN", "zset", ZSet, Churn, KeyOnly),
     spec!("bzpopmax", "ZPOPMAX", "zset", ZSet, Churn, KeyOnly),
-    spec!("zrangebylex", "ZRANGEBYLEX", "zset", ZSet, HitMiss, ZrangeByLex),
-    spec!("zrevrangebylex", "ZREVRANGEBYLEX", "zset", ZSet, HitMiss, ZrangeByLex),
+    spec!(
+        "zrangebylex",
+        "ZRANGEBYLEX",
+        "zset",
+        ZSet,
+        HitMiss,
+        ZrangeByLex
+    ),
+    spec!(
+        "zrevrangebylex",
+        "ZREVRANGEBYLEX",
+        "zset",
+        ZSet,
+        HitMiss,
+        ZrangeByLex
+    ),
     spec!("zlexcount", "ZLEXCOUNT", "zset", ZSet, HitMiss, ZlexCount),
     spec!("zinter", "ZINTER", "zset", ZSet, HitMiss, Zinter),
     spec!("zunion", "ZUNION", "zset", ZSet, HitMiss, Zinter),
@@ -338,7 +450,7 @@ pub fn lookup(mix_key: &str) -> Option<&'static CommandSpec> {
 }
 
 pub fn is_forbidden(mix_key: &str) -> bool {
-    FORBIDDEN_MIX_KEYS.iter().any(|k| *k == mix_key)
+    FORBIDDEN_MIX_KEYS.contains(&mix_key)
 }
 
 pub fn mix_key_from_redis(name: &str) -> String {

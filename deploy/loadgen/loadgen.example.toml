@@ -1,0 +1,144 @@
+# Loadgen 打开控制台时的默认值与侧栏预设.
+# 改完后重启进程生效 (../loadgen.sh down && ../loadgen.sh up), 不必重新编译.
+# 文件不存在时使用编译进二进制的同一份默认值.
+
+[server]
+endpoint = "127.0.0.1:6379"
+mode = "cluster"
+
+[stress]
+target_ops = 5000
+connections = 8
+pipeline = 8
+timeout = 1000
+
+[keyspace]
+prefix = "loadgen"
+size = 100000
+value_size_min = 64
+value_size_max = 256
+miss_ratio = 0.1
+ttl_ratio = 0.0
+ttl_seconds = 60
+
+[commands]
+get = 40
+set = 40
+del = 5
+mget = 10
+incr = 3
+expire = 2
+
+[[presets]]
+id = "balanced"
+title = "均衡读写"
+description = "8k OPS · 16 Conn · 8 Pipe"
+stress.target_ops = 8000
+stress.connections = 16
+stress.pipeline = 8
+stress.timeout = 1000
+keyspace.size = 1000000
+keyspace.prefix = "kv:"
+keyspace.value_size_min = 64
+keyspace.value_size_max = 256
+keyspace.miss_ratio = 0.1
+keyspace.ttl_ratio = 0.0
+keyspace.ttl_seconds = 60
+commands.get = 50
+commands.set = 50
+
+[[presets]]
+id = "read_heavy"
+title = "只读密集"
+description = "12k OPS · 90% GET / 10% MGET"
+stress.target_ops = 12000
+stress.connections = 16
+stress.pipeline = 16
+stress.timeout = 500
+keyspace.size = 2000000
+keyspace.prefix = "cache:"
+keyspace.value_size_min = 64
+keyspace.value_size_max = 256
+keyspace.miss_ratio = 0.05
+keyspace.ttl_ratio = 0.0
+keyspace.ttl_seconds = 60
+commands.get = 90
+commands.mget = 10
+
+[[presets]]
+id = "write_heavy"
+title = "写入密集"
+description = "6k OPS · 80% SET · DEL/INCR"
+stress.target_ops = 6000
+stress.connections = 16
+stress.pipeline = 8
+stress.timeout = 1000
+keyspace.size = 1000000
+keyspace.prefix = "data:"
+keyspace.value_size_min = 128
+keyspace.value_size_max = 512
+keyspace.miss_ratio = 0.1
+keyspace.ttl_ratio = 0.2
+keyspace.ttl_seconds = 60
+commands.get = 10
+commands.set = 80
+commands.del = 5
+commands.incr = 5
+
+[[presets]]
+id = "hotspot"
+title = "单槽热点"
+description = "5k OPS · Slot 10438 · 50% INCR"
+stress.target_ops = 5000
+stress.connections = 8
+stress.pipeline = 8
+stress.timeout = 1000
+keyspace.size = 1000
+keyspace.prefix = "hot:"
+keyspace.value_size_min = 16
+keyspace.value_size_max = 64
+keyspace.miss_ratio = 0.05
+keyspace.ttl_ratio = 0.0
+keyspace.ttl_seconds = 60
+keyspace.target_slot = 10438
+commands.get = 30
+commands.set = 20
+commands.incr = 50
+
+[[presets]]
+id = "cache_miss"
+title = "低命中率"
+description = "5k OPS · 65% 命中 · 80% TTL"
+stress.target_ops = 5000
+stress.connections = 8
+stress.pipeline = 8
+stress.timeout = 1500
+keyspace.size = 500000
+keyspace.prefix = "ttl:"
+keyspace.value_size_min = 64
+keyspace.value_size_max = 256
+keyspace.miss_ratio = 0.35
+keyspace.ttl_ratio = 0.8
+keyspace.ttl_seconds = 60
+commands.get = 50
+commands.set = 40
+commands.del = 5
+commands.expire = 5
+
+[[presets]]
+id = "max_throughput"
+title = "极限加压"
+description = "不限速 (0) · 24 Conn · 16 Pipe"
+stress.target_ops = 0
+stress.connections = 24
+stress.pipeline = 16
+stress.timeout = 1000
+keyspace.size = 100000
+keyspace.prefix = "bench:"
+keyspace.value_size_min = 64
+keyspace.value_size_max = 256
+keyspace.miss_ratio = 0.1
+keyspace.ttl_ratio = 0.0
+keyspace.ttl_seconds = 60
+commands.get = 50
+commands.set = 50

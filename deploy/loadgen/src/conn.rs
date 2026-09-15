@@ -35,7 +35,7 @@ impl Conn {
         let timeout = Duration::from_millis(cfg.timeout_ms);
         match cfg.mode {
             TargetMode::Single => {
-                let url = format!("redis://{}", cfg.endpoints[0]);
+                let url = format!("redis://{}", cfg.endpoint);
                 let client = redis::Client::open(url)?;
                 let conn = tokio::time::timeout(timeout, client.get_multiplexed_async_connection())
                     .await
@@ -43,9 +43,8 @@ impl Conn {
                 Ok(Conn::Single(conn))
             }
             TargetMode::Cluster => {
-                // 只把第一个地址当 seed, CLUSTER SLOTS 再发现其余节点;
-                // 把全部 endpoint 塞进 initial_nodes 会并行打满 Docker 端口转发.
-                let seed = format!("redis://{}", cfg.endpoints[0]);
+                // 只把 endpoint 当 seed, CLUSTER SLOTS 再发现其余节点.
+                let seed = format!("redis://{}", cfg.endpoint);
                 let client = ClusterClientBuilder::new(vec![seed])
                     .connection_timeout(timeout)
                     .build()?;
@@ -105,10 +104,7 @@ pub(crate) async fn cluster_state(addr: &str, timeout: Duration) -> redis::Redis
 
 /// 启动门闩: seed 必须 PING 通; cluster 还要求 `cluster_state:ok`.
 pub async fn check_ready(cfg: &WorkloadConfig) -> Result<(), String> {
-    let seed = cfg
-        .endpoints
-        .first()
-        .ok_or_else(|| "endpoints 不能为空".to_string())?;
+    let seed = &cfg.endpoint;
     let timeout = Duration::from_millis(cfg.timeout_ms.max(1));
     if !ping(seed, timeout).await {
         return Err(format!("seed {seed} 不通, 拒绝启动"));

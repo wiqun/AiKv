@@ -36,7 +36,7 @@ pub(crate) fn next_connect_backoff(current: Duration) -> Duration {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnSpec {
     pub mode: TargetMode,
-    pub endpoints: Vec<String>,
+    pub endpoint: String,
     pub timeout_ms: u64,
 }
 
@@ -44,7 +44,7 @@ impl ConnSpec {
     pub fn from_config(cfg: &WorkloadConfig) -> Self {
         Self {
             mode: cfg.mode,
-            endpoints: cfg.endpoints.clone(),
+            endpoint: cfg.endpoint.clone(),
             timeout_ms: cfg.timeout_ms,
         }
     }
@@ -537,18 +537,15 @@ async fn probe_once(
     };
     let current = cfg.load_full();
     let timeout = Duration::from_millis(current.timeout_ms.max(1));
-    let mut statuses = Vec::with_capacity(current.endpoints.len());
-    for endpoint in &current.endpoints {
-        let reachable = crate::conn::ping(endpoint, timeout).await;
-        statuses.push(EndpointStatus {
-            addr: endpoint.clone(),
-            reachable,
-        });
-    }
-    let any_up = statuses.iter().any(|item| item.reachable);
+    let reachable = crate::conn::ping(&current.endpoint, timeout).await;
+    let statuses = vec![EndpointStatus {
+        addr: current.endpoint.clone(),
+        reachable,
+    }];
+    let any_up = reachable;
     let cluster_view = if current.mode == TargetMode::Cluster {
-        let seed = current.endpoints.first().cloned().unwrap_or_default();
-        crate::conn::cluster_view_after_probe(crate::conn::cluster_state(&seed, timeout).await)
+        let seed = &current.endpoint;
+        crate::conn::cluster_view_after_probe(crate::conn::cluster_state(seed, timeout).await)
     } else {
         None
     };
