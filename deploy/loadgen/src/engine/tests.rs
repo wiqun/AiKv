@@ -124,15 +124,15 @@ fn doubles_connect_backoff_until_cap() {
 #[test]
 fn runtime_state_watermarks_reset_on_epoch_bump() {
     let state = RuntimeState::default();
-    state.watermarks.main.store(100, Ordering::Relaxed);
-    state.watermarks.ttl.store(50, Ordering::Relaxed);
-    state.watermarks.churn.store(25, Ordering::Relaxed);
+    state.watermarks.string.main.store(100, Ordering::Relaxed);
+    state.watermarks.string.ttl.store(50, Ordering::Relaxed);
+    state.watermarks.string.churn.store(25, Ordering::Relaxed);
 
     state.bump_run_epoch();
 
-    assert_eq!(state.watermarks.main.load(Ordering::Relaxed), 0);
-    assert_eq!(state.watermarks.ttl.load(Ordering::Relaxed), 0);
-    assert_eq!(state.watermarks.churn.load(Ordering::Relaxed), 0);
+    assert_eq!(state.watermarks.string.main.load(Ordering::Relaxed), 0);
+    assert_eq!(state.watermarks.string.ttl.load(Ordering::Relaxed), 0);
+    assert_eq!(state.watermarks.string.churn.load(Ordering::Relaxed), 0);
 }
 
 /// 派发从暂停恢复后应清掉暂停原因, 避免控制台一直 toast 过期的「已暂停派发」.
@@ -161,4 +161,18 @@ async fn resume_clears_stale_pause_error() {
         state.last_error().await.is_none(),
         "点启动 resume_dispatch 也应清掉过期暂停错误"
     );
+}
+
+#[tokio::test]
+async fn user_pause_survives_probe_clearing_dispatch_pause() {
+    let state = RuntimeState::default();
+    state.set_user_paused(true);
+    assert!(state.is_paused());
+    state.set_paused(false, None).await;
+    assert!(
+        state.is_paused(),
+        "探活恢复不得清掉用户点的暂停"
+    );
+    state.resume_dispatch().await;
+    assert!(!state.is_paused());
 }

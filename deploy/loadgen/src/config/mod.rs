@@ -1,5 +1,6 @@
 //! 运行时配置模型: 不可变快照 + 局部更新补丁 + 严格校验.
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use clap::ValueEnum;
@@ -22,15 +23,23 @@ pub enum TargetMode {
 }
 
 /// 命令混合权重 (自动归一化, 无需凑成 100).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+/// 核心六字段保持兼容; 其余 aikv 客户端命令走 `extra` (如 `hget` / `json_get`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Mix {
+    #[serde(default)]
     pub set: u32,
+    #[serde(default)]
     pub get: u32,
+    #[serde(default)]
     pub del: u32,
+    #[serde(default)]
     pub mget: u32,
+    #[serde(default)]
     pub incr: u32,
+    #[serde(default)]
     pub expire: u32,
+    #[serde(default, flatten)]
+    pub extra: BTreeMap<String, u32>,
 }
 
 impl Default for Mix {
@@ -42,13 +51,44 @@ impl Default for Mix {
             mget: 10,
             incr: 3,
             expire: 2,
+            extra: BTreeMap::new(),
         }
     }
 }
 
 impl Mix {
+    pub fn zeros() -> Self {
+        Self {
+            set: 0,
+            get: 0,
+            del: 0,
+            mget: 0,
+            incr: 0,
+            expire: 0,
+            extra: BTreeMap::new(),
+        }
+    }
+
+    pub fn weight(&self, mix_key: &str) -> u32 {
+        match mix_key {
+            "set" => self.set,
+            "get" => self.get,
+            "del" => self.del,
+            "mget" => self.mget,
+            "incr" => self.incr,
+            "expire" => self.expire,
+            other => self.extra.get(other).copied().unwrap_or(0),
+        }
+    }
+
     pub fn total(&self) -> u32 {
-        self.set + self.get + self.del + self.mget + self.incr + self.expire
+        self.set
+            + self.get
+            + self.del
+            + self.mget
+            + self.incr
+            + self.expire
+            + self.extra.values().copied().sum::<u32>()
     }
 }
 
@@ -107,8 +147,6 @@ pub struct WorkloadConfig {
     pub miss_ratio: f64,
     pub mix: Mix,
     pub timeout_ms: u64,
-    /// 只读: 写命令降级为读, 保证压力连续
-    pub readonly: bool,
     /// 引擎开关
     pub running: bool,
 }
@@ -132,7 +170,6 @@ impl Default for WorkloadConfig {
             miss_ratio: 0.1,
             mix: Mix::default(),
             timeout_ms: 1_000,
-            readonly: false,
             running: false,
         }
     }
@@ -159,8 +196,9 @@ pub struct ConfigPatch {
     pub miss_ratio: Option<f64>,
     pub mix: Option<Mix>,
     pub timeout_ms: Option<u64>,
-    pub readonly: Option<bool>,
     pub running: Option<bool>,
+    /// 仅运行时有效: true = 用户暂停派发 (不停 worker).
+    pub paused: Option<bool>,
 }
 
 impl ConfigPatch {
@@ -207,14 +245,11 @@ impl ConfigPatch {
         if let Some(v) = self.miss_ratio {
             cfg.miss_ratio = v;
         }
-        if let Some(v) = self.mix {
+        if let Some(v) = self.mix.clone() {
             cfg.mix = v;
         }
         if let Some(v) = self.timeout_ms {
             cfg.timeout_ms = v;
-        }
-        if let Some(v) = self.readonly {
-            cfg.readonly = v;
         }
         if let Some(v) = self.running {
             cfg.running = v;
@@ -281,6 +316,16 @@ impl WorkloadConfig {
         }
         if self.mix.total() == 0 {
             return Err(ConfigError::new("mix 权重不能全为 0"));
+        }
+        for key in self.mix.extra.keys() {
+            if crate::catalog::is_forbidden(key) {
+                return Err(ConfigError::new(format!(
+                    "命令 {key} 会破坏发压连接或清空实例, 拒绝调度"
+                )));
+            }
+            if crate::catalog::lookup(key).is_none() {
+                return Err(ConfigError::new(format!("未知发压命令: {key}")));
+            }
         }
         if !(1..=MAX_TIMEOUT_MS).contains(&self.timeout_ms) {
             return Err(ConfigError::new(format!(

@@ -101,7 +101,10 @@ pub struct RuntimeState {
     pub workers: AtomicU64,
     pub watermarks: crate::workload::Watermarks,
     run_epoch: AtomicU64,
+    /// 探活判定的派发暂停 (节点全挂 / 集群 fail).
     dispatch_paused: AtomicBool,
+    /// 控制台点「暂停」: worker 保留, 只停发命令.
+    user_paused: AtomicBool,
     endpoint_status: Mutex<Vec<EndpointStatus>>,
     last_error: Mutex<Option<ErrorInfo>>,
 }
@@ -133,10 +136,15 @@ impl RuntimeState {
     }
 
     pub fn is_paused(&self) -> bool {
-        self.dispatch_paused.load(Ordering::Relaxed)
+        self.dispatch_paused.load(Ordering::Relaxed) || self.user_paused.load(Ordering::Relaxed)
+    }
+
+    pub fn set_user_paused(&self, paused: bool) {
+        self.user_paused.store(paused, Ordering::Relaxed);
     }
 
     pub async fn resume_dispatch(&self) {
+        self.user_paused.store(false, Ordering::Relaxed);
         self.set_paused(false, None).await;
     }
 
@@ -150,7 +158,7 @@ impl RuntimeState {
     }
 
     pub fn write_watermark(&self) -> u64 {
-        self.watermarks.main.load(Ordering::Relaxed)
+        self.watermarks.string.main.load(Ordering::Relaxed)
     }
 
     pub fn run_epoch(&self) -> u64 {
@@ -163,7 +171,7 @@ impl RuntimeState {
             if let Some(reason) = reason {
                 self.record_error(reason).await;
             }
-        } else if !paused && was {
+        } else if !paused && was && !self.user_paused.load(Ordering::Relaxed) {
             *self.last_error.lock().await = None;
         }
     }

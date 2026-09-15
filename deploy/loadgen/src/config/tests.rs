@@ -76,6 +76,7 @@ fn rejects_all_zero_mix() {
         mget: 0,
         incr: 0,
         expire: 0,
+        extra: Default::default(),
     };
     assert!(WorkloadConfig { mix: zero, ..cfg }.validate().is_err());
 }
@@ -199,4 +200,23 @@ fn patch_target_slot_and_ttl_seconds() {
     let clear_patch: ConfigPatch = serde_json::from_str(r#"{"target_slot": null}"#).unwrap();
     let restored = next.patched(&clear_patch).unwrap();
     assert_eq!(restored.target_slot, None);
+}
+
+#[test]
+fn mix_accepts_extended_commands() {
+    let patch: ConfigPatch = serde_json::from_str(
+        r#"{"mix":{"hget":40,"hset":60,"json_get":10,"set":0,"get":0,"del":0,"mget":0,"incr":0,"expire":0}}"#,
+    )
+    .unwrap();
+    let next = WorkloadConfig::default().patched(&patch).unwrap();
+    assert_eq!(next.mix.weight("hget"), 40);
+    assert_eq!(next.mix.weight("json_get"), 10);
+    assert_eq!(next.mix.set, 0);
+}
+
+#[test]
+fn mix_rejects_destructive_commands() {
+    let patch: ConfigPatch = serde_json::from_str(r#"{"mix":{"flushall":1}}"#).unwrap();
+    let err = WorkloadConfig::default().patched(&patch).unwrap_err();
+    assert!(err.to_string().contains("flushall"));
 }

@@ -5,6 +5,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <title>Loadgen 控制台</title>
+    <link rel="icon" href="/wiqun.svg" type="image/svg+xml">
     <style>
         :root {
             --bg: #0b0f19;
@@ -80,15 +81,18 @@
         .brand {
             display: flex;
             align-items: center;
-            gap: 8px;
+            gap: 9px;
             font-size: 15px;
             font-weight: 700;
             color: var(--fg);
             letter-spacing: -0.02em;
         }
 
-        .brand svg {
-            color: var(--accent);
+        .brand img {
+            width: 24px;
+            height: 24px;
+            display: block;
+            flex-shrink: 0;
         }
 
         .status-divider {
@@ -102,6 +106,11 @@
             align-items: center;
             gap: 8px;
             flex-wrap: wrap;
+        }
+
+        .badge[hidden],
+        [hidden] {
+            display: none !important;
         }
 
         .badge {
@@ -125,16 +134,165 @@
             border-color: rgba(16, 185, 129, 0.35);
         }
 
-        .badge.off {
-            background: rgba(239, 68, 68, 0.1);
-            color: var(--bad);
-            border-color: rgba(239, 68, 68, 0.3);
+        .badge.idle {
+            background: rgba(148, 163, 184, 0.12);
+            color: var(--fg-muted);
+            border-color: rgba(148, 163, 184, 0.3);
         }
 
         .badge.pause {
             background: rgba(245, 158, 11, 0.12);
             color: var(--warn);
             border-color: rgba(245, 158, 11, 0.35);
+        }
+
+        #state {
+            position: relative;
+        }
+
+        .task-info-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 14px;
+            height: 14px;
+            margin-left: 1px;
+            flex-shrink: 0;
+            color: inherit;
+            opacity: 0.92;
+        }
+
+        .task-info-btn svg {
+            display: block;
+            width: 14px;
+            height: 14px;
+        }
+
+        button.task-stop-btn {
+            width: 14px;
+            height: 14px;
+            min-width: 14px;
+            padding: 0;
+            margin-left: 1px;
+            border: none;
+            border-radius: 3px;
+            background: transparent;
+            color: inherit;
+            opacity: 0.5;
+            flex-shrink: 0;
+        }
+
+        button.task-stop-btn svg {
+            display: block;
+            width: 12px;
+            height: 12px;
+        }
+
+        button.task-stop-btn:hover {
+            opacity: 1;
+            color: var(--bad);
+            background: rgba(239, 68, 68, 0.14);
+            border: none;
+        }
+
+        .task-info-pop {
+            position: absolute;
+            top: calc(100% + 8px);
+            left: 0;
+            z-index: 60;
+            width: max-content;
+            min-width: 196px;
+            max-width: min(260px, 72vw);
+            max-height: min(420px, 72vh);
+            overflow-x: hidden;
+            overflow-y: auto;
+            padding: 10px 12px 12px;
+            background: var(--panel);
+            border: 1px solid var(--panel-border);
+            border-radius: var(--card-radius);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            scrollbar-width: thin;
+            scrollbar-color: rgba(148, 163, 184, 0.28) transparent;
+        }
+
+        .task-info-pop::-webkit-scrollbar {
+            width: 5px;
+        }
+
+        .task-info-pop::-webkit-scrollbar-track {
+            background: transparent;
+            margin: 6px 0;
+        }
+
+        .task-info-pop::-webkit-scrollbar-thumb {
+            background: rgba(148, 163, 184, 0.28);
+            border-radius: 99px;
+        }
+
+        .task-info-pop::-webkit-scrollbar-thumb:hover {
+            background: rgba(148, 163, 184, 0.45);
+        }
+
+        .task-info-pop::-webkit-scrollbar-corner {
+            background: transparent;
+        }
+
+        .task-info-title {
+            font-size: 11.5px;
+            font-weight: 600;
+            color: var(--fg);
+            letter-spacing: 0.02em;
+            margin-bottom: 8px;
+        }
+
+        .task-info-section {
+            margin: 8px 0 4px;
+            font-size: 11.5px;
+            font-weight: 500;
+            color: var(--fg-muted);
+            letter-spacing: -0.01em;
+        }
+
+        .task-info-section:first-of-type {
+            margin-top: 0;
+        }
+
+        .task-info-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            min-height: 24px;
+        }
+
+        .task-info-k {
+            width: 64px;
+            flex-shrink: 0;
+            font-size: 11.5px;
+            font-weight: 500;
+            color: var(--fg-muted);
+            text-align: right;
+            letter-spacing: -0.01em;
+        }
+
+        .task-info-v {
+            min-width: 0;
+            font-size: 12px;
+            font-family: var(--font-mono);
+            font-variant-numeric: tabular-nums;
+            color: var(--fg);
+            letter-spacing: 0.01em;
+            word-break: break-all;
+        }
+
+        .task-info-row.mix {
+            justify-content: space-between;
+            gap: 16px;
+            padding: 2px 0;
+        }
+
+        .task-info-row.mix .legend-badge {
+            min-width: 28px;
         }
 
         .dot {
@@ -153,10 +311,26 @@
             background: var(--bad);
         }
 
+        .dot.idle {
+            background: var(--fg-muted);
+        }
+
+        .dot.pause {
+            background: var(--warn);
+        }
+
         .nav-actions {
             display: flex;
             align-items: center;
-            gap: 8px;
+            gap: 10px;
+        }
+
+        .dirty-hint {
+            font-size: 12px;
+            font-weight: 500;
+            color: var(--fg-muted);
+            letter-spacing: 0.01em;
+            white-space: nowrap;
         }
 
         /* 按钮通用 */
@@ -204,6 +378,30 @@
             color: #ffffff;
         }
 
+        button.warn {
+            background: rgba(245, 158, 11, 0.12);
+            border-color: rgba(245, 158, 11, 0.4);
+            color: var(--warn);
+        }
+
+        button.warn:hover {
+            background: var(--warn);
+            border-color: var(--warn);
+            color: #111827;
+        }
+
+        button.ok {
+            background: var(--ok);
+            border-color: var(--ok);
+            color: #ffffff;
+        }
+
+        button.ok:hover {
+            background: #059669;
+            border-color: #059669;
+            color: #ffffff;
+        }
+
         /* 主视窗容器 */
         .app-window {
             max-width: 1280px;
@@ -232,6 +430,7 @@
         }
 
         .main-col {
+            position: relative;
             display: flex;
             flex-direction: column;
             gap: 18px;
@@ -285,27 +484,6 @@
             display: flex;
             align-items: center;
             justify-content: space-between;
-        }
-
-        .card-apple .card-title {
-            font-size: 11.5px;
-            font-weight: 600;
-            letter-spacing: 0.02em;
-            color: var(--fg);
-            text-transform: none;
-            display: flex;
-            align-items: center;
-            gap: 6px;
-        }
-
-        .card-apple .card-title::before {
-            content: "";
-            display: inline-block;
-            width: 7px;
-            height: 7px;
-            border-radius: 50%;
-            background: #3b82f6;
-            box-shadow: 0 0 7px rgba(59, 130, 246, 0.7);
         }
 
         /* 苹果表单行 (Apple Row) - 适度加大行高与呼吸感 */
@@ -546,11 +724,25 @@
         }
 
         .card-title {
-            font-size: 11px;
-            font-weight: 700;
-            text-transform: uppercase;
-            letter-spacing: 0.06em;
-            color: var(--fg-muted);
+            font-size: 11.5px;
+            font-weight: 600;
+            letter-spacing: 0.02em;
+            color: var(--fg);
+            text-transform: none;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .card-title::before {
+            content: "";
+            display: inline-block;
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background: #3b82f6;
+            box-shadow: 0 0 7px rgba(59, 130, 246, 0.7);
+            flex-shrink: 0;
         }
 
         /* 表单与网格 */
@@ -874,25 +1066,20 @@
             z-index: 1;
         }
 
-        .cmd-add-capsule-wrapper.is-open {
-            z-index: 60;
-            min-width: 220px;
-            min-height: 36px;
+        .cmd-add-capsule-wrapper[hidden] {
+            display: none !important;
         }
 
-        /* 打开态: 输入行与建议列表合成同宽 combobox, 向下浮层不撑开卡片 */
+        .cmd-add-capsule-wrapper.is-open {
+            z-index: 60;
+        }
+
+        /* 打开态: 胶囊在文档流中占位, 列表同宽浮在正下方 */
         .cmd-add-combobox {
-            position: absolute;
-            top: 0;
-            left: 0;
-            display: flex;
+            position: relative;
+            display: inline-flex;
             flex-direction: column;
-            min-width: 220px;
-            background: #141c2c;
-            border: 1px solid var(--accent);
-            border-radius: 10px;
-            box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2), 0 12px 32px rgba(0, 0, 0, 0.55);
-            overflow: hidden;
+            width: 156px;
         }
 
         /* 原版 + 添加命令胶囊样式 (完全对齐已有命令的高度与圆角，灰色虚线框) */
@@ -923,15 +1110,15 @@
             transform: translateY(-1px);
         }
 
-        /* 输入行并入 combobox, 不再单独画胶囊边框 */
+        /* 打开态保持添加命令胶囊: 36px 高、全圆角、蓝色虚线高亮 */
         .cmd-pill.add-pill.input-mode {
-            padding: 0 10px 0 14px;
+            padding: 5px 12px 5px 16px;
             min-height: 36px;
             width: 100%;
-            border: none;
-            border-radius: 0;
-            background: transparent;
-            box-shadow: none;
+            border: 1px dashed #3b82f6;
+            border-radius: 999px;
+            background: rgba(59, 130, 246, 0.08);
+            box-shadow: 0 0 10px rgba(59, 130, 246, 0.35);
             display: flex;
             align-items: center;
             gap: 8px;
@@ -952,7 +1139,7 @@
             font-weight: 600;
             flex: 1;
             min-width: 0;
-            width: auto;
+            width: 0;
             padding: 0 !important;
             height: 24px !important;
             line-height: 24px !important;
@@ -992,20 +1179,23 @@
             color: #ffffff;
         }
 
-        /* 建议列表: 与输入行同宽, 贴合在 combobox 内部 */
+        /* 建议列表: 贴在胶囊正下方, 同宽, 圆角取胶囊半高 18px 与两端对齐 */
         .cmd-suggestions-menu {
+            position: absolute;
+            top: calc(100% + 4px);
+            left: 0;
             width: 100%;
             max-height: 286px;
             overflow-y: auto;
             overflow-x: hidden;
-            background: transparent;
-            border: none;
-            border-top: 1px solid rgba(255, 255, 255, 0.08);
-            border-radius: 0;
-            box-shadow: none;
-            padding: 4px 4px 6px;
+            background: #141c2c;
+            border: 1px solid rgba(59, 130, 246, 0.45);
+            border-radius: 18px;
+            box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
+            padding: 6px;
             display: none;
             box-sizing: border-box;
+            z-index: 61;
             scrollbar-width: thin;
             scrollbar-color: rgba(148, 163, 184, 0.55) rgba(255, 255, 255, 0.04);
         }
@@ -1419,12 +1609,12 @@
             margin: 2px 0;
         }
 
-        /* Toast 消息 (顶部悬浮居中，下移至 top: 76px，加大尺寸、高对比度与光晕提示) */
+        /* Toast: 相对右侧主控面板水平居中, 叠在首张卡片标题行 */
         #toast {
-            position: fixed;
-            top: 76px;
+            position: absolute;
+            top: 14px;
             left: 50%;
-            transform: translateX(-50%) translateY(-14px);
+            transform: translateX(-50%) translateY(-10px);
             opacity: 0;
             pointer-events: none;
             z-index: 100;
@@ -1442,7 +1632,8 @@
             display: inline-flex;
             align-items: center;
             gap: 10px;
-            max-width: 90vw;
+            max-width: calc(100% - 32px);
+            box-sizing: border-box;
         }
 
         #toast.show {
@@ -1472,6 +1663,53 @@
         #toast.error .toast-icon {
             color: #ef4444;
         }
+
+        .modal-backdrop {
+            position: fixed;
+            inset: 0;
+            z-index: 80;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+            background: rgba(2, 6, 23, 0.62);
+        }
+
+        .modal-card {
+            width: min(420px, 100%);
+            background: var(--panel);
+            border: 1px solid var(--panel-border);
+            border-radius: var(--card-radius);
+            box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+            padding: 18px 20px 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .modal-title {
+            font-size: 14px;
+            font-weight: 700;
+            color: var(--fg);
+        }
+
+        .modal-card p {
+            margin: 0;
+            font-size: 13px;
+            color: var(--fg-sub);
+            line-height: 1.55;
+        }
+
+        .modal-note {
+            font-size: 12px;
+            color: var(--fg-muted);
+        }
+
+        .modal-actions {
+            display: flex;
+            justify-content: flex-end;
+            margin-top: 4px;
+        }
     </style>
 </head>
 
@@ -1482,41 +1720,40 @@
         <div class="top-nav-inner">
             <div class="brand-group">
                 <div class="brand">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                        stroke-width="2.2">
-                        <path d="M4 14.899A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.242" />
-                        <path d="m8 11 4-4 4 4" />
-                        <path d="M12 7v10" />
-                    </svg>
+                    <img src="/wiqun.svg" width="24" height="24" alt="">
                     Loadgen
                 </div>
                 <div class="status-divider"></div>
                 <div class="status-pills">
-                    <span id="state" class="badge off"><span class="dot bad"></span>已停止</span>
-                    <span id="rate" class="badge">限速 -</span>
-                    <span id="workers" class="badge">client -</span>
                     <span id="endpoints"></span>
+                    <span id="mode_badge" class="badge">Cluster</span>
+                    <span id="state" class="badge idle">
+                        <span id="state_dot" class="dot idle"></span>
+                        <span id="state_label">未运行</span>
+                        <span id="task_info_btn" class="task-info-btn" hidden aria-label="当前任务参数">
+                            <svg viewBox="0 0 16 16" aria-hidden="true">
+                                <circle cx="8" cy="8" r="6.25" fill="none" stroke="currentColor" stroke-width="1.4"></circle>
+                                <rect x="7.25" y="4.15" width="1.5" height="5.2" rx="0.75" fill="currentColor"></rect>
+                                <circle cx="8" cy="11.4" r="0.95" fill="currentColor"></circle>
+                            </svg>
+                        </span>
+                        <button type="button" id="task_stop_btn" class="task-stop-btn" hidden aria-label="终止任务">
+                            <svg viewBox="0 0 16 16" aria-hidden="true">
+                                <path d="M4.2 4.2l7.6 7.6M11.8 4.2l-7.6 7.6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"></path>
+                            </svg>
+                        </button>
+                        <div id="task_info_pop" class="task-info-pop" hidden></div>
+                    </span>
                 </div>
             </div>
 
             <div class="nav-actions">
-                <button class="primary" onclick="triggerStart()">
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor">
+                <span id="dirty_hint" class="dirty-hint" hidden>草稿已改 · 终止后点启动才生效</span>
+                <button id="btn_primary" class="primary" onclick="triggerPrimary()">
+                    <svg id="btn_primary_icon" width="13" height="13" viewBox="0 0 24 24" fill="currentColor">
                         <polygon points="5 3 19 12 5 21 5 3" />
                     </svg>
-                    启动
-                </button>
-                <button class="danger" onclick="triggerStop()">
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor">
-                        <rect x="4" y="4" width="16" height="16" rx="2" />
-                    </svg>
-                    停止
-                </button>
-                <button onclick="triggerReload()">
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2" />
-                    </svg>
-                    刷新
+                    <span id="btn_primary_label">启动</span>
                 </button>
             </div>
         </div>
@@ -1561,12 +1798,13 @@
             </aside>
 
             <section class="main-col">
+                <div id="toast" role="status"></div>
                 <!-- 顶部并排紧凑配置: 模块 1 与 模块 2 双列排版，大幅压缩垂直高度 -->
                 <div class="top-configs-grid">
-                    <!-- 模块 1: 压力与吞吐控制 (Apple macOS Grouped List) -->
+                    <!-- 模块 1: 目标与加压 -->
                     <div class="card card-apple">
                         <div class="card-header">
-                            <div class="card-title">压力与吞吐控制</div>
+                            <div class="card-title">目标与加压</div>
                         </div>
 
                         <!-- Apple Row 1: 服务地址 -->
@@ -1641,10 +1879,10 @@
                         </div>
                     </div>
 
-                    <!-- 模块 2: 数据特征与负载行为 (Apple macOS Grouped List) -->
+                    <!-- 模块 2: 数据特征 -->
                     <div class="card card-apple">
                         <div class="card-header">
-                            <div class="card-title">数据特征与负载行为</div>
+                            <div class="card-title">数据特征</div>
                         </div>
 
                         <!-- Apple Row 1: 键名空间 -->
@@ -1704,18 +1942,18 @@
                     </div>
                 </div>
 
-                <!-- 模块 3: 命令选择与占比 -->
+                <!-- 模块 3: 命令占比 -->
                 <div class="card">
                     <div class="card-header">
-                        <div class="card-title">命令选择与占比</div>
+                        <div class="card-title">命令占比</div>
                     </div>
 
-                    <!-- 1. 命令选择池 (Chips / Pills) 与常驻添加输入框 -->
+                    <!-- 1. 命令选择池: 引擎目录里的命令均可添加发压 -->
                     <div class="cmd-selector-section">
                         <div class="cmd-pills-row">
                             <div class="cmd-pills-list" id="cmd_pills"></div>
                             <div class="cmd-add-capsule-wrapper" id="cmd_add_container">
-                                <div class="cmd-pill add-pill" id="cmd_add_pill" onclick="startAddCmd(event)" title="添加命令">
+                                <div class="cmd-pill add-pill" id="cmd_add_pill" onclick="startAddCmd(event)" title="添加 aikv 客户端命令">
                                     <span>+ 添加命令</span>
                                 </div>
                             </div>
@@ -1756,13 +1994,39 @@
         </div>
     </main>
 
-    <div id="toast" role="status"></div>
-
     <script>
         const FIELDS = ["target_ops", "connections", "pipeline", "timeout_ms", "keyspace", "key_prefix",
             "value_size_min", "value_size_max", "miss_ratio", "ttl_ratio", "ttl_seconds"];
         const DEFAULT_OPS = ["get", "set", "mget", "del", "incr", "expire"];
-        let ALL_OPS = ["get", "set", "mget", "del", "incr", "expire"];
+        let ALL_OPS = DEFAULT_OPS.slice();
+        let SUPPORTED_COMMANDS = new Set(["GET", "SET", "MGET", "DEL", "INCR", "EXPIRE"]);
+        let COMMAND_MIX_KEYS = { GET: "get", SET: "set", MGET: "mget", DEL: "del", INCR: "incr", EXPIRE: "expire" };
+        const HEAVY_HINTS = {};
+
+        function mixKeyOf(cmdUpper) {
+            return COMMAND_MIX_KEYS[cmdUpper] || cmdUpper.toLowerCase().replace(/\./g, "_");
+        }
+
+        async function loadEngineCatalog() {
+            const res = await fetch("/api/commands");
+            const json = await res.json();
+            const list = json.commands || [];
+            SUPPORTED_COMMANDS = new Set(list.map(c => c.name));
+            COMMAND_MIX_KEYS = Object.fromEntries(list.map(c => [c.name, c.mix_key]));
+            for (const key of Object.keys(HEAVY_HINTS)) delete HEAVY_HINTS[key];
+            for (const c of list) {
+                if (c.heavy_hint) HEAVY_HINTS[c.mix_key] = c.heavy_hint;
+                if (!OP_META[c.mix_key]) {
+                    OP_META[c.mix_key] = {
+                        name: c.name,
+                        color: COLOR_PALETTE[Object.keys(OP_META).length % COLOR_PALETTE.length],
+                        desc: `${c.group} 命令 ${c.name}`
+                    };
+                } else {
+                    OP_META[c.mix_key].name = c.name;
+                }
+            }
+        }
         const OP_META = {
             get: { name: "GET", color: "#a855f7", desc: "读取数据" },
             set: { name: "SET", color: "#22c55e", desc: "写入数据" },
@@ -1779,28 +2043,6 @@
         let activeSuggestIndex = -1;
         let currentSuggestions = [];
         let currentPresetKey = "balanced";
-        // 系统支持的客户端全量命令集 (与服务端注册表 COMMAND_TABLE 一致)
-        const SUPPORTED_COMMANDS = new Set([
-            "APPEND", "ASKING", "ATOM.DISCARD", "ATOM.EXEC", "ATOM.MULTI", "ATOM.UNWATCH", "ATOM.WATCH",
-            "BGSAVE", "BLMOVE", "BLPOP", "BRPOP", "BZPOPMAX", "BZPOPMIN", "CLIENT", "CLUSTER", "COMMAND",
-            "CONFIG", "COPY", "DBSIZE", "DECR", "DECRBY", "DEL", "DISCARD", "DUMP", "ECHO", "EVAL", "EVALSHA",
-            "EXEC", "EXISTS", "EXPIRE", "EXPIREAT", "EXPIRETIME", "FLUSHALL", "FLUSHDB", "GET", "GETBIT",
-            "GETDEL", "GETEX", "GETRANGE", "HDEL", "HELLO", "HEXISTS", "HGET", "HGETALL", "HINCRBY",
-            "HINCRBYFLOAT", "HKEYS", "HLEN", "HMGET", "HMSET", "HSCAN", "HSET", "HSETNX", "HVALS", "INCR",
-            "INCRBY", "INCRBYFLOAT", "INFO", "JSON.ARRAPPEND", "JSON.ARRLEN", "JSON.DEL", "JSON.GET",
-            "JSON.MGET", "JSON.MSET", "JSON.NUMINCRBY", "JSON.OBJLEN", "JSON.SET", "JSON.STRLEN", "JSON.TYPE",
-            "JSON.UPDATE", "KEYS", "LASTSAVE", "LATENCY", "LINDEX", "LINSERT", "LLEN", "LMOVE", "LPOP",
-            "LPOS", "LPUSH", "LRANGE", "LREM", "LSET", "LTRIM", "MGET", "MIGRATE", "MONITOR", "MOVE",
-            "MSET", "MULTI", "OBJECT", "PERSIST", "PEXPIRE", "PEXPIREAT", "PEXPIRETIME", "PING", "PSETEX",
-            "PTTL", "QUIT", "RANDOMKEY", "READONLY", "READWRITE", "RENAME", "RENAMENX", "RESTORE", "RPOP",
-            "RPUSH", "SADD", "SAVE", "SCAN", "SCARD", "SCRIPT", "SDIFF", "SDIFFSTORE", "SELECT", "SET",
-            "SETBIT", "SETEX", "SETNX", "SETRANGE", "SHUTDOWN", "SINTER", "SINTERSTORE", "SISMEMBER",
-            "SLOWLOG", "SMEMBERS", "SMOVE", "SPOP", "SRANDMEMBER", "SREM", "SSCAN", "STRLEN", "SUNION",
-            "SUNIONSTORE", "SWAPDB", "TIME", "TTL", "TYPE", "UNWATCH", "WATCH", "ZADD", "ZCARD", "ZCOUNT",
-            "ZDIFF", "ZINCRBY", "ZINTER", "ZLEXCOUNT", "ZPOPMAX", "ZPOPMIN", "ZRANGE", "ZRANGEBYLEX",
-            "ZRANGEBYSCORE", "ZRANK", "ZREM", "ZREVRANGE", "ZREVRANGEBYLEX", "ZREVRANGEBYSCORE", "ZREVRANK",
-            "ZSCAN", "ZSCORE", "ZUNION"
-        ]);
         const NUMERIC = new Set(["target_ops", "connections", "pipeline", "timeout_ms", "keyspace",
             "value_size_min", "value_size_max", "miss_ratio", "ttl_ratio", "ttl_seconds"]);
         const PRESETS = {
@@ -1942,7 +2184,7 @@
                 <div class="cmd-add-combobox">
                     <div class="cmd-pill add-pill input-mode" id="cmd_add_pill" onclick="event.stopPropagation()">
                         <input type="text" id="cmd_add_input" class="cmd-add-input"
-                               placeholder="输入命令" maxlength="20" autocomplete="off" spellcheck="false" />
+                               placeholder="输入命令" maxlength="20" size="8" autocomplete="off" spellcheck="false" />
                         <span class="cmd-add-btn-check" id="cmd_add_submit_btn" onclick="submitAddCmd()" title="确认添加">
                             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
                         </span>
@@ -2054,7 +2296,7 @@
             }
 
             menu.innerHTML = currentSuggestions.map((cmd, idx) => {
-                const opKey = cmd.toLowerCase().replace(/\./g, "_");
+                const opKey = mixKeyOf(cmd);
                 const isAdded = activeOps.has(opKey);
                 return `
                     <div class="cmd-suggest-item ${isAdded ? 'added' : ''}"
@@ -2095,7 +2337,7 @@
             }
             const cmdUpper = val.toUpperCase();
             if (!SUPPORTED_COMMANDS.has(cmdUpper)) {
-                showToast(`不支持的命令: ${cmdUpper}，请输入合法的客户端命令`);
+                showToast(`引擎不支持发压命令: ${cmdUpper}`);
                 if (input) {
                     input.value = "";
                     input.focus();
@@ -2104,7 +2346,7 @@
                 return;
             }
 
-            const opKey = cmdUpper.toLowerCase().replace(/\./g, "_");
+            const opKey = mixKeyOf(cmdUpper);
             if (!OP_META[opKey]) {
                 const color = COLOR_PALETTE[ALL_OPS.length % COLOR_PALETTE.length];
                 OP_META[opKey] = {
@@ -2127,6 +2369,7 @@
                     opPercentages[opKey] = 0;
                 }
                 showToast(`成功添加命令: ${cmdUpper}`);
+                warnIfHeavy(opKey);
             } else {
                 showToast(`命令 ${cmdUpper} 已在已选测试列表中`);
             }
@@ -2153,6 +2396,7 @@
                 } else {
                     opPercentages[op] = 0;
                 }
+                warnIfHeavy(op);
             }
             syncMixUI();
             markDirty();
@@ -2520,14 +2764,13 @@
             }
 
             patch.mix = {};
-            for (const m of DEFAULT_OPS) {
+            for (const m of ALL_OPS) {
                 patch.mix[m] = activeOps.has(m) ? (opPercentages[m] || 0) : 0;
             }
             patch.mode = el("mode") ? el("mode").value : "cluster";
             const host = el("endpoint_host") ? el("endpoint_host").value.trim() : "127.0.0.1";
             const port = el("endpoint_port") ? el("endpoint_port").value.trim() : "6379";
             patch.endpoints = [`${host}:${port}`];
-            patch.readonly = false;
             return patch;
         }
 
@@ -2574,6 +2817,19 @@
 
             if (cfg.mix && !dirty) {
                 const rawMix = cfg.mix;
+                for (const m of Object.keys(rawMix)) {
+                    if (m === "extra") continue;
+                    if (!ALL_OPS.includes(m) && Number(rawMix[m] || 0) >= 0) {
+                        ALL_OPS.push(m);
+                        if (!OP_META[m]) {
+                            OP_META[m] = {
+                                name: m.toUpperCase().replace(/_/g, "."),
+                                color: COLOR_PALETTE[ALL_OPS.length % COLOR_PALETTE.length],
+                                desc: `客户端命令 ${m}`
+                            };
+                        }
+                    }
+                }
                 let total = 0;
                 for (const m of ALL_OPS) total += Number(rawMix[m] || 0);
                 activeOps.clear();
@@ -2697,18 +2953,160 @@
             });
         }
 
+        let taskInfoHideTimer = null;
+        let lastRtState = "stopped";
+
+        function taskInfoRow(label, value) {
+            const row = document.createElement("div");
+            row.className = "task-info-row";
+            const k = document.createElement("span");
+            k.className = "task-info-k";
+            k.textContent = label;
+            const v = document.createElement("span");
+            v.className = "task-info-v";
+            v.textContent = value;
+            row.append(k, v);
+            return row;
+        }
+
+        function taskInfoSection(title) {
+            const node = document.createElement("div");
+            node.className = "task-info-section";
+            node.textContent = title;
+            return node;
+        }
+
+        function taskInfoMixRow(key, weight) {
+            const row = document.createElement("div");
+            row.className = "task-info-row mix";
+            const left = document.createElement("span");
+            left.className = "legend-left";
+            const bar = document.createElement("span");
+            bar.className = "legend-bar";
+            const meta = OP_META[key] || { name: key.toUpperCase(), color: "#94a3b8" };
+            bar.style.background = meta.color;
+            const name = document.createElement("span");
+            name.className = "legend-name";
+            name.textContent = meta.name || key.toUpperCase();
+            left.append(bar, name);
+            const badge = document.createElement("span");
+            badge.className = "legend-badge";
+            badge.style.color = meta.color;
+            badge.textContent = weight + "%";
+            row.append(left, badge);
+            return row;
+        }
+
+        function fillTaskInfoPop(cfg, rt) {
+            const pop = el("task_info_pop");
+            const hitPct = Math.round((1 - Number(cfg.miss_ratio || 0)) * 100);
+            const ttlPct = Math.round(Number(cfg.ttl_ratio || 0) * 100);
+            const stateText = { running: "运行中", paused: "暂停", stopped: "未运行" }[rt.state] || rt.state;
+            const slot = cfg.target_slot == null || cfg.target_slot === "" ? "全槽分散" : String(cfg.target_slot);
+            const nodes = [
+                (() => { const t = document.createElement("div"); t.className = "task-info-title"; t.textContent = "当前任务"; return t; })(),
+                taskInfoSection("目标"),
+                taskInfoRow("状态", stateText),
+                taskInfoRow("拓扑", cfg.mode === "single" ? "Single" : "Cluster"),
+                taskInfoRow("地址", (cfg.endpoints || []).join(", ") || "—"),
+                taskInfoSection("压力"),
+                taskInfoRow("限速", cfg.target_ops > 0 ? cfg.target_ops + " ops/s" : "不限速"),
+                taskInfoRow("连接", String(cfg.connections)),
+                taskInfoRow("client", String(rt.workers)),
+                taskInfoRow("pipeline", String(cfg.pipeline)),
+                taskInfoRow("超时", cfg.timeout_ms + " ms"),
+                taskInfoSection("数据"),
+                taskInfoRow("前缀", cfg.key_prefix || "—"),
+                taskInfoRow("键空间", String(cfg.keyspace)),
+                taskInfoRow("值大小", cfg.value_size_min + " – " + cfg.value_size_max),
+                taskInfoRow("命中率", hitPct + "%"),
+                taskInfoRow("TTL 比例", ttlPct + "%"),
+                taskInfoRow("TTL 时长", cfg.ttl_seconds + " s"),
+                taskInfoRow("Hash tag", cfg.use_hashtag ? "是" : "否"),
+                taskInfoRow("目标槽", slot),
+                taskInfoSection("命令占比"),
+            ];
+            const entries = Object.entries(cfg.mix || {})
+                .filter(([, w]) => Number(w) > 0)
+                .sort((a, b) => Number(b[1]) - Number(a[1]));
+            if (!entries.length) nodes.push(taskInfoRow("—", "空"));
+            else for (const [key, weight] of entries) nodes.push(taskInfoMixRow(key, weight));
+            pop.replaceChildren(...nodes);
+        }
+
+        function bindTaskInfoHover() {
+            const state = el("state");
+            const pop = el("task_info_pop");
+            if (!state || !pop) return;
+            const show = () => {
+                if (el("task_info_btn").hidden) return;
+                clearTimeout(taskInfoHideTimer);
+                pop.hidden = false;
+            };
+            const hide = () => {
+                taskInfoHideTimer = setTimeout(() => { pop.hidden = true; }, 150);
+            };
+            state.addEventListener("mouseenter", show);
+            state.addEventListener("mouseleave", hide);
+            const stop = el("task_stop_btn");
+            if (stop) {
+                stop.addEventListener("click", (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    triggerTerminate();
+                });
+            }
+        }
+
+        function syncPrimaryButton(state) {
+            const btn = el("btn_primary");
+            const label = el("btn_primary_label");
+            const icon = el("btn_primary_icon");
+            if (!btn || !label || !icon) return;
+            if (state === "running") {
+                btn.className = "warn";
+                label.textContent = "暂停";
+                icon.innerHTML = '<rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/>';
+            } else if (state === "paused") {
+                btn.className = "ok";
+                label.textContent = "继续";
+                icon.innerHTML = '<polygon points="5 3 19 12 5 21 5 3"/>';
+            } else {
+                btn.className = "primary";
+                label.textContent = "启动";
+                icon.innerHTML = '<polygon points="5 3 19 12 5 21 5 3"/>';
+            }
+        }
+
         function renderRuntime(cfg, rt) {
-            const labels = { running: "运行中", stopped: "已停止", paused: "派发已暂停" };
+            const labels = { running: "运行中", stopped: "未运行", paused: "暂停" };
             const stateLabel = labels[rt.state] || rt.state;
             const isOk = rt.state === "running";
-            const dotCls = isOk ? "ok" : "bad";
+            const isPaused = rt.state === "paused";
+            const dotCls = isOk ? "ok" : isPaused ? "pause" : "idle";
+            lastRtState = rt.state;
 
-            el("state").innerHTML = `<span class="dot ${dotCls}"></span>${stateLabel}`;
-            el("state").className = "badge " + (isOk ? "on" : rt.state === "paused" ? "pause" : "off");
-            el("rate").textContent = cfg.target_ops > 0 ? "限速 " + cfg.target_ops + " ops/s" : "不限速";
-            el("workers").textContent = "client " + rt.workers;
             el("endpoints").innerHTML = rt.endpoints.map(e =>
                 `<span class="badge"><span class="dot ${e.reachable ? "ok" : "bad"}"></span>${e.addr}</span>`).join("");
+            el("mode_badge").textContent = cfg.mode === "single" ? "Single" : "Cluster";
+            el("state_dot").className = "dot " + dotCls;
+            el("state_label").textContent = stateLabel;
+            el("state").className = "badge " + (isOk ? "on" : isPaused ? "pause" : "idle");
+            syncPrimaryButton(rt.state);
+            syncDirtyHint();
+
+            const live = rt.state !== "stopped";
+            const info = el("task_info_btn");
+            const stop = el("task_stop_btn");
+            const pop = el("task_info_pop");
+            info.hidden = !live;
+            stop.hidden = !live;
+            if (!live) {
+                pop.hidden = true;
+                pop.replaceChildren();
+            } else {
+                fillTaskInfoPop(cfg, rt);
+            }
 
             const msg = rt.last_error ? rt.last_error.message : "";
             const stalePause = rt.state === "running" && /已暂停派发/.test(msg);
@@ -2729,7 +3127,7 @@
 
         function showToast(message) {
             const node = el("toast");
-            const isError = /失败|不可达|暂停|错误|拒绝|不支持|unreachable/i.test(message);
+            const isError = /失败|不可达|暂停|错误|拒绝|不支持|unreachable|至少需要/i.test(message);
             node.innerHTML = `
                 <span class="toast-icon">
                     ${isError 
@@ -2752,6 +3150,28 @@
 
         function markDirty() {
             dirty = true;
+            syncDirtyHint();
+        }
+
+        function syncDirtyHint() {
+            const hint = el("dirty_hint");
+            if (!hint) return;
+            const live = lastRtState === "running" || lastRtState === "paused";
+            hint.hidden = !(live && dirty);
+        }
+
+        function warnIfHeavy(opKey) {
+            const hint = HEAVY_HINTS[opKey];
+            const dialog = el("heavy_dialog");
+            const text = el("heavy_dialog_text");
+            if (!hint || !dialog || !text) return;
+            text.textContent = hint;
+            dialog.hidden = false;
+        }
+
+        function closeHeavyDialog() {
+            const dialog = el("heavy_dialog");
+            if (dialog) dialog.hidden = true;
         }
 
         async function patch(body, keepForm) {
@@ -2767,19 +3187,17 @@
             } catch (err) { showToast("请求失败: " + err.message); }
         }
 
-        function triggerStart() {
-            const nonCoreOps = getActiveList().filter(op => !DEFAULT_OPS.includes(op));
-            if (nonCoreOps.length > 0) {
-                const names = nonCoreOps.map(op => OP_META[op]?.name || op.toUpperCase()).join(", ");
-                showToast(`压测引擎后端当前支持 6 种核心 KV 命令发压，暂未实现 ${names} 的发压逻辑`);
-                return;
-            }
-            patch({ ...readForm(), running: true });
+        function triggerPrimary() {
+            if (lastRtState === "running") patch({ paused: true }, true);
+            else if (lastRtState === "paused") patch({ paused: false }, true);
+            else patch({ ...readForm(), running: true });
         }
-        function triggerStop() { patch({ running: false }, true); }
-        function triggerReload() { dirty = false; refresh(); }
+        function triggerTerminate() {
+            el("task_info_pop").hidden = true;
+            patch({ running: false }, true);
+        }
 
-        document.addEventListener("DOMContentLoaded", () => {
+        document.addEventListener("DOMContentLoaded", async () => {
             for (const field of FIELDS) {
                 if (field === "miss_ratio" || field === "ttl_ratio") continue;
                 if (el(field)) {
@@ -2804,6 +3222,11 @@
             if (el("endpoint_host")) el("endpoint_host").addEventListener("input", markDirty);
             if (el("endpoint_port")) el("endpoint_port").addEventListener("input", markDirty);
 
+            try {
+                await loadEngineCatalog();
+            } catch (err) {
+                showToast("加载命令目录失败: " + err.message);
+            }
             updateSlotPreview();
             syncMixUI();
             syncCustomModeDropdown();
@@ -2812,10 +3235,33 @@
                 const dd = el("custom_mode_dropdown");
                 if (dd && !dd.contains(e.target)) closeCustomMode();
             });
+            bindTaskInfoHover();
+            const heavy = el("heavy_dialog");
+            if (heavy) {
+                heavy.addEventListener("click", (e) => {
+                    if (e.target === heavy) closeHeavyDialog();
+                });
+            }
+            document.addEventListener("keydown", (e) => {
+                if (e.key === "Escape" && heavy && !heavy.hidden) {
+                    e.preventDefault();
+                    closeHeavyDialog();
+                }
+            });
             refresh();
             setInterval(refresh, 1000);
         });
     </script>
+    <div id="heavy_dialog" class="modal-backdrop" hidden>
+        <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="heavy_dialog_title">
+            <div class="modal-title" id="heavy_dialog_title">这条命令比较重</div>
+            <p id="heavy_dialog_text"></p>
+            <div class="modal-note">已加入 mix，不会拦截。</div>
+            <div class="modal-actions">
+                <button type="button" class="primary" onclick="closeHeavyDialog()">知道了</button>
+            </div>
+        </div>
+    </div>
 </body>
 
 </html>
