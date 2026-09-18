@@ -115,3 +115,4 @@ volumes:
 networks:
   aikv-net:
     name: aikv-net
+    external: true

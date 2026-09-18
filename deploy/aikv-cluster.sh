@@ -69,6 +69,10 @@ compose() {
     docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" "$@"
 }
 
+ensure_network() {
+    docker network inspect aikv-net >/dev/null 2>&1 || docker network create aikv-net >/dev/null
+}
+
 copy_context_tree() {
     tar -C "$1" \
         --exclude='.git' \
@@ -497,6 +501,7 @@ cmd_up() {
 
     need docker redis-cli curl
     docker compose version >/dev/null
+    ensure_network
     local image="${AIKV_IMAGE:-aikv:dev}"
     if ! docker image inspect "$image" >/dev/null 2>&1; then
         die "镜像不存在: $image (请先执行: $(basename "$0") build)"

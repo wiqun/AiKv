@@ -9,3 +9,5 @@ deploy/.runtime/
 *.bak
 deploy/loadgen/target/
 deploy/loadgen/loadgen.toml
+deploy/observability/config/prometheus/targets/*.yaml
+!deploy/observability/config/prometheus/targets/*.example.yaml

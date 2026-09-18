@@ -44,10 +44,18 @@ flowchart LR
 
 ```bash
 cd deploy
+
+# 方式 A: 单机全量启动 (默认拉起 Server 与本机探针)
 ./observability.sh up
+
+# 方式 B: 多机解耦部署
+# 监控机启动监控中心 (Prometheus + Grafana + OTel):
+./observability.sh up --server
+# 存储节点机启动探针 (Node Exporter + cAdvisor):
+./observability.sh up --agent
 ```
 
-脚本将自动检测 Docker/Compose 环境, 自 `deploy/.env.example` 复制默认环境变量, 启动服务并执行 60 秒轮询探活.
+脚本将自动检测 Docker/Compose 环境, 自 `deploy/.env.example` 复制默认环境变量, 启动服务并执行轮询探活.
 
 - **Grafana 访问**: [http://127.0.0.1:3000](http://127.0.0.1:3000) (默认免密 Viewer 模式, 管理员账号 `admin` / `admin`)
 - **Prometheus 访问**: [http://127.0.0.1:9090](http://127.0.0.1:9090)
@@ -58,10 +66,10 @@ cd deploy
 
 ```bash
 # 停止容器并保留历史监控数据卷 (aikv-prom-data, aikv-grafana-data)
-./observability.sh down
+./observability.sh down [--all|--server|--agent]
 
-# 停止容器并彻底清空历史监控数据卷
-./observability.sh down --purge
+# 停止容器并清空历史监控数据卷 (持久保留用户 targets/*.yaml 配置)
+./observability.sh down --purge [--all|--server|--agent]
 ```
 
 ---

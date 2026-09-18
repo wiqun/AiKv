@@ -5,6 +5,8 @@ services:
     container_name: cadvisor
     restart: unless-stopped
     privileged: true
+    ports:
+      - "${CADVISOR_BIND:-0.0.0.0:8080}:8080"
     devices:
       - /dev/kmsg:/dev/kmsg
     volumes:
@@ -36,3 +38,4 @@ services:
 networks:
   aikv-net:
     name: aikv-net
+    external: true

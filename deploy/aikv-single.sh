@@ -61,6 +61,10 @@ compose() {
     docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" "$@"
 }
 
+ensure_network() {
+    docker network inspect aikv-net >/dev/null 2>&1 || docker network create aikv-net >/dev/null
+}
+
 copy_context_tree() {
     tar -C "$1" \
         --exclude='.git' \
@@ -142,6 +146,7 @@ cmd_up() {
 
     need docker redis-cli curl
     docker compose version >/dev/null
+    ensure_network
     local timeout_seconds="${AIKV_STARTUP_TIMEOUT_SECONDS:-60}"
     if ! [[ "$timeout_seconds" =~ ^[1-9][0-9]*$ ]]; then
         die "AIKV_STARTUP_TIMEOUT_SECONDS 必须为正整数"
@@ -176,7 +181,7 @@ cmd_up() {
         compose ps || true
         die "aikv 单机容器未能在 ${timeout_seconds}s 内响应 PONG (${probe_ip}:6379)"
     fi
-    if ! curl -fsS --max-time 5 "http://${probe_ip}:9191/health" >/dev/null; then
+    if ! curl -fsS --noproxy '*' --max-time 5 "http://${probe_ip}:9191/health" >/dev/null; then
         compose ps || true
         die "aikv 单机健康检查接口访问失败 (http://${probe_ip}:9191/health)"
     fi
