@@ -24,9 +24,11 @@ services:
     deploy:
       resources:
         limits:
-          memory: 128M
+          cpus: "${CADVISOR_CPU_LIMIT:-0.5}"
+          memory: "${CADVISOR_MEM_LIMIT:-128M}"
         reservations:
-          memory: 64M
+          cpus: "${CADVISOR_CPU_RESERVATION:-0.1}"
+          memory: "${CADVISOR_MEM_RESERVATION:-64M}"
     logging:
       driver: "json-file"
       options:

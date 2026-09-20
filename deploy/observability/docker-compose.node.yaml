@@ -19,9 +19,11 @@ services:
     deploy:
       resources:
         limits:
-          memory: 64M
+          cpus: "${NODE_EXPORTER_CPU_LIMIT:-0.2}"
+          memory: "${NODE_EXPORTER_MEM_LIMIT:-64M}"
         reservations:
-          memory: 32M
+          cpus: "${NODE_EXPORTER_CPU_RESERVATION:-0.05}"
+          memory: "${NODE_EXPORTER_MEM_RESERVATION:-32M}"
     logging:
       driver: "json-file"
       options:

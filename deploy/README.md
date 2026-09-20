@@ -69,6 +69,34 @@ flowchart TD
 
 ---
 
+## 性能测试规格与资源配额规范
+
+为保证基准压测 (Benchmark) 的可重复性, 避免容器因抢占算力导致调度与 Raft 选举抖动, 部署方案默认对各容器统一启用物理资源配额与绑核 (`cpuset`):
+
+| 服务组件 | 默认规格 (Limit) | 默认绑核 (`cpuset`) | 保障配额 (Reservation) | 对应环境变量与说明 |
+| :--- | :--- | :--- | :--- | :--- |
+| **AiKv 单机实例** | 2GB 内存 | `0,1` (2 核) | 512MB 内存 | `AIKV_MEM_LIMIT`, `AIKV_SINGLE_CPUSET` |
+| **AiKv 集群节点 1** | 2GB 内存 | `0,1` (2 核) | 512MB 内存 | `AIKV_NODE1_CPUSET` |
+| **AiKv 集群节点 2** | 2GB 内存 | `2,3` (2 核) | 512MB 内存 | `AIKV_NODE2_CPUSET` |
+| **AiKv 集群节点 3** | 2GB 内存 | `4,5` (2 核) | 512MB 内存 | `AIKV_NODE3_CPUSET` |
+| **AiKv 集群节点 4** | 2GB 内存 | `6,7` (2 核) | 512MB 内存 | `AIKV_NODE4_CPUSET` |
+| **AiKv 集群节点 5** | 2GB 内存 | `8,9` (2 核) | 512MB 内存 | `AIKV_NODE5_CPUSET` |
+| **AiKv 集群节点 6** | 2GB 内存 | `10,11` (2 核) | 512MB 内存 | `AIKV_NODE6_CPUSET` |
+| **OTel Collector** | 1.0 CPU, 256MB 内存 | 无限制 (共享) | 0.2 CPU, 64MB 内存 | `OTEL_CPU_LIMIT`, `OTEL_MEM_LIMIT` |
+| **Prometheus** | 1.0 CPU, 512MB 内存 | 无限制 (共享) | 0.2 CPU, 128MB 内存 | `PROMETHEUS_CPU_LIMIT`, `PROMETHEUS_MEM_LIMIT` |
+| **Grafana** | 1.0 CPU, 512MB 内存 | 无限制 (共享) | 0.2 CPU, 128MB 内存 | `GRAFANA_CPU_LIMIT`, `GRAFANA_MEM_LIMIT` |
+| **Node Exporter** | 0.2 CPU, 64MB 内存 | 无限制 (共享) | 0.05 CPU, 32MB 内存 | `NODE_EXPORTER_CPU_LIMIT` |
+| **cAdvisor** | 0.5 CPU, 128MB 内存 | 无限制 (共享) | 0.1 CPU, 64MB 内存 | `CADVISOR_CPU_LIMIT` |
+
+- **宿主机核心规划 (以 16 核物理机为例)**:
+  - 核 `0-11`: 独占分配给 6 个存储实例 (每节点固定 2C2G 规格, 消除跨核 Cache 失效与 CFS 节流).
+  - 核 `12-13`: 保留给压测引擎 (`loadgen`) 与宿主机系统基础进程.
+  - 核 `14-15`: 承载可观测性监控栈, 消除监控解析对被测引擎的干扰.
+- **弹性调节与跨机适配**:
+  - 若在核心数较少 (如 4 核或 8 核) 的机器上运行, 可在 `deploy/.env` 中将对应的 `AIKV_NODE*_CPUSET` 设为空值 (例如 `AIKV_NODE1_CPUSET=`), 此时容器将退回至完全共享调度, 绝不会报错退出.
+
+---
+
 ## 运行时与存储目录规范
 
 为了方便在宿主机本地直接排查存储引擎状态并保证环境干净, 部署体系约定如下:

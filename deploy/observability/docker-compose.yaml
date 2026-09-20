@@ -13,9 +13,11 @@ services:
     deploy:
       resources:
         limits:
-          memory: 128M
+          cpus: "${OTEL_CPU_LIMIT:-1.0}"
+          memory: "${OTEL_MEM_LIMIT:-256M}"
         reservations:
-          memory: 64M
+          cpus: "${OTEL_CPU_RESERVATION:-0.2}"
+          memory: "${OTEL_MEM_RESERVATION:-64M}"
     logging:
       driver: "json-file"
       options:
@@ -53,9 +55,11 @@ services:
     deploy:
       resources:
         limits:
-          memory: 256M
+          cpus: "${PROMETHEUS_CPU_LIMIT:-1.0}"
+          memory: "${PROMETHEUS_MEM_LIMIT:-512M}"
         reservations:
-          memory: 128M
+          cpus: "${PROMETHEUS_CPU_RESERVATION:-0.2}"
+          memory: "${PROMETHEUS_MEM_RESERVATION:-128M}"
     logging:
       driver: "json-file"
       options:
@@ -95,9 +99,11 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1G
+          cpus: "${GRAFANA_CPU_LIMIT:-1.0}"
+          memory: "${GRAFANA_MEM_LIMIT:-512M}"
         reservations:
-          memory: 256M
+          cpus: "${GRAFANA_CPU_RESERVATION:-0.2}"
+          memory: "${GRAFANA_MEM_RESERVATION:-128M}"
     logging:
       driver: "json-file"
       options:

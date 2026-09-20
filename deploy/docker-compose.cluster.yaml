@@ -6,6 +6,12 @@ x-aikv-node: &aikv-node
   environment:
     OTEL_RESOURCE_ATTRIBUTES: "${OTEL_RESOURCE_ATTRIBUTES:-cluster=dev}"
     AIKV_HOST_LABEL: "${AIKV_HOST_LABEL:-localhost}"
+  deploy:
+    resources:
+      limits:
+        memory: "${AIKV_MEM_LIMIT:-2G}"
+      reservations:
+        memory: "${AIKV_MEM_RESERVATION:-512M}"
   ulimits:
     nofile:
       soft: 65535
@@ -23,6 +29,7 @@ services:
   aikv-1:
     <<: *aikv-node
     container_name: aikv-1
+    cpuset: "${AIKV_NODE1_CPUSET-0,1}"
     ports:
       - "${AIKV_BIND_IP:-127.0.0.1}:6379:6379"
       - "${AIKV_BIND_IP:-127.0.0.1}:16379:16379"
@@ -46,6 +53,7 @@ services:
   aikv-2:
     <<: *aikv-node
     container_name: aikv-2
+    cpuset: "${AIKV_NODE2_CPUSET-2,3}"
     ports:
       - "${AIKV_BIND_IP:-127.0.0.1}:6380:6380"
       - "${AIKV_BIND_IP:-127.0.0.1}:16380:16380"
@@ -69,6 +77,7 @@ services:
   aikv-3:
     <<: *aikv-node
     container_name: aikv-3
+    cpuset: "${AIKV_NODE3_CPUSET-4,5}"
     ports:
       - "${AIKV_BIND_IP:-127.0.0.1}:6381:6381"
       - "${AIKV_BIND_IP:-127.0.0.1}:16381:16381"
@@ -92,6 +101,7 @@ services:
   aikv-4:
     <<: *aikv-node
     container_name: aikv-4
+    cpuset: "${AIKV_NODE4_CPUSET-6,7}"
     ports:
       - "${AIKV_BIND_IP:-127.0.0.1}:7379:7379"
       - "${AIKV_BIND_IP:-127.0.0.1}:17379:17379"
@@ -115,6 +125,7 @@ services:
   aikv-5:
     <<: *aikv-node
     container_name: aikv-5
+    cpuset: "${AIKV_NODE5_CPUSET-8,9}"
     ports:
       - "${AIKV_BIND_IP:-127.0.0.1}:7380:7380"
       - "${AIKV_BIND_IP:-127.0.0.1}:17380:17380"
@@ -138,6 +149,7 @@ services:
   aikv-6:
     <<: *aikv-node
     container_name: aikv-6
+    cpuset: "${AIKV_NODE6_CPUSET-10,11}"
     ports:
       - "${AIKV_BIND_IP:-127.0.0.1}:7381:7381"
       - "${AIKV_BIND_IP:-127.0.0.1}:17381:17381"

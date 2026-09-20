@@ -3,6 +3,7 @@ services:
   aikv-single:
     image: ${AIKV_IMAGE:-aikv:dev}
     container_name: aikv-single
+    cpuset: "${AIKV_SINGLE_CPUSET-0,1}"
     command: ["--config", "/etc/aikv/aikv.toml"]
     restart: unless-stopped
     stop_grace_period: 30s
@@ -20,6 +21,12 @@ services:
       - type: bind
         source: ./.runtime/single/data
         target: /var/lib/aikv/data
+    deploy:
+      resources:
+        limits:
+          memory: "${AIKV_MEM_LIMIT:-2G}"
+        reservations:
+          memory: "${AIKV_MEM_RESERVATION:-512M}"
     ulimits:
       nofile:
         soft: 65535
