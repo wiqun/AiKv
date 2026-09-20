@@ -21,6 +21,7 @@ services:
       - type: bind
         source: ./.runtime/single/data
         target: /var/lib/aikv/data
+    memswap_limit: "${AIKV_MEM_LIMIT:-2G}"
     deploy:
       resources:
         limits:

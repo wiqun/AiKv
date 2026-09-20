@@ -6,6 +6,7 @@ x-aikv-node: &aikv-node
   environment:
     OTEL_RESOURCE_ATTRIBUTES: "${OTEL_RESOURCE_ATTRIBUTES:-cluster=dev}"
     AIKV_HOST_LABEL: "${AIKV_HOST_LABEL:-localhost}"
+  memswap_limit: "${AIKV_MEM_LIMIT:-2G}"
   deploy:
     resources:
       limits:
