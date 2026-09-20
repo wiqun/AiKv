@@ -11,7 +11,6 @@ RUNTIME_DIR="$SCRIPT_DIR/.runtime/loadgen"
 PID_FILE="$RUNTIME_DIR/loadgen.pid"
 LOG_FILE="$RUNTIME_DIR/loadgen.log"
 BIND_FILE="$RUNTIME_DIR/bind"
-BIND="${LOADGEN_BIND:-127.0.0.1:8787}"
 
 usage() {
     printf '用法: %s build|up|down|status\n' "$(basename "$0")" >&2
@@ -43,6 +42,9 @@ load_dotenv() {
         fi
     done < "$SCRIPT_DIR/.env"
 }
+load_dotenv
+
+BIND="${LOADGEN_BIND:-127.0.0.1:8787}"
 
 need() {
     local cmd
@@ -213,7 +215,6 @@ cmd_up() {
     exit 1
 }
 
-load_dotenv
 cmd="${1:-}"
 if [[ -z "$cmd" ]]; then
     usage

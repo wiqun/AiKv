@@ -49,8 +49,27 @@ need() {
     done
 }
 
+resolve_probe_endpoint() {
+    local raw="${1:-}" default_port="${2:-}"
+    local host="127.0.0.1" port="$default_port"
+
+    if [[ "$raw" =~ : ]]; then
+        host="${raw%:*}"
+        port="${raw##*:}"
+    elif [[ -n "$raw" ]]; then
+        port="$raw"
+    fi
+
+    if [[ -z "$host" || "$host" == "0.0.0.0" || "$host" == "::" ]]; then
+        host="127.0.0.1"
+    fi
+    printf '%s:%s' "$host" "$port"
+}
+
 probe_native_node_exporter() {
-    curl -fsS --noproxy '*' -m 2 "http://127.0.0.1:9100/metrics" 2>/dev/null | grep -E '^node_' >/dev/null
+    local ep
+    ep="$(resolve_probe_endpoint "${NODE_EXPORTER_BIND:-}" 9100)"
+    curl -fsS --noproxy '*' -m 2 "http://${ep}/metrics" 2>/dev/null | grep -E '^node_' >/dev/null
 }
 
 has_cadvisor_support() {
@@ -141,17 +160,20 @@ compose() {
 
 wait_for_server() {
     local i prom_ready=0 grafana_ready=0 health_resp
+    local prom_ep grafana_ep
+    prom_ep="$(resolve_probe_endpoint "${PROMETHEUS_BIND:-}" 9090)"
+    grafana_ep="$(resolve_probe_endpoint "${GRAFANA_BIND:-}" 3000)"
     printf '等待 Prometheus / Grafana 就绪...\n'
     for ((i = 1; i <= 30; i++)); do
-        if (( !prom_ready )) && curl -fsS --noproxy '*' "http://127.0.0.1:9090/-/ready" >/dev/null 2>&1; then
+        if (( !prom_ready )) && curl -fsS --noproxy '*' "http://${prom_ep}/-/ready" >/dev/null 2>&1; then
             prom_ready=1
-            printf '  Prometheus 就绪 (http://127.0.0.1:9090)\n'
+            printf '  Prometheus 就绪 (http://%s)\n' "$prom_ep"
         fi
         if (( !grafana_ready )); then
-            health_resp="$(curl -s --noproxy '*' "http://127.0.0.1:3000/api/health" 2>/dev/null || true)"
+            health_resp="$(curl -s --noproxy '*' "http://${grafana_ep}/api/health" 2>/dev/null || true)"
             if grep -qE '"database":\s*"ok"' <<<"$health_resp"; then
                 grafana_ready=1
-                printf '  Grafana 就绪 (http://127.0.0.1:3000)\n'
+                printf '  Grafana 就绪 (http://%s)\n' "$grafana_ep"
             fi
         fi
         if (( prom_ready && grafana_ready )); then
@@ -168,11 +190,13 @@ wait_for_server() {
 
 wait_for_agent() {
     local i node_ready=0
+    local node_ep
+    node_ep="$(resolve_probe_endpoint "${NODE_EXPORTER_BIND:-}" 9100)"
     printf '等待 Node Exporter 就绪...\n'
     for ((i = 1; i <= 30; i++)); do
-        if curl -fsS --noproxy '*' -m 2 "http://127.0.0.1:9100/metrics" 2>/dev/null | grep -E '^node_' >/dev/null; then
+        if curl -fsS --noproxy '*' -m 2 "http://${node_ep}/metrics" 2>/dev/null | grep -E '^node_' >/dev/null; then
             node_ready=1
-            printf '  Node Exporter 就绪 (http://127.0.0.1:9100/metrics)\n'
+            printf '  Node Exporter 就绪 (http://%s/metrics)\n' "$node_ep"
             break
         fi
         sleep 1
@@ -185,18 +209,26 @@ wait_for_agent() {
 }
 
 print_server_ready() {
+    local prom_ep grafana_ep otel_grpc_ep otel_http_ep
+    prom_ep="$(resolve_probe_endpoint "${PROMETHEUS_BIND:-}" 9090)"
+    grafana_ep="$(resolve_probe_endpoint "${GRAFANA_BIND:-}" 3000)"
+    otel_grpc_ep="$(resolve_probe_endpoint "${OTEL_GRPC_BIND:-}" 4317)"
+    otel_http_ep="$(resolve_probe_endpoint "${OTEL_HTTP_BIND:-}" 4318)"
     printf '可观测性监控中心 (Server) 已就绪\n'
-    printf '  Grafana:     http://127.0.0.1:3000 (admin/admin)\n'
-    printf '  Prometheus:  http://127.0.0.1:9090\n'
-    printf '  OTel gRPC:   127.0.0.1:4317\n'
-    printf '  OTel HTTP:   127.0.0.1:4318\n'
+    printf '  Grafana:     http://%s (admin/admin)\n' "$grafana_ep"
+    printf '  Prometheus:  http://%s\n' "$prom_ep"
+    printf '  OTel gRPC:   %s\n' "$otel_grpc_ep"
+    printf '  OTel HTTP:   %s\n' "$otel_http_ep"
 }
 
 print_agent_ready() {
+    local node_ep cadvisor_ep
+    node_ep="$(resolve_probe_endpoint "${NODE_EXPORTER_BIND:-}" 9100)"
+    cadvisor_ep="$(resolve_probe_endpoint "${CADVISOR_BIND:-}" 8080)"
     printf '可观测性节点探针 (Agent) 已就绪\n'
-    printf '  Node Exp:    http://127.0.0.1:9100/metrics\n'
+    printf '  Node Exp:    http://%s/metrics\n' "$node_ep"
     if has_cadvisor_support; then
-        printf '  cAdvisor:    http://127.0.0.1:8080\n'
+        printf '  cAdvisor:    http://%s\n' "$cadvisor_ep"
     fi
 }
 
