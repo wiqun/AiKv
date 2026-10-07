@@ -93,7 +93,10 @@ async fn test_info_keyspace() {
     };
     let s = String::from_utf8_lossy(&text);
     assert!(s.contains("# Keyspace"));
-    assert!(s.contains("db0:keys=2,expires=1"));
+    assert!(s.contains("keys_estimate:"));
+    assert!(s.contains("db0:expires=1"));
+    assert!(!s.contains("keys="));
+    assert!(!s.contains("avg_ttl"));
 }
 
 #[tokio::test]

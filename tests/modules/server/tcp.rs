@@ -142,11 +142,14 @@ async fn test_tcp_select_dbsize() {
     write_cmd(&mut stream, &[b"SELECT", b"1"]).await;
     assert_eq!(read_response(&mut stream).await, b"+OK\r\n");
     write_cmd(&mut stream, &[b"DBSIZE"]).await;
-    assert_eq!(read_response(&mut stream).await, b":0\r\n");
+    let selected = read_response(&mut stream).await;
     write_cmd(&mut stream, &[b"SELECT", b"0"]).await;
     read_response(&mut stream).await;
     write_cmd(&mut stream, &[b"DBSIZE"]).await;
-    assert_eq!(read_response(&mut stream).await, b":1\r\n");
+    let original = read_response(&mut stream).await;
+    assert_eq!(selected, original);
+    assert_ne!(selected, b":0\r\n");
+    assert!(selected.starts_with(b":"));
 }
 
 #[tokio::test]

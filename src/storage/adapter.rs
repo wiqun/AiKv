@@ -548,6 +548,18 @@ impl KvStorage for KvStorageAdapter {
         Ok(self.expires.get(db))
     }
 
+    async fn sample_avg_ttl(&self, db: usize) -> Result<u64> {
+        let entries = self.collect_db_entries(db).await?;
+        let now = now_ms();
+        let remaining = entries.iter().filter_map(|(_, value)| {
+            value
+                .expires_at
+                .filter(|exp| *exp > now)
+                .map(|exp| exp - now)
+        });
+        Ok(crate::storage::types::compute_avg_ttl_ms(remaining))
+    }
+
     async fn keyspace_stats(&self, db: usize) -> Result<KeyspaceStats> {
         let entries = self.collect_db_entries(db).await?;
         let now = now_ms();

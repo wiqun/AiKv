@@ -26,7 +26,9 @@
 
 **ExpiresCounters**: 各逻辑 DB 的进程内 TTL 写入计数. 成功写入 `expires_at = Some` 时加 1, 包括没有读过旧值的覆盖写. 这次调用已经看到旧 TTL, 或惰性过期删掉带 TTL 的值时饱和减. compaction 不改它. 重启从 0 开始, 不扫库补存量.
 
-**estimate_entry_count**: 引擎条目估值, 等于已打开 SSTable 的 `num_entries` 与 MemTable `entry_count` 之和. 集群实现把本地各 group 的估值相加, 不扫描.
+**estimate_entry_count**: 引擎条目估值, 等于已打开 SSTable 的 `num_entries` 与 MemTable `entry_count` 之和. 集群实现把本地各 group 的估值相加, 不扫描. `MemoryEngine` 没有 SST, 估值是全部逻辑 DB 上未过期用户 key 之和.
+
+**DBSIZE**: 返回引擎条目估值, 不随 `SELECT` 改变. `SET NX` / `XX`, `DEL` 返回值和 `EXISTS` 仍是精确命令结果.
 
 **键过期语义**: `TtlExpireFilter` 在 compaction 时丢弃过期值, 且不改 `ExpiresCounters`. `KvStorage::delete` 用一次存在性读取决定返回个数.
 
@@ -54,4 +56,4 @@
 
 **OTLP**: OpenTelemetry Protocol, AiKv 的生产指标出口; 指标前缀为 `aikv_*`.
 
-**INFO**: Redis 兼容的 INFO 命令输出; 目标是与 Redis 8.8 的 INFO 字段对齐, 部分字段为 stub 值.
+**INFO**: Redis 兼容的 INFO 命令输出. 默认 Keyspace 只有一行 `keys_estimate`, 再加每个逻辑 DB 的 `dbN:expires`. 不输出 `keys=` 和 `avg_ttl`. `sample_avg_ttl` 是唯一会扫描并计算平均剩余 TTL 的路径, 默认 INFO 不调用它.

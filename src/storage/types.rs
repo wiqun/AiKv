@@ -277,6 +277,8 @@ pub trait KvStorage: Send + Sync {
         let _ = db;
         Ok(0)
     }
+    /// 抽样该逻辑 DB 的平均剩余 TTL (毫秒). 默认 INFO 不调用.
+    async fn sample_avg_ttl(&self, db: usize) -> Result<u64>;
     async fn keyspace_stats(&self, db: usize) -> Result<KeyspaceStats>;
     async fn clear(&self, db: usize) -> Result<()>;
     async fn clear_all(&self) -> Result<()>;
@@ -437,6 +439,17 @@ impl ExpiresCounters {
         for count in &self.counts {
             count.store(0, Ordering::Relaxed);
         }
+    }
+
+    #[inline]
+    pub fn swap(&self, a: usize, b: usize) {
+        if a >= DB_COUNT || b >= DB_COUNT || a == b {
+            return;
+        }
+        let left = self.counts[a].load(Ordering::Relaxed);
+        let right = self.counts[b].load(Ordering::Relaxed);
+        self.counts[a].store(right, Ordering::Relaxed);
+        self.counts[b].store(left, Ordering::Relaxed);
     }
 }
 

@@ -69,6 +69,39 @@ async fn test_compat_exists() {
             storage.exists(0, b"k").await.unwrap(),
             "{label}: EXISTS present"
         );
+        assert_eq!(
+            storage.get(0, b"k").await.unwrap().as_deref(),
+            Some(b"v".as_slice()),
+            "{label}: EXISTS matches GET"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_compat_set_nx_does_not_overwrite() {
+    use aikv::command::CommandRouter;
+    use aikv::protocol::RespValue;
+    use bytes::Bytes;
+
+    let dir = TempDir::new().unwrap();
+    for (label, storage) in [("memory", mem()), ("aidb", aidb(&dir))] {
+        let router = CommandRouter::new(Arc::clone(&storage));
+        let mut db = 0;
+        let arg = |s: &str| Bytes::copy_from_slice(s.as_bytes());
+        router
+            .execute("SET", &[arg("k"), arg("v")], &mut db)
+            .await
+            .unwrap();
+        let nx = router
+            .execute("SET", &[arg("k"), arg("v2"), arg("NX")], &mut db)
+            .await
+            .unwrap();
+        assert_eq!(nx, RespValue::BulkString(None), "{label}: SET NX");
+        assert_eq!(
+            storage.get(0, b"k").await.unwrap().as_deref(),
+            Some(b"v".as_slice()),
+            "{label}: SET NX leaves the value"
+        );
     }
 }
 

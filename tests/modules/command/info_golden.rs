@@ -54,7 +54,8 @@ async fn info_redis88_all_p0_fields_present() {
         "INFO all missing Redis 8.8 P0 fields: {}",
         missing.join(", ")
     );
-    assert!(text.contains("db0:keys="), "keyspace db0 line missing");
+    assert!(text.contains("keys_estimate:"), "keyspace estimate missing");
+    assert!(!text.contains("keys="));
 }
 
 #[tokio::test]

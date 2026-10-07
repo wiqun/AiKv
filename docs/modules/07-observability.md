@@ -94,4 +94,4 @@ flowchart TD
 8. **`Modules`**: 已加载模块列表 (空);
 9. **`Errorstats`**: 详细错误分类统计 (`errorstat_WRONGTYPE`, `errorstat_ERR` 等);
 10. **`Cluster`**: 集群启用标志 (`cluster_enabled: 1`), 集群状态 (`cluster_state: ok/fail`), 槽位分配数;
-11. **`Keyspace`**: 各逻辑数据库 Key 总数与设置 TTL 的 Key 数量 (`db0:keys=100,expires=10,avg_ttl=3600000`).
+11. **`Keyspace`**: 一行引擎条目估值 `keys_estimate`, 以及每个逻辑 DB 的进程内 TTL 计数 `dbN:expires`. 不输出 `keys=` 和 `avg_ttl`.

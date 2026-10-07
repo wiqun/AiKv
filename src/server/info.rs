@@ -500,14 +500,12 @@ impl<'a> InfoRenderer<'a> {
         use crate::storage::types::DB_COUNT;
 
         let mut out = String::from("# Keyspace\r\n");
+        let estimate = self.storage.len(0).await.unwrap_or(0);
+        let _ = write!(out, "keys_estimate:{estimate}\r\n");
         let db_count = self.storage.db_count().await.unwrap_or(0).min(DB_COUNT);
         for db in 0..db_count {
-            if let Ok(stats) = self.storage.keyspace_stats(db).await {
-                let _ = write!(
-                    out,
-                    "db{db}:keys={},expires={},avg_ttl={},subexpiry=0\r\n",
-                    stats.keys, stats.expires, stats.avg_ttl
-                );
+            if let Ok(expires) = self.storage.expires(db).await {
+                let _ = write!(out, "db{db}:expires={expires}\r\n");
             }
         }
         out
