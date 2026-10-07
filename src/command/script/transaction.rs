@@ -191,23 +191,38 @@ impl ScriptTransaction {
                         storage.delete(self.db_index, &key).await?;
                     }
                     ExtendedBatchOp::SetString(value) => {
+                        let preserved = !self.expire_at.contains_key(&key);
                         let exp = self.resolve_expires_at(storage, &key).await?;
                         if let Some(at) = exp {
-                            storage.set_with_ttl(self.db_index, &key, value, at).await?;
+                            storage
+                                .set_with_ttl(self.db_index, &key, value, at)
+                                .await?;
+                            if preserved {
+                                storage.release_seen_ttl(self.db_index).await?;
+                            }
                         } else {
                             storage.set(self.db_index, &key, value).await?;
                         }
                     }
                     _ => {
+                        let preserved = !self.expire_at.contains_key(&key);
                         let mut stored = op_to_stored(op)?;
                         stored.expires_at = self.resolve_expires_at(storage, &key).await?;
+                        let saw_ttl = preserved && stored.expires_at.is_some();
                         storage.set_typed(self.db_index, &key, stored).await?;
+                        if saw_ttl {
+                            storage.release_seen_ttl(self.db_index).await?;
+                        }
                     }
                 }
             } else if self.expire_at.contains_key(&key) {
                 if let Some(mut stored) = storage.get_typed(self.db_index, &key).await? {
+                    let saw_ttl = stored.expires_at.is_some();
                     stored.expires_at = self.expire_at.get(&key).copied().flatten();
                     storage.set_typed(self.db_index, &key, stored).await?;
+                    if saw_ttl {
+                        storage.release_seen_ttl(self.db_index).await?;
+                    }
                 }
             }
         }

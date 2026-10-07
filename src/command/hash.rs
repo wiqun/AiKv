@@ -72,7 +72,7 @@ impl HashCommands {
                     self.migrate_hash_to_subkey(db, key, &stored.expires_at, map)
                         .await?;
                 } else {
-                    self.storage.set_typed(db, key, stored).await?;
+                    self.storage.rewrite_stored(db, key, stored).await?;
                 }
                 Ok(router::integer(new_fields))
             }
@@ -105,7 +105,7 @@ impl HashCommands {
                     kind: CollectionKind::Hash,
                     count: old_count,
                 };
-                self.storage.set_typed(db, key, stored).await?;
+                self.storage.rewrite_stored(db, key, stored).await?;
                 Ok(router::integer(new_fields))
             }
             _ => Err(router::wrongtype()),
@@ -175,7 +175,7 @@ impl HashCommands {
                 if map.is_empty() {
                     self.storage.delete(db, key).await?;
                 } else {
-                    self.storage.set_typed(db, key, stored).await?;
+                    self.storage.rewrite_stored(db, key, stored).await?;
                 }
                 Ok(router::integer(count))
             }
@@ -207,7 +207,7 @@ impl HashCommands {
                         kind: CollectionKind::Hash,
                         count: new_count,
                     };
-                    self.storage.set_typed(db, key, stored).await?;
+                    self.storage.rewrite_stored(db, key, stored).await?;
                 }
                 Ok(router::integer(removed))
             }
@@ -352,7 +352,7 @@ impl HashCommands {
                     self.migrate_hash_to_subkey(db, key, &stored.expires_at, map)
                         .await?;
                 } else {
-                    self.storage.set_typed(db, key, stored).await?;
+                    self.storage.rewrite_stored(db, key, stored).await?;
                 }
             }
             ValueType::CollectionHeader {
@@ -377,7 +377,7 @@ impl HashCommands {
                     kind: CollectionKind::Hash,
                     count: *count + 1,
                 };
-                self.storage.set_typed(db, key, stored).await?;
+                self.storage.rewrite_stored(db, key, stored).await?;
             }
             _ => return Err(router::wrongtype()),
         }
@@ -457,7 +457,7 @@ impl HashCommands {
                         .await?;
                     return Ok(router::bulk(s.into_bytes()));
                 }
-                self.storage.set_typed(db, key, stored).await?;
+                self.storage.rewrite_stored(db, key, stored).await?;
                 return Ok(router::bulk(s.into_bytes()));
             }
             ValueType::CollectionHeader {
@@ -497,7 +497,7 @@ impl HashCommands {
                         kind: CollectionKind::Hash,
                         count: *count + 1,
                     };
-                    self.storage.set_typed(db, key, stored).await?;
+                    self.storage.rewrite_stored(db, key, stored).await?;
                 }
                 s.as_bytes().to_vec()
             }
@@ -535,7 +535,7 @@ impl HashCommands {
                         .await?;
                     return Ok(router::integer(new_val));
                 }
-                self.storage.set_typed(db, key, stored).await?;
+                self.storage.rewrite_stored(db, key, stored).await?;
                 return Ok(router::integer(new_val));
             }
             ValueType::CollectionHeader {
@@ -567,7 +567,7 @@ impl HashCommands {
                         kind: CollectionKind::Hash,
                         count: *count + 1,
                     };
-                    self.storage.set_typed(db, key, stored).await?;
+                    self.storage.rewrite_stored(db, key, stored).await?;
                 }
                 new_val
             }
@@ -707,7 +707,7 @@ impl HashCommands {
             },
             expires_at: *expires_at,
         };
-        self.storage.set_typed(db, key, metadata).await
+        self.storage.rewrite_stored(db, key, metadata).await
     }
 
     /// 删除某个 key 下的所有 hash subkey entries.

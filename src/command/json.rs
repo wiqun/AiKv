@@ -75,7 +75,8 @@ impl JsonCommands {
             .await?
             .and_then(|s| s.expires_at);
         if let Some(at) = expire_at {
-            self.storage.set_with_ttl(db, key, json_bytes, at).await
+            self.storage.set_with_ttl(db, key, json_bytes, at).await?;
+            self.storage.release_seen_ttl(db).await
         } else {
             self.storage.set(db, key, json_bytes).await
         }

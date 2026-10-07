@@ -77,16 +77,24 @@ impl StringCommands {
             }
 
             // KEEPTTL: 保留现有过期时间
-            let expire = if opts.keep_ttl {
+            let previous_ttl = if opts.keep_ttl {
                 self.storage
                     .get_typed(db, &opts.key)
                     .await?
                     .and_then(|s| s.expires_at)
             } else {
+                None
+            };
+            let expire = if opts.keep_ttl {
+                previous_ttl
+            } else {
                 opts.expire_at
             };
 
             self.apply_set(db, &opts.key, &opts.value, expire).await?;
+            if previous_ttl.is_some() {
+                self.storage.release_seen_ttl(db).await?;
+            }
 
             return Ok(if opts.return_old {
                 match old_value {

@@ -295,6 +295,7 @@ impl KvStorage for MemoryEngine {
         let mut map = self.databases[db].write();
         let removed = Self::purge_expired(&mut map);
         self.record_expired(removed);
+        self.expires.on_ttl_clear_n(db, removed);
         Ok(keys)
     }
 
@@ -343,6 +344,12 @@ impl KvStorage for MemoryEngine {
     async fn expires(&self, db: usize) -> Result<u64> {
         self.check_db(db)?;
         Ok(self.expires.get(db))
+    }
+
+    async fn release_seen_ttl(&self, db: usize) -> Result<()> {
+        self.check_db(db)?;
+        self.expires.on_ttl_clear(db);
+        Ok(())
     }
 
     async fn sample_avg_ttl(&self, db: usize) -> Result<u64> {
@@ -614,10 +621,15 @@ impl KvStorage for MemoryEngine {
         if src_db == dst_db && src_key == dst_key {
             return Ok(replace);
         }
-        if self.get_typed(dst_db, dst_key).await?.is_some() && !replace {
+        let existing = self.get_typed(dst_db, dst_key).await?;
+        if existing.is_some() && !replace {
             return Ok(false);
         }
+        let saw_ttl = existing.and_then(|value| value.expires_at).is_some();
         self.set_typed(dst_db, dst_key, stored.clone()).await?;
+        if saw_ttl {
+            self.expires.on_ttl_clear(dst_db);
+        }
         Ok(true)
     }
 

@@ -295,6 +295,22 @@ pub trait KvStorage: Send + Sync {
     async fn get_typed(&self, db: usize, key: &[u8]) -> Result<Option<StoredValue>>;
     async fn set_typed(&self, db: usize, key: &[u8], value: StoredValue) -> Result<()>;
 
+    /// 这次调用已经看到该逻辑 DB 上的一条 TTL 时饱和减. 盲写不要调用.
+    async fn release_seen_ttl(&self, db: usize) -> Result<()> {
+        let _ = db;
+        Ok(())
+    }
+
+    /// 把已经读到的值写回同一个 key. 值上带 TTL 时, 写入的加 1 再饱和减.
+    async fn rewrite_stored(&self, db: usize, key: &[u8], stored: StoredValue) -> Result<()> {
+        let saw_ttl = stored.expires_at.is_some();
+        self.set_typed(db, key, stored).await?;
+        if saw_ttl {
+            self.release_seen_ttl(db).await?;
+        }
+        Ok(())
+    }
+
     async fn rename_key(&self, db: usize, old_key: &[u8], new_key: &[u8]) -> Result<()>;
     async fn rename_key_nx(&self, db: usize, old_key: &[u8], new_key: &[u8]) -> Result<bool>;
     async fn copy_key(
@@ -420,11 +436,17 @@ impl ExpiresCounters {
     /// 本次调用已经看到旧值带 TTL, 或惰性过期删掉了带 TTL 的值时饱和减.
     #[inline]
     pub fn on_ttl_clear(&self, db: usize) {
-        if db < DB_COUNT {
-            let _ = self.counts[db].fetch_update(Ordering::Relaxed, Ordering::Relaxed, |curr| {
-                Some(curr.saturating_sub(1))
-            });
+        self.on_ttl_clear_n(db, 1);
+    }
+
+    #[inline]
+    pub fn on_ttl_clear_n(&self, db: usize, n: u64) {
+        if n == 0 || db >= DB_COUNT {
+            return;
         }
+        let _ = self.counts[db].fetch_update(Ordering::Relaxed, Ordering::Relaxed, |curr| {
+            Some(curr.saturating_sub(n))
+        });
     }
 
     #[inline]

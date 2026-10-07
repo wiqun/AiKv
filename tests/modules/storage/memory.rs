@@ -196,3 +196,12 @@ async fn test_memory_engine_keyspace_stats() {
     assert_eq!(stats.keys, 2);
     assert_eq!(stats.expires, 1);
 }
+
+#[tokio::test]
+async fn keys_purge_decrements_expires() {
+    let e = engine();
+    e.set_with_ttl(0, b"k", b"v", 1).await.unwrap();
+    assert_eq!(e.expires(0).await.unwrap(), 1);
+    assert!(e.keys(0, b"*").await.unwrap().is_empty());
+    assert_eq!(e.expires(0).await.unwrap(), 0);
+}

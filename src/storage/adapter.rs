@@ -548,6 +548,12 @@ impl KvStorage for KvStorageAdapter {
         Ok(self.expires.get(db))
     }
 
+    async fn release_seen_ttl(&self, db: usize) -> Result<()> {
+        self.check_db(db)?;
+        self.expires.on_ttl_clear(db);
+        Ok(())
+    }
+
     async fn sample_avg_ttl(&self, db: usize) -> Result<u64> {
         let entries = self.collect_db_entries(db).await?;
         let now = now_ms();
@@ -747,10 +753,15 @@ impl KvStorage for KvStorageAdapter {
         if src_db == dst_db && src_key == dst_key {
             return Ok(replace);
         }
-        if self.load_typed(dst_db, dst_key).await?.is_some() && !replace {
+        let existing = self.load_typed(dst_db, dst_key).await?;
+        if existing.is_some() && !replace {
             return Ok(false);
         }
+        let saw_ttl = existing.as_ref().and_then(|value| value.expires_at).is_some();
         self.set_typed(dst_db, dst_key, stored).await?;
+        if saw_ttl {
+            self.expires.on_ttl_clear(dst_db);
+        }
         Ok(true)
     }
 

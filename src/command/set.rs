@@ -63,7 +63,7 @@ impl SetCommands {
                     self.migrate_set_to_subkey(db, key, &stored.expires_at, set)
                         .await?;
                 } else {
-                    self.storage.set_typed(db, key, stored).await?;
+                    self.storage.rewrite_stored(db, key, stored).await?;
                 }
                 Ok(router::integer(count))
             }
@@ -89,7 +89,7 @@ impl SetCommands {
                     // Set member 值用空字节 (仅 key 存在性)
                     self.storage.raw_subkey_set(db, subkey_key, vec![]).await?;
                 }
-                self.storage.set_typed(db, key, stored).await?;
+                self.storage.rewrite_stored(db, key, stored).await?;
                 Ok(router::integer(new_members))
             }
             _ => Err(router::wrongtype()),
@@ -115,7 +115,7 @@ impl SetCommands {
                 if set.is_empty() {
                     self.storage.delete(db, key).await?;
                 } else {
-                    self.storage.set_typed(db, key, stored).await?;
+                    self.storage.rewrite_stored(db, key, stored).await?;
                 }
                 Ok(router::integer(count))
             }
@@ -141,7 +141,7 @@ impl SetCommands {
                 if *count == 0 {
                     self.storage.delete(db, key).await?;
                 } else {
-                    self.storage.set_typed(db, key, stored).await?;
+                    self.storage.rewrite_stored(db, key, stored).await?;
                 }
                 Ok(router::integer(removed))
             }
@@ -235,7 +235,7 @@ impl SetCommands {
                 if set.is_empty() {
                     self.storage.delete(db, key).await?;
                 } else {
-                    self.storage.set_typed(db, key, stored).await?;
+                    self.storage.rewrite_stored(db, key, stored).await?;
                 }
             }
             ValueType::CollectionHeader {
@@ -251,7 +251,7 @@ impl SetCommands {
                 if *count == 0 {
                     self.storage.delete(db, key).await?;
                 } else {
-                    self.storage.set_typed(db, key, stored).await?;
+                    self.storage.rewrite_stored(db, key, stored).await?;
                 }
             }
             _ => unreachable!(),
@@ -384,7 +384,7 @@ impl SetCommands {
                 if set.is_empty() {
                     self.storage.delete(db, source).await?;
                 } else {
-                    self.storage.set_typed(db, source, src_stored).await?;
+                    self.storage.rewrite_stored(db, source, src_stored).await?;
                 }
             }
             ValueType::CollectionHeader {
@@ -398,7 +398,7 @@ impl SetCommands {
                 if *count == 0 {
                     self.storage.delete(db, source).await?;
                 } else {
-                    self.storage.set_typed(db, source, src_stored).await?;
+                    self.storage.rewrite_stored(db, source, src_stored).await?;
                 }
             }
             _ => unreachable!(),
@@ -420,7 +420,7 @@ impl SetCommands {
         match &mut dest_stored.value {
             ValueType::Set(ref mut set) => {
                 set.insert(member);
-                self.storage.set_typed(db, dest, dest_stored).await?;
+                self.storage.rewrite_stored(db, dest, dest_stored).await?;
             }
             ValueType::CollectionHeader {
                 kind: CollectionKind::Set,
@@ -430,7 +430,7 @@ impl SetCommands {
                 let subkey_key = subkey::encode_set_member_key(&encoded, &member);
                 self.storage.raw_subkey_set(db, subkey_key, vec![]).await?;
                 *count += 1;
-                self.storage.set_typed(db, dest, dest_stored).await?;
+                self.storage.rewrite_stored(db, dest, dest_stored).await?;
             }
             _ => unreachable!(),
         }
@@ -628,7 +628,7 @@ impl SetCommands {
             },
             expires_at: *expires_at,
         };
-        self.storage.set_typed(db, key, metadata).await
+        self.storage.rewrite_stored(db, key, metadata).await
     }
 }
 

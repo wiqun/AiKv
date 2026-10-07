@@ -105,7 +105,7 @@ impl ZSetCommands {
             }
             zset.insert(member, score);
         }
-        self.storage.set_typed(db, key, stored).await?;
+        self.storage.rewrite_stored(db, key, stored).await?;
         BlockingRegistry::global().notify(key, RespValue::SimpleString("OK".into()));
         Ok(router::integer(count))
     }
@@ -127,7 +127,7 @@ impl ZSetCommands {
         if zset.is_empty() {
             self.storage.delete(db, key).await?;
         } else {
-            self.storage.set_typed(db, key, stored).await?;
+            self.storage.rewrite_stored(db, key, stored).await?;
         }
         Ok(router::integer(count))
     }
@@ -304,7 +304,7 @@ impl ZSetCommands {
         let zset = stored.as_zset_mut()?;
         let new_score = zset.get(&member).copied().unwrap_or(0.0) + increment;
         zset.insert(member, new_score);
-        self.storage.set_typed(db, key, stored).await?;
+        self.storage.rewrite_stored(db, key, stored).await?;
         Ok(router::bulk(format_score(new_score).into_bytes()))
     }
 
@@ -372,7 +372,7 @@ impl ZSetCommands {
         if zset.is_empty() {
             self.storage.delete(db, key).await?;
         } else {
-            self.storage.set_typed(db, key, stored).await?;
+            self.storage.rewrite_stored(db, key, stored).await?;
         }
         Ok(RespValue::Array(Some(items)))
     }
