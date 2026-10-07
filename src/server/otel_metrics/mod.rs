@@ -2,8 +2,8 @@
 //!
 //! # Invariant
 //!
-//! - 热路径只写 `ServerMetrics`; `aikv_*` 由 `refresh_runtime_metrics` →
-//!   `info_catalog::sync_otel_from_server_metrics` 读真源、算 delta 后写 OTLP
+//! - 热路径只写 `ServerMetrics`. 导出任务用同一份快照渲染 `/metrics` 并推送增量.
+//!   `sync_otel_from_server_metrics` 不再由 refresh 调用.
 //!   (相对 INFO 最多滞后 ~15s); 禁止在热路径直接写 OTel.
 //! - OTel counter 仅支持 `add(delta)`: `SyncSnapshot` 保存上次 cumulative 快照,
 //!   `sync_counters` / `sync_commandstats` 逐字段差分后 add.

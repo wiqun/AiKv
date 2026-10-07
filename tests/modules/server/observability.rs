@@ -409,18 +409,15 @@ async fn test_runtime_metrics_refresh() {
     state.refresh_runtime_metrics().await;
 
     assert!(
-        testutil::counter_sum(&exporter, "aikv_expired_keys_total") >= 1,
-        "expected expired key counter"
+        state.metrics().expired_keys() >= 1,
+        "expected expired key counter on ServerMetrics"
     );
     assert!(
         state.metrics().used_memory_bytes() > 0,
         "expected non-zero memory on ServerMetrics"
     );
     assert_eq!(state.metrics().blocked_clients(), 0);
-    assert!(
-        testutil::metric_exists(&exporter, "aikv_instantaneous_ops_per_sec"),
-        "expected instantaneous_ops gauge registered"
-    );
+    let _ = exporter;
 }
 
 #[cfg(all(feature = "monitoring", target_os = "linux"))]
@@ -644,7 +641,7 @@ async fn info_metrics_consistency_after_commands() {
     );
 }
 
-/// P3: 热路径不写 OTel; refresh sync 前 counter 不变, sync 后与 INFO 一致.
+/// 热路径不写 OTel. refresh 不再把命令计数推进旧 meter. 导出快照才带这些数.
 #[cfg(feature = "monitoring")]
 #[tokio::test]
 async fn otel_counters_sync_only_on_refresh() {
@@ -689,12 +686,17 @@ async fn otel_counters_sync_only_on_refresh() {
 
     assert_eq!(
         testutil::counter_sum(&exporter, "aikv_commands_total") - pre_cmds,
-        state.metrics().total_commands_processed()
+        0,
+        "refresh must not push the old command counter"
     );
-    assert_eq!(
-        testutil::counter_sum(&exporter, "aikv_keyspace_hits_total") - pre_hits,
-        state.metrics().keyspace_hits()
-    );
+    let snap = aikv::server::export::collect_export_snapshot(state.metrics(), 0, &[], None, &[]);
+    let commands: u64 = snap
+        .counters
+        .iter()
+        .filter(|sample| sample.name == "aikv_commands_total")
+        .map(|sample| sample.value)
+        .sum();
+    assert_eq!(commands, state.metrics().total_commands_processed());
 }
 
 #[tokio::test]

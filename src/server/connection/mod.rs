@@ -605,6 +605,7 @@ impl Connection {
 
     fn record_command_observability(&self, cmd: &str, args: &[String], start: Instant, _ok: bool) {
         let duration_us = start.elapsed().as_micros() as u64;
+        self.state.latency_stats.record(cmd, duration_us);
         self.state.slow_query_log.record(
             cmd,
             args,

@@ -300,7 +300,7 @@ impl ServerSharedState {
             if let Some(otel) = self.metrics.otel_handle() {
                 otel.set_rebuild_counters_duration(self.storage.rebuild_counters_duration_us());
             }
-            crate::server::info_catalog::sync_otel_from_server_metrics(&self.metrics);
+            // 命令和字节计数只走导出快照. 这里不再把同一批累计值同步进另一套 OTel 计数器.
         }
     }
 

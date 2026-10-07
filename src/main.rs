@@ -685,11 +685,16 @@ async fn main() {
                     }
                 }
                 let engine = bg_state.storage.aidb_statistics();
+                #[cfg(feature = "cluster")]
+                let raft = aikv::cluster::state::raft_export_views();
+                #[cfg(not(feature = "cluster"))]
+                let raft = Vec::new();
                 let current = aikv::server::export::collect_export_snapshot(
                     bg_state.metrics(),
                     keys_estimate,
                     &expires,
                     engine.as_deref(),
+                    &raft,
                 );
                 let text = aikv::server::export::render_prometheus(&current);
                 aikv::server::export::publish_metrics_text(text);

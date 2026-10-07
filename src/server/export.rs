@@ -131,11 +131,18 @@ pub fn collect_export_snapshot(
     keys_estimate: u64,
     expires: &[(usize, u64)],
     engine: Option<&aidb::Statistics>,
+    raft: &[(String, RaftExportView)],
 ) -> ExportSnapshot {
     let mut snapshot = ExportSnapshot::default();
     append_process(&mut snapshot, metrics, keys_estimate, expires);
     append_commands(&mut snapshot, metrics);
     append_redirects(&mut snapshot, metrics);
+    for (group, view) in raft {
+        let part = raft_samples(group, view);
+        snapshot.gauges.extend(part.gauges);
+        snapshot.counters.extend(part.counters);
+        snapshot.histograms.extend(part.histograms);
+    }
     if let Some(stats) = engine {
         append_engine(&mut snapshot, stats);
     }
@@ -148,12 +155,11 @@ fn append_process(
     keys_estimate: u64,
     expires: &[(usize, u64)],
 ) {
-    push_counter(
-        &mut snapshot,
-        "aikv_connections_current",
-        vec![],
-        metrics.connected_clients() as u64,
-    );
+    snapshot.gauges.push(GaugeSample {
+        name: "aikv_connections_current".into(),
+        labels: vec![],
+        value: metrics.connected_clients() as f64,
+    });
     push_counter(
         &mut snapshot,
         "aikv_connections_rejected_total",
@@ -697,7 +703,7 @@ mod tests {
         metrics.on_redirect(RedirectKind::Moved);
         assert_eq!(metrics.redirect_count(RedirectKind::Moved), 1);
         assert_eq!(metrics.redirect_count(RedirectKind::Ask), 0);
-        let snap = super::collect_export_snapshot(&metrics, 0, &[], None);
+        let snap = super::collect_export_snapshot(&metrics, 0, &[], None, &[]);
         let types: Vec<_> = snap
             .counters
             .iter()
@@ -719,7 +725,7 @@ mod tests {
         use crate::server::metrics::ServerMetrics;
         let metrics = ServerMetrics::default();
         let text =
-            super::render_prometheus(&super::collect_export_snapshot(&metrics, 0, &[], None));
+            super::render_prometheus(&super::collect_export_snapshot(&metrics, 0, &[], None, &[]));
         assert!(!text.contains("aidb_raft_"), "{text}");
         assert!(!text.contains("group="), "{text}");
     }
@@ -735,11 +741,81 @@ mod tests {
     }
 
     #[test]
+    fn raft_view_enters_the_snapshot() {
+        use super::{collect_export_snapshot, render_prometheus, RaftExportView};
+        use crate::server::metrics::ServerMetrics;
+        let view = RaftExportView {
+            commit_index: 10,
+            applied_index: 7,
+            last_log_index: 10,
+            max_voter_matched: 6,
+            is_leader: true,
+            leader_contact_age_secs: 4.0,
+            role: "leader",
+        };
+        let text = render_prometheus(&collect_export_snapshot(
+            &ServerMetrics::default(),
+            0,
+            &[],
+            None,
+            &[("g1".into(), view)],
+        ));
+        assert!(
+            text.contains("aidb_raft_apply_lag_entries{group=\"g1\"} 3"),
+            "{text}"
+        );
+        assert!(
+            text.contains("aidb_raft_replication_lag_entries{group=\"g1\"} 4"),
+            "{text}"
+        );
+        assert!(
+            text.contains("aidb_raft_leader_contact_age_seconds{group=\"g1\"} 0"),
+            "{text}"
+        );
+        assert!(
+            text.contains("aidb_raft_role{group=\"g1\",role=\"leader\"} 1"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn connections_current_follows_the_live_value() {
+        use super::{collect_export_snapshot, push_deltas};
+        use crate::server::metrics::ServerMetrics;
+        let metrics = ServerMetrics::default();
+        for _ in 0..10 {
+            metrics.on_connect();
+        }
+        let high = collect_export_snapshot(&metrics, 0, &[], None, &[]);
+        for _ in 0..3 {
+            metrics.on_disconnect();
+        }
+        let low = collect_export_snapshot(&metrics, 0, &[], None, &[]);
+        let mut sink = GaugeSink { value: None };
+        push_deltas(&low, &high, &mut sink);
+        assert_eq!(sink.value, Some(7.0));
+    }
+
+    struct GaugeSink {
+        value: Option<f64>,
+    }
+
+    impl super::ExportSink for GaugeSink {
+        fn add_counter(&mut self, _name: &str, _labels: &[(&str, &str)], _delta: u64) {}
+        fn set_gauge(&mut self, name: &str, _labels: &[(&str, &str)], value: f64) {
+            if name == "aikv_connections_current" {
+                self.value = Some(value);
+            }
+        }
+        fn set_histogram(&mut self, _: &str, _: &[(&str, &str)], _: &LatencySnapshot) {}
+    }
+
+    #[test]
     fn scan_entries_added_once() {
         use crate::server::metrics::ServerMetrics;
         let metrics = ServerMetrics::default();
         metrics.note_scan_entries(3);
-        let snap = super::collect_export_snapshot(&metrics, 0, &[], None);
+        let snap = super::collect_export_snapshot(&metrics, 0, &[], None, &[]);
         let text = super::render_prometheus(&snap);
         assert!(text.contains("aikv_scan_entries_total 3\n"), "{text}");
         let scan_samples = snap
