@@ -233,7 +233,8 @@ pub fn resolve_from_parts(
 | :--- | :--- | :--- |
 | `UnknownAidbPreset { raw }` | 非法 preset 字符串 | 回退 `default` |
 | `UnknownAnnounceMode { raw }` | 非法 announce_mode | 回退 `unknown` |
-| `InvalidOtelSampleRatio { raw }` | 非 [0,1] 有限值 | 回退 `1.0` |
+| `InvalidOtelSampleRatio { raw }` | 非 [0,1] 有限值 | 回退 `0.0` |
+| `InvalidLogLevel { raw }` | 认不出的日志级别 | 回退 `info` |
 | `ClusterSectionIgnored` | 无 cluster feature 但 TOML 含 `[cluster]` | 忽略该段 |
 | `PartialClusterConfig` | 仅配 `node_id` 或 `rpc_addr` 其一 | 退化为单机 |
 | `MemoryEngineProductionHint` | `engine=memory` | 提示生产慎用 |

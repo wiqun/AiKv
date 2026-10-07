@@ -495,7 +495,7 @@ fn init_logging(settings: &ResolvedSettings) {
     #[cfg(all(feature = "monitoring", not(feature = "cluster")))]
     let cluster_node_id: Option<u64> = None;
 
-    let filter = EnvFilter::new(settings.observability.log_level.as_str());
+    let log_level = settings.observability.log_level.as_str();
 
     #[cfg(feature = "monitoring")]
     if let Some(config) = aikv::server::otel::otel_config_from_settings(
@@ -505,7 +505,9 @@ fn init_logging(settings: &ResolvedSettings) {
     ) {
         if aikv::server::otel::init_otel(&config) && aikv::server::otel::tracer_installed() {
             let tracer = opentelemetry::global::tracer("aikv");
-            let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+            let otel_layer = tracing_opentelemetry::layer()
+                .with_tracer(tracer)
+                .with_filter(tracing_subscriber::filter::LevelFilter::TRACE);
             let base = Registry::default().with(otel_layer);
             let subscriber = if json_enabled {
                 base.with(
@@ -515,18 +517,18 @@ fn init_logging(settings: &ResolvedSettings) {
                         .with_current_span(true)
                         .with_span_list(true)
                         .with_writer(std::io::stdout)
+                        .with_filter(EnvFilter::new(log_level))
                         .boxed(),
                 )
-                .with(filter)
             } else {
                 base.with(
                     fmt::layer()
                         .compact()
                         .with_target(true)
                         .with_writer(std::io::stdout)
+                        .with_filter(EnvFilter::new(log_level))
                         .boxed(),
                 )
-                .with(filter)
             };
             let _ = subscriber.try_init();
             return;
@@ -535,27 +537,25 @@ fn init_logging(settings: &ResolvedSettings) {
 
     // 无 OTel 时只初始化 fmt subscriber
     let subscriber = if json_enabled {
-        Registry::default()
-            .with(
-                fmt::layer()
-                    .json()
-                    .flatten_event(false)
-                    .with_current_span(true)
-                    .with_span_list(true)
-                    .with_writer(std::io::stdout)
-                    .boxed(),
-            )
-            .with(filter)
+        Registry::default().with(
+            fmt::layer()
+                .json()
+                .flatten_event(false)
+                .with_current_span(true)
+                .with_span_list(true)
+                .with_writer(std::io::stdout)
+                .with_filter(EnvFilter::new(log_level))
+                .boxed(),
+        )
     } else {
-        Registry::default()
-            .with(
-                fmt::layer()
-                    .compact()
-                    .with_target(true)
-                    .with_writer(std::io::stdout)
-                    .boxed(),
-            )
-            .with(filter)
+        Registry::default().with(
+            fmt::layer()
+                .compact()
+                .with_target(true)
+                .with_writer(std::io::stdout)
+                .with_filter(EnvFilter::new(log_level))
+                .boxed(),
+        )
     };
     if let Err(e) = subscriber.try_init() {
         eprintln!("warn: tracing subscriber already initialized ({})", e);
@@ -724,4 +724,42 @@ async fn main() {
 
     #[cfg(feature = "monitoring")]
     aikv::server::otel::shutdown_otel();
+}
+
+#[cfg(test)]
+fn export_spans_enabled_at(level: &str) -> bool {
+    aidb::observability::set_traces_enabled(true);
+    let subscriber = Registry::default()
+        .with(tracing_subscriber::filter::LevelFilter::TRACE)
+        .with(
+            fmt::layer()
+                .with_writer(std::io::sink)
+                .with_filter(EnvFilter::new(level)),
+        );
+    let enabled = tracing::subscriber::with_default(subscriber, || {
+        !aidb::observability::optional_span("kv_command").is_disabled()
+    });
+    aidb::observability::set_traces_enabled(false);
+    enabled
+}
+
+#[cfg(test)]
+mod logging_filter_tests {
+    use super::export_spans_enabled_at;
+
+    #[test]
+    fn error_log_level_still_creates_command_span() {
+        assert!(export_spans_enabled_at("error"));
+    }
+
+    #[test]
+    fn init_logging_does_not_filter_the_whole_subscriber() {
+        let src = include_str!("main.rs");
+        let start = src.find("fn init_logging").expect("init_logging");
+        let body = &src[start..start + 2800];
+        assert!(
+            !body.contains(".with(filter)"),
+            "log filter must sit on the fmt layer, not the whole subscriber"
+        );
+    }
 }
