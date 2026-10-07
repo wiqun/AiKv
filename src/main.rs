@@ -676,7 +676,21 @@ async fn main() {
                 interval.tick().await;
                 bg_state.refresh_runtime_metrics().await;
                 bg_state.metrics().refresh_process_metrics();
-                let current = aikv::server::export::collect_export_snapshot();
+                let keys_estimate = bg_state.storage.len(0).await.unwrap_or(0) as u64;
+                let db_count = bg_state.storage.db_count().await.unwrap_or(0);
+                let mut expires = Vec::with_capacity(db_count);
+                for db in 0..db_count {
+                    if let Ok(count) = bg_state.storage.expires(db).await {
+                        expires.push((db, count));
+                    }
+                }
+                let engine = bg_state.storage.aidb_statistics();
+                let current = aikv::server::export::collect_export_snapshot(
+                    bg_state.metrics(),
+                    keys_estimate,
+                    &expires,
+                    engine.as_deref(),
+                );
                 let text = aikv::server::export::render_prometheus(&current);
                 aikv::server::export::publish_metrics_text(text);
                 if otlp_enabled {

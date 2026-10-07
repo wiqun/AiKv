@@ -527,7 +527,13 @@ impl CommandRouter {
             "PTTL" => self.key_cmds.pttl(*db, args).await,
             "PERSIST" => self.key_cmds.persist(*db, args).await,
             "KEYS" => self.key_cmds.keys(*db, args).await,
-            "SCAN" => self.key_cmds.scan(*db, args).await,
+            "SCAN" => {
+                let value = self.key_cmds.scan(*db, args).await?;
+                if let Some(metrics) = self.metrics.as_ref() {
+                    metrics.note_scan_entries(scan_key_count(&value));
+                }
+                Ok(value)
+            }
             "RANDOMKEY" => self.key_cmds.randomkey(*db, args).await,
             "RENAME" => self.key_cmds.rename(*db, args).await,
             "RENAMENX" => self.key_cmds.renamenx(*db, args).await,
@@ -723,6 +729,16 @@ pub(crate) fn require_min_args(cmd: &str, args: &[Bytes], n: usize) -> Result<()
         return Err(wrong_args(cmd, ""));
     }
     Ok(())
+}
+
+fn scan_key_count(value: &RespValue) -> u64 {
+    let RespValue::Array(Some(parts)) = value else {
+        return 0;
+    };
+    let Some(RespValue::Array(Some(keys))) = parts.get(1) else {
+        return 0;
+    };
+    keys.len() as u64
 }
 
 pub(crate) fn ok() -> RespValue {

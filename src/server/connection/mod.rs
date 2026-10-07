@@ -178,6 +178,7 @@ impl Connection {
                     alive_ms = conn_start.elapsed().as_millis() as u64,
                     "kv.connection.close.reason"
                 );
+                self.state.metrics.note_connection_close("shutdown");
                 break;
             }
             if self.quit {
@@ -188,6 +189,7 @@ impl Connection {
                     alive_ms = conn_start.elapsed().as_millis() as u64,
                     "kv.connection.close.reason"
                 );
+                self.state.metrics.note_connection_close("quit");
                 break;
             }
 
@@ -206,6 +208,7 @@ impl Connection {
                         alive_ms = conn_start.elapsed().as_millis() as u64,
                         "kv.connection.close.reason"
                     );
+                    self.state.metrics.note_connection_close("idle_timeout");
                     break;
                 }
             }
@@ -222,6 +225,7 @@ impl Connection {
                             alive_ms = conn_start.elapsed().as_millis() as u64,
                             "kv.connection.close.reason"
                         );
+                        self.state.metrics.note_connection_close("read_error");
                         return Err(e.into());
                     }
                     Err(_) => {
@@ -233,6 +237,7 @@ impl Connection {
                             alive_ms = conn_start.elapsed().as_millis() as u64,
                             "kv.connection.close.reason"
                         );
+                        self.state.metrics.note_connection_close("read_timeout");
                         break;
                     }
                 }
@@ -248,6 +253,7 @@ impl Connection {
                     alive_ms = conn_start.elapsed().as_millis() as u64,
                     "kv.connection.close.reason"
                 );
+                self.state.metrics.note_connection_close("client_closed");
                 break;
             }
 
@@ -261,6 +267,7 @@ impl Connection {
                     alive_ms = conn_start.elapsed().as_millis() as u64,
                     "kv.connection.close.reason"
                 );
+                self.state.metrics.note_connection_close("buffer_overflow");
                 break;
             }
 

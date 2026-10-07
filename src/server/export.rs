@@ -124,9 +124,361 @@ pub fn push_deltas(current: &ExportSnapshot, baseline: &ExportSnapshot, sink: &m
     }
 }
 
-/// 后面的任务往这份快照里填命令, 引擎和 Raft 样本. 这里先返回空快照, 让导出时钟只有一处.
-pub fn collect_export_snapshot() -> ExportSnapshot {
-    ExportSnapshot::default()
+/// 连接, 进程和引擎样本. 不扫描数据库, 也不带 `instantaneous_ops`, `evicted_keys`,
+/// `used_memory_lua`, `avg_ttl`. 未启用 Raft 时样本没有 `group`.
+pub fn collect_export_snapshot(
+    metrics: &crate::server::metrics::ServerMetrics,
+    keys_estimate: u64,
+    expires: &[(usize, u64)],
+    engine: Option<&aidb::Statistics>,
+) -> ExportSnapshot {
+    let mut snapshot = ExportSnapshot::default();
+    append_process(&mut snapshot, metrics, keys_estimate, expires);
+    append_commands(&mut snapshot, metrics);
+    if let Some(stats) = engine {
+        append_engine(&mut snapshot, stats);
+    }
+    snapshot
+}
+
+fn append_process(
+    mut snapshot: &mut ExportSnapshot,
+    metrics: &crate::server::metrics::ServerMetrics,
+    keys_estimate: u64,
+    expires: &[(usize, u64)],
+) {
+    push_counter(
+        &mut snapshot,
+        "aikv_connections_current",
+        vec![],
+        metrics.connected_clients() as u64,
+    );
+    push_counter(
+        &mut snapshot,
+        "aikv_connections_rejected_total",
+        vec![],
+        metrics.rejected_connections(),
+    );
+    push_counter(
+        &mut snapshot,
+        "aikv_net_input_bytes_total",
+        vec![],
+        metrics.net_input_bytes(),
+    );
+    push_counter(
+        &mut snapshot,
+        "aikv_net_output_bytes_total",
+        vec![],
+        metrics.net_output_bytes(),
+    );
+    push_counter(
+        &mut snapshot,
+        "aikv_scan_entries_total",
+        vec![],
+        metrics.scan_entries(),
+    );
+    push_counter(
+        &mut snapshot,
+        "aikv_expired_keys_total",
+        vec![],
+        metrics.expired_keys(),
+    );
+    push_counter(
+        &mut snapshot,
+        "aikv_slowlog_total",
+        vec![],
+        metrics.slowlog_commands_count(),
+    );
+    push_counter(
+        &mut snapshot,
+        "aikv_point_reads_total",
+        vec![("result".into(), "hit".into())],
+        metrics.point_read_count(true),
+    );
+    push_counter(
+        &mut snapshot,
+        "aikv_point_reads_total",
+        vec![("result".into(), "miss".into())],
+        metrics.point_read_count(false),
+    );
+    snapshot.gauges.push(GaugeSample {
+        name: "aikv_process_up".into(),
+        labels: vec![],
+        value: 1.0,
+    });
+    snapshot.gauges.push(GaugeSample {
+        name: "aikv_rss_bytes".into(),
+        labels: vec![],
+        value: metrics.cached_rss_bytes() as f64,
+    });
+    snapshot.gauges.push(GaugeSample {
+        name: "aikv_keys_estimate".into(),
+        labels: vec![],
+        value: keys_estimate as f64,
+    });
+    for (db, count) in expires {
+        snapshot.gauges.push(GaugeSample {
+            name: "aikv_expires".into(),
+            labels: vec![("db".into(), db.to_string())],
+            value: *count as f64,
+        });
+    }
+    for (reason, count) in metrics.connection_close_rows() {
+        push_counter(
+            &mut snapshot,
+            "aikv_connection_closes_total",
+            vec![("reason".into(), reason)],
+            count,
+        );
+    }
+    for (errno, count) in metrics.accept_error_rows() {
+        push_counter(
+            &mut snapshot,
+            "aikv_accept_errors_total",
+            vec![("errno".into(), errno)],
+            count,
+        );
+    }
+}
+
+fn append_commands(
+    mut snapshot: &mut ExportSnapshot,
+    metrics: &crate::server::metrics::ServerMetrics,
+) {
+    for (command, ok, err) in metrics.command_counter_rows() {
+        push_counter(
+            &mut snapshot,
+            "aikv_commands_total",
+            vec![
+                ("command".into(), command.clone()),
+                ("status".into(), "ok".into()),
+            ],
+            ok,
+        );
+        push_counter(
+            &mut snapshot,
+            "aikv_commands_total",
+            vec![
+                ("command".into(), command),
+                ("status".into(), "error".into()),
+            ],
+            err,
+        );
+    }
+    for (command, ok, snap) in metrics.command_duration_rows() {
+        snapshot.histograms.push(HistogramSample {
+            name: "aikv_command_duration_seconds".into(),
+            labels: vec![
+                ("command".into(), command),
+                ("status".into(), if ok { "ok" } else { "error" }.into()),
+            ],
+            snap,
+        });
+    }
+}
+
+fn push_counter(
+    snapshot: &mut ExportSnapshot,
+    name: &str,
+    labels: Vec<(String, String)>,
+    value: u64,
+) {
+    snapshot.counters.push(CounterSample {
+        name: name.into(),
+        labels,
+        value,
+    });
+}
+
+fn append_engine(snapshot: &mut ExportSnapshot, stats: &aidb::Statistics) {
+    use std::sync::atomic::Ordering;
+    let current = stats.snapshot();
+    snapshot
+        .gauges
+        .push(gauge("aidb_wal_size_bytes", vec![], current.wal_size_bytes));
+    snapshot.gauges.push(gauge(
+        "aidb_memtable_active_bytes",
+        vec![],
+        current.memtable_size_bytes[0],
+    ));
+    snapshot.gauges.push(gauge(
+        "aidb_memtable_frozen_bytes",
+        vec![],
+        current.memtable_size_bytes[1],
+    ));
+    snapshot.gauges.push(gauge(
+        "aidb_memtable_limit_bytes",
+        vec![],
+        stats.memtable_limit_bytes.load(Ordering::Relaxed),
+    ));
+    snapshot.gauges.push(gauge(
+        "aidb_l0_files",
+        vec![],
+        current.sstable_count.first().copied().unwrap_or(0),
+    ));
+    snapshot.gauges.push(gauge(
+        "aidb_l0_compaction_trigger",
+        vec![],
+        stats.l0_compaction_trigger.load(Ordering::Relaxed),
+    ));
+    snapshot.gauges.push(gauge(
+        "aidb_l0_slowdown_writes_trigger",
+        vec![],
+        stats.l0_slowdown_writes_trigger.load(Ordering::Relaxed),
+    ));
+    snapshot.gauges.push(gauge(
+        "aidb_l0_stop_writes_trigger",
+        vec![],
+        stats.l0_stop_writes_trigger.load(Ordering::Relaxed),
+    ));
+    for (level, size) in current.sstable_size_bytes.iter().enumerate() {
+        snapshot.gauges.push(GaugeSample {
+            name: "aidb_sstable_size_bytes".into(),
+            labels: vec![("level".into(), level.to_string())],
+            value: *size as f64,
+        });
+    }
+    append_engine_counters(snapshot, stats, &current);
+}
+
+fn append_engine_counters(
+    snapshot: &mut ExportSnapshot,
+    stats: &aidb::Statistics,
+    current: &aidb::statistics::StatsSnapshot,
+) {
+    use std::sync::atomic::Ordering;
+    push_counter(
+        snapshot,
+        "aidb_wal_written_bytes_total",
+        vec![],
+        current.wal_written_bytes,
+    );
+    push_counter(
+        snapshot,
+        "aidb_flush_written_bytes_total",
+        vec![],
+        current.flush_written_bytes,
+    );
+    push_counter(
+        snapshot,
+        "aidb_compaction_written_bytes_total",
+        vec![],
+        current.compaction_written_bytes,
+    );
+    push_counter(
+        snapshot,
+        "aidb_compaction_read_bytes_total",
+        vec![],
+        current.compaction_read_bytes,
+    );
+    push_counter(
+        snapshot,
+        "aidb_block_read_bytes_total",
+        vec![],
+        current.block_read_bytes,
+    );
+    push_counter(
+        snapshot,
+        "aidb_block_seek_count_total",
+        vec![],
+        current.block_seek_count,
+    );
+    push_counter(
+        snapshot,
+        "aidb_logical_read_count_total",
+        vec![],
+        current.logical_read_count,
+    );
+    push_counter(
+        snapshot,
+        "aidb_logical_read_bytes_total",
+        vec![],
+        current.logical_read_bytes,
+    );
+    push_counter(
+        snapshot,
+        "aidb_block_cache_hits_total",
+        vec![],
+        current.block_cache_hits,
+    );
+    push_counter(
+        snapshot,
+        "aidb_block_cache_misses_total",
+        vec![],
+        current.block_cache_misses,
+    );
+    push_counter(
+        snapshot,
+        "aidb_bloom_false_positive_total",
+        vec![],
+        current.bloom_false_positive,
+    );
+    push_counter(
+        snapshot,
+        "aidb_bloom_useful_total",
+        vec![],
+        current.bloom_useful,
+    );
+    snapshot.gauges.push(gauge(
+        "aidb_block_cache_size_bytes",
+        vec![],
+        current.block_cache_size,
+    ));
+    snapshot.gauges.push(gauge(
+        "aidb_block_cache_capacity_bytes",
+        vec![],
+        current.block_cache_capacity,
+    ));
+    snapshot.gauges.push(gauge(
+        "aidb_compaction_pending_bytes",
+        vec![],
+        current.compaction_pending_bytes,
+    ));
+    snapshot.gauges.push(GaugeSample {
+        name: "aidb_flush_last_duration_seconds".into(),
+        labels: vec![],
+        value: stats.flush_last_duration_us.load(Ordering::Relaxed) as f64 / 1_000_000.0,
+    });
+    snapshot.gauges.push(GaugeSample {
+        name: "aidb_compaction_last_duration_seconds".into(),
+        labels: vec![],
+        value: stats.compaction_last_duration_us.load(Ordering::Relaxed) as f64 / 1_000_000.0,
+    });
+    snapshot.gauges.push(GaugeSample {
+        name: "aidb_write_stall_window_max_us".into(),
+        labels: vec![],
+        value: stats.take_write_stall_window_max_us() as f64,
+    });
+    snapshot.histograms.push(HistogramSample {
+        name: "aidb_engine_write_duration_seconds".into(),
+        labels: vec![],
+        snap: stats.engine_write_duration.snapshot(),
+    });
+    snapshot.gauges.push(GaugeSample {
+        name: "aidb_recovery_wal_replay_duration_seconds".into(),
+        labels: vec![],
+        value: current.recovery_wal_replay_duration_us as f64 / 1_000_000.0,
+    });
+    for kind in aidb::statistics::WriteStallKind::ALL {
+        let (cause, stall_kind) = kind.cause_and_type();
+        push_counter(
+            snapshot,
+            "aidb_write_stall_total",
+            vec![
+                ("cause".into(), cause.into()),
+                ("kind".into(), stall_kind.into()),
+            ],
+            current.write_stall_requests[kind as usize],
+        );
+    }
+}
+
+fn gauge(name: &str, labels: Vec<(String, String)>, value: u64) -> GaugeSample {
+    GaugeSample {
+        name: name.into(),
+        labels,
+        value: value as f64,
+    }
 }
 
 fn format_labels(labels: &[(String, String)]) -> String {
@@ -207,6 +559,32 @@ mod tests {
             _snap: &LatencySnapshot,
         ) {
             *self.histogram_sets.borrow_mut() += 1;
+        }
+    }
+
+    #[test]
+    fn scan_entries_added_once() {
+        use crate::server::metrics::ServerMetrics;
+        let metrics = ServerMetrics::default();
+        metrics.note_scan_entries(3);
+        let snap = super::collect_export_snapshot(&metrics, 0, &[], None);
+        let text = super::render_prometheus(&snap);
+        assert!(text.contains("aikv_scan_entries_total 3\n"), "{text}");
+        let scan_samples = snap
+            .counters
+            .iter()
+            .filter(|c| c.name == "aikv_scan_entries_total")
+            .count();
+        assert_eq!(scan_samples, 1);
+        for forbidden in [
+            "instantaneous_ops",
+            "evicted_keys",
+            "used_memory_lua",
+            "avg_ttl",
+            "aidb_backup_",
+            "group=",
+        ] {
+            assert!(!text.contains(forbidden), "{forbidden} in {text}");
         }
     }
 

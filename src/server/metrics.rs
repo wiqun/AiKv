@@ -119,6 +119,8 @@ pub struct ServerMetrics {
     local_point_misses: AtomicU64,
     shared_point_reads: OnceLock<Arc<PointReadCounter>>,
     scan_entries: AtomicU64,
+    connection_closes: DashMap<&'static str, u64>,
+    accept_errors: DashMap<String, u64>,
     #[cfg(feature = "monitoring")]
     process_last_cpu_user_seconds_bits: AtomicU64,
     #[cfg(feature = "monitoring")]
@@ -179,6 +181,8 @@ impl Default for ServerMetrics {
             local_point_misses: AtomicU64::new(0),
             shared_point_reads: OnceLock::new(),
             scan_entries: AtomicU64::new(0),
+            connection_closes: DashMap::new(),
+            accept_errors: DashMap::new(),
             #[cfg(feature = "monitoring")]
             process_last_cpu_user_seconds_bits: AtomicU64::new(0),
             #[cfg(feature = "monitoring")]
@@ -875,6 +879,55 @@ impl ServerMetrics {
     /// SCAN 结束时的条目数. 不改点查 hit/miss.
     pub fn note_scan_entries(&self, count: u64) {
         self.scan_entries.fetch_add(count, Ordering::Relaxed);
+    }
+
+    pub fn scan_entries(&self) -> u64 {
+        self.scan_entries.load(Ordering::Relaxed)
+    }
+
+    pub fn note_connection_close(&self, reason: &'static str) {
+        *self.connection_closes.entry(reason).or_insert(0) += 1;
+    }
+
+    pub fn note_accept_error(&self, errno: &str) {
+        *self.accept_errors.entry(errno.to_string()).or_insert(0) += 1;
+    }
+
+    pub fn connection_close_rows(&self) -> Vec<(String, u64)> {
+        self.connection_closes
+            .iter()
+            .map(|e| ((*e.key()).to_string(), *e.value()))
+            .collect()
+    }
+
+    pub fn accept_error_rows(&self) -> Vec<(String, u64)> {
+        self.accept_errors
+            .iter()
+            .map(|e| (e.key().clone(), *e.value()))
+            .collect()
+    }
+
+    pub fn command_counter_rows(&self) -> Vec<(String, u64, u64)> {
+        self.commands_total
+            .iter()
+            .map(|e| (e.key().clone(), e.ok, e.err))
+            .collect()
+    }
+
+    pub fn command_duration_rows(&self) -> Vec<(String, bool, LatencySnapshot)> {
+        let mut out = Vec::new();
+        for entry in self.command_latency.iter() {
+            let name = (*entry.key()).to_string();
+            let ok = entry.ok.snapshot();
+            let err = entry.err.snapshot();
+            if ok.count > 0 {
+                out.push((name.clone(), true, ok));
+            }
+            if err.count > 0 {
+                out.push((name, false, err));
+            }
+        }
+        out
     }
 
     pub fn command_histogram_snapshots(
