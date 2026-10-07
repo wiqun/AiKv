@@ -38,7 +38,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use tracing::{instrument, Instrument};
+use tracing::Instrument;
 
 use crate::command::{
     database, hash, json, key, list, persistence, script, server, set, string, zset,
@@ -64,7 +64,6 @@ pub struct CommandRouter {
     #[expect(dead_code)]
     key_lock: Arc<KeyLock>,
     metrics: Option<Arc<ServerMetrics>>,
-    tcp_port: u16,
     string: string::StringCommands,
     hash: hash::HashCommands,
     list: list::ListCommands,
@@ -101,12 +100,10 @@ impl CommandRouter {
             metrics: None,
             storage,
             key_lock,
-            tcp_port: 6379,
         }
     }
 
     pub fn new_with_shared(storage: Arc<dyn KvStorage>, shared: Arc<ServerSharedState>) -> Self {
-        let tcp_port = shared.tcp_port;
         let key_lock = Arc::new(KeyLock::new(KEY_LOCK_BUCKETS));
         Self {
             string: string::StringCommands::new(storage.clone(), key_lock.clone()),
@@ -144,7 +141,6 @@ impl CommandRouter {
             metrics: Some(Arc::clone(&shared.metrics)),
             storage,
             key_lock,
-            tcp_port,
         }
     }
 
@@ -152,7 +148,6 @@ impl CommandRouter {
         Arc::clone(&self.storage)
     }
 
-    #[instrument(level = "debug", name = "kv_command", skip(self, args), fields(cmd.name = cmd, args_len = args.len()))]
     pub async fn execute(&self, cmd: &str, args: &[Bytes], db: &mut usize) -> Result<RespValue> {
         self.execute_with_client(
             cmd,
@@ -180,33 +175,17 @@ impl CommandRouter {
             &crate::cluster::connection::ClusterConnectionState,
         >,
     ) -> Result<RespValue> {
+        let span = aidb::observability::optional_span("kv_command");
+        if aidb::observability::traces_enabled() {
+            span.record("cmd", crate::command::canonical_command(cmd));
+        }
         #[cfg(feature = "cluster")]
         if let Some(state) = conn_state {
             if let Some(result) = self.cluster_route(cmd, args, state).await {
                 return result;
             }
         }
-        let span = tracing::debug_span!(
-            "kv_command",
-            otel.kind = "server",
-            cmd = cmd,
-            args_len = args.len(),
-            client_id = client_id.unwrap_or(0),
-            client.address = tracing::field::Empty,
-            network.peer.address = tracing::field::Empty,
-            network.peer.port = tracing::field::Empty,
-            db = *db,
-            server.port = self.tcp_port,
-            db.system = "redis",
-            db.operation.name = cmd,
-            trace_id = tracing::field::Empty,
-            span_id = tracing::field::Empty,
-        );
-        if let Some(addr) = client_addr {
-            span.record("client.address", tracing::field::display(addr.ip()));
-            span.record("network.peer.address", tracing::field::display(addr.ip()));
-            span.record("network.peer.port", addr.port() as i64);
-        }
+        let _ = client_addr;
         let started = std::time::Instant::now();
         let result = async {
             #[cfg(feature = "monitoring")]

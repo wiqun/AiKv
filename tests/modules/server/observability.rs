@@ -833,3 +833,134 @@ fn test_metric_catalog_contract() {
         );
     }
 }
+
+struct SpanCapture {
+    spans: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    info_events: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    fields: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+struct FieldGrab(Vec<String>);
+
+impl tracing::field::Visit for FieldGrab {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        self.0.push(format!("{}={value:?}", field.name()));
+    }
+
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        self.0.push(format!("{}={value}", field.name()));
+    }
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SpanCapture {
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        _id: &tracing::span::Id,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        self.spans
+            .lock()
+            .unwrap()
+            .push(attrs.metadata().name().to_string());
+        let mut grab = FieldGrab(Vec::new());
+        attrs.record(&mut grab);
+        self.fields.lock().unwrap().extend(grab.0);
+    }
+
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        if *event.metadata().level() == tracing::Level::INFO {
+            let mut grab = FieldGrab(Vec::new());
+            event.record(&mut grab);
+            self.info_events
+                .lock()
+                .unwrap()
+                .push(event.metadata().name().to_string());
+            self.fields.lock().unwrap().extend(grab.0);
+        }
+    }
+}
+
+fn info_capture() -> (
+    SpanCapture,
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+) {
+    let spans = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let info_events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let fields = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    (
+        SpanCapture {
+            spans: std::sync::Arc::clone(&spans),
+            info_events: std::sync::Arc::clone(&info_events),
+            fields: std::sync::Arc::clone(&fields),
+        },
+        spans,
+        info_events,
+        fields,
+    )
+}
+
+#[tokio::test]
+async fn default_get_and_set_emit_no_info_and_no_span() {
+    use aikv::command::CommandRouter;
+    use aikv::storage::{KvStorage, MemoryEngine};
+    use bytes::Bytes;
+    use std::sync::Arc;
+    use tracing_subscriber::prelude::*;
+    use tracing_subscriber::Registry;
+
+    aidb::observability::set_traces_enabled(false);
+    let (layer, spans, info_events, _fields) = info_capture();
+    let subscriber =
+        Registry::default().with(layer.with_filter(tracing_subscriber::filter::LevelFilter::INFO));
+    let storage: Arc<dyn KvStorage> = MemoryEngine::new(16);
+    let router = CommandRouter::new(storage);
+    let mut db = 0;
+    let key = Bytes::from_static(b"user-key-should-stay-out");
+    let _guard = tracing::subscriber::set_default(subscriber);
+    router
+        .execute("SET", &[key.clone(), Bytes::from_static(b"v")], &mut db)
+        .await
+        .unwrap();
+    router.execute("GET", &[key], &mut db).await.unwrap();
+    drop(_guard);
+    assert!(info_events.lock().unwrap().is_empty());
+    let spans = spans.lock().unwrap();
+    assert!(!spans
+        .iter()
+        .any(|name| name == "kv_command" || name == "kv_connection"));
+    aidb::observability::set_traces_enabled(false);
+}
+
+#[tokio::test]
+async fn command_span_exists_only_when_traces_are_enabled() {
+    use aikv::command::CommandRouter;
+    use aikv::storage::{KvStorage, MemoryEngine};
+    use bytes::Bytes;
+    use std::sync::Arc;
+    use tracing_subscriber::prelude::*;
+    use tracing_subscriber::Registry;
+
+    aidb::observability::set_traces_enabled(true);
+    let (layer, spans, _info_events, fields) = info_capture();
+    let subscriber =
+        Registry::default().with(layer.with_filter(tracing_subscriber::filter::LevelFilter::INFO));
+    let storage: Arc<dyn KvStorage> = MemoryEngine::new(16);
+    let router = CommandRouter::new(storage);
+    let mut db = 0;
+    let key = Bytes::from_static(b"user-key-should-stay-out");
+    let _guard = tracing::subscriber::set_default(subscriber);
+    router.execute("GET", &[key], &mut db).await.unwrap();
+    drop(_guard);
+    let spans = spans.lock().unwrap();
+    assert_eq!(spans.iter().filter(|name| *name == "kv_command").count(), 1);
+    let dumped = fields.lock().unwrap().join(" ");
+    assert!(!dumped.contains("user-key-should-stay-out"));
+    aidb::observability::set_traces_enabled(false);
+}

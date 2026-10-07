@@ -139,39 +139,24 @@ impl Connection {
             cluster_state: crate::cluster::connection::ClusterConnectionState::new(),
             tx_state: TransactionState::new(),
         };
-        tracing::info!(remote = %remote, client_id, "kv.connection.open");
+        tracing::debug!(remote = %remote, client_id, "kv.connection.open");
         let _ = conn.run().await;
         let gate = Arc::clone(&conn.state.transaction_gate);
         let _guard = gate.write_owned().await;
         conn.release_watches();
         drop(_guard);
         state.unregister_client(client_id);
-        tracing::info!(remote = %conn.remote, client_id, "kv.connection.close");
+        tracing::debug!(remote = %conn.remote, client_id, "kv.connection.close");
     }
 
-    #[instrument(
-        name = "kv_connection",
-        skip(self),
-        fields(
-            otel.kind = "server",
-            remote_addr = %self.remote,
-            client.address = %self.remote.ip(),
-            network.peer.address = %self.remote.ip(),
-            network.peer.port = self.remote.port(),
-            server.port = tracing::field::Empty,
-            db_index = 0,
-        )
-    )]
     async fn run(&mut self) -> Result<()> {
-        tracing::Span::current().record("db_index", self.current_db as i64);
-        tracing::Span::current().record("server.port", self.state.tcp_port as i64);
         let config = Arc::clone(&self.state.connection_config);
         let mut buf = vec![0u8; 16384];
         let conn_start = Instant::now();
 
         loop {
             if self.state.shutdown.is_cancelled() {
-                tracing::info!(
+                tracing::debug!(
                     target: "kv.conn.close_reason",
                     client_id = self.client_id,
                     reason = "shutdown",
@@ -182,7 +167,7 @@ impl Connection {
                 break;
             }
             if self.quit {
-                tracing::info!(
+                tracing::debug!(
                     target: "kv.conn.close_reason",
                     client_id = self.client_id,
                     reason = "quit",
@@ -200,7 +185,7 @@ impl Connection {
 
             if let Some(idle) = config.idle_timeout {
                 if self.last_active.elapsed() > idle {
-                    tracing::info!(
+                    tracing::debug!(
                         target: "kv.conn.close_reason",
                         client_id = self.client_id,
                         reason = "idle_timeout",
@@ -217,7 +202,7 @@ impl Connection {
                 match time::timeout(timeout, self.read_buf(&mut buf)).await {
                     Ok(Ok(n)) => n,
                     Ok(Err(e)) => {
-                        tracing::info!(
+                        tracing::debug!(
                             target: "kv.conn.close_reason",
                             client_id = self.client_id,
                             reason = "read_error",
@@ -229,7 +214,7 @@ impl Connection {
                         return Err(e.into());
                     }
                     Err(_) => {
-                        tracing::info!(
+                        tracing::debug!(
                             target: "kv.conn.close_reason",
                             client_id = self.client_id,
                             reason = "read_timeout",
@@ -246,7 +231,7 @@ impl Connection {
             };
 
             if n == 0 {
-                tracing::info!(
+                tracing::debug!(
                     target: "kv.conn.close_reason",
                     client_id = self.client_id,
                     reason = "client_closed",
@@ -258,7 +243,7 @@ impl Connection {
             }
 
             if self.parser.buffer_len() + n > self.parser.max_buffer_size() {
-                tracing::info!(
+                tracing::debug!(
                     target: "kv.conn.close_reason",
                     client_id = self.client_id,
                     reason = "buffer_overflow",
