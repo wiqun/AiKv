@@ -83,8 +83,12 @@ fn overview_latency_is_one_line_and_freshness_is_sample_age() {
         .into_iter()
         .filter(|expr| expr.contains("aikv_command_duration_seconds"))
         .collect();
-    assert!(latency.iter().any(|expr| expr.contains("histogram_quantile(0.50")));
-    assert!(latency.iter().any(|expr| expr.contains("histogram_quantile(0.99")));
+    assert!(latency
+        .iter()
+        .any(|expr| expr.contains("histogram_quantile(0.50")));
+    assert!(latency
+        .iter()
+        .any(|expr| expr.contains("histogram_quantile(0.99")));
     for expr in &latency {
         assert!(expr.contains("sum by (le)"), "{expr}");
         assert!(expr.contains("$rate_window"), "{expr}");
@@ -145,10 +149,18 @@ fn overview_latency_is_one_line_and_freshness_is_sample_age() {
         }
         let text = std::fs::read_to_string(&path).unwrap();
         for forbidden in FORBIDDEN {
-            assert!(!text.contains(forbidden), "{} has {forbidden}", path.display());
+            assert!(
+                !text.contains(forbidden),
+                "{} has {forbidden}",
+                path.display()
+            );
         }
     }
-    for name in ["storage-engine.json", "process-system.json", "cold-recovery.json"] {
+    for name in [
+        "storage-engine.json",
+        "process-system.json",
+        "cold-recovery.json",
+    ] {
         assert!(!dashboards_dir().join(name).exists(), "{name} still exists");
     }
 }
@@ -161,7 +173,10 @@ fn troubleshoot_read_amp_skips_zero_and_cache_hit_uses_the_window() {
         .iter()
         .find(|expr| expr.contains("aidb_logical_read_bytes_total"))
         .expect("read amp");
-    assert!(read_amp.contains("aidb_block_read_bytes_total"), "{read_amp}");
+    assert!(
+        read_amp.contains("aidb_block_read_bytes_total"),
+        "{read_amp}"
+    );
     assert!(read_amp.contains("$rate_window"), "{read_amp}");
     assert!(read_amp.contains("> 0"), "{read_amp}");
 
@@ -171,7 +186,10 @@ fn troubleshoot_read_amp_skips_zero_and_cache_hit_uses_the_window() {
         .expect("cache hit");
     assert!(cache_hit.contains("rate("), "{cache_hit}");
     assert!(cache_hit.contains("$rate_window"), "{cache_hit}");
-    assert!(cache_hit.contains("aidb_block_cache_misses_total"), "{cache_hit}");
+    assert!(
+        cache_hit.contains("aidb_block_cache_misses_total"),
+        "{cache_hit}"
+    );
 
     let pending = panel_by_title(&dash, "compaction 待处理字节");
     let note = pending["description"].as_str().unwrap_or("");
@@ -201,7 +219,10 @@ fn capacity_titles_say_estimate_and_process_local_ttl() {
     assert_eq!(estimate["targets"][0]["expr"], "aikv_keys_estimate");
     let estimate_note = estimate["description"].as_str().unwrap_or("");
     for needle in ["旧版本", "删除标记", "subkey", "Raft 日志", "compaction"] {
-        assert!(estimate_note.contains(needle), "{estimate_note} missing {needle}");
+        assert!(
+            estimate_note.contains(needle),
+            "{estimate_note} missing {needle}"
+        );
     }
     let expires = panel_by_title(&dash, "本进程登记的 TTL");
     assert_eq!(expires["targets"][0]["expr"], "sum by (db) (aikv_expires)");
@@ -213,7 +234,9 @@ fn capacity_titles_say_estimate_and_process_local_ttl() {
     assert!(queries
         .iter()
         .any(|expr| expr == "rate(aikv_expired_keys_total[$rate_window])"));
-    assert!(queries.iter().any(|expr| expr == "sum(aidb_sstable_size_bytes)"));
+    assert!(queries
+        .iter()
+        .any(|expr| expr == "sum(aidb_sstable_size_bytes)"));
     assert!(queries.iter().any(|expr| expr == "aikv_rss_bytes"));
     let rss = queries
         .iter()
@@ -225,10 +248,7 @@ fn capacity_titles_say_estimate_and_process_local_ttl() {
         .as_str()
         .unwrap_or("")
         .contains("RSS 不是数据集大小"));
-    let raw = std::fs::read_to_string(
-        dashboards_dir().join("aikv-capacity.json"),
-    )
-    .unwrap();
+    let raw = std::fs::read_to_string(dashboards_dir().join("aikv-capacity.json")).unwrap();
     assert!(!raw.contains("avg_ttl"));
     assert!(!raw.contains("DBSIZE"));
 }
@@ -287,17 +307,19 @@ fn cluster_status_is_one_row_per_group() {
     ] {
         assert!(queries.iter().any(|expr| expr == name), "missing {name}");
     }
-    assert!(panel_descriptions(&dash).iter().any(|note| note.contains("没有 group 标签")));
+    assert!(panel_descriptions(&dash)
+        .iter()
+        .any(|note| note.contains("没有 group 标签")));
 
     assert!(queries.iter().any(|expr| {
         expr == "histogram_quantile(0.99, sum by (le, group) (rate(aidb_propose_duration_seconds_bucket[$rate_window])))"
     }));
-    assert!(queries.iter().any(|expr| {
-        expr == "sum(rate(aikv_redirects_total{type=\"moved\"}[$rate_window]))"
-    }));
-    assert!(queries.iter().any(|expr| {
-        expr == "sum(rate(aikv_redirects_total{type=\"ask\"}[$rate_window]))"
-    }));
+    assert!(queries
+        .iter()
+        .any(|expr| { expr == "sum(rate(aikv_redirects_total{type=\"moved\"}[$rate_window]))" }));
+    assert!(queries
+        .iter()
+        .any(|expr| { expr == "sum(rate(aikv_redirects_total{type=\"ask\"}[$rate_window]))" }));
     let raw = std::fs::read_to_string(dashboards_dir().join("aikv-cluster.json")).unwrap();
     assert!(!raw.contains("type=\"MOVED\""));
     assert!(!raw.contains("type=\"ASK\""));
@@ -327,4 +349,61 @@ fn panel_descriptions(value: &Value) -> Vec<String> {
     }
     walk(value, &mut notes);
     notes
+}
+
+#[test]
+fn connections_split_accept_errors_and_close_reasons() {
+    let dash = dashboard("aikv-connections.json");
+    let queries = exprs(&dash);
+    for needle in [
+        "rate(aikv_net_input_bytes_total[$rate_window])",
+        "rate(aikv_net_output_bytes_total[$rate_window])",
+        "sum by (errno) (rate(aikv_accept_errors_total[$rate_window]))",
+        "sum by (reason) (rate(aikv_connection_closes_total[$rate_window]))",
+        "rate(aikv_scan_entries_total[$rate_window])",
+    ] {
+        assert!(
+            queries.iter().any(|expr| expr == needle),
+            "missing {needle}"
+        );
+    }
+
+    let mut names: Vec<String> = std::fs::read_dir(dashboards_dir())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".json"))
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec![
+            "aikv-capacity.json".to_string(),
+            "aikv-cluster.json".to_string(),
+            "aikv-connections.json".to_string(),
+            "aikv-overview.json".to_string(),
+            "aikv-troubleshoot.json".to_string(),
+        ]
+    );
+
+    let readme = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("deploy/observability/README.md"),
+    )
+    .unwrap();
+    let section = readme
+        .split("## 6.")
+        .nth(1)
+        .unwrap()
+        .split("## 7.")
+        .next()
+        .unwrap();
+    for uid in [
+        "aikv-overview",
+        "aikv-troubleshoot",
+        "aikv-capacity",
+        "aikv-cluster",
+        "aikv-connections",
+    ] {
+        assert!(section.contains(uid), "section 6 missing {uid}");
+    }
+    assert!(!section.contains("4 张"), "{section}");
 }

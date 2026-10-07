@@ -1,6 +1,6 @@
 # AiKv 可观测性监控栈 (Observability Stack)
 
-本目录提供面向 `aikv` 存储引擎与协议层的轻量级, 免维护, 安全默认的可观测性监控栈. 内置 OpenTelemetry Collector, Prometheus 和 Grafana 三件套, 自动挂载预置数据源与 4 张白盒性能分析大盘.
+本目录提供面向 `aikv` 存储引擎与协议层的轻量级, 免维护, 安全默认的可观测性监控栈. 内置 OpenTelemetry Collector, Prometheus 和 Grafana 三件套, 自动挂载预置数据源与五张看板: 总览, 排障, 容量, 集群, 连接.
 
 ---
 
@@ -102,57 +102,20 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317
 | **Manifest 恢复耗时** | `aidb_recovery_manifest_duration_seconds` | `INFO storage` -> `recovery_manifest_duration_us` | **OTel 秒 = INFO 微秒 × 10⁻⁶**; 覆盖三大冷启动恢复分支 |
 | **SST 打开耗时** | `aidb_recovery_sstable_open_duration_seconds` | `INFO storage` -> `recovery_sstable_open_duration_us` | **OTel 秒 = INFO 微秒 × 10⁻⁶**; 全量 SSTable 校验耗时 |
 | **键计数器重扫耗时** | `aikv_recovery_rebuild_counters_duration_seconds` | `INFO storage` -> `recovery_rebuild_counters_duration_us` | **OTel 秒 = INFO 微秒 × 10⁻⁶**; 16 个 DB 全库键重建耗时 |
-| **单次最大写停顿** | `aidb_write_stall_max_duration_seconds` | `INFO storage` -> `write_stall_max_duration_us` | **OTel 秒 = INFO 微秒 × 10⁻⁶**; 生命周期内极值 |
 | **系统 OS 线程数** | `aikv_process_threads` | `INFO threads` -> `process_threads` | 操作系统当前真实线程数 **1:1 等价** |
 | **上下文切换速率** | `aikv_process_context_switches_total` | `INFO threads` -> 差分累加 | 差分速率曲线对应 INFO 字段累加差分速率 |
 
 ---
 
-## 6. 预置监控大盘体系 (4 张预置大盘)
+## 6. 预置监控大盘
 
-Grafana 启动后自动加载 `AiKv` 仪表盘目录下的四张大盘:
+Grafana 启动后加载 `AiKv` 目录下的五张看板. 查询只使用已经导出的序列, 速率窗口是变量 `$rate_window`.
 
-1. **`AiKv / 概览与基准评测 (Overview & Benchmark)` (推荐主盘)**:
-   - **“3 个常驻展开 + 2 个专项折叠” 工业级 5-Row 架构**:
-     - **Row 1: 业务服务层 (Client 视角)** (常驻展开):
-       - 顶部 6 张核心 KPI 摘要卡 (w=4): 存活节点数, 集群总 Key 数, SST 磁盘总占用, 区间慢查询增量 (≥10 告警), 命令错误率 (ID 50, error 比率 %), 连接拒绝速率 (ID 51, ops/s);
-       - 三大时序黄金柱石 (8:8:8 宽幅并列): 总处理吞吐趋势 (OPS), 各命令吞吐时序拆解 (OPS by Commands), 端到端延迟分位数时序 (P50/P95/P99);
-       - 命令观测矩阵四联 (6:6:6:6): 命令调用量占比 (环形饼图), 命令执行量排行 (Top 10 Bar Gauge), 各业务命令响应延迟 P50 对比, 键空间命中率时序 (真实命中率, 无假健康); 全部命令面板严格过滤内部控制面伪命令;
-       - 网络与连接状态监控 (8:8:8): 服务网络带宽 (双线: In/Out), 客户端连接/阻塞与拒绝 (三线), 慢查询速率 (全命令合计 vs 各命令分线).
-     - **Row 2: 存储引擎层 (LSM-Tree 视角)** (常驻展开):
-       - 三大核心状态摘要卡 (w=8): 写放大 (WA, 带 Sparkline 面积图), 读放大 (RA, 带 Sparkline), 空间放大 (SA, 基于 `$payload_bytes` 估算, 带 Sparkline);
-       - 写路径因果诊断区: 物理写入速率分解 vs 用户逻辑写入基准 (ID 14, 堆叠物理写上叠独立逻辑写折线, 直读写放大), Write Stall 写停顿频次与最大耗时 (ID 15 双轴), MemTable 活跃/只读内存与 WAL 大小心跳 (ID 35), Flush 与 Compaction 速率/P95 耗时双轴同屏 (ID 43);
-       - 读链路与缓存穿透区: Block Cache 命中率与 Miss 穿透速率 (ID 17 双轴), 读放大 (RA) 演进与 Bloom Filter 假阳性率联动 (ID 52 双轴带 1.0 基准线);
-       - LSM 空间形态与底层算子区: 纯 SSTable 分层文件数堆叠 (ID 18, L0 高亮), SSTable 分层占用与 Key 增长 (ID 36 纯数字绑定), 存储底层核心算子 P95 耗时分布 (ID 16 表格图例).
-     - **Row 3: 系统物理层 (OS & Host 视角)** (常驻展开):
-       - 顶部 4 张物理摘要卡 (w=6): AiKv 实例 CPU 消耗核数 (ID 53), 进程物理驻留内存 RSS (ID 54), OS 线程总数 (ID 55), 磁盘最大平均等待耗时 (ID 56 await ms, 显式 `* 1000` 换算);
-       - 主机硬件 vs 进程资源对比区 (3 联 × w=8, h=7): 主机 CPU 利用率 vs AiKv 消耗核数 (用户态/内核态拆解), 主机物理内存分布 vs AiKv 驻留 RSS, 主机磁盘读写带宽 + AiKv 进程自身真实读写吞吐 + await 等待耗时右轴印证;
-       - 磁盘饱和度与内核调度区 (2 联 × w=12, h=7): 磁盘饱和度 (ID 57, 左轴读写 IOPS, 右轴 `%util` 显式 `* 100` 换算), 进程线程数 + 系统分配 FD (宿主机视角标注) + 自愿/非自愿上下文切换速率右轴.
-     - **Row 4: 分布式与集群通信 (Cluster & HA)** (默认折叠, 按需展开):
-       - 集群重定向速率 (ID 34, MOVED/ASK), Gossip 心跳与故障转移速率 (ID 41, Failover 标红), Raft 底层复制通信吞吐 (ID 42, 按 RPC 类型与方向分解).
-     - **Row 5: 冷启动与崩溃恢复 (Cold Recovery & RTO)** (默认折叠, 按需展开):
-       - 完整迁入并保留全部对账契约说明: 5 张 RTO 阶段 Stat 卡片 (WAL 重放耗时与字节, Manifest 耗时, SST 打开耗时, 全库键计数器重扫耗时), WAL 重放吞吐带宽 (ID 65, Gauge), RTO 4 阶段耗时构成占比 (ID 66, Timeseries). 全量注入 `$cluster/$host/$node` 模板变量.
-   - **顶层变量级联联动与导航**: 支持 `$cluster` (集群) -> `$host` (宿主机) -> `$node` (节点实例, 支持多选与 All 聚合) 三级联动, 并提供 `$payload_bytes` (单 Key 估算净载荷, 默认 116B) 动态调整空间放大; 内置 `tags: ["aikv-nav"]` 与全局面板下拉互跳链接.
-   - **默认时间窗口与刷新**: 默认 `now-30m` 到 `now`, `30s` 平衡刷新; 所有 Timeseries 统一提供 `[mean, max]` 统计列.
-   - **架构决策演进: 拒绝「假健康」, 建立生产级对账与排障契约**:
-     - **淘汰假健康与 legacy 兜底**: 全面剔除掩盖故障的 `vector(100)` 与无意义伪装, 彻底清理 legacy `_ratio` 兜底与 `label_replace * 0` hack.
-     - **Description 排障指引与对账契约**: 在各面板内置标准 Description 说明, 逐一列出「No data 常见原因」及「OTel 秒 = INFO 微秒 × 10⁻⁶」对账契约.
-     - **折叠行节流**: Grafana 原生特性保证折叠状态的 Row 4 与 Row 5 不发起后台查询, 兼顾单机极速压测与集群深度诊断.
-2. **`AiKv - 存储引擎白盒指标 (Storage Engine)`**:
-   - 写放大 (WA) 综合比率与 4 种写吞吐拆分曲线;
-   - 读放大 (RA) 综合比率与 BlockCache 纯读命中率;
-   - Write Stall 请求停顿百分比, 停顿原因归因与 P99 停顿延迟分位数;
-   - LSM 形态与 Compaction 积压量, 各层 SST 文件与容量, Bloom 过滤器假阳性率 (FPR).
-3. **`AiKv - 冷启动恢复与 RTO 分析 (Cold Recovery & RTO)`**:
-   - 5 项冷启动 RTO 耗时与字节 Stat 核心卡片;
-   - WAL 物理重放带宽吞吐折线图;
-   - RTO 4 阶段 (Manifest, SST 打开, WAL 回放, 计数器全库重扫) 耗时构成对比图.
-4. **`AiKv - 系统物理度量与协议概览 (Process & System)`**:
-   - OS 线程总数, 自愿/非自愿上下文切换速率曲线;
-   - 物理 CPU 毫秒使用率换算;
-   - 独立物理磁盘读写 I/O 双曲线;
-   - 进程真实常驻内存 (RSS);
-   - 协议层命令 QPS, 客户端连接与阻塞状态, Keyspace 命中率, 网络吞吐.
+1. `aikv-overview` 总览: 命令速率, 错误比例, 不按命令拆开的延迟, 慢查询, 点查命中率, 连接与拒绝, L0 和写停顿.
+2. `aikv-troubleshoot` 排障: MemTable, Block Cache, 各层 SST, WAL, flush 与 compaction 的字节速率和最近一次耗时, Bloom, 读放大, 以及按命令的 P99.
+3. `aikv-capacity` 容量: 引擎条目估值, 本进程登记的 TTL, 过期键速率, SST 字节合计和 RSS.
+4. `aikv-cluster` 集群: 每个 group 一行的角色和滞后. 只有启用 Raft 时使用. L0, MemTable 和本周期最大停顿是进程合计.
+5. `aikv-connections` 连接: 网络入出字节, 按 errno 分开的 accept 错误, 按关闭原因分开的断开, 以及 SCAN 扫描量.
 
 ---
 
