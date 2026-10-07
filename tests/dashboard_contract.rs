@@ -193,3 +193,67 @@ fn troubleshoot_read_amp_skips_zero_and_cache_hit_uses_the_window() {
         .iter()
         .any(|expr| expr.contains("histogram_quantile(0.99") && expr.contains("by (le, command)")));
 }
+
+#[test]
+fn capacity_titles_say_estimate_and_process_local_ttl() {
+    let dash = dashboard("aikv-capacity.json");
+    let estimate = panel_by_title(&dash, "引擎条目估值");
+    assert_eq!(estimate["targets"][0]["expr"], "aikv_keys_estimate");
+    let estimate_note = estimate["description"].as_str().unwrap_or("");
+    for needle in ["旧版本", "删除标记", "subkey", "Raft 日志", "compaction"] {
+        assert!(estimate_note.contains(needle), "{estimate_note} missing {needle}");
+    }
+    let expires = panel_by_title(&dash, "本进程登记的 TTL");
+    assert_eq!(expires["targets"][0]["expr"], "sum by (db) (aikv_expires)");
+    assert!(expires["description"]
+        .as_str()
+        .unwrap_or("")
+        .contains("重启后不代表磁盘存量"));
+    let queries = exprs(&dash);
+    assert!(queries
+        .iter()
+        .any(|expr| expr == "rate(aikv_expired_keys_total[$rate_window])"));
+    assert!(queries.iter().any(|expr| expr == "sum(aidb_sstable_size_bytes)"));
+    assert!(queries.iter().any(|expr| expr == "aikv_rss_bytes"));
+    let rss = queries
+        .iter()
+        .position(|expr| expr == "aikv_rss_bytes")
+        .unwrap();
+    let _ = rss;
+    let rss_panel = find_panel_with_expr(&dash, "aikv_rss_bytes");
+    assert!(rss_panel["description"]
+        .as_str()
+        .unwrap_or("")
+        .contains("RSS 不是数据集大小"));
+    let raw = std::fs::read_to_string(
+        dashboards_dir().join("aikv-capacity.json"),
+    )
+    .unwrap();
+    assert!(!raw.contains("avg_ttl"));
+    assert!(!raw.contains("DBSIZE"));
+}
+
+fn find_panel_with_expr<'a>(value: &'a Value, expr: &str) -> &'a Value {
+    fn walk<'a>(value: &'a Value, expr: &str) -> Option<&'a Value> {
+        match value {
+            Value::Object(map) => {
+                if map.get("targets").is_some() {
+                    let mut queries = Vec::new();
+                    collect_exprs(value, &mut queries);
+                    if queries.iter().any(|item| item == expr) {
+                        return Some(value);
+                    }
+                }
+                for child in map.values() {
+                    if let Some(found) = walk(child, expr) {
+                        return Some(found);
+                    }
+                }
+                None
+            }
+            Value::Array(items) => items.iter().find_map(|child| walk(child, expr)),
+            _ => None,
+        }
+    }
+    walk(value, expr).unwrap_or_else(|| panic!("no panel with {expr}"))
+}

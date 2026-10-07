@@ -1,0 +1,88 @@
+{
+  "title": "容量",
+  "uid": "aikv-capacity",
+  "tags": ["aikv", "capacity"],
+  "timezone": "browser",
+  "editable": true,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-30m", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "rate_window",
+        "label": "窗口",
+        "type": "custom",
+        "query": "5m",
+        "description": "导出周期大于 75 秒时, 把这个窗口改成至少 4 个导出周期.",
+        "current": { "text": "5m", "value": "5m" },
+        "options": [{ "text": "5m", "value": "5m", "selected": true }]
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "引擎条目估值",
+      "description": "含旧版本, 删除标记, subkey 和同一引擎里的 Raft 日志, 并且会随 compaction 变化.",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "aikv_keys_estimate" }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "本进程登记的 TTL",
+      "description": "重启后不代表磁盘存量.",
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (db) (aikv_expires)",
+          "legendFormat": "db {{db}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "过期键速率",
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "rate(aikv_expired_keys_total[$rate_window])"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "SST 字节合计",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum(aidb_sstable_size_bytes)" }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "RSS",
+      "description": "RSS 不是数据集大小.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "aikv_rss_bytes" }
+      ]
+    }
+  ]
+}
