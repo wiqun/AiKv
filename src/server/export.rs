@@ -135,6 +135,7 @@ pub fn collect_export_snapshot(
     let mut snapshot = ExportSnapshot::default();
     append_process(&mut snapshot, metrics, keys_estimate, expires);
     append_commands(&mut snapshot, metrics);
+    append_redirects(&mut snapshot, metrics);
     if let Some(stats) = engine {
         append_engine(&mut snapshot, stats);
     }
@@ -272,6 +273,32 @@ fn append_commands(
                 ("command".into(), command),
                 ("status".into(), if ok { "ok" } else { "error" }.into()),
             ],
+            snap,
+        });
+    }
+}
+
+fn append_redirects(
+    snapshot: &mut ExportSnapshot,
+    metrics: &crate::server::metrics::ServerMetrics,
+) {
+    use crate::server::metrics::RedirectKind;
+    push_counter(
+        snapshot,
+        "aikv_redirects_total",
+        vec![("type".into(), "moved".into())],
+        metrics.redirect_count(RedirectKind::Moved),
+    );
+    push_counter(
+        snapshot,
+        "aikv_redirects_total",
+        vec![("type".into(), "ask".into())],
+        metrics.redirect_count(RedirectKind::Ask),
+    );
+    for (group, snap) in metrics.propose_rows() {
+        snapshot.histograms.push(HistogramSample {
+            name: "aidb_propose_duration_seconds".into(),
+            labels: vec![("group".into(), group.to_string())],
             snap,
         });
     }
@@ -473,6 +500,56 @@ fn append_engine_counters(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RaftExportView {
+    pub commit_index: u64,
+    pub applied_index: u64,
+    pub last_log_index: u64,
+    pub max_voter_matched: u64,
+    pub is_leader: bool,
+    pub leader_contact_age_secs: f64,
+    pub role: &'static str,
+}
+
+/// 导出时用这份视图算滞后. 不在请求路径上做减法.
+pub fn raft_samples(group: &str, view: &RaftExportView) -> ExportSnapshot {
+    let mut snapshot = ExportSnapshot::default();
+    let group_label = vec![("group".into(), group.into())];
+    snapshot.gauges.push(GaugeSample {
+        name: "aidb_raft_apply_lag_entries".into(),
+        labels: group_label.clone(),
+        value: view.commit_index.saturating_sub(view.applied_index) as f64,
+    });
+    let replication = if view.is_leader {
+        view.last_log_index.saturating_sub(view.max_voter_matched)
+    } else {
+        0
+    };
+    snapshot.gauges.push(GaugeSample {
+        name: "aidb_raft_replication_lag_entries".into(),
+        labels: group_label.clone(),
+        value: replication as f64,
+    });
+    let contact = if view.is_leader {
+        0.0
+    } else {
+        view.leader_contact_age_secs
+    };
+    snapshot.gauges.push(GaugeSample {
+        name: "aidb_raft_leader_contact_age_seconds".into(),
+        labels: group_label.clone(),
+        value: contact,
+    });
+    let mut role_labels = group_label;
+    role_labels.push(("role".into(), view.role.into()));
+    snapshot.gauges.push(GaugeSample {
+        name: "aidb_raft_role".into(),
+        labels: role_labels,
+        value: 1.0,
+    });
+    snapshot
+}
+
 fn gauge(name: &str, labels: Vec<(String, String)>, value: u64) -> GaugeSample {
     GaugeSample {
         name: name.into(),
@@ -560,6 +637,101 @@ mod tests {
         ) {
             *self.histogram_sets.borrow_mut() += 1;
         }
+    }
+
+    fn gauge_value(snap: &super::ExportSnapshot, name: &str) -> f64 {
+        snap.gauges
+            .iter()
+            .find(|g| g.name == name)
+            .map(|g| g.value)
+            .unwrap_or(f64::NAN)
+    }
+
+    #[test]
+    fn raft_lag_uses_the_view() {
+        use super::{raft_samples, RaftExportView};
+        let leader = RaftExportView {
+            commit_index: 10,
+            applied_index: 7,
+            last_log_index: 10,
+            max_voter_matched: 6,
+            is_leader: true,
+            leader_contact_age_secs: 4.0,
+            role: "leader",
+        };
+        let snap = raft_samples("g1", &leader);
+        assert_eq!(gauge_value(&snap, "aidb_raft_apply_lag_entries"), 3.0);
+        assert_eq!(gauge_value(&snap, "aidb_raft_replication_lag_entries"), 4.0);
+        assert_eq!(
+            gauge_value(&snap, "aidb_raft_leader_contact_age_seconds"),
+            0.0
+        );
+        let role = snap
+            .gauges
+            .iter()
+            .find(|g| g.name == "aidb_raft_role")
+            .unwrap();
+        assert_eq!(role.value, 1.0);
+        assert!(role
+            .labels
+            .iter()
+            .any(|(k, v)| k == "role" && v == "leader"));
+        let follower = RaftExportView {
+            is_leader: false,
+            role: "follower",
+            ..leader
+        };
+        let snap = raft_samples("g1", &follower);
+        assert_eq!(gauge_value(&snap, "aidb_raft_replication_lag_entries"), 0.0);
+        assert_eq!(
+            gauge_value(&snap, "aidb_raft_leader_contact_age_seconds"),
+            4.0
+        );
+    }
+
+    #[test]
+    fn redirect_ignores_gossip() {
+        use crate::server::metrics::{RedirectKind, ServerMetrics};
+        let metrics = ServerMetrics::default();
+        metrics.on_gossip_refresh(2);
+        metrics.on_redirect(RedirectKind::Moved);
+        assert_eq!(metrics.redirect_count(RedirectKind::Moved), 1);
+        assert_eq!(metrics.redirect_count(RedirectKind::Ask), 0);
+        let snap = super::collect_export_snapshot(&metrics, 0, &[], None);
+        let types: Vec<_> = snap
+            .counters
+            .iter()
+            .filter(|c| c.name == "aikv_redirects_total")
+            .map(|c| {
+                c.labels
+                    .iter()
+                    .find(|(k, _)| k == "type")
+                    .unwrap()
+                    .1
+                    .clone()
+            })
+            .collect();
+        assert_eq!(types, vec!["moved".to_string(), "ask".to_string()]);
+    }
+
+    #[test]
+    fn metrics_text_without_raft_has_no_group_label() {
+        use crate::server::metrics::ServerMetrics;
+        let metrics = ServerMetrics::default();
+        let text =
+            super::render_prometheus(&super::collect_export_snapshot(&metrics, 0, &[], None));
+        assert!(!text.contains("aidb_raft_"), "{text}");
+        assert!(!text.contains("group="), "{text}");
+    }
+
+    #[test]
+    fn propose_duration_records_only_on_the_write_path() {
+        use crate::server::metrics::ServerMetrics;
+        let metrics = ServerMetrics::default();
+        metrics.note_propose(20, false);
+        assert_eq!(metrics.propose_count(), 0);
+        metrics.note_propose(20, true);
+        assert_eq!(metrics.propose_count(), 1);
     }
 
     #[test]

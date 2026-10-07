@@ -47,7 +47,7 @@ description: AiKv 可观测性架构 — SlowQueryLog 慢查询、LatencyStats �
   - 生产环境运行在 `RUST_LOG=info` 时, tracing 静态过滤将开销降至零.
 - **端口协议隔离**:
   - Redis RESP 端口 (6379) 与 HTTP 协议不兼容;
-  - `--metrics-addr:--metrics-port` (默认 9191) 提供 HTTP `/health` (返回 `200 OK`) 和 `/metrics` (上一轮累计快照的 Prometheus 文本). 导出间隔由 `metrics_export_interval_secs` 控制, 默认 15 秒. 端点为空时不初始化 OTLP, `/metrics` 仍然提供;
+  - `--metrics-addr:--metrics-port` (默认 9191) 提供 HTTP `/health` (返回 `200 OK`) 和 `/metrics` (上一轮累计快照的 Prometheus 文本). 导出间隔由 `metrics_export_interval_secs` 控制, 默认 15 秒. 端点为空时不初始化 OTLP, `/metrics` 仍然提供. `MOVED` / `ASK` 记入 `aikv_redirects_total{type}`, gossip tick 不计. 未启用 Raft 时文本没有 `group=`;
   - 生产环境监控统一通过 OTLP gRPC 管道推送给 OpenTelemetry Collector.
 
 ---

@@ -377,9 +377,18 @@ impl ClusterDataAdapter {
         request: Request,
     ) -> Result<Response> {
         let mut last_err = Self::data_group_not_ready_err();
+        let started = std::time::Instant::now();
+        let note = || {
+            if let Some(metrics) = &mgr.metrics {
+                metrics.note_propose_group(gid, started.elapsed().as_micros() as u64, true);
+            }
+        };
         for attempt in 0..GROUP_READY_MAX_ATTEMPTS {
             match mgr.multi_raft.propose_group(gid, request.clone()).await {
-                Ok(resp) => return Ok(resp),
+                Ok(resp) => {
+                    note();
+                    return Ok(resp);
+                }
                 Err(e) => {
                     last_err = Self::map_err(e);
                     if Self::is_transient_cluster_err(&last_err)
@@ -388,10 +397,12 @@ impl ClusterDataAdapter {
                         tokio::time::sleep(GROUP_READY_RETRY_DELAY).await;
                         continue;
                     }
+                    note();
                     return Err(last_err);
                 }
             }
         }
+        note();
         Err(last_err)
     }
 }
@@ -486,10 +497,8 @@ impl StorageAdapter for ClusterDataAdapter {
         if ops.is_empty() {
             return Ok(());
         }
-        let mut by_gid: HashMap<
-            u64,
-            (Arc<ClusterStateManager>, Vec<(Vec<u8>, Option<Vec<u8>>)>),
-        > = HashMap::new();
+        let mut by_gid: HashMap<u64, (Arc<ClusterStateManager>, Vec<(Vec<u8>, Option<Vec<u8>>)>)> =
+            HashMap::new();
         let mut by_mig: HashMap<
             u64,
             (

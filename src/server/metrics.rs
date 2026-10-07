@@ -22,6 +22,12 @@ use aidb::statistics::{LatencyHistogram, LatencySnapshot, COMMAND_DURATION_BOUND
 use crate::server::latency::CommandLatencySnapshot;
 use crate::storage::observation::PointReadCounter;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedirectKind {
+    Moved,
+    Ask,
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct CommandTotals {
     pub(crate) ok: u64,
@@ -121,6 +127,9 @@ pub struct ServerMetrics {
     scan_entries: AtomicU64,
     connection_closes: DashMap<&'static str, u64>,
     accept_errors: DashMap<String, u64>,
+    redirect_moved: AtomicU64,
+    redirect_ask: AtomicU64,
+    propose_duration: DashMap<u64, LatencyHistogram>,
     #[cfg(feature = "monitoring")]
     process_last_cpu_user_seconds_bits: AtomicU64,
     #[cfg(feature = "monitoring")]
@@ -183,6 +192,9 @@ impl Default for ServerMetrics {
             scan_entries: AtomicU64::new(0),
             connection_closes: DashMap::new(),
             accept_errors: DashMap::new(),
+            redirect_moved: AtomicU64::new(0),
+            redirect_ask: AtomicU64::new(0),
+            propose_duration: DashMap::new(),
             #[cfg(feature = "monitoring")]
             process_last_cpu_user_seconds_bits: AtomicU64::new(0),
             #[cfg(feature = "monitoring")]
@@ -664,8 +676,61 @@ impl ServerMetrics {
 
     /// 集群重定向计数 (aikv_cluster_redirects_total 语义).
     pub fn on_cluster_redirect(&self, redirect_type: &str) {
+        match redirect_type {
+            "moved" => self.on_redirect(RedirectKind::Moved),
+            "ask" => self.on_redirect(RedirectKind::Ask),
+            _ => return,
+        }
         let key = format!("CLUSTER.redirect.{}", redirect_type);
         self.on_command(&key, true);
+    }
+
+    pub fn on_redirect(&self, kind: RedirectKind) {
+        match kind {
+            RedirectKind::Moved => {
+                self.redirect_moved.fetch_add(1, Ordering::Relaxed);
+            }
+            RedirectKind::Ask => {
+                self.redirect_ask.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    pub fn redirect_count(&self, kind: RedirectKind) -> u64 {
+        match kind {
+            RedirectKind::Moved => self.redirect_moved.load(Ordering::Relaxed),
+            RedirectKind::Ask => self.redirect_ask.load(Ordering::Relaxed),
+        }
+    }
+
+    /// 写路径 propose 返回时记一次. 读路径传 `is_write = false`, 不加计数.
+    pub fn note_propose(&self, duration_us: u64, is_write: bool) {
+        self.note_propose_group(0, duration_us, is_write);
+    }
+
+    pub fn note_propose_group(&self, group: u64, duration_us: u64, is_write: bool) {
+        if !is_write {
+            return;
+        }
+        self.propose_duration
+            .entry(group)
+            .or_default()
+            .record(duration_us);
+    }
+
+    pub fn propose_count(&self) -> u64 {
+        self.propose_duration
+            .iter()
+            .map(|entry| entry.snapshot().count)
+            .sum()
+    }
+
+    pub fn propose_rows(&self) -> Vec<(u64, LatencySnapshot)> {
+        self.propose_duration
+            .iter()
+            .map(|entry| (*entry.key(), entry.snapshot()))
+            .filter(|(_, snap)| snap.count > 0)
+            .collect()
     }
 
     pub fn json_command_ok_count(&self, command: &str) -> u64 {
