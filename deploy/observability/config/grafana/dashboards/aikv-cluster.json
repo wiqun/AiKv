@@ -34,6 +34,27 @@
         {
           "id": "joinByField",
           "options": { "byField": "group", "mode": "outer" }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Value": true,
+              "Value #A": true,
+              "Time": true,
+              "Time 1": true,
+              "Time 2": true,
+              "Time 3": true
+            },
+            "renameByName": {
+              "Value 1": "apply lag",
+              "Value 2": "replication lag",
+              "Value 3": "leader contact age",
+              "Value #B": "apply lag",
+              "Value #C": "replication lag",
+              "Value #D": "leader contact age"
+            }
+          }
         }
       ],
       "targets": [
@@ -94,7 +115,8 @@
       "id": 4,
       "type": "stat",
       "title": "本周期最大停顿",
-      "description": "没有 group 标签. 这是进程合计, 不按 group 分行.",
+      "description": "没有 group 标签. 这是进程合计, 不按 group 分行. 0 表示这个导出周期没有停顿.",
+      "fieldConfig": { "defaults": { "unit": "µs" } },
       "gridPos": { "h": 6, "w": 8, "x": 16, "y": 10 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [

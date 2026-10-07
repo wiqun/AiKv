@@ -202,6 +202,8 @@
       "id": 10,
       "type": "timeseries",
       "title": "本周期最大停顿",
+      "description": "0 表示这个导出周期没有停顿.",
+      "fieldConfig": { "defaults": { "unit": "µs" } },
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 36 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [

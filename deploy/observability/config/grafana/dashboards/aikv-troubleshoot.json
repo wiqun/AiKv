@@ -71,14 +71,25 @@
       "id": 5,
       "type": "timeseries",
       "title": "Flush 与 compaction",
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "Bps" } },
       "targets": [
         { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "rate(aidb_flush_written_bytes_total[$rate_window])", "legendFormat": "flush written" },
         { "refId": "B", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "rate(aidb_compaction_written_bytes_total[$rate_window])", "legendFormat": "compaction written" },
-        { "refId": "C", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "rate(aidb_compaction_read_bytes_total[$rate_window])", "legendFormat": "compaction read" },
-        { "refId": "D", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "aidb_flush_last_duration_seconds", "legendFormat": "flush last" },
-        { "refId": "E", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "aidb_compaction_last_duration_seconds", "legendFormat": "compaction last" }
+        { "refId": "C", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "rate(aidb_compaction_read_bytes_total[$rate_window])", "legendFormat": "compaction read" }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Flush 与 compaction 最近一次耗时",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "aidb_flush_last_duration_seconds", "legendFormat": "flush last" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "aidb_compaction_last_duration_seconds", "legendFormat": "compaction last" }
       ]
     },
     {

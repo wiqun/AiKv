@@ -407,3 +407,75 @@ fn connections_split_accept_errors_and_close_reasons() {
     }
     assert!(!section.contains("4 张"), "{section}");
 }
+
+#[test]
+fn review_names_lag_columns_and_keeps_stall_and_duration_readable() {
+    let cluster = dashboard("aikv-cluster.json");
+    let table = panel_by_title(&cluster, "每个 group");
+    let renames = organize_rename_targets(table);
+    for name in ["apply lag", "replication lag", "leader contact age"] {
+        assert!(renames.iter().any(|item| item == name), "missing {name}");
+    }
+    assert!(
+        organize_excludes_value_one(table),
+        "role gauge value 1 is still a column"
+    );
+
+    for name in ["aikv-overview.json", "aikv-cluster.json"] {
+        let dash = dashboard(name);
+        let stall = panel_by_title(&dash, "本周期最大停顿");
+        assert_eq!(stall["fieldConfig"]["defaults"]["unit"], "µs", "{name}");
+        let note = stall["description"].as_str().unwrap_or("");
+        assert!(
+            note.contains("0 表示这个导出周期没有停顿"),
+            "{name}: {note}"
+        );
+    }
+
+    let trouble = dashboard("aikv-troubleshoot.json");
+    let bytes = find_panel_with_expr(
+        &trouble,
+        "rate(aidb_flush_written_bytes_total[$rate_window])",
+    );
+    assert!(panel_exprs(bytes)
+        .iter()
+        .all(|expr| !expr.contains("last_duration")));
+    let durations = find_panel_with_expr(&trouble, "aidb_flush_last_duration_seconds");
+    let duration_exprs = panel_exprs(durations);
+    assert!(duration_exprs
+        .iter()
+        .any(|expr| expr == "aidb_compaction_last_duration_seconds"));
+    assert!(duration_exprs.iter().all(|expr| !expr.contains("bytes")));
+    assert_eq!(durations["fieldConfig"]["defaults"]["unit"], "s");
+}
+
+fn panel_exprs(panel: &Value) -> Vec<String> {
+    let mut queries = Vec::new();
+    collect_exprs(panel, &mut queries);
+    queries
+}
+
+fn organize_rename_targets(panel: &Value) -> Vec<String> {
+    let mut names = Vec::new();
+    for step in panel["transformations"].as_array().into_iter().flatten() {
+        if step["id"] != "organize" {
+            continue;
+        }
+        if let Some(map) = step["options"]["renameByName"].as_object() {
+            names.extend(
+                map.values()
+                    .filter_map(|item| item.as_str().map(str::to_string)),
+            );
+        }
+    }
+    names
+}
+
+fn organize_excludes_value_one(panel: &Value) -> bool {
+    panel["transformations"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|step| step["id"] == "organize")
+        .any(|step| step["options"]["excludeByName"]["Value"] == true)
+}
