@@ -727,6 +727,7 @@ async fn main() {
 }
 
 #[cfg(test)]
+#[cfg(test)]
 fn export_spans_enabled_at(level: &str) -> bool {
     aidb::observability::set_traces_enabled(true);
     let subscriber = Registry::default()
