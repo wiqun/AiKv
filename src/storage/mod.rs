@@ -7,7 +7,6 @@ pub mod aidb_options;
 pub mod cluster_adapter;
 #[cfg(feature = "cluster")]
 mod cluster_batcher;
-mod counter_batch;
 pub mod dump;
 pub mod memory;
 pub mod observation;
@@ -17,7 +16,7 @@ pub mod types;
 pub mod watch_registry;
 pub mod watch_version;
 
-pub use adapter::{AdapterWriteOp, KvStorageAdapter, StorageAdapter, WriteBatchStats};
+pub use adapter::{AdapterWriteOp, KvStorageAdapter, StorageAdapter};
 pub use aidb::AiDbEngine;
 pub use aidb_options::{
     server_db_options, server_db_options_with_preset, testing_db_options, DbPreset,
@@ -30,5 +29,5 @@ pub use types::{
     StoredValue, ValueType, WriteOp, TTL_NO_EXPIRY, WRONGTYPE,
 };
 
-pub use ttl_filter::{DbKeyCounterRemovalListener, TtlExpireFilter};
+pub use ttl_filter::TtlExpireFilter;
 pub use watch_registry::WatchRegistry;

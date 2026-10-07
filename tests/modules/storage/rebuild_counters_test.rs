@@ -1,33 +1,23 @@
-use std::sync::Arc;
 use tempfile::TempDir;
 
-use aikv::storage::{AiDbEngine, KvStorage, KvStorageAdapter};
+use aikv::storage::types::{now_ms, KvStorage};
+use aikv::storage::{AiDbEngine, KvStorageAdapter};
 
 #[tokio::test]
-async fn test_rebuild_counters_duration_recorded() {
+async fn reopen_expires_starts_at_zero() {
     let dir = TempDir::new().unwrap();
-    let engine = AiDbEngine::open_for_testing(dir.path()).expect("open aidb");
-    let adapter = KvStorageAdapter::new(engine);
-
-    // 写入若干数据，确保全库扫描真实发生
-    for i in 0..5 {
-        let key = format!("rebuild_key_{i}").into_bytes();
-        let val = format!("rebuild_val_{i}").into_bytes();
-        adapter.set(0, &key, &val).await.unwrap();
+    let path = dir.path().to_path_buf();
+    {
+        let engine = AiDbEngine::open_for_testing(&path).expect("open aidb");
+        let storage = KvStorageAdapter::open(engine, None).await.unwrap();
+        storage
+            .set_with_ttl(0, b"k", b"v", now_ms() + 60_000)
+            .await
+            .unwrap();
+        assert_eq!(storage.expires(0).await.unwrap(), 1);
+        storage.flush_engine().await.unwrap();
     }
-
-    // 显式触发重建计数器 (模拟启动恢复与写批失败重扫)
-    adapter.rebuild_counters().await.unwrap();
-
-    let duration_us = adapter.rebuild_counters_duration_us();
-    // [ASSUMPTION]: 写入数据后全库 16 个逻辑 DB 扫描完成, 耗时微秒严格大于 0
-    assert!(
-        duration_us > 0,
-        "rebuild_counters_duration_us must be > 0 (got {})",
-        duration_us
-    );
-
-    // 验证 KvStorage trait 动态分发亦能正确读出该指标
-    let storage: Arc<dyn KvStorage> = adapter.clone();
-    assert_eq!(storage.rebuild_counters_duration_us(), duration_us);
+    let engine = AiDbEngine::open_for_testing(&path).expect("reopen");
+    let storage = KvStorageAdapter::open(engine, None).await.unwrap();
+    assert_eq!(storage.expires(0).await.unwrap(), 0);
 }

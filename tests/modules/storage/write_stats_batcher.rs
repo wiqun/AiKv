@@ -1,8 +1,4 @@
-//! WriteStats / reverse-dedup ack 映射契约.
-//! 核心纯函数单测在 `cluster_batcher` / `cluster_adapter` 的 `#[cfg(test)]` 中
-//! (`map_acks_deduped_put_gets_inserted_false`, `plan_reverse_dedup_put_del_put_*`,
-//! `parse_write_stats_*`, `stats_from_effects_*`).
-//! 本文件用源码门禁锁定: Plain PUT / write_batch 路径不得在 propose 前 `get_local`/`exists`.
+//! 集群写批不得在 propose 前用 exists/get_local 做键计数.
 
 #[test]
 fn submit_write_op_put_must_not_call_get_local_before_propose() {
@@ -49,14 +45,6 @@ fn write_batch_must_consume_write_stats_not_pre_exists() {
         .unwrap_or(body.len());
     let write_batch_fn = &body[..end];
 
-    assert!(
-        write_batch_fn.contains("parse_write_stats"),
-        "write_batch must consume WriteStats via parse_write_stats"
-    );
-    assert!(
-        write_batch_fn.contains("stats_from_effects"),
-        "write_batch must map effects to inserted/deleted via stats_from_effects"
-    );
     assert_eq!(
         write_batch_fn.matches("self.exists(").count(),
         0,

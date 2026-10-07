@@ -626,7 +626,6 @@ impl<'a> InfoRenderer<'a> {
                 snap.memtable_size_bytes[1],
             );
             append_kv_u64(&mut out, "aidb_wal_size_bytes", snap.wal_size_bytes);
-            append_kv_u64(&mut out, "aidb_total_key_count", snap.total_key_count);
             append_kv_u64(&mut out, "aidb_sequence", snap.sequence);
             append_kv_u64(&mut out, "aidb_flush_total", snap.flush_total);
             append_kv_u64(

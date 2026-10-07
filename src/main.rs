@@ -34,8 +34,6 @@ type StorageBuildResult = Result<
         StorageEngineKind,
         Option<PathBuf>,
         Option<Arc<aidb::DB>>,
-        Option<Arc<aikv::storage::types::DbKeyCounters>>,
-        Option<Arc<aikv::storage::types::ExpireDecrGate>>,
     ),
     String,
 >;
@@ -52,8 +50,6 @@ async fn build_storage(
             StorageEngineKind::Memory,
             None,
             None,
-            None,
-            None,
         )),
         EngineKind::AiDb => {
             let path = settings
@@ -65,21 +61,9 @@ async fn build_storage(
                 server_db_options_with_preset(settings.sync_wal, preset),
             )
             .map_err(|e| e.to_string())?;
-            // 注入 TTL compaction 过滤器 (纯决策) + 键计数 Remove 监听器.
-            let counters = std::sync::Arc::new(aikv::storage::types::DbKeyCounters::new());
-            let expire_gate = std::sync::Arc::new(aikv::storage::types::ExpireDecrGate::new());
             engine
                 .db
                 .set_compaction_filter(Some(std::sync::Arc::new(TtlExpireFilter)));
-            engine
-                .db
-                .set_compaction_removal_listener(Some(std::sync::Arc::new(
-                    aikv::storage::ttl_filter::DbKeyCounterRemovalListener::new(
-                        counters.clone(),
-                        expire_gate.clone(),
-                        engine.db.clone(),
-                    ),
-                )));
             let db = engine.db.clone();
             let adapter: Arc<dyn aikv::storage::StorageAdapter> = engine;
             #[cfg(feature = "cluster")]
@@ -89,19 +73,12 @@ async fn build_storage(
                     aikv::storage::cluster_adapter::ClusterDataAdapter::DEFAULT_EAGER_FLUSH,
                 );
             Ok((
-                KvStorageAdapter::open_with_counters(
-                    adapter,
-                    Some(observation),
-                    counters.clone(),
-                    expire_gate.clone(),
-                )
-                .await
-                .map_err(|e| e.to_string())?,
+                KvStorageAdapter::open(adapter, Some(observation))
+                    .await
+                    .map_err(|e| e.to_string())?,
                 StorageEngineKind::AiDb,
                 Some(path.clone()),
                 Some(db),
-                Some(counters),
-                Some(expire_gate),
             ))
         }
     }
@@ -192,8 +169,6 @@ async fn init_cluster(
     settings: &ResolvedSettings,
     cluster_db: Option<Arc<aidb::DB>>,
     metrics: Arc<aikv::server::metrics::ServerMetrics>,
-    key_counters: Arc<aikv::storage::types::DbKeyCounters>,
-    expire_gate: Arc<aikv::storage::types::ExpireDecrGate>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use std::net::SocketAddr as NetAddr;
 
@@ -381,18 +356,7 @@ async fn init_cluster(
         raft_node_config: data_raft_config,
         options: data_options,
         compaction_filter: Some(std::sync::Arc::new(TtlExpireFilter)),
-        compaction_removal_listener_factory: Some(std::sync::Arc::new({
-            let counters = key_counters;
-            let gate = expire_gate;
-            move |db: std::sync::Arc<aidb::DB>| {
-                std::sync::Arc::new(aikv::storage::ttl_filter::DbKeyCounterRemovalListener::new(
-                    counters.clone(),
-                    gate.clone(),
-                    db,
-                ))
-                    as std::sync::Arc<dyn aidb::engine::compaction::CompactionRemovalListener>
-            }
-        })),
+        compaction_removal_listener_factory: None,
     };
     let _lifecycle_shutdown = multi_raft.start_lifecycle_with_data(lifecycle_cfg);
 
@@ -630,7 +594,7 @@ async fn main() {
     );
 
     let observation = StorageObservation::new();
-    let (storage, engine_kind, data_dir, _cluster_db, key_counters, expire_gate) =
+    let (storage, engine_kind, data_dir, _cluster_db) =
         match build_storage(&settings, observation.clone()).await {
             Ok(s) => s,
             Err(e) => {
@@ -638,11 +602,6 @@ async fn main() {
                 std::process::exit(1);
             }
         };
-    #[cfg(not(feature = "cluster"))]
-    {
-        let _ = key_counters;
-        let _ = expire_gate;
-    }
     let tcp_port = settings.bind.port();
     let connection_config = ConnectionConfig {
         max_clients: settings.max_clients,
@@ -663,14 +622,7 @@ async fn main() {
     // 集群初始化 (等待 init_cluster 完成, 确保 CLUSTER_STATE_MGR 就绪)
     #[cfg(feature = "cluster")]
     if settings.cluster.node_id.is_some() && settings.cluster.rpc_addr.is_some() {
-        if let Err(e) = init_cluster(
-            &settings,
-            _cluster_db,
-            Arc::clone(&state.metrics),
-            key_counters.unwrap_or_else(|| Arc::new(aikv::storage::types::DbKeyCounters::new())),
-            expire_gate.unwrap_or_else(|| Arc::new(aikv::storage::types::ExpireDecrGate::new())),
-        )
-        .await
+        if let Err(e) = init_cluster(&settings, _cluster_db, Arc::clone(&state.metrics)).await
         {
             tracing::error!(error = %e, "cluster initialization failed");
             std::process::exit(1);

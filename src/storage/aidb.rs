@@ -27,7 +27,7 @@ use async_trait::async_trait;
 use tokio::task;
 
 use crate::error::{Error, Result};
-use crate::storage::adapter::{AdapterWriteOp, StorageAdapter, WriteBatchStats};
+use crate::storage::adapter::{AdapterWriteOp, StorageAdapter};
 use crate::storage::types::StorageEngineKind;
 
 /// AiDb 扁平 KV 引擎
@@ -105,7 +105,7 @@ impl StorageAdapter for AiDbEngine {
             .await
     }
 
-    async fn set(&self, key: Vec<u8>, value: Vec<u8>) -> Result<bool> {
+    async fn set(&self, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
         self.blocking(move |db| {
             db.put(&key, &value)
                 .map_err(|e| Error::Storage(e.to_string()))
@@ -125,30 +125,17 @@ impl StorageAdapter for AiDbEngine {
         .await
     }
 
-    async fn apply_writes(&self, ops: Vec<AdapterWriteOp>) -> Result<Vec<bool>> {
+    async fn apply_writes(&self, ops: Vec<AdapterWriteOp>) -> Result<()> {
         self.blocking(move |db| {
             let mut wb = WriteBatch::new();
-            let mut flags = Vec::with_capacity(ops.len());
             for op in ops {
                 match op {
-                    AdapterWriteOp::Put { key, value } => {
-                        flags.push(
-                            !db.key_exists(&key)
-                                .map_err(|e| Error::Storage(e.to_string()))?,
-                        );
-                        wb.put(key, value);
-                    }
-                    AdapterWriteOp::Delete { key } => {
-                        flags.push(
-                            db.key_exists(&key)
-                                .map_err(|e| Error::Storage(e.to_string()))?,
-                        );
-                        wb.delete(key);
-                    }
+                    AdapterWriteOp::Put { key, value } => wb.put(key, value),
+                    AdapterWriteOp::Delete { key } => wb.delete(key),
                 }
             }
-            let _stats = db.write(&wb).map_err(|e| Error::Storage(e.to_string()))?;
-            Ok(flags)
+            db.write(&wb).map_err(|e| Error::Storage(e.to_string()))?;
+            Ok(())
         })
         .await
     }
@@ -161,7 +148,7 @@ impl StorageAdapter for AiDbEngine {
         .await
     }
 
-    async fn write_batch(&self, batch: Vec<AdapterWriteOp>) -> Result<WriteBatchStats> {
+    async fn write_batch(&self, batch: Vec<AdapterWriteOp>) -> Result<()> {
         self.blocking(move |db| {
             let mut wb = WriteBatch::new();
             for op in batch {
@@ -174,11 +161,8 @@ impl StorageAdapter for AiDbEngine {
                     }
                 }
             }
-            let stats = db.write(&wb).map_err(|e| Error::Storage(e.to_string()))?;
-            Ok(WriteBatchStats {
-                inserted: stats.inserted,
-                deleted: stats.deleted,
-            })
+            db.write(&wb).map_err(|e| Error::Storage(e.to_string()))?;
+            Ok(())
         })
         .await
     }
@@ -211,16 +195,11 @@ impl StorageAdapter for AiDbEngine {
     }
 
     async fn len(&self) -> Result<usize> {
-        self.blocking(move |db| {
-            let iter = db.iter().map_err(|e| Error::Storage(e.to_string()))?;
-            let mut count = 0usize;
-            for item in iter {
-                let _ = item.map_err(|e| Error::Storage(e.to_string()))?;
-                count += 1;
-            }
-            Ok(count)
-        })
-        .await
+        Ok(self.estimate_entry_count().await? as usize)
+    }
+
+    async fn estimate_entry_count(&self) -> Result<u64> {
+        self.blocking(move |db| Ok(db.estimate_entry_count())).await
     }
 
     async fn is_empty(&self) -> Result<bool> {

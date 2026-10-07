@@ -82,8 +82,8 @@ async fn test_info_storage_renders_aidb_snapshot() {
         "must contain aidb_wal_size_bytes"
     );
     assert!(
-        storage_section.contains("aidb_total_key_count:1"),
-        "total_key_count should reflect 1 inserted key"
+        storage_section.contains("aidb_sequence:"),
+        "must contain aidb_sequence"
     );
 
     // 2. 测试默认无参 INFO (render_default) 包含 storage 节

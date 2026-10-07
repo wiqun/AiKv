@@ -148,8 +148,8 @@ pub(super) async fn submit_write_ops(
 
 /// 统一写批入口: 将 PUT 或 DELETE 请求发送到对应 group 的 batcher.
 ///
-/// PUT: 不前置 `get_local`, 返回值来自 propose 后的 `WriteStats` (insert 语义).
-/// DELETE: key 不存在则短路跳过 propose, 返回 `Ok(false)`; 否则返回 `WriteStats` 的 deleted.
+/// PUT: 不前置 `get_local`. 成功只认 `Response::Ok`.
+/// DELETE: key 不存在则短路跳过 propose, 返回 `Ok(false)`; 已存在并提交成功返回 `Ok(true)`.
 pub(super) async fn submit_write_op(
     batchers: &parking_lot::Mutex<HashMap<u64, Arc<GroupSetBatcher>>>,
     eager_flush: usize,
@@ -231,7 +231,7 @@ pub(super) async fn run_set_batcher(
             Request::WriteBatch(tb),
         )
         .await
-        .and_then(super::cluster_adapter::ClusterDataAdapter::parse_write_stats)
+        .and_then(super::cluster_adapter::ClusterDataAdapter::check_response)
         .map_err(|e| e.to_string());
 
         let propose_us = t_propose.elapsed().as_micros();
@@ -248,19 +248,11 @@ pub(super) async fn run_set_batcher(
         );
 
         match result {
-            Ok(effects) => {
+            Ok(()) => {
                 let indices: Vec<Option<usize>> = ack_maps.iter().map(|m| m.effect_index).collect();
-                match map_ack_bools(&indices, &effects) {
-                    Ok(bools) => {
-                        for (m, v) in ack_maps.into_iter().zip(bools) {
-                            let _ = m.ack.send(Ok(v));
-                        }
-                    }
-                    Err(e) => {
-                        for m in ack_maps {
-                            let _ = m.ack.send(Err(e.clone()));
-                        }
-                    }
+                let bools = map_ack_included(&indices);
+                for (m, v) in ack_maps.into_iter().zip(bools) {
+                    let _ = m.ack.send(Ok(v));
                 }
             }
             Err(e) => {
@@ -311,21 +303,9 @@ pub(super) fn plan_reverse_dedup(items: Vec<PlannedOp>) -> (ThinWriteBatch, Vec<
     (tb, indices_rev)
 }
 
-/// 将 `effects` (与 dedup 后 `tb.ops` 对齐) 映射为各原始 item 的 ack bool.
-pub(super) fn map_ack_bools(
-    effect_indices: &[Option<usize>],
-    effects: &[bool],
-) -> std::result::Result<Vec<bool>, String> {
-    effect_indices
-        .iter()
-        .map(|opt| match opt {
-            None => Ok(false),
-            Some(i) => effects
-                .get(*i)
-                .copied()
-                .ok_or_else(|| format!("effect index {i} out of range (len={})", effects.len())),
-        })
-        .collect()
+/// 实际提交的 op 在 `Response::Ok` 后 ack true. 被 reverse-dedup 丢掉的中间 op ack false.
+pub(super) fn map_ack_included(effect_indices: &[Option<usize>]) -> Vec<bool> {
+    effect_indices.iter().map(|opt| opt.is_some()).collect()
 }
 
 #[cfg(test)]
@@ -369,10 +349,8 @@ mod tests {
         }
         assert_eq!(indices, vec![None, Some(1), Some(0)]);
 
-        // effects 与 tb.ops 对齐: m 为 insert, k 为 overwrite
-        let effects = vec![true, false];
-        let acks = map_ack_bools(&indices, &effects).expect("map");
-        assert_eq!(acks, vec![false, false, true]);
+        let acks = map_ack_included(&indices);
+        assert_eq!(acks, vec![false, true, true]);
     }
 
     /// Put→Del→Put 必须 LWW 保留最后 Put; 旧实现保留全部 Delete 会变成 Put 后再 Del,
@@ -400,7 +378,7 @@ mod tests {
             other => panic!("expected Put(k,v2), got {other:?}"),
         }
         assert_eq!(indices, vec![None, None, Some(0)]);
-        let acks = map_ack_bools(&indices, &[true]).expect("map");
+        let acks = map_ack_included(&indices);
         assert_eq!(acks, vec![false, false, true]);
     }
 
@@ -418,7 +396,7 @@ mod tests {
         assert_eq!(tb.ops.len(), 1);
         assert!(matches!(tb.ops[0], ThinWriteOp::Delete { .. }));
         assert_eq!(indices, vec![None, Some(0)]);
-        let acks = map_ack_bools(&indices, &[true]).expect("map");
+        let acks = map_ack_included(&indices);
         assert_eq!(acks, vec![false, true]);
     }
 

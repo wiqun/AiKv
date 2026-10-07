@@ -272,6 +272,11 @@ pub trait KvStorage: Send + Sync {
         count: usize,
     ) -> Result<ScanResult>;
     async fn len(&self, db: usize) -> Result<usize>;
+    /// 本进程在该逻辑 DB 上登记过的 TTL 写入次数, 不是磁盘上的 TTL 存量.
+    async fn expires(&self, db: usize) -> Result<u64> {
+        let _ = db;
+        Ok(0)
+    }
     async fn keyspace_stats(&self, db: usize) -> Result<KeyspaceStats>;
     async fn clear(&self, db: usize) -> Result<()>;
     async fn clear_all(&self) -> Result<()>;
@@ -382,41 +387,13 @@ pub trait KvStorage: Send + Sync {
     }
 }
 
-/// 内存逻辑 DB 键计数器 (固定容量 `DB_COUNT`, 线程安全原子数组).
+/// 进程内各逻辑 DB 的 TTL 写入计数. 重启从 0 开始, 不扫库补存量.
 #[derive(Debug, Default)]
-pub struct DbKeyCounters {
+pub struct ExpiresCounters {
     counts: [AtomicU64; DB_COUNT],
 }
 
-/// 过期键 `decr` 单飞门闩: 惰性删除/`DEL`/compaction 至多一方扣减, 持有至 `set_typed` 重生.
-#[derive(Debug, Default)]
-pub struct ExpireDecrGate {
-    claimed: dashmap::DashSet<Vec<u8>>,
-}
-
-impl ExpireDecrGate {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// 若本调用方赢得扣减权则返回 true.
-    #[inline]
-    pub fn try_claim(&self, encoded_or_lsm_key: &[u8]) -> bool {
-        self.claimed.insert(encoded_or_lsm_key.to_vec())
-    }
-
-    #[inline]
-    pub fn release(&self, encoded_or_lsm_key: &[u8]) {
-        self.claimed.remove(encoded_or_lsm_key);
-    }
-
-    #[inline]
-    pub fn clear(&self) {
-        self.claimed.clear();
-    }
-}
-
-impl DbKeyCounters {
+impl ExpiresCounters {
     pub fn new() -> Self {
         Self::default()
     }
@@ -430,26 +407,21 @@ impl DbKeyCounters {
         }
     }
 
+    /// 本次成功写入 `expires_at = Some` 时加 1, 包括没有读过旧值的覆盖写.
     #[inline]
-    pub fn incr(&self, db: usize) {
+    pub fn on_ttl_write(&self, db: usize) {
         if db < DB_COUNT {
             self.counts[db].fetch_add(1, Ordering::Relaxed);
         }
     }
 
+    /// 本次调用已经看到旧值带 TTL, 或惰性过期删掉了带 TTL 的值时饱和减.
     #[inline]
-    pub fn decr(&self, db: usize) {
+    pub fn on_ttl_clear(&self, db: usize) {
         if db < DB_COUNT {
             let _ = self.counts[db].fetch_update(Ordering::Relaxed, Ordering::Relaxed, |curr| {
                 Some(curr.saturating_sub(1))
             });
-        }
-    }
-
-    #[inline]
-    pub fn set(&self, db: usize, count: u64) {
-        if db < DB_COUNT {
-            self.counts[db].store(count, Ordering::Relaxed);
         }
     }
 
@@ -465,13 +437,6 @@ impl DbKeyCounters {
         for count in &self.counts {
             count.store(0, Ordering::Relaxed);
         }
-    }
-
-    pub fn snapshot(&self) -> Vec<usize> {
-        self.counts
-            .iter()
-            .map(|c| c.load(Ordering::Relaxed) as usize)
-            .collect()
     }
 }
 
@@ -493,78 +458,18 @@ mod tests {
     }
 
     #[test]
-    fn test_db_key_counters_initial_and_bounds() {
-        let counters = DbKeyCounters::new();
-        for db in 0..DB_COUNT {
-            assert_eq!(counters.get(db), 0);
-        }
-        // 越界读返回 0
-        assert_eq!(counters.get(DB_COUNT), 0);
-        assert_eq!(counters.get(999), 0);
-
-        // 越界操作 no-op
-        counters.incr(DB_COUNT);
-        counters.decr(DB_COUNT);
-        counters.set(DB_COUNT, 100);
-        counters.reset_db(DB_COUNT);
-        assert_eq!(counters.get(DB_COUNT), 0);
-    }
-
-    #[test]
-    fn test_db_key_counters_incr_decr_and_saturation() {
-        let counters = DbKeyCounters::new();
-        counters.incr(0);
-        counters.incr(0);
+    fn expires_counters_write_clear_and_saturation() {
+        let counters = ExpiresCounters::new();
+        assert_eq!(counters.get(0), 0);
+        counters.on_ttl_write(0);
+        counters.on_ttl_write(0);
         assert_eq!(counters.get(0), 2);
-
-        counters.decr(0);
+        counters.on_ttl_clear(0);
         assert_eq!(counters.get(0), 1);
-
-        counters.decr(0);
+        counters.on_ttl_clear(0);
+        counters.on_ttl_clear(0);
         assert_eq!(counters.get(0), 0);
-
-        // 下溢饱和保护: 0 减 1 保持 0, 不 wrap 成 u64::MAX
-        counters.decr(0);
-        assert_eq!(counters.get(0), 0);
-    }
-
-    #[test]
-    fn test_db_key_counters_set_and_resets() {
-        let counters = DbKeyCounters::new();
-        counters.set(1, 42);
-        counters.set(2, 100);
-        assert_eq!(counters.get(1), 42);
-        assert_eq!(counters.get(2), 100);
-
-        counters.reset_db(1);
-        assert_eq!(counters.get(1), 0);
-        assert_eq!(counters.get(2), 100);
-
-        counters.reset_all();
-        assert_eq!(counters.get(2), 0);
-    }
-
-    #[test]
-    fn test_db_key_counters_snapshot() {
-        let counters = DbKeyCounters::new();
-        counters.set(0, 10);
-        counters.set(3, 30);
-        let snap = counters.snapshot();
-        assert_eq!(snap.len(), DB_COUNT);
-        assert_eq!(snap[0], 10);
-        assert_eq!(snap[1], 0);
-        assert_eq!(snap[3], 30);
-    }
-
-    #[test]
-    fn test_expire_decr_gate_claim_release() {
-        let gate = ExpireDecrGate::new();
-        assert!(gate.try_claim(b"k"));
-        assert!(!gate.try_claim(b"k"));
-        gate.release(b"k");
-        assert!(gate.try_claim(b"k"));
-        gate.clear();
-        assert!(gate.try_claim(b"k"));
-        assert!(!gate.try_claim(b"k"));
+        counters.on_ttl_write(DB_COUNT);
+        assert_eq!(counters.get(DB_COUNT), 0);
     }
 }
