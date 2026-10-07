@@ -19,6 +19,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -245,6 +246,10 @@ pub trait KvStorage: Send + Sync {
     /// 包含全库重扫与过期 key 探测的端到端墙钟时间 (含调度与 I/O await 等待).
     fn rebuild_counters_duration_us(&self) -> u64 {
         0
+    }
+
+    /// 绑定点查计数. 默认空实现, 内存引擎和适配器会记 hit / miss.
+    fn set_point_read_counter(&self, _counter: Arc<crate::storage::observation::PointReadCounter>) {
     }
 
     async fn get(&self, db: usize, key: &[u8]) -> Result<Option<Vec<u8>>>;

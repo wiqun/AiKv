@@ -14,7 +14,7 @@
 //!   `flush` / `close_engine` 为 no-op.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 use parking_lot::RwLock;
@@ -22,7 +22,7 @@ use rand::seq::SliceRandom;
 use tracing::instrument;
 
 use crate::error::{Error, Result};
-use crate::storage::observation::StorageObservation;
+use crate::storage::observation::{PointReadCounter, StorageObservation};
 use crate::storage::types::{
     compute_avg_ttl_ms, now_ms, ExpiresCounters, KeyspaceStats, KvStorage, ScanResult, StoredValue,
     ValueType, WriteOp, TTL_NO_EXPIRY, WRONGTYPE,
@@ -35,6 +35,7 @@ use crate::storage::watch_version::{
 pub struct MemoryEngine {
     databases: Vec<RwLock<HashMap<Vec<u8>, StoredValue>>>,
     observation: Option<Arc<StorageObservation>>,
+    point_reads: OnceLock<Arc<PointReadCounter>>,
     watchers: Arc<WatchRegistry>,
     expires: ExpiresCounters,
 }
@@ -52,6 +53,7 @@ impl MemoryEngine {
         Arc::new(Self {
             databases,
             observation,
+            point_reads: OnceLock::new(),
             watchers: WatchRegistry::new(),
             expires: ExpiresCounters::new(),
         })
@@ -544,7 +546,17 @@ impl KvStorage for MemoryEngine {
     }
 
     async fn get_typed(&self, db: usize, key: &[u8]) -> Result<Option<StoredValue>> {
-        self.get_entry_read(db, key)
+        let result = self.get_entry_read(db, key);
+        if let Ok(value) = &result {
+            if let Some(counter) = self.point_reads.get() {
+                counter.note(value.is_some());
+            }
+        }
+        result
+    }
+
+    fn set_point_read_counter(&self, counter: Arc<PointReadCounter>) {
+        let _ = self.point_reads.set(counter);
     }
 
     async fn set_typed(&self, db: usize, key: &[u8], value: StoredValue) -> Result<()> {

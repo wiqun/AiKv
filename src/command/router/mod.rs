@@ -53,11 +53,11 @@ mod stats;
 
 use keylock::KEY_LOCK_BUCKETS;
 pub use keylock::{KeyLock, KeyLocksGuard};
+use stats::record_command_outcome;
 #[cfg(feature = "monitoring")]
 use stats::record_command_span_status;
 #[cfg(feature = "cluster")]
 use stats::{classify_command, is_cluster_local_admin_cmd, is_multi_key_cmd};
-use stats::{record_command_outcome, record_keyspace_lookup};
 
 pub struct CommandRouter {
     storage: Arc<dyn KvStorage>,
@@ -207,6 +207,7 @@ impl CommandRouter {
             span.record("network.peer.address", tracing::field::display(addr.ip()));
             span.record("network.peer.port", addr.port() as i64);
         }
+        let started = std::time::Instant::now();
         let result = async {
             #[cfg(feature = "monitoring")]
             crate::server::otel::record_trace_ids_on_span(&tracing::Span::current());
@@ -215,7 +216,8 @@ impl CommandRouter {
         }
         .instrument(span)
         .await;
-        record_command_outcome(&self.metrics, cmd, &result);
+        let duration_us = started.elapsed().as_micros() as u64;
+        record_command_outcome(&self.metrics, cmd, &result, duration_us);
         #[cfg(feature = "monitoring")]
         record_command_span_status(&result);
         result
@@ -421,46 +423,12 @@ impl CommandRouter {
         protocol_version: ProtocolVersion,
     ) -> Result<RespValue> {
         match cmd {
-            "GET" => {
-                let result = self.string.get(*db, args).await?;
-                record_keyspace_lookup(
-                    &self.metrics,
-                    matches!(&result, RespValue::BulkString(Some(_))),
-                );
-                Ok(result)
-            }
+            "GET" => self.string.get(*db, args).await,
             "SET" => self.string.set(*db, args).await,
-            "MGET" => {
-                let result = self.string.mget(*db, args).await?;
-                if let RespValue::Array(Some(items)) = &result {
-                    for item in items {
-                        record_keyspace_lookup(
-                            &self.metrics,
-                            matches!(item, RespValue::BulkString(Some(_))),
-                        );
-                    }
-                }
-                Ok(result)
-            }
+            "MGET" => self.string.mget(*db, args).await,
             "MSET" => self.string.mset(*db, args).await,
             "DEL" => self.string.del(*db, args).await,
-            "EXISTS" => {
-                let result = self.string.exists(*db, args).await?;
-                if self.metrics.is_some() {
-                    // 从 EXISTS 返回值提取 keyspace hits/misses (避免二次遍历)
-                    if let RespValue::Integer(count) = &result {
-                        let hits = *count as usize;
-                        let misses = args.len().saturating_sub(hits);
-                        for _ in 0..hits {
-                            record_keyspace_lookup(&self.metrics, true);
-                        }
-                        for _ in 0..misses {
-                            record_keyspace_lookup(&self.metrics, false);
-                        }
-                    }
-                }
-                Ok(result)
-            }
+            "EXISTS" => self.string.exists(*db, args).await,
             "STRLEN" => self.string.strlen(*db, args).await,
             "GETRANGE" => self.string.getrange(*db, args).await,
             "SETRANGE" => self.string.setrange(*db, args).await,
@@ -479,14 +447,7 @@ impl CommandRouter {
             "PSETEX" => self.string.psetex(*db, args).await,
             "HSET" => self.hash.hset(*db, args).await,
             "HMSET" => self.hash.hmset(*db, args).await,
-            "HGET" => {
-                let result = self.hash.hget(*db, args).await?;
-                record_keyspace_lookup(
-                    &self.metrics,
-                    matches!(&result, RespValue::BulkString(Some(_))),
-                );
-                Ok(result)
-            }
+            "HGET" => self.hash.hget(*db, args).await,
             "HDEL" => self.hash.hdel(*db, args).await,
             "HEXISTS" => self.hash.hexists(*db, args).await,
             "HLEN" => self.hash.hlen(*db, args).await,

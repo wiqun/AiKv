@@ -252,8 +252,8 @@ impl ServerCommands {
                 };
                 let snapshots = self
                     .shared
-                    .latency_stats
-                    .histogram_snapshots(filter.as_deref());
+                    .metrics
+                    .command_histogram_snapshots(filter.as_deref());
                 Ok(latency_histogram_resp(&snapshots, proto))
             }
             "LATEST" => {
@@ -303,7 +303,10 @@ impl ServerCommands {
                 } else {
                     None
                 };
-                let count = self.shared.latency_stats.reset(filter.as_deref());
+                let count = self
+                    .shared
+                    .metrics
+                    .reset_command_histograms(filter.as_deref());
                 Ok(router::integer(count as i64))
             }
             "HELP" => {

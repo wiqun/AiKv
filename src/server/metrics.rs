@@ -7,16 +7,20 @@
 //! # Invariant
 //!
 //! - INFO 字段须与同期 `ServerMetrics` atomics 一致; 禁止在 `InfoRenderer` 内独立计数公式.
-//! - 钩子分工: Router `on_command` 计 calls/err; Connection `on_command_duration`
-//!   计 usec/histogram; 勿在 INFO 重复累加.
+//! - 钩子分工: 命令出口 `on_command_done` 只记一次 calls 和真实耗时.
+//!   点查 hit/miss 在存储 `get_typed` 返回时记, 命令层不再为同一次点查加第二次.
 //! - 跟踪排除: `PING|ECHO|HELLO|QUIT|MONITOR|SLOWLOG` 不经 `record_command_observability`.
 //! - 客户端 commandstats: `is_client_command` 过滤含 `.` 的内部伪命令
 //!   (如 `GOSSIP.tick`), 不进 INFO commandstats.
 
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-#[cfg(feature = "monitoring")]
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+
+use aidb::statistics::{LatencyHistogram, LatencySnapshot, COMMAND_DURATION_BOUNDS_US};
+
+use crate::server::latency::CommandLatencySnapshot;
+use crate::storage::observation::PointReadCounter;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct CommandTotals {
@@ -32,6 +36,44 @@ pub(crate) struct CommandTotals {
 /// 客户端可见命令统计 (排除 GOSSIP.tick 等内部伪命令).
 fn is_client_command(command: &str) -> bool {
     !command.contains('.')
+}
+
+#[derive(Debug)]
+struct CommandLatencySlot {
+    ok: LatencyHistogram,
+    err: LatencyHistogram,
+    max_us: AtomicU64,
+}
+
+impl CommandLatencySlot {
+    fn new() -> Self {
+        Self {
+            ok: LatencyHistogram::default(),
+            err: LatencyHistogram::default(),
+            max_us: AtomicU64::new(0),
+        }
+    }
+
+    fn note_max(&self, duration_us: u64) {
+        let mut current = self.max_us.load(Ordering::Relaxed);
+        while duration_us > current {
+            match self.max_us.compare_exchange(
+                current,
+                duration_us,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(v) => current = v,
+            }
+        }
+    }
+}
+
+impl Default for CommandLatencySlot {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Debug)]
@@ -72,6 +114,11 @@ pub struct ServerMetrics {
     slowlog_commands_time_ms_max: AtomicU64,
     error_stats: DashMap<String, u64>,
     db_key_counts: DashMap<usize, u64>,
+    command_latency: DashMap<&'static str, CommandLatencySlot>,
+    local_point_hits: AtomicU64,
+    local_point_misses: AtomicU64,
+    shared_point_reads: OnceLock<Arc<PointReadCounter>>,
+    scan_entries: AtomicU64,
     #[cfg(feature = "monitoring")]
     process_last_cpu_user_seconds_bits: AtomicU64,
     #[cfg(feature = "monitoring")]
@@ -127,6 +174,11 @@ impl Default for ServerMetrics {
             slowlog_commands_time_ms_max: AtomicU64::new(0),
             error_stats: DashMap::new(),
             db_key_counts: DashMap::new(),
+            command_latency: DashMap::new(),
+            local_point_hits: AtomicU64::new(0),
+            local_point_misses: AtomicU64::new(0),
+            shared_point_reads: OnceLock::new(),
+            scan_entries: AtomicU64::new(0),
             #[cfg(feature = "monitoring")]
             process_last_cpu_user_seconds_bits: AtomicU64::new(0),
             #[cfg(feature = "monitoring")]
@@ -604,10 +656,7 @@ impl ServerMetrics {
         self.on_command("CLUSTER.failover", true);
     }
 
-    pub fn on_json_command(&self, command: &str, ok: bool) {
-        let key = format!("JSON.{}", command.to_ascii_lowercase());
-        self.on_command(&key, ok);
-    }
+    pub fn on_json_command(&self, _command: &str, _ok: bool) {}
 
     /// 集群重定向计数 (aikv_cluster_redirects_total 语义).
     pub fn on_cluster_redirect(&self, redirect_type: &str) {
@@ -642,10 +691,16 @@ impl ServerMetrics {
 
     pub fn keyspace_hits(&self) -> u64 {
         self.keyspace_hits.load(Ordering::Relaxed)
+            + self.shared_point_reads.get().map(|c| c.hits()).unwrap_or(0)
     }
 
     pub fn keyspace_misses(&self) -> u64 {
         self.keyspace_misses.load(Ordering::Relaxed)
+            + self
+                .shared_point_reads
+                .get()
+                .map(|c| c.misses())
+                .unwrap_or(0)
     }
 
     pub fn connections_total(&self) -> u64 {
@@ -756,6 +811,153 @@ impl ServerMetrics {
 
     #[cfg(not(feature = "monitoring"))]
     pub fn sync_redis_aligned_gauges(&self) {}
+
+    pub fn attach_point_reads(&self, counter: Arc<PointReadCounter>) {
+        let _ = self.shared_point_reads.set(counter);
+    }
+
+    /// 命令出口记一次. `command` 必须是 `canonical_command` 返回的静态名字.
+    pub fn on_command_done(&self, command: &'static str, ok: bool, duration_us: u64) {
+        self.bump_command_totals(command, ok, duration_us);
+        let slot = self.command_latency.entry(command).or_default();
+        if ok {
+            slot.ok.record(duration_us);
+        } else {
+            slot.err.record(duration_us);
+        }
+        slot.note_max(duration_us);
+    }
+
+    pub fn command_status_count(&self, command: &str, ok: bool) -> u64 {
+        self.commands_total
+            .get(command)
+            .map(|t| if ok { t.ok } else { t.err })
+            .unwrap_or(0)
+    }
+
+    pub fn command_duration(&self, command: &str, ok: bool) -> LatencySnapshot {
+        self.command_latency
+            .get(command)
+            .map(|slot| {
+                if ok {
+                    slot.ok.snapshot()
+                } else {
+                    slot.err.snapshot()
+                }
+            })
+            .unwrap_or_else(|| LatencyHistogram::default().snapshot())
+    }
+
+    pub fn note_point_read(&self, hit: bool) {
+        if hit {
+            self.local_point_hits.fetch_add(1, Ordering::Relaxed);
+            self.on_keyspace_hit();
+        } else {
+            self.local_point_misses.fetch_add(1, Ordering::Relaxed);
+            self.on_keyspace_miss();
+        }
+    }
+
+    pub fn point_read_count(&self, hit: bool) -> u64 {
+        let local = if hit {
+            self.local_point_hits.load(Ordering::Relaxed)
+        } else {
+            self.local_point_misses.load(Ordering::Relaxed)
+        };
+        let shared = self
+            .shared_point_reads
+            .get()
+            .map(|c| if hit { c.hits() } else { c.misses() })
+            .unwrap_or(0);
+        local + shared
+    }
+
+    /// SCAN 结束时的条目数. 不改点查 hit/miss.
+    pub fn note_scan_entries(&self, count: u64) {
+        self.scan_entries.fetch_add(count, Ordering::Relaxed);
+    }
+
+    pub fn command_histogram_snapshots(
+        &self,
+        filter: Option<&[&str]>,
+    ) -> Vec<(String, CommandLatencySnapshot)> {
+        let mut out = Vec::new();
+        for entry in self.command_latency.iter() {
+            let name = *entry.key();
+            if let Some(names) = filter {
+                if !names.iter().any(|n| n.eq_ignore_ascii_case(name)) {
+                    continue;
+                }
+            }
+            let ok = entry.ok.snapshot();
+            let err = entry.err.snapshot();
+            let calls = ok.count + err.count;
+            if calls == 0 {
+                continue;
+            }
+            let mut buckets = Vec::with_capacity(COMMAND_DURATION_BOUNDS_US.len());
+            let mut cumulative = 0u64;
+            for (i, bound) in COMMAND_DURATION_BOUNDS_US.iter().enumerate() {
+                cumulative += ok.buckets[i] + err.buckets[i];
+                buckets.push((*bound, cumulative));
+            }
+            out.push((
+                name.to_ascii_lowercase(),
+                CommandLatencySnapshot {
+                    calls,
+                    total_us: ok.sum_us + err.sum_us,
+                    max_us: entry.max_us.load(Ordering::Relaxed),
+                    buckets,
+                    p50_us: 0,
+                    p95_us: 0,
+                    p99_us: 0,
+                    p999_us: 0,
+                },
+            ));
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    pub fn reset_command_histograms(&self, filter: Option<&[&str]>) -> u64 {
+        match filter {
+            None => {
+                let count = self.command_latency.len() as u64;
+                self.command_latency.clear();
+                count
+            }
+            Some(names) => {
+                let mut count = 0u64;
+                for name in names {
+                    let key = crate::command::canonical_command(name);
+                    if self.command_latency.remove(key).is_some() {
+                        count += 1;
+                    }
+                }
+                count
+            }
+        }
+    }
+
+    fn bump_command_totals(&self, command: &str, ok: bool, duration_us: u64) {
+        if let Some(mut entry) = self.commands_total.get_mut(command) {
+            if ok {
+                entry.ok += 1;
+            } else {
+                entry.err += 1;
+            }
+            entry.usec = entry.usec.saturating_add(duration_us);
+            return;
+        }
+        let mut totals = CommandTotals::default();
+        if ok {
+            totals.ok = 1;
+        } else {
+            totals.err = 1;
+        }
+        totals.usec = duration_us;
+        self.commands_total.insert(command.to_string(), totals);
+    }
 }
 
 #[cfg(test)]
@@ -808,5 +1010,47 @@ mod tests {
                 "refresh should overwrite dummy cache with real data"
             );
         }
+    }
+
+    #[test]
+    fn command_done_records_once() {
+        use crate::command::canonical_command;
+        let metrics = ServerMetrics::default();
+        let get = canonical_command("get");
+        let get_upper = canonical_command("GET");
+        assert!(std::ptr::eq(get, get_upper));
+        assert_eq!(get, "GET");
+        metrics.on_command_done(get, true, 150);
+        assert_eq!(metrics.command_status_count("GET", true), 1);
+        assert_eq!(metrics.command_status_count("GET", false), 0);
+        let snap = metrics.command_duration("GET", true);
+        assert_eq!(snap.count, 1);
+        assert_eq!(snap.sum_us, 150);
+    }
+
+    #[test]
+    fn unknown_command_does_not_use_the_raw_name() {
+        use crate::command::canonical_command;
+        assert_eq!(canonical_command("no-such"), "unknown");
+    }
+
+    #[test]
+    fn json_set_counts_once() {
+        use crate::command::canonical_command;
+        let metrics = ServerMetrics::default();
+        metrics.on_command_done(canonical_command("JSON.SET"), true, 80);
+        assert_eq!(metrics.command_status_count("JSON.SET", true), 1);
+        assert_eq!(metrics.command_duration("JSON.SET", true).count, 1);
+    }
+
+    #[test]
+    fn point_read_miss_does_not_count_as_hit() {
+        let metrics = ServerMetrics::default();
+        metrics.note_point_read(false);
+        assert_eq!(metrics.point_read_count(false), 1);
+        assert_eq!(metrics.point_read_count(true), 0);
+        metrics.note_scan_entries(3);
+        assert_eq!(metrics.point_read_count(false), 1);
+        assert_eq!(metrics.point_read_count(true), 0);
     }
 }

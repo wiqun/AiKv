@@ -28,16 +28,16 @@
 //!   (对齐 Redis 7, 与 `GET` 的 WRONGTYPE 不同).
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 
 use crate::error::{Error, Result};
 use crate::storage::memory::glob_match;
-use crate::storage::observation::StorageObservation;
+use crate::storage::observation::{PointReadCounter, StorageObservation};
 use crate::storage::types::{
-    now_ms, ExpiresCounters, KeyspaceStats, KvStorage, ScanResult, StorageEngineKind,
-    StoredValue, ValueType, WriteOp, DB_COUNT, TTL_NO_EXPIRY, WRONGTYPE,
+    now_ms, ExpiresCounters, KeyspaceStats, KvStorage, ScanResult, StorageEngineKind, StoredValue,
+    ValueType, WriteOp, DB_COUNT, TTL_NO_EXPIRY, WRONGTYPE,
 };
 use crate::storage::watch_registry::WatchRegistry;
 use crate::storage::watch_version::{
@@ -166,6 +166,7 @@ pub struct KvStorageAdapter {
     storage: Arc<dyn StorageAdapter>,
     db_count: usize,
     observation: Option<Arc<StorageObservation>>,
+    point_reads: OnceLock<Arc<PointReadCounter>>,
     expires: Arc<ExpiresCounters>,
     watchers: Arc<WatchRegistry>,
 }
@@ -190,6 +191,7 @@ impl KvStorageAdapter {
             storage,
             db_count: DB_COUNT,
             observation,
+            point_reads: OnceLock::new(),
             expires: Arc::new(ExpiresCounters::new()),
             watchers: WatchRegistry::new(),
         })
@@ -688,7 +690,17 @@ impl KvStorage for KvStorageAdapter {
     }
 
     async fn get_typed(&self, db: usize, key: &[u8]) -> Result<Option<StoredValue>> {
-        self.load_typed(db, key).await
+        let result = self.load_typed(db, key).await;
+        if let Ok(value) = &result {
+            if let Some(counter) = self.point_reads.get() {
+                counter.note(value.is_some());
+            }
+        }
+        result
+    }
+
+    fn set_point_read_counter(&self, counter: Arc<PointReadCounter>) {
+        let _ = self.point_reads.set(counter);
     }
 
     async fn set_typed(&self, db: usize, key: &[u8], value: StoredValue) -> Result<()> {
@@ -757,7 +769,10 @@ impl KvStorage for KvStorageAdapter {
         if existing.is_some() && !replace {
             return Ok(false);
         }
-        let saw_ttl = existing.as_ref().and_then(|value| value.expires_at).is_some();
+        let saw_ttl = existing
+            .as_ref()
+            .and_then(|value| value.expires_at)
+            .is_some();
         self.set_typed(dst_db, dst_key, stored).await?;
         if saw_ttl {
             self.expires.on_ttl_clear(dst_db);

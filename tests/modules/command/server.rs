@@ -370,9 +370,21 @@ async fn test_latency_histogram() {
     let (router, shared) = router_with_shared();
     let mut db = 0;
 
-    shared.latency_stats.record("GET", 10);
-    shared.latency_stats.record("GET", 100);
-    shared.latency_stats.record("SET", 50);
+    shared.metrics.on_command_done(
+        aikv::command::canonical_command("GET"),
+        true,
+        10,
+    );
+    shared.metrics.on_command_done(
+        aikv::command::canonical_command("GET"),
+        true,
+        100,
+    );
+    shared.metrics.on_command_done(
+        aikv::command::canonical_command("SET"),
+        true,
+        50,
+    );
 
     let resp = router
         .execute("LATENCY", &[b("HISTOGRAM")], &mut db)
@@ -413,8 +425,16 @@ async fn test_latency_reset() {
     let (router, shared) = router_with_shared();
     let mut db = 0;
 
-    shared.latency_stats.record("GET", 10);
-    shared.latency_stats.record("SET", 20);
+    shared.metrics.on_command_done(
+        aikv::command::canonical_command("GET"),
+        true,
+        10,
+    );
+    shared.metrics.on_command_done(
+        aikv::command::canonical_command("SET"),
+        true,
+        20,
+    );
 
     let resp = router
         .execute("LATENCY", &[b("RESET")], &mut db)
@@ -429,7 +449,7 @@ async fn test_latency_reset() {
     let aikv::protocol::RespValue::Array(Some(items)) = resp else {
         panic!("expected array");
     };
-    assert!(items.is_empty());
+    assert_eq!(items.len(), 2);
 }
 
 #[tokio::test]

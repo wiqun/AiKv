@@ -818,8 +818,8 @@ async fn test_json_metrics_recorded() {
         .execute("JSON.GET", &[b("mk")], &mut db)
         .await
         .unwrap();
-    assert!(shared.metrics.json_command_ok_count("set") >= 1);
-    assert!(shared.metrics.json_command_ok_count("get") >= 1);
+    assert!(shared.metrics.command_ok_count("JSON.SET") >= 1);
+    assert!(shared.metrics.command_ok_count("JSON.GET") >= 1);
 }
 
 #[tokio::test]

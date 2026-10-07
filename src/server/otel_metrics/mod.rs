@@ -552,13 +552,10 @@ impl OtelMetrics {
         for (cmd, totals) in metrics.all_command_totals() {
             let prev_ok = snap.commands_ok.get(&cmd).copied().unwrap_or(0);
             let prev_err = snap.commands_err.get(&cmd).copied().unwrap_or(0);
-            let prev_usec = snap.commands_usec.get(&cmd).copied().unwrap_or(0);
             let prev_slow = snap.commands_slowlog.get(&cmd).copied().unwrap_or(0);
 
             let delta_ok = totals.ok.saturating_sub(prev_ok);
             let delta_err = totals.err.saturating_sub(prev_err);
-            let delta_usec = totals.usec.saturating_sub(prev_usec);
-            let delta_calls = delta_ok + delta_err;
             let delta_slow = totals.slowlog_count.saturating_sub(prev_slow);
 
             if delta_ok > 0 {
@@ -568,19 +565,6 @@ impl OtelMetrics {
             if delta_err > 0 {
                 self.commands_total
                     .add(delta_err, &Self::cmd_attrs(&cmd, "error"));
-            }
-
-            if delta_calls > 0 && delta_usec > 0 {
-                let avg_secs = (delta_usec as f64 / delta_calls as f64) / 1_000_000.0;
-                let status = if delta_err > 0 && delta_ok == 0 {
-                    "error"
-                } else {
-                    "ok"
-                };
-                for _ in 0..delta_calls {
-                    self.command_duration_seconds
-                        .record(avg_secs, &Self::cmd_attrs(&cmd, status));
-                }
             }
 
             if delta_slow > 0 {

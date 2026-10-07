@@ -596,9 +596,8 @@ impl Connection {
         Ok(())
     }
 
-    fn record_command_observability(&self, cmd: &str, args: &[String], start: Instant, ok: bool) {
+    fn record_command_observability(&self, cmd: &str, args: &[String], start: Instant, _ok: bool) {
         let duration_us = start.elapsed().as_micros() as u64;
-        self.state.latency_stats.record(cmd, duration_us);
         self.state.slow_query_log.record(
             cmd,
             args,
@@ -606,9 +605,6 @@ impl Connection {
             &self.remote.to_string(),
             self.current_db as u16,
         );
-        self.state
-            .metrics()
-            .on_command_duration(cmd, duration_us, ok);
         if duration_us >= self.state.slow_query_log.threshold_us() {
             self.state.metrics().on_slowlog_command(cmd, duration_us);
             #[cfg(feature = "monitoring")]

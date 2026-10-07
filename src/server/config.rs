@@ -160,6 +160,9 @@ impl ServerSharedState {
         ])));
         let metrics = {
             let m = ServerMetrics::default();
+            let point_reads = Arc::new(crate::storage::observation::PointReadCounter::default());
+            storage.set_point_read_counter(Arc::clone(&point_reads));
+            m.attach_point_reads(point_reads);
             #[cfg(feature = "monitoring")]
             let m = {
                 let otel = super::otel_metrics::OtelMetrics::init_global(
