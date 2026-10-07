@@ -152,3 +152,44 @@ fn overview_latency_is_one_line_and_freshness_is_sample_age() {
         assert!(!dashboards_dir().join(name).exists(), "{name} still exists");
     }
 }
+
+#[test]
+fn troubleshoot_read_amp_skips_zero_and_cache_hit_uses_the_window() {
+    let dash = dashboard("aikv-troubleshoot.json");
+    let queries = exprs(&dash);
+    let read_amp = queries
+        .iter()
+        .find(|expr| expr.contains("aidb_logical_read_bytes_total"))
+        .expect("read amp");
+    assert!(read_amp.contains("aidb_block_read_bytes_total"), "{read_amp}");
+    assert!(read_amp.contains("$rate_window"), "{read_amp}");
+    assert!(read_amp.contains("> 0"), "{read_amp}");
+
+    let cache_hit = queries
+        .iter()
+        .find(|expr| expr.contains("aidb_block_cache_hits_total"))
+        .expect("cache hit");
+    assert!(cache_hit.contains("rate("), "{cache_hit}");
+    assert!(cache_hit.contains("$rate_window"), "{cache_hit}");
+    assert!(cache_hit.contains("aidb_block_cache_misses_total"), "{cache_hit}");
+
+    let pending = panel_by_title(&dash, "compaction 待处理字节");
+    let note = pending["description"].as_str().unwrap_or("");
+    assert!(note.contains("L0 超出 trigger 的最老文件"), "{note}");
+    assert!(note.contains("最底层不计入"), "{note}");
+
+    let raw = serde_json::to_string(&dash).unwrap();
+    assert!(raw.contains("aidb_flush_last_duration_seconds"));
+    assert!(raw.contains("aidb_compaction_last_duration_seconds"));
+    assert!(!raw.contains("aidb_flush_total"));
+    assert!(!raw.contains("aidb_compaction_total"));
+    for expr in &queries {
+        if expr.contains("histogram_quantile") {
+            assert!(!expr.contains("aidb_flush"), "{expr}");
+            assert!(!expr.contains("aidb_compaction"), "{expr}");
+        }
+    }
+    assert!(queries
+        .iter()
+        .any(|expr| expr.contains("histogram_quantile(0.99") && expr.contains("by (le, command)")));
+}
