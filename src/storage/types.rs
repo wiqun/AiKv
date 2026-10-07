@@ -241,9 +241,7 @@ pub trait KvStorage: Send + Sync {
         None
     }
 
-    /// 最近一次键计数器全库重建端到端耗时 (微秒).
-    ///
-    /// 包含全库重扫与过期 key 探测的端到端墙钟时间 (含调度与 I/O await 等待).
+    /// 键计数器全库重扫耗时 (微秒). 重扫已去掉, 固定返回 0.
     fn rebuild_counters_duration_us(&self) -> u64 {
         0
     }

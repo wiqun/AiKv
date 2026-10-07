@@ -27,7 +27,7 @@
 - **细粒度并发与事务**: 4096 桶按 Key 字典序排序加锁, 彻底杜绝死锁; 支持 MULTI/EXEC/WATCH 原子事务.
 - **分布式集群模式**: 16384 槽位路由, Hash Tag, 在线槽位迁移, 客户端透明重定向 (redis-cli -c).
 - **云原生高并发架构**: Tokio 异步运行时 + 4096 桶细粒度 KeyLock, 保证原子性与无死锁的同时最大化多核吞吐.
-- **云原生可观测性**: 深度对齐 Redis 8.8 INFO 字段, 支持基于 OpenTelemetry 的指标导出 (`aikv_*`) 与全链路 tracing span 跟踪.
+- **云原生可观测性**: 指标由 OpenTelemetry 导出 (`aikv_*` 与 `aidb_*`). span 只允许命令入口 `kv_command`, 采样率为 0 或端点为空时不创建.
 
 ---
 
