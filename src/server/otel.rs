@@ -32,7 +32,7 @@ pub struct OtelInitConfig {
     pub tcp_port: u16,
     pub deployment_environment: Option<String>,
     pub extra_resource_attrs: Vec<KeyValue>,
-    /// Trace 采样率 (0.0-1.0), 由 `AIKV_OTEL_SAMPLE_RATIO` 控制, 默认 1.0.
+    /// Trace 采样率 (0.0-1.0), 由 `AIKV_OTEL_SAMPLE_RATIO` 控制, 默认 0.0.
     pub sample_ratio: f64,
 }
 
@@ -46,16 +46,16 @@ fn resolve_node_id(env_node_id: Option<&str>, cluster_node_id: Option<u64>) -> O
         .or(cluster_node_id)
 }
 
-/// 解析采样率 (0.0-1.0). 非法输入回退 1.0 (保持全采样, 不静默丢 trace).
+/// 解析采样率 (0.0-1.0). 非法输入回退 0.0, 不导出 trace.
 pub fn parse_sample_ratio(raw: &str) -> f64 {
     match raw.trim().parse::<f64>() {
         Ok(r) if r.is_finite() && (0.0..=1.0).contains(&r) => r,
         _ => {
             eprintln!(
-                "warn: invalid AIKV_OTEL_SAMPLE_RATIO value {:?}, falling back to 1.0 (full sampling)",
+                "warn: invalid AIKV_OTEL_SAMPLE_RATIO value {:?}, falling back to 0.0 (no traces)",
                 raw
             );
-            1.0
+            0.0
         }
     }
 }
@@ -155,7 +155,7 @@ pub fn otel_config_from_env(
         .unwrap_or_default();
     let sample_ratio = env_nonempty("AIKV_OTEL_SAMPLE_RATIO")
         .map(|v| parse_sample_ratio(&v))
-        .unwrap_or(1.0);
+        .unwrap_or(0.0);
     Some(OtelInitConfig {
         endpoint,
         service_name,

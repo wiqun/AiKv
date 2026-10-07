@@ -51,6 +51,7 @@ pub struct ObservabilitySettings {
     pub otlp_endpoint: Option<String>,
     pub otel_service_name: Option<String>,
     pub otel_sample_ratio: Option<f64>,
+    pub log_level: Option<String>,
     pub host_label: Option<String>,
     pub deployment_env: Option<String>,
 }
@@ -101,6 +102,7 @@ pub struct ResolvedObservability {
     pub otlp_endpoint: Option<String>,
     pub otel_service_name: String,
     pub otel_sample_ratio: f64,
+    pub log_level: LogLevel,
     pub host_label: Option<String>,
     pub deployment_env: Option<String>,
 }
@@ -134,6 +136,51 @@ pub enum ConfigWarning {
     ClusterSectionIgnored,
     PartialClusterConfig,
     MemoryEngineProductionHint,
+    InvalidLogLevel { raw: String },
+}
+
+/// 进程日志级别. 只接受这五个名字, 大小写不敏感.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogLevel {
+    Error,
+    Warn,
+    Info,
+    Debug,
+    Trace,
+}
+
+impl LogLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LogLevel::Error => "error",
+            LogLevel::Warn => "warn",
+            LogLevel::Info => "info",
+            LogLevel::Debug => "debug",
+            LogLevel::Trace => "trace",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "error" => Some(LogLevel::Error),
+            "warn" => Some(LogLevel::Warn),
+            "info" => Some(LogLevel::Info),
+            "debug" => Some(LogLevel::Debug),
+            "trace" => Some(LogLevel::Trace),
+            _ => None,
+        }
+    }
+}
+
+impl Serialize for LogLevel {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+/// 采样率大于 0 且端点非空时才导出 trace.
+pub fn should_export_traces(sample_ratio: f64, endpoint: Option<&str>) -> bool {
+    sample_ratio > 0.0 && endpoint.is_some_and(|value| !value.is_empty())
 }
 
 #[derive(Debug, Error)]
@@ -176,7 +223,7 @@ const DEFAULT_METRICS_ADDR: &str = "127.0.0.1";
 const DEFAULT_METRICS_PORT: u16 = 9191;
 const DEFAULT_METRICS_EXPORT_INTERVAL_SECS: u64 = 15;
 const DEFAULT_OTEL_SERVICE_NAME: &str = "aikv";
-const DEFAULT_OTEL_SAMPLE_RATIO: f64 = 1.0;
+const DEFAULT_OTEL_SAMPLE_RATIO: f64 = 0.0;
 const DEFAULT_AIDB_PRESET: &str = "default";
 
 #[cfg(feature = "cluster")]
@@ -262,6 +309,9 @@ impl Settings {
         }
         if let Some(v) = other.otel_sample_ratio {
             self.observability.otel_sample_ratio = Some(v);
+        }
+        if let Some(ref v) = other.log_level {
+            self.observability.log_level = Some(v.clone());
         }
         if let Some(ref v) = other.host_label {
             self.observability.host_label = Some(v.clone());
@@ -422,6 +472,19 @@ fn resolve_observability(
         .clone()
         .unwrap_or_else(|| DEFAULT_OTEL_SERVICE_NAME.to_string());
 
+    let log_level = match obs.log_level.as_deref() {
+        None => LogLevel::Info,
+        Some(raw) => match LogLevel::parse(raw) {
+            Some(level) => level,
+            None => {
+                warnings.push(ConfigWarning::InvalidLogLevel {
+                    raw: raw.to_string(),
+                });
+                LogLevel::Info
+            }
+        },
+    };
+
     let otel_sample_ratio = match obs.otel_sample_ratio {
         Some(r) if r.is_finite() && (0.0..=1.0).contains(&r) => r,
         Some(r) => {
@@ -439,6 +502,7 @@ fn resolve_observability(
         otlp_endpoint,
         otel_service_name,
         otel_sample_ratio,
+        log_level,
         host_label: obs.host_label.clone(),
         deployment_env: obs.deployment_env.clone(),
     })

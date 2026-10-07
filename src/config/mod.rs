@@ -10,9 +10,9 @@ pub use cli::{Cli, CliOverrides};
 pub use engine::EngineKind;
 pub use file::{discover_config_path, discover_config_path_in, load_settings_from_file};
 pub use settings::{
-    print_resolved_config, AnnounceMode, ConfigError, ConfigWarning, EngineSettings,
-    ObservabilitySettings, ResolveResult, ResolvedObservability, ResolvedSettings, ServerSettings,
-    Settings,
+    print_resolved_config, should_export_traces, AnnounceMode, ConfigError, ConfigWarning,
+    EngineSettings, LogLevel, ObservabilitySettings, ResolveResult, ResolvedObservability,
+    ResolvedSettings, ServerSettings, Settings,
 };
 
 #[cfg(feature = "cluster")]
@@ -102,7 +102,8 @@ mod resolve_tests {
         assert!(resolved.observability.json_log);
         assert!(resolved.observability.otlp_endpoint.is_none());
         assert_eq!(resolved.observability.otel_service_name, "aikv");
-        assert!((resolved.observability.otel_sample_ratio - 1.0).abs() < f64::EPSILON);
+        assert!((resolved.observability.otel_sample_ratio - 0.0).abs() < f64::EPSILON);
+        assert_eq!(resolved.observability.log_level, LogLevel::Info);
         assert!(resolved.observability.host_label.is_none());
         assert!(resolved.observability.deployment_env.is_none());
         assert!(resolved.config_file_used.is_none());
@@ -141,6 +142,51 @@ mod resolve_tests {
         );
         let (resolved, _) = resolve_parts(None, env, CliOverrides::default()).unwrap();
         assert_eq!(resolved.observability.metrics_export_interval_secs, 30);
+    }
+
+    #[test]
+    fn log_level_and_sample_ratio_defaults() {
+        let (resolved, _) = resolve_parts(None, HashMap::new(), CliOverrides::default()).unwrap();
+        assert_eq!(resolved.observability.log_level, LogLevel::Info);
+        assert!((resolved.observability.otel_sample_ratio - 0.0).abs() < f64::EPSILON);
+        assert!(!should_export_traces(0.0, Some("http://127.0.0.1:4317")));
+        assert!(!should_export_traces(0.1, None));
+        assert!(!should_export_traces(0.1, Some("")));
+        assert!(should_export_traces(0.1, Some("http://127.0.0.1:4317")));
+    }
+
+    #[test]
+    fn log_level_env_then_cli() {
+        let mut env = HashMap::new();
+        env.insert("AIKV_LOG_LEVEL".to_string(), "debug".to_string());
+        let (resolved, _) = resolve_parts(None, env, CliOverrides::default()).unwrap();
+        assert_eq!(resolved.observability.log_level, LogLevel::Debug);
+
+        let mut env = HashMap::new();
+        env.insert("AIKV_LOG_LEVEL".to_string(), "debug".to_string());
+        let cli = CliOverrides {
+            log_level: Some("error".to_string()),
+            ..CliOverrides::default()
+        };
+        let (resolved, _) = resolve_parts(None, env, cli).unwrap();
+        assert_eq!(resolved.observability.log_level, LogLevel::Error);
+
+        let mut env = HashMap::new();
+        env.insert("AIKV_LOG_LEVEL".to_string(), "nope".to_string());
+        let (resolved, warnings) = resolve_parts(None, env, CliOverrides::default()).unwrap();
+        assert_eq!(resolved.observability.log_level, LogLevel::Info);
+        assert!(warnings.iter().any(|w| matches!(
+            w,
+            ConfigWarning::InvalidLogLevel { raw } if raw == "nope"
+        )));
+
+        let mut env = HashMap::new();
+        env.insert("AIKV_OTEL_SAMPLE_RATIO".to_string(), "abc".to_string());
+        let (resolved, warnings) = resolve_parts(None, env, CliOverrides::default()).unwrap();
+        assert!((resolved.observability.otel_sample_ratio - 0.0).abs() < f64::EPSILON);
+        assert!(warnings.contains(&ConfigWarning::InvalidOtelSampleRatio {
+            raw: "abc".to_string()
+        }));
     }
 
     #[test]
@@ -364,14 +410,14 @@ aidb_preset = "bogus"
         );
     }
 
-    /// 回归测试: 非法 OTel 采样率必须告警并回退到 `1.0`.
+    /// 回归测试: 非法 OTel 采样率必须告警并回退到 `0.0`.
     #[test]
     fn warning_invalid_otel_sample_ratio_in_resolve() {
         for raw in ["abc", "1.5"] {
             let env = HashMap::from([("AIKV_OTEL_SAMPLE_RATIO".to_string(), raw.to_string())]);
             let (resolved, warnings) = resolve_parts(None, env, CliOverrides::default()).unwrap();
 
-            assert_eq!(resolved.observability.otel_sample_ratio, 1.0, "raw={raw}");
+            assert_eq!(resolved.observability.otel_sample_ratio, 0.0, "raw={raw}");
             assert!(
                 warnings.contains(&ConfigWarning::InvalidOtelSampleRatio {
                     raw: raw.to_string()

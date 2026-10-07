@@ -243,7 +243,7 @@ fn test_hot_path_span_level_debug() {
     );
 }
 
-/// 采样率解析契约: `AIKV_OTEL_SAMPLE_RATIO` 合法范围 0.0-1.0, 非法输入回退 1.0.
+/// 采样率解析契约: `AIKV_OTEL_SAMPLE_RATIO` 合法范围 0.0-1.0, 非法输入回退 0.0.
 #[cfg(feature = "monitoring")]
 #[test]
 fn test_sample_ratio_parse() {
@@ -255,14 +255,14 @@ fn test_sample_ratio_parse() {
     assert_eq!(parse_sample_ratio("0.5"), 0.5);
     assert_eq!(parse_sample_ratio(" 0.5 "), 0.5);
     assert_eq!(parse_sample_ratio("+0.5"), 0.5);
-    // 非法/越界 → 回退 1.0
-    assert_eq!(parse_sample_ratio(""), 1.0);
-    assert_eq!(parse_sample_ratio("abc"), 1.0);
-    assert_eq!(parse_sample_ratio("-0.5"), 1.0);
-    assert_eq!(parse_sample_ratio("1.5"), 1.0);
-    assert_eq!(parse_sample_ratio("2"), 1.0);
-    assert_eq!(parse_sample_ratio("NaN"), 1.0);
-    assert_eq!(parse_sample_ratio("inf"), 1.0);
+    // 非法/越界 → 回退 0.0
+    assert_eq!(parse_sample_ratio(""), 0.0);
+    assert_eq!(parse_sample_ratio("abc"), 0.0);
+    assert_eq!(parse_sample_ratio("-0.5"), 0.0);
+    assert_eq!(parse_sample_ratio("1.5"), 0.0);
+    assert_eq!(parse_sample_ratio("2"), 0.0);
+    assert_eq!(parse_sample_ratio("NaN"), 0.0);
+    assert_eq!(parse_sample_ratio("inf"), 0.0);
 }
 
 /// 返回锚点文本之前的最近一个 instrument 属性文本.

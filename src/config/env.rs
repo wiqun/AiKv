@@ -109,10 +109,13 @@ impl Settings {
                     self.observability.otel_sample_ratio = Some(r);
                 }
                 Err(_) => {
-                    self.observability.otel_sample_ratio = Some(1.0);
+                    self.observability.otel_sample_ratio = Some(0.0);
                     warnings.push(ConfigWarning::InvalidOtelSampleRatio { raw: v.to_string() });
                 }
             }
+        }
+        if let Some(v) = nonempty(&map, "AIKV_LOG_LEVEL") {
+            self.observability.log_level = Some(v.to_string());
         }
         if let Some(v) = nonempty(&map, "AIKV_HOST_LABEL") {
             self.observability.host_label = Some(v.to_string());
