@@ -257,3 +257,74 @@ fn find_panel_with_expr<'a>(value: &'a Value, expr: &str) -> &'a Value {
     }
     walk(value, expr).unwrap_or_else(|| panic!("no panel with {expr}"))
 }
+
+#[test]
+fn cluster_status_is_one_row_per_group() {
+    let dash = dashboard("aikv-cluster.json");
+    let table = panel_by_title(&dash, "每个 group");
+    assert_eq!(table["type"], "table");
+    for target in table["targets"].as_array().expect("targets") {
+        assert_eq!(target["instant"], true);
+    }
+    let mut table_exprs = Vec::new();
+    collect_exprs(table, &mut table_exprs);
+    let mut got = table_exprs.clone();
+    got.sort();
+    let mut expected = vec![
+        "aidb_raft_role".to_string(),
+        "aidb_raft_apply_lag_entries".to_string(),
+        "aidb_raft_replication_lag_entries".to_string(),
+        "aidb_raft_leader_contact_age_seconds".to_string(),
+    ];
+    expected.sort();
+    assert_eq!(got, expected);
+
+    let queries = exprs(&dash);
+    for name in [
+        "aidb_l0_files",
+        "aidb_memtable_active_bytes",
+        "aidb_write_stall_window_max_us",
+    ] {
+        assert!(queries.iter().any(|expr| expr == name), "missing {name}");
+    }
+    assert!(panel_descriptions(&dash).iter().any(|note| note.contains("没有 group 标签")));
+
+    assert!(queries.iter().any(|expr| {
+        expr == "histogram_quantile(0.99, sum by (le, group) (rate(aidb_propose_duration_seconds_bucket[$rate_window])))"
+    }));
+    assert!(queries.iter().any(|expr| {
+        expr == "sum(rate(aikv_redirects_total{type=\"moved\"}[$rate_window]))"
+    }));
+    assert!(queries.iter().any(|expr| {
+        expr == "sum(rate(aikv_redirects_total{type=\"ask\"}[$rate_window]))"
+    }));
+    let raw = std::fs::read_to_string(dashboards_dir().join("aikv-cluster.json")).unwrap();
+    assert!(!raw.contains("type=\"MOVED\""));
+    assert!(!raw.contains("type=\"ASK\""));
+}
+
+fn panel_descriptions(value: &Value) -> Vec<String> {
+    let mut notes = Vec::new();
+    fn walk(value: &Value, notes: &mut Vec<String>) {
+        match value {
+            Value::Object(map) => {
+                if map.get("targets").is_some() {
+                    if let Some(note) = map.get("description").and_then(|item| item.as_str()) {
+                        notes.push(note.to_string());
+                    }
+                }
+                for child in map.values() {
+                    walk(child, notes);
+                }
+            }
+            Value::Array(items) => {
+                for child in items {
+                    walk(child, notes);
+                }
+            }
+            _ => {}
+        }
+    }
+    walk(value, &mut notes);
+    notes
+}
