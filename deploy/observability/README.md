@@ -158,13 +158,7 @@ Grafana 启动后自动加载 `AiKv` 仪表盘目录下的四张大盘:
 
 ## 7. 已知客户端 Trace 拒收警告说明 (文档化预期行为)
 
-`aikv` 客户端默认通过统一 endpoint (`:4317`) 同时上报 trace span 与 metrics. 当前轻量级监控栈仅挂载了 metrics 流水线, 未引入分布式追踪后端 (如 Tempo).
-
-因此, `aikv` 实例在运行过程中控制台可能间歇性输出如下日志:
-```text
-OpenTelemetry trace error occurred. Exporting failed to send batch: status code 12 (Unimplemented)
-```
-**这是完全正常的文档化预期行为**, 对 `aikv` 正常业务处理和 metrics 指标收集没有任何副作用. 后续若需接入分布式链路追踪, 仅需在 `otel-collector/config.yaml` 增加 trace pipeline 并接入 Tempo 即可无缝启用.
+默认采样率是 `0`, 进程不导出 span. 采样率大于 `0` 且配置了 OTLP 端点时, Collector 的 `traces` 流水线接收 span 并交给 `debug` exporter. 这不是 Tempo, 也不再把 status 12 (`Unimplemented`) 当成稳态.
 
 ---
 

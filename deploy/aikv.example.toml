@@ -19,4 +19,6 @@ aidb_preset = "high-write"  # default | high-write | high-read
 metrics_addr = "127.0.0.1"
 metrics_port = 9191
 json_log = true
+# log_level = "info"
+# otel_sample_ratio = 0.0
 # otlp_endpoint = "http://aikv-otel-collector:4317"

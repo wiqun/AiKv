@@ -119,6 +119,7 @@ MultiRaft 端口依次为 `26379`, `26380`, `26381`, `27379`, `27380`, `27381`.
 | `observability.otlp_endpoint` | `AIKV_OTLP_ENDPOINT` | (仅 env/TOML) |
 | `observability.otel_service_name` | `AIKV_OTEL_SERVICE_NAME` | (仅 env/TOML) |
 | `observability.otel_sample_ratio` | `AIKV_OTEL_SAMPLE_RATIO` | (仅 env/TOML) |
+| `observability.log_level` | `AIKV_LOG_LEVEL` | `--log-level` |
 | `observability.host_label` | `AIKV_HOST_LABEL` | (仅 env/TOML) |
 | `observability.deployment_env` | `AIKV_DEPLOYMENT_ENV` | (仅 env/TOML) |
 | `cluster.node_id` | `AIKV_CLUSTER_NODE_ID` | `--cluster-node-id` |
@@ -141,7 +142,7 @@ MultiRaft 端口依次为 `26379`, `26380`, `26381`, `27379`, `27380`, `27381`.
 
 | 变量 | 作用 | 与 AIKV_* 关系 |
 | :--- | :--- | :--- |
-| `RUST_LOG` | tracing 级别 | 仅 env, 不参与四层 merge |
+| `RUST_LOG` | 不再决定本进程过滤级别 | 级别走 `observability.log_level` / `AIKV_LOG_LEVEL` / `--log-level`, 默认 `info` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP 端点 | 优先于 `AIKV_OTLP_ENDPOINT` |
 | `OTEL_SERVICE_NAME` | 服务名 | 优先于 `AIKV_OTEL_SERVICE_NAME` |
 | `OTEL_DEPLOYMENT_ENVIRONMENT` | 部署环境 | 优先于 `AIKV_DEPLOYMENT_ENV` |

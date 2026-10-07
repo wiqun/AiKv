@@ -160,7 +160,7 @@ AiKv 采用四层配置合并, 优先级从低到高: **内置默认值 → TOML
 | 集群 | `AIKV_CLUSTER_NODE_ID`, `AIKV_CLUSTER_RPC_ADDR`, `AIKV_CLUSTER_PEERS` | 对应 `[cluster]`; peers 逗号分隔 |
 | 已有 env | `AIKV_CLIENT_ADDR`, `AIKV_CLUSTER_ANNOUNCE_MODE`, `AIKV_LINEARIZABLE_READ` | 名称不变, 纳入 env 层 merge; `AIKV_LINEARIZABLE_READ` 仅 `1`/大小写不敏感的 `true` 为真, 其他值均为假 |
 | 部署脚本 | `AIKV_BIND_IP`, `AIKV_ANNOUNCE_IP`, `AIKV_IMAGE`, `AIKV_CLUSTER_TIMEOUT_SECONDS` | 仅 `deploy/` Compose / `aikv-*.sh` 使用, 不进入进程四层配置 merge |
-| 日志 | `RUST_LOG` | 仅 env, 不参与四层 merge struct |
+| 日志 | `AIKV_LOG_LEVEL` | 默认 `info`. 代码默认, TOML `observability.log_level`, env, CLI `--log-level`. `RUST_LOG` 不再决定本进程过滤级别 |
 
 `--print-config` 可将合并后有效配置以 TOML 格式输出到 stdout (然后继续启动), 便于排查优先级.
 
@@ -225,14 +225,14 @@ AiKv 采用四层配置合并, 优先级从低到高: **内置默认值 → TOML
 
 | 环境变量                          | 默认值       | 作用说明                                                          |
 | ----------------------------- | --------- | ------------------------------------------------------------- |
-| `RUST_LOG`                    | `info`    | Tracing 日志级别过滤指令 (不参与四层 merge)                              |
+| `AIKV_LOG_LEVEL`              | `info`    | 进程日志级别. `RUST_LOG` 不再决定本进程过滤级别                            |
 | `AIKV_JSON_LOG`               | `true`    | 是否以 JSON 格式输出结构化日志; 亦可写 TOML `observability.json_log`          |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | 空 (跳过)    | OTLP gRPC 端点; 优先于 `AIKV_OTLP_ENDPOINT`                         |
 | `OTEL_SERVICE_NAME`           | `aikv`    | OTel 服务名; 优先于 `AIKV_OTEL_SERVICE_NAME`                        |
 | `OTEL_DEPLOYMENT_ENVIRONMENT` | 空         | 部署环境; 优先于 `AIKV_DEPLOYMENT_ENV`                                |
 | `AIKV_CLIENT_ADDR`            | 自动推导      | 集群客户端通告地址 (对应 `cluster.client_addr`)                         |
 | `AIKV_CLUSTER_ANNOUNCE_MODE`  | `unknown` | 通告模式: `unknown` | `fixed`                                   |
-| `AIKV_OTEL_SAMPLE_RATIO`      | `1.0`     | 链路追踪采样率 (`0.0` ~ `1.0`)                                       |
+| `AIKV_OTEL_SAMPLE_RATIO`      | `0.0`     | 链路追踪采样率 (`0.0` ~ `1.0`). 非法值回退 `0`. 大于 `0` 且端点非空才导出 span |
 
 
 ---

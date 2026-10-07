@@ -17,7 +17,9 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use aikv::command::blocking;
-use aikv::config::{print_resolved_config, resolve, Cli, EngineKind, ResolvedSettings};
+use aikv::config::{
+    print_resolved_config, resolve, should_export_traces, Cli, EngineKind, ResolvedSettings,
+};
 use aikv::server::{ConnectionConfig, Server, ServerSharedState};
 use aikv::storage::ttl_filter::TtlExpireFilter;
 use aikv::storage::{
@@ -481,6 +483,10 @@ async fn init_cluster(
 }
 
 fn init_logging(settings: &ResolvedSettings) {
+    aidb::observability::set_traces_enabled(should_export_traces(
+        settings.observability.otel_sample_ratio,
+        settings.observability.otlp_endpoint.as_deref(),
+    ));
     let json_enabled = settings.observability.json_log;
     #[cfg(feature = "monitoring")]
     let tcp_port = settings.bind.port();
@@ -489,9 +495,7 @@ fn init_logging(settings: &ResolvedSettings) {
     #[cfg(all(feature = "monitoring", not(feature = "cluster")))]
     let cluster_node_id: Option<u64> = None;
 
-    let filter = EnvFilter::builder()
-        .with_default_directive("info".parse().unwrap())
-        .from_env_lossy();
+    let filter = EnvFilter::new(settings.observability.log_level.as_str());
 
     #[cfg(feature = "monitoring")]
     if let Some(config) = aikv::server::otel::otel_config_from_settings(
@@ -499,7 +503,7 @@ fn init_logging(settings: &ResolvedSettings) {
         tcp_port,
         cluster_node_id,
     ) {
-        if aikv::server::otel::init_otel(&config) {
+        if aikv::server::otel::init_otel(&config) && aikv::server::otel::tracer_installed() {
             let tracer = opentelemetry::global::tracer("aikv");
             let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
             let base = Registry::default().with(otel_layer);
@@ -510,7 +514,7 @@ fn init_logging(settings: &ResolvedSettings) {
                         .flatten_event(false)
                         .with_current_span(true)
                         .with_span_list(true)
-                        .with_writer(std::io::stderr)
+                        .with_writer(std::io::stdout)
                         .boxed(),
                 )
                 .with(filter)
@@ -519,7 +523,7 @@ fn init_logging(settings: &ResolvedSettings) {
                     fmt::layer()
                         .compact()
                         .with_target(true)
-                        .with_writer(std::io::stderr)
+                        .with_writer(std::io::stdout)
                         .boxed(),
                 )
                 .with(filter)
@@ -538,7 +542,7 @@ fn init_logging(settings: &ResolvedSettings) {
                     .flatten_event(false)
                     .with_current_span(true)
                     .with_span_list(true)
-                    .with_writer(std::io::stderr)
+                    .with_writer(std::io::stdout)
                     .boxed(),
             )
             .with(filter)
@@ -548,7 +552,7 @@ fn init_logging(settings: &ResolvedSettings) {
                 fmt::layer()
                     .compact()
                     .with_target(true)
-                    .with_writer(std::io::stderr)
+                    .with_writer(std::io::stdout)
                     .boxed(),
             )
             .with(filter)
@@ -587,6 +591,7 @@ async fn main() {
         tracing::warn!(target = "aikv::config", ?w, "configuration warning");
     }
 
+    tracing::info!(?settings, "resolved config");
     tracing::info!(
         bind = %settings.bind,
         engine = ?settings.engine,

@@ -26,6 +26,7 @@ processors:
           - set(metric.unit, "") where metric.unit == "1"
 
 exporters:
+  debug: {}
   prometheus_remote_write:
     endpoint: http://prometheus:9090/api/v1/write
     tls:
@@ -43,3 +44,7 @@ service:
       receivers: [otlp]
       processors: [memory_limiter, transform/strip_unit_one, batch]
       exporters: [prometheus_remote_write]
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [debug]
