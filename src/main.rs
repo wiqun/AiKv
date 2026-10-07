@@ -622,8 +622,7 @@ async fn main() {
     // 集群初始化 (等待 init_cluster 完成, 确保 CLUSTER_STATE_MGR 就绪)
     #[cfg(feature = "cluster")]
     if settings.cluster.node_id.is_some() && settings.cluster.rpc_addr.is_some() {
-        if let Err(e) = init_cluster(&settings, _cluster_db, Arc::clone(&state.metrics)).await
-        {
+        if let Err(e) = init_cluster(&settings, _cluster_db, Arc::clone(&state.metrics)).await {
             tracing::error!(error = %e, "cluster initialization failed");
             std::process::exit(1);
         }
@@ -664,17 +663,28 @@ async fn main() {
             }
         }
 
-        // 后台定期刷新 uptime / memory 指标, 并同步底层 aidb 统计至 OTel
+        // 一份快照同时写成 /metrics 文本. 端点为空时不推 OTLP.
         let bg_state = Arc::clone(&state);
+        let export_secs = settings.observability.metrics_export_interval_secs.max(1);
+        let otlp_enabled =
+            aikv::server::export::export_config(settings.observability.otlp_endpoint.as_deref())
+                .otlp_enabled;
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(export_secs));
+            let mut baseline = aikv::server::export::ExportSnapshot::default();
             loop {
                 interval.tick().await;
                 bg_state.refresh_runtime_metrics().await;
                 bg_state.metrics().refresh_process_metrics();
-                if let Some(stats) = bg_state.storage.aidb_statistics() {
-                    aidb::metrics::sync_to_otel(&stats);
+                let current = aikv::server::export::collect_export_snapshot();
+                let text = aikv::server::export::render_prometheus(&current);
+                aikv::server::export::publish_metrics_text(text);
+                if otlp_enabled {
+                    let mut sink = aikv::server::export::OtelSink;
+                    aikv::server::export::push_deltas(&current, &baseline, &mut sink);
+                    aikv::server::otel::flush_otel_metrics().await;
                 }
+                baseline = current;
             }
         });
     }

@@ -82,7 +82,7 @@ hyper-util = { version = "0.1", features = ["tokio"], optional = true }
 http-body-util = { version = "0.1", optional = true }
 opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic", "metrics"], optional = true }
 opentelemetry = { version = "0.32", optional = true }
-opentelemetry_sdk = { version = "0.32", features = ["rt-tokio", "testing"], optional = true }
+opentelemetry_sdk = { version = "0.32", features = ["rt-tokio", "testing", "experimental_metrics_custom_reader"], optional = true }
 tracing-opentelemetry = { version = "0.33", optional = true }
 
 [dev-dependencies]

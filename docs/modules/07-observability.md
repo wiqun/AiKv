@@ -29,7 +29,7 @@ description: AiKv 可观测性架构 — SlowQueryLog 慢查询、LatencyStats �
 | [`src/server/otel.rs`](../../src/server/otel.rs) | OpenTelemetry TracerProvider 与 MeterProvider 初始化及资源绑定 | `init_tracer`, `init_meter` |
 | [`src/server/otel_metrics/`](../../src/server/otel_metrics/) | `aikv_*` 全部 OTel Counter, Gauge, Histogram 指标声明与更新 | `OtelMetrics`, `refresh_runtime_metrics` |
 | [`src/server/process_metrics.rs`](../../src/server/process_metrics.rs) | 进程级 CPU 时间、内存 RSS、Peak RSS 与文件描述符采集 | `collect_process_metrics` |
-| [`src/server/metrics_server.rs`](../../src/server/metrics_server.rs) | 独立 HTTP 探活服务 (`/health` 与 `/`, feature = "monitoring") | `MetricsServer::run` |
+| [`src/server/metrics_server.rs`](../../src/server/metrics_server.rs) | 独立 HTTP 服务 (`/health` 与 `/metrics`, feature = "monitoring") | `MetricsServer::run` |
 
 ---
 
@@ -47,7 +47,7 @@ description: AiKv 可观测性架构 — SlowQueryLog 慢查询、LatencyStats �
   - 生产环境运行在 `RUST_LOG=info` 时, tracing 静态过滤将开销降至零.
 - **端口协议隔离**:
   - Redis RESP 端口 (6379) 与 HTTP 协议不兼容;
-  - `--metrics-addr:--metrics-port` (默认 9191) 仅提供 HTTP `/health` 探活响应 (返回 `200 OK`), **不提供** HTTP `/metrics` 文本抓取;
+  - `--metrics-addr:--metrics-port` (默认 9191) 提供 HTTP `/health` (返回 `200 OK`) 和 `/metrics` (上一轮累计快照的 Prometheus 文本). 导出间隔由 `metrics_export_interval_secs` 控制, 默认 15 秒. 端点为空时不初始化 OTLP, `/metrics` 仍然提供;
   - 生产环境监控统一通过 OTLP gRPC 管道推送给 OpenTelemetry Collector.
 
 ---

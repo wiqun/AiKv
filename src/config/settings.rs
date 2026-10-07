@@ -46,6 +46,7 @@ pub struct EngineSettings {
 pub struct ObservabilitySettings {
     pub metrics_addr: Option<String>,
     pub metrics_port: Option<u16>,
+    pub metrics_export_interval_secs: Option<u64>,
     pub json_log: Option<bool>,
     pub otlp_endpoint: Option<String>,
     pub otel_service_name: Option<String>,
@@ -95,6 +96,7 @@ pub struct ResolvedSettings {
 pub struct ResolvedObservability {
     pub metrics_addr: String,
     pub metrics_port: u16,
+    pub metrics_export_interval_secs: u64,
     pub json_log: bool,
     pub otlp_endpoint: Option<String>,
     pub otel_service_name: String,
@@ -172,6 +174,7 @@ const DEFAULT_BIND: &str = "127.0.0.1:6379";
 const DEFAULT_MAX_CLIENTS: usize = 10000;
 const DEFAULT_METRICS_ADDR: &str = "127.0.0.1";
 const DEFAULT_METRICS_PORT: u16 = 9191;
+const DEFAULT_METRICS_EXPORT_INTERVAL_SECS: u64 = 15;
 const DEFAULT_OTEL_SERVICE_NAME: &str = "aikv";
 const DEFAULT_OTEL_SAMPLE_RATIO: f64 = 1.0;
 const DEFAULT_AIDB_PRESET: &str = "default";
@@ -244,6 +247,9 @@ impl Settings {
         }
         if let Some(v) = other.metrics_port {
             self.observability.metrics_port = Some(v);
+        }
+        if let Some(v) = other.metrics_export_interval_secs {
+            self.observability.metrics_export_interval_secs = Some(v);
         }
         if let Some(v) = other.json_log {
             self.observability.json_log = Some(v);
@@ -406,6 +412,9 @@ fn resolve_observability(
         .clone()
         .unwrap_or_else(|| DEFAULT_METRICS_ADDR.to_string());
     let metrics_port = obs.metrics_port.unwrap_or(DEFAULT_METRICS_PORT);
+    let metrics_export_interval_secs = obs
+        .metrics_export_interval_secs
+        .unwrap_or(DEFAULT_METRICS_EXPORT_INTERVAL_SECS);
     let json_log = obs.json_log.unwrap_or(true);
     let otlp_endpoint = obs.otlp_endpoint.clone();
     let otel_service_name = obs
@@ -425,6 +434,7 @@ fn resolve_observability(
     Ok(ResolvedObservability {
         metrics_addr,
         metrics_port,
+        metrics_export_interval_secs,
         json_log,
         otlp_endpoint,
         otel_service_name,

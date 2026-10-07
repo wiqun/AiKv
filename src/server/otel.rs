@@ -1,12 +1,17 @@
 //! OTel traces + metrics 初始化 (monitoring feature).
 
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 
 use opentelemetry::global;
 use opentelemetry::KeyValue;
 use opentelemetry_otlp::WithExportConfig;
-use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
+use opentelemetry_sdk::error::OTelSdkResult;
+use opentelemetry_sdk::metrics::data::ResourceMetrics;
+use opentelemetry_sdk::metrics::exporter::PushMetricExporter;
+use opentelemetry_sdk::metrics::reader::MetricReader;
+use opentelemetry_sdk::metrics::Pipeline;
+use opentelemetry_sdk::metrics::{InstrumentKind, ManualReader, SdkMeterProvider, Temporality};
 use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider};
 use opentelemetry_sdk::Resource;
 
@@ -14,6 +19,8 @@ use crate::config::ResolvedObservability;
 
 static TRACER_PROVIDER: OnceLock<SdkTracerProvider> = OnceLock::new();
 static METER_PROVIDER: OnceLock<SdkMeterProvider> = OnceLock::new();
+static EXPORT_READER: OnceLock<Arc<ManualReader>> = OnceLock::new();
+static METRIC_EXPORTER: OnceLock<opentelemetry_otlp::MetricExporter> = OnceLock::new();
 
 /// OTel 初始化参数 (Resource 标签).
 #[derive(Debug, Clone)]
@@ -175,7 +182,7 @@ pub fn record_trace_ids_on_span(span: &tracing::Span) {
     }
 }
 
-/// 初始化 OTel Tracer + Meter (15s metrics export). 成功返回 true.
+/// 初始化 OTel Tracer + Meter. 指标由导出任务按配置间隔推送, 这里不另起时钟.
 pub fn init_otel(config: &OtelInitConfig) -> bool {
     let resource = build_resource(config);
     let endpoint = config.endpoint.clone();
@@ -218,12 +225,12 @@ pub fn init_otel(config: &OtelInitConfig) -> bool {
             return false;
         }
     };
+    let _ = METRIC_EXPORTER.set(metric_exporter);
 
-    let reader = PeriodicReader::builder(metric_exporter)
-        .with_interval(Duration::from_secs(15))
-        .build();
+    let reader = Arc::new(ManualReader::builder().build());
+    let _ = EXPORT_READER.set(Arc::clone(&reader));
     let meter_provider = SdkMeterProvider::builder()
-        .with_reader(reader)
+        .with_reader(SharedReader { inner: reader })
         .with_resource(resource)
         .build();
     global::set_meter_provider(meter_provider.clone());
@@ -234,7 +241,49 @@ pub fn init_otel(config: &OtelInitConfig) -> bool {
     true
 }
 
-/// 进程退出前 flush traces/metrics (SHUTDOWN 或正常退出).
+/// 导出任务调用: 收集全局 meter 上这一轮的增量并送出, 不另起 15 秒时钟.
+pub async fn flush_otel_metrics() {
+    let (Some(reader), Some(exporter)) = (EXPORT_READER.get(), METRIC_EXPORTER.get()) else {
+        return;
+    };
+    let mut collected = ResourceMetrics::default();
+    if MetricReader::collect(reader.as_ref(), &mut collected).is_err() {
+        return;
+    }
+    let _ = exporter.export(&collected).await;
+}
+
+struct SharedReader {
+    inner: Arc<ManualReader>,
+}
+
+impl std::fmt::Debug for SharedReader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SharedReader")
+    }
+}
+
+impl MetricReader for SharedReader {
+    fn register_pipeline(&self, pipeline: Weak<Pipeline>) {
+        self.inner.register_pipeline(pipeline);
+    }
+
+    fn collect(&self, rm: &mut ResourceMetrics) -> OTelSdkResult {
+        MetricReader::collect(self.inner.as_ref(), rm)
+    }
+
+    fn force_flush(&self) -> OTelSdkResult {
+        self.inner.force_flush()
+    }
+
+    fn shutdown_with_timeout(&self, timeout: Duration) -> OTelSdkResult {
+        self.inner.shutdown_with_timeout(timeout)
+    }
+
+    fn temporality(&self, kind: InstrumentKind) -> Temporality {
+        self.inner.temporality(kind)
+    }
+}
 pub fn shutdown_otel() {
     if let Some(tp) = TRACER_PROVIDER.get() {
         let _ = tp.shutdown();

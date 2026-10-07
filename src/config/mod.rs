@@ -98,6 +98,7 @@ mod resolve_tests {
         assert!(resolved.backup_dir.is_none());
         assert_eq!(resolved.observability.metrics_addr, "127.0.0.1");
         assert_eq!(resolved.observability.metrics_port, 9191);
+        assert_eq!(resolved.observability.metrics_export_interval_secs, 15);
         assert!(resolved.observability.json_log);
         assert!(resolved.observability.otlp_endpoint.is_none());
         assert_eq!(resolved.observability.otel_service_name, "aikv");
@@ -127,6 +128,19 @@ mod resolve_tests {
             );
             assert!(resolved.cluster.linearizable_read);
         }
+    }
+
+    #[test]
+    fn metrics_export_interval_defaults_and_env() {
+        let (resolved, _) = resolve_parts(None, HashMap::new(), CliOverrides::default()).unwrap();
+        assert_eq!(resolved.observability.metrics_export_interval_secs, 15);
+        let mut env = HashMap::new();
+        env.insert(
+            "AIKV_METRICS_EXPORT_INTERVAL_SECS".to_string(),
+            "30".to_string(),
+        );
+        let (resolved, _) = resolve_parts(None, env, CliOverrides::default()).unwrap();
+        assert_eq!(resolved.observability.metrics_export_interval_secs, 30);
     }
 
     #[test]

@@ -83,6 +83,11 @@ impl Settings {
                 self.observability.metrics_port = Some(p);
             }
         }
+        if let Some(v) = nonempty(&map, "AIKV_METRICS_EXPORT_INTERVAL_SECS") {
+            if let Ok(secs) = v.parse::<u64>() {
+                self.observability.metrics_export_interval_secs = Some(secs);
+            }
+        }
         if let Some(v) = nonempty(&map, "AIKV_JSON_LOG") {
             if let Some(b) = parse_bool_lenient(v) {
                 self.observability.json_log = Some(b);
