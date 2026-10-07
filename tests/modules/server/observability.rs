@@ -137,40 +137,16 @@ fn test_span_naming() {
         .join("src");
 
     // 期望存在的 span 名称: AiDb 引擎核心路径
-    let expected_db_spans: &[&str] = &[
-        "wal_open",
-        "wal_write",
-        "wal_flush",
-        "wal_sync",
-        "wal_rotate",
-        "wal_replay",
-        "wal_writer_open",
-        "wal_writer_open_with_sync",
-        "mem_delete",
-        "mem_get",
-        "mem_search",
-        "sst_block_read",
-        "sst_block_seek",
-        "cmp_pick",
-        "cmp_run",
-        "cmp_merge",
-        "cmp_apply",
-    ];
+    let expected_db_spans: &[&str] = &["db_flush", "cmp_run", "raft_propose"];
 
-    // 期望存在的 span 名称: AiKv 关键路径
-    let expected_kv_spans: &[&str] = &[
-        "kv_cluster_route",
-        "cmd_cluster_failover",
-        "cmd_cluster_info",
-        "cmd_cluster_nodes",
-        "cmd_cluster_slots",
-    ];
+    // 期望存在的 span 名称: AiKv 只保留命令入口.
+    let expected_kv_spans: &[&str] = &["kv_command"];
 
     let mut missing = Vec::new();
 
     for name in expected_db_spans {
         if db_src.exists() {
-            let pattern = format!("name = \"{}\"", name);
+            let pattern = format!("optional_span(\"{name}\")");
             let found = walk_grep(&db_src, &pattern).unwrap_or(false);
             if !found {
                 missing.push(format!("DbSpan::{name}"));
@@ -179,7 +155,7 @@ fn test_span_naming() {
     }
 
     for name in expected_kv_spans {
-        let pattern = format!("name = \"{}\"", name);
+        let pattern = format!("optional_span(\"{name}\")");
         let found = walk_grep(&kv_src, &pattern).unwrap_or(false);
         if !found {
             missing.push(format!("KvSpan::{name}"));
@@ -193,52 +169,45 @@ fn test_span_naming() {
     );
 }
 
-/// 热路径 span 必须显式 `level = "debug"` (AGENTS.md 硬约束).
-///
-/// 无 `level` 参数时 tracing 默认 Info, 生产 `RUST_LOG=info` 会创建 span 并进入
-/// OTel, 是 Phase 2 profiling 定位到的集群压测性能主因 (E15 + connection 层).
+/// 只允许命令入口 span `kv_command`, 且不得再有 `#[instrument]`.
 #[test]
 fn test_hot_path_span_level_debug() {
     let kv_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-
-    let hot_paths: &[(&str, &str)] = &[
-        // 入口 span (AGENTS.md:66 强制): 每条命令必经
-        ("command/router/mod.rs", "name = \"kv_command\""),
-        ("command/string.rs", "name = \"cmd_string\""),
-        // 每条命令 I/O 必经路径
-        ("server/connection/mod.rs", "name = \"kv_read\""),
-        ("server/connection/mod.rs", "name = \"kv_parse\""),
-        ("server/connection/protocol.rs", "name = \"kv_write\""),
-        ("server/connection/protocol.rs", "name = \"kv_encode\""),
-        // 集群路由决策 (每条命令)
-        ("cluster/router.rs", "name = \"kv_cluster_route\""),
-        ("cluster/router.rs", "name = \"kv_cluster_cross_slot\""),
-        // 默认引擎 (MemoryEngine) 每条命令
-        ("storage/memory.rs", "name = \"mem_engine_get\""),
-        ("storage/memory.rs", "name = \"mem_engine_set\""),
-        ("storage/memory.rs", "name = \"mem_engine_del\""),
-        ("storage/memory.rs", "name = \"mem_engine_expire\""),
-    ];
-
-    let mut violations = Vec::new();
-    for (rel, anchor) in hot_paths {
-        let path = kv_src.join(rel);
-        let content =
-            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?} failed: {e}"));
-        match instrument_attr_before(&content, anchor) {
-            Some(attr) => {
-                if !attr.contains("level = \"debug\"") {
-                    violations.push(format!("{rel} @ {anchor}\n  -> {attr}"));
-                }
+    let mut files = Vec::new();
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+                out.push(path);
             }
-            None => violations.push(format!("{rel} @ {anchor}: instrument attr not found")),
         }
     }
-
+    walk(&kv_src, &mut files);
+    let mut violations = Vec::new();
+    for path in files {
+        let content = std::fs::read_to_string(&path).unwrap();
+        let rel = path.strip_prefix(&kv_src).unwrap().display().to_string();
+        if content.contains("#[instrument") || content.contains("#[tracing::instrument") {
+            violations.push(format!("{rel} still has an instrument attribute"));
+        }
+        let mut rest = content.as_str();
+        while let Some(index) = rest.find("optional_span(\"") {
+            let after = &rest[index + "optional_span(\"".len()..];
+            let end = after.find('"').unwrap();
+            let name = &after[..end];
+            if name != "kv_command" {
+                violations.push(format!("{rel} optional_span {name}"));
+            }
+            rest = &after[end..];
+        }
+    }
+    let connection = std::fs::read_to_string(kv_src.join("server/connection/mod.rs")).unwrap();
+    assert!(!connection.contains("kv_connection"));
     assert!(
         violations.is_empty(),
-        "热路径 span 必须显式 level = \"debug\" (AGENTS.md 硬约束), 否则生产 \
-         RUST_LOG=info 下会创建 span 并进入 OTel:\n{}",
+        "disallowed spans:\n{}",
         violations.join("\n")
     );
 }
@@ -263,22 +232,6 @@ fn test_sample_ratio_parse() {
     assert_eq!(parse_sample_ratio("2"), 0.0);
     assert_eq!(parse_sample_ratio("NaN"), 0.0);
     assert_eq!(parse_sample_ratio("inf"), 0.0);
-}
-
-/// 返回锚点文本之前的最近一个 instrument 属性文本.
-fn instrument_attr_before(content: &str, anchor: &str) -> Option<String> {
-    let anchor_pos = content.find(anchor)?;
-    let prefix = &content[..anchor_pos];
-    let start = [
-        prefix.rfind("#[tracing::instrument"),
-        prefix.rfind("#[instrument"),
-    ]
-    .into_iter()
-    .flatten()
-    .max()?;
-    let attr = &content[start..];
-    let end = attr.find(']')?;
-    Some(attr[..=end].to_string())
 }
 
 /// 递归搜索文件中是否包含指定字符串.

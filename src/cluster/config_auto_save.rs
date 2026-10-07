@@ -6,7 +6,6 @@ use std::time::Duration;
 
 use parking_lot::RwLock;
 use tokio::sync::watch;
-use tracing::instrument;
 
 use crate::cluster::commands::save_nodes_conf;
 use aidb::cluster::MetaRaftNode;
@@ -45,7 +44,6 @@ impl ConfigAutoSave {
         self.interval
     }
 
-    #[instrument(level = "debug", name = "config_auto_save_tick", skip(self))]
     fn tick(&self) {
         let current_version = self.meta_raft.get_cluster_meta().version;
         let last_version = *self.last_saved_version.read();

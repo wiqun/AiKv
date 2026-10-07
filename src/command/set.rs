@@ -21,7 +21,6 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use rand::seq::SliceRandom;
-use tracing::instrument;
 
 use crate::command::router::{self, KeyLock};
 use crate::command::scan_util;
@@ -44,7 +43,6 @@ impl SetCommands {
         Self { storage, key_lock }
     }
 
-    #[instrument(level = "debug", name = "cmd_set", skip(self, args), fields(cmd.name = "SADD"))]
     pub async fn sadd(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_min_args("SADD", args, 2)?;
         let key = &args[0];
@@ -338,7 +336,6 @@ impl SetCommands {
         self.store_set(db, dest, result).await
     }
 
-    #[instrument(level = "debug", name = "cmd_set", skip(self, args), fields(cmd.name = "SMOVE"))]
     pub async fn smove(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_args("SMOVE", args, 3)?;
         let source = &args[0];
@@ -438,7 +435,6 @@ impl SetCommands {
         Ok(router::integer(1))
     }
 
-    #[instrument(level = "debug", name = "cmd_set", skip(self, args), fields(cmd.name = "SSCAN"))]
     pub async fn sscan(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_min_args("SSCAN", args, 2)?;
         let cursor = scan_util::parse_u64(&args[1])?;

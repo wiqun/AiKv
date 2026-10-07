@@ -394,6 +394,7 @@ impl ClusterDataAdapter {
                     if Self::is_transient_cluster_err(&last_err)
                         && attempt + 1 < GROUP_READY_MAX_ATTEMPTS
                     {
+                        tracing::warn!(gid, attempt, "forward retry");
                         tokio::time::sleep(GROUP_READY_RETRY_DELAY).await;
                         continue;
                     }

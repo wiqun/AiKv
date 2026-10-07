@@ -130,7 +130,6 @@ pub fn parse_cluster_node_id(raw: &str) -> Result<u64, String> {
 // ---------------------------------------------------------------------------
 /// CLUSTER 子命令分发器. 所有 CLUSTER 子命令统一入口,
 /// 避免 execute_inner 的 match 进一步膨胀.
-#[tracing::instrument(level = "debug", name = "cmd_cluster", skip_all, fields(sub = sub))]
 pub async fn dispatch_cluster(
     sub: Option<&str>,
     args: &[bytes::Bytes],

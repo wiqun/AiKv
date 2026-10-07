@@ -20,7 +20,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use tracing::instrument;
 
 use crate::command::router::{self, KeyLock};
 use crate::command::scan_util;
@@ -43,7 +42,6 @@ impl HashCommands {
         Self { storage, key_lock }
     }
 
-    #[instrument(level = "debug", name = "cmd_hash", skip(self, args), fields(cmd.name = "HSET"))]
     pub async fn hset(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         if args.len() < 3 || args.len().is_multiple_of(2) {
             return Err(router::wrong_args("HSET", ""));
@@ -113,7 +111,6 @@ impl HashCommands {
     }
 
     /// HMSET — Redis 兼容: 始终返回 `OK` (HSET 返回新增字段数).
-    #[instrument(level = "debug", name = "cmd_hash", skip(self, args), fields(cmd.name = "HMSET"))]
     pub async fn hmset(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         self.hset(db, args).await?;
         Ok(RespValue::SimpleString("OK".into()))

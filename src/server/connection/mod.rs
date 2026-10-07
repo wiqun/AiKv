@@ -52,7 +52,6 @@ use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
 use tokio::sync::broadcast;
 use tokio::time;
-use tracing::instrument;
 
 use crate::command;
 use crate::error::{Error, Result};
@@ -271,7 +270,6 @@ impl Connection {
                             let _ = self.flush_responses().await;
                             return Err(e);
                         }
-                        tracing::Span::current().record("db_index", self.current_db as i64);
                         self.last_active = Instant::now();
                         if is_immediate_flush || self.quit {
                             self.flush_responses().await?;
@@ -301,7 +299,6 @@ impl Connection {
         Ok(())
     }
 
-    #[instrument(level = "debug", name = "kv_read", skip(self, buf))]
     async fn read_buf(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let n = self.stream.read(buf).await?;
         if n > 0 {
@@ -311,19 +308,11 @@ impl Connection {
         Ok(n)
     }
 
-    #[instrument(
-        level = "debug",
-        name = "kv_parse",
-        skip(self),
-        fields(frame_size, resp_version)
-    )]
     async fn parse_frame(&mut self) -> Result<Option<RespValue>> {
         let before = self.parser.buffer_len();
         let result = self.parser.parse();
         if let Ok(Some(_)) = &result {
             let frame_size = before.saturating_sub(self.parser.buffer_len());
-            tracing::Span::current().record("frame_size", frame_size);
-            tracing::Span::current().record("resp_version", self.protocol_version.as_u8());
             tracing::debug!(frame_size, "kv.parse.complete");
         }
         result

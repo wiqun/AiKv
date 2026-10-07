@@ -103,7 +103,6 @@ pub(super) async fn run_pending_migration_to_completion(
     Ok(())
 }
 
-#[tracing::instrument(level = "debug", name = "cmd_cluster_rebalance", skip_all)]
 pub async fn cluster_rebalance() -> Result<String, String> {
     let mgr = CLUSTER_STATE_MGR
         .get()

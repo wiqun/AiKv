@@ -42,9 +42,9 @@ description: AiKv 可观测性架构 — SlowQueryLog 慢查询、LatencyStats �
 - **OTel 增量镜像同步 (15s 周期)**:
   - 后台周期性任务调用 `info_catalog::sync_otel_from_server_metrics()`, 读取 `ServerMetrics` 快照并计算增量 Delta, 随后调用 OTel Counter `add(delta)`;
   - 指标数据相对于内存真源最多滞后 ~15s (符合云原生监控抓取常规间隔).
-- **热路径 Debug Span 约束**:
-  - `kv_command`, `cmd_string`, `batcher_batch_done` 等高频请求 Span 必须标注 `level = "debug"`;
-  - 生产环境运行在 `RUST_LOG=info` 时, tracing 静态过滤将开销降至零.
+- **Span 允许名单**:
+  - 只有命令入口 `kv_command`, 且仅在采样率大于 0 且 OTLP 端点非空时创建;
+  - 字段只有命令名, 不含用户 key. 连接打开和关闭是 debug 事件, 不是 span.
 - **端口协议隔离**:
   - Redis RESP 端口 (6379) 与 HTTP 协议不兼容;
   - `--metrics-addr:--metrics-port` (默认 9191) 提供 HTTP `/health` (返回 `200 OK`) 和 `/metrics` (上一轮累计快照的 Prometheus 文本). 导出间隔由 `metrics_export_interval_secs` 控制, 默认 15 秒. 端点为空时不初始化 OTLP, `/metrics` 仍然提供. `MOVED` / `ASK` 记入 `aikv_redirects_total{type}`, gossip tick 不计. 未启用 Raft 时文本没有 `group=`;

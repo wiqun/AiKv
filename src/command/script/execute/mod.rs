@@ -35,7 +35,6 @@ use crate::command::script::transaction::{expire_seconds_to_at, parse_i64_arg, S
 use crate::error::{Error, Result};
 use crate::protocol::RespValue;
 use crate::storage::KvStorage;
-use tracing::Instrument;
 
 mod hash;
 mod list;
@@ -204,9 +203,7 @@ pub async fn redis_call_async(
         }
     }
 
-    run(lua, storage, txn, &command, command_args, throw_error)
-        .instrument(tracing::debug_span!("cmd_lua_redis_call", cmd.name = %command))
-        .await
+    run(lua, storage, txn, &command, command_args, throw_error).await
 }
 
 async fn dispatch(

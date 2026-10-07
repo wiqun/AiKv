@@ -30,7 +30,6 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use tokio::sync::oneshot;
-use tracing::instrument;
 
 use crate::command::blocking::{self, BlockedClientGuard, BlockingRegistry};
 use crate::command::router::{self, KeyLock};
@@ -86,7 +85,6 @@ impl ZSetCommands {
         }
     }
 
-    #[instrument(level = "debug", name = "cmd_zset", skip(self, args), fields(cmd.name = "ZADD"))]
     pub async fn zadd(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_min_args("ZADD", args, 3)?;
         if !(args.len() - 1).is_multiple_of(2) {
