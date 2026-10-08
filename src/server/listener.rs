@@ -39,19 +39,20 @@ impl Server {
                     Err(err) => {
                         let errno = err.raw_os_error().map(|code| code.to_string()).unwrap_or_else(|| "other".into());
                         state.metrics.note_accept_error(&errno);
-                        return Err(err.into());
+                        tracing::warn!(%errno, "accept failed");
+                        continue;
                     }
                 };
                 tracing::debug!(%remote, "kv.accept");
-                let state = Arc::clone(&state);
-                if !state.try_register_connection() {
+                let Some(permit) = state.try_register_connection() else {
                   tracing::warn!(%remote, "connection rejected: maxclients reached");
                   drop(stream);
                   continue;
-                }
+                };
+                let conn_state = Arc::clone(&state);
                 tokio::spawn(async move {
-                  Connection::handle(stream, remote, state.clone()).await;
-                  state.metrics.on_disconnect();
+                  let _permit = permit;
+                  Connection::handle(stream, remote, conn_state).await;
                 });
               }
             }

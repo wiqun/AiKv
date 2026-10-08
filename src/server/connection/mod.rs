@@ -149,7 +149,6 @@ impl Connection {
     }
 
     async fn run(&mut self) -> Result<()> {
-        let config = Arc::clone(&self.state.connection_config);
         let mut buf = vec![0u8; 16384];
         let conn_start = Instant::now();
 
@@ -182,7 +181,7 @@ impl Connection {
                 break;
             }
 
-            if let Some(idle) = config.idle_timeout {
+            if let Some(idle) = self.state.idle_timeout() {
                 if self.last_active.elapsed() > idle {
                     tracing::debug!(
                         target: "kv.conn.close_reason",
@@ -197,7 +196,7 @@ impl Connection {
                 }
             }
 
-            let n = if let Some(timeout) = config.read_timeout {
+            let n = if let Some(timeout) = self.state.read_timeout() {
                 match time::timeout(timeout, self.read_buf(&mut buf)).await {
                     Ok(Ok(n)) => n,
                     Ok(Err(e)) => {

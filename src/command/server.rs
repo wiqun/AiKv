@@ -106,10 +106,15 @@ impl ServerCommands {
                 "ERR Unknown config parameter '{param}'"
             )));
         }
-        if param == "appendonly" {
-            return Err(Error::Command(
-                "ERR Unsupported CONFIG parameter: appendonly".into(),
-            ));
+        if param == "appendonly"
+            || matches!(
+                param.as_str(),
+                "port" | "dir" | "dbfilename" | "save" | "maxmemory" | "maxmemory-policy"
+            )
+        {
+            return Err(Error::Command(format!(
+                "ERR Unsupported CONFIG parameter: {param}"
+            )));
         }
         match param.as_str() {
             "slowlog-log-slower-than" => {
@@ -123,6 +128,18 @@ impl ServerCommands {
                     .parse()
                     .map_err(|_| Error::Config("Invalid slowlog-max-len value".into()))?;
                 self.shared.slow_query_log.set_max_entries(max_len);
+            }
+            "maxclients" => {
+                let limit: usize = value
+                    .parse()
+                    .map_err(|_| Error::Config("Invalid maxclients value".into()))?;
+                self.shared.set_max_clients(limit);
+            }
+            "timeout" => {
+                let secs: u64 = value
+                    .parse()
+                    .map_err(|_| Error::Config("Invalid timeout value".into()))?;
+                self.shared.set_idle_timeout_secs(secs);
             }
             _ => {}
         }
@@ -464,4 +481,52 @@ fn latency_detail_map(snap: &crate::server::latency::CommandLatencySnapshot) -> 
             RespValue::Map(bucket_map),
         ),
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use bytes::Bytes;
+
+    use super::ServerCommands;
+    use crate::server::config::{ConnectionConfig, ServerSharedState};
+    use crate::storage::{KvStorage, MemoryEngine};
+
+    #[tokio::test]
+    async fn config_set_maxclients_changes_the_limit() {
+        let storage: Arc<dyn KvStorage> = MemoryEngine::new(16);
+        let state = ServerSharedState::new(
+            ConnectionConfig {
+                read_timeout: None,
+                idle_timeout: None,
+                max_clients: 1,
+            },
+            storage,
+            6379,
+        );
+        let commands = ServerCommands::new(Arc::clone(&state.storage), Arc::clone(&state));
+        let first = state.try_register_connection();
+        assert!(first.is_some());
+        assert!(state.try_register_connection().is_none());
+        commands
+            .config_set(&[
+                Bytes::from_static(b"SET"),
+                Bytes::from_static(b"maxclients"),
+                Bytes::from_static(b"2"),
+            ])
+            .await
+            .expect("set");
+        assert!(state.try_register_connection().is_some());
+        let err = commands
+            .config_set(&[
+                Bytes::from_static(b"SET"),
+                Bytes::from_static(b"port"),
+                Bytes::from_static(b"1"),
+            ])
+            .await
+            .expect_err("port");
+        assert!(err.to_string().contains("Unsupported"));
+        assert_eq!(state.tcp_port, 6379);
+    }
 }

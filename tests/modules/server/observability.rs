@@ -298,8 +298,9 @@ async fn test_maxclients_rejection_metrics() {
         6379,
     );
 
-    assert!(state.try_register_connection());
-    assert!(!state.try_register_connection());
+    let permit = state.try_register_connection();
+    assert!(permit.is_some());
+    assert!(state.try_register_connection().is_none());
 
     aikv::server::info_catalog::sync_otel_from_server_metrics(state.metrics());
 

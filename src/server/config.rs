@@ -18,6 +18,29 @@ use crate::storage::{KvStorage, StorageEngineKind, StorageObservation};
 
 pub(crate) type TransactionGate = Arc<tokio::sync::RwLock<()>>;
 
+fn duration_to_ms(timeout: Option<std::time::Duration>) -> u64 {
+    timeout
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn ms_to_duration(ms: u64) -> Option<std::time::Duration> {
+    if ms == 0 {
+        None
+    } else {
+        Some(std::time::Duration::from_millis(ms))
+    }
+}
+
+/// 连接名额. 任务结束或 panic 时归还.
+pub struct ConnectionPermit(Arc<ServerSharedState>);
+
+impl Drop for ConnectionPermit {
+    fn drop(&mut self) {
+        self.0.metrics.on_disconnect();
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ConnectionConfig {
     pub read_timeout: Option<std::time::Duration>,
@@ -46,6 +69,9 @@ pub struct ClientInfo {
 
 pub struct ServerSharedState {
     pub connection_config: Arc<ConnectionConfig>,
+    max_clients: AtomicUsize,
+    idle_timeout_ms: AtomicU64,
+    read_timeout_ms: AtomicU64,
     pub metrics: Arc<ServerMetrics>,
     pub slow_query_log: Arc<SlowQueryLog>,
     pub latency_stats: Arc<LatencyStats>,
@@ -158,6 +184,9 @@ impl ServerSharedState {
                 connection_config.max_clients.to_string(),
             ),
         ])));
+        let max_clients = AtomicUsize::new(connection_config.max_clients);
+        let idle_timeout_ms = AtomicU64::new(duration_to_ms(connection_config.idle_timeout));
+        let read_timeout_ms = AtomicU64::new(duration_to_ms(connection_config.read_timeout));
         let metrics = {
             let m = ServerMetrics::default();
             let point_reads = Arc::new(crate::storage::observation::PointReadCounter::default());
@@ -174,6 +203,9 @@ impl ServerSharedState {
         };
         Arc::new(Self {
             connection_config: Arc::new(connection_config),
+            max_clients,
+            idle_timeout_ms,
+            read_timeout_ms,
             metrics,
             slow_query_log: Arc::new(SlowQueryLog::new()),
             latency_stats: Arc::new(LatencyStats::default()),
@@ -270,14 +302,14 @@ impl ServerSharedState {
         &self.metrics
     }
 
-    pub fn try_register_connection(self: &Arc<Self>) -> bool {
-        let max = self.connection_config.max_clients;
+    pub fn try_register_connection(self: &Arc<Self>) -> Option<ConnectionPermit> {
+        let max = self.max_clients.load(Ordering::Relaxed);
         if max > 0 && self.metrics.connected_clients() >= max {
             self.metrics.on_rejected_connection();
-            return false;
+            return None;
         }
         self.metrics.on_connect();
-        true
+        Some(ConnectionPermit(Arc::clone(self)))
     }
 
     pub async fn refresh_runtime_metrics(self: &Arc<Self>) {
@@ -304,11 +336,59 @@ impl ServerSharedState {
         }
     }
 
+    pub fn live_max_clients(&self) -> usize {
+        self.max_clients.load(Ordering::Relaxed)
+    }
+
+    pub fn set_max_clients(&self, limit: usize) {
+        self.max_clients.store(limit, Ordering::Relaxed);
+    }
+
+    pub fn idle_timeout(&self) -> Option<std::time::Duration> {
+        ms_to_duration(self.idle_timeout_ms.load(Ordering::Relaxed))
+    }
+
+    pub fn set_idle_timeout_secs(&self, secs: u64) {
+        let ms = secs.saturating_mul(1000);
+        self.idle_timeout_ms.store(ms, Ordering::Relaxed);
+    }
+
+    pub fn read_timeout(&self) -> Option<std::time::Duration> {
+        ms_to_duration(self.read_timeout_ms.load(Ordering::Relaxed))
+    }
+
     pub fn uptime_secs(&self) -> u64 {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
         now.saturating_sub(self.start_time_secs)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use crate::server::config::{ConnectionConfig, ServerSharedState};
+    use crate::storage::{KvStorage, MemoryEngine};
+
+    #[test]
+    fn permit_drop_releases_the_slot() {
+        let storage: Arc<dyn KvStorage> = MemoryEngine::new(16);
+        let state = ServerSharedState::new(
+            ConnectionConfig {
+                read_timeout: None,
+                idle_timeout: None,
+                max_clients: 1,
+            },
+            storage,
+            6379,
+        );
+        let permit = state.try_register_connection().expect("slot");
+        assert_eq!(state.metrics().connected_clients(), 1);
+        assert!(state.try_register_connection().is_none());
+        drop(permit);
+        assert_eq!(state.metrics().connected_clients(), 0);
     }
 }
