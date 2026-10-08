@@ -482,7 +482,10 @@ async fn init_cluster(
     Ok(())
 }
 
-fn init_logging(settings: &ResolvedSettings) {
+fn init_logging<W>(settings: &ResolvedSettings, log_writer: W)
+where
+    W: for<'writer> tracing_subscriber::fmt::MakeWriter<'writer> + Send + Sync + 'static + Clone,
+{
     aidb::observability::set_traces_enabled(should_export_traces(
         settings.observability.otel_sample_ratio,
         settings.observability.otlp_endpoint.as_deref(),
@@ -516,7 +519,7 @@ fn init_logging(settings: &ResolvedSettings) {
                         .flatten_event(false)
                         .with_current_span(true)
                         .with_span_list(true)
-                        .with_writer(std::io::stdout)
+                        .with_writer(log_writer.clone())
                         .with_filter(EnvFilter::new(log_level))
                         .boxed(),
                 )
@@ -525,7 +528,7 @@ fn init_logging(settings: &ResolvedSettings) {
                     fmt::layer()
                         .compact()
                         .with_target(true)
-                        .with_writer(std::io::stdout)
+                        .with_writer(log_writer.clone())
                         .with_filter(EnvFilter::new(log_level))
                         .boxed(),
                 )
@@ -543,7 +546,7 @@ fn init_logging(settings: &ResolvedSettings) {
                 .flatten_event(false)
                 .with_current_span(true)
                 .with_span_list(true)
-                .with_writer(std::io::stdout)
+                .with_writer(log_writer.clone())
                 .with_filter(EnvFilter::new(log_level))
                 .boxed(),
         )
@@ -552,7 +555,7 @@ fn init_logging(settings: &ResolvedSettings) {
             fmt::layer()
                 .compact()
                 .with_target(true)
-                .with_writer(std::io::stdout)
+                .with_writer(log_writer)
                 .with_filter(EnvFilter::new(log_level))
                 .boxed(),
         )
@@ -580,8 +583,11 @@ async fn main() {
                 std::process::exit(1);
             }
         }
+        // stdout 留给 TOML 文档. 运行中的服务仍把日志写到 stdout.
+        init_logging(&settings, std::io::stderr);
+    } else {
+        init_logging(&settings, std::io::stdout);
     }
-    init_logging(&settings);
     if let Some(path) = settings.config_file_used.as_deref() {
         tracing::info!("config file: {}", path.display());
     } else {

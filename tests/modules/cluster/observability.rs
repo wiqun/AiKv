@@ -83,11 +83,10 @@ fn sync_counters_mirrors_failover_total() {
     assert_eq!(testutil::counter_sum(&exporter, "aikv_failover_total"), 2);
 }
 
-/// cluster redirect (MOVED/ASK) 镜像到 `aikv_cluster_redirects_total` (T8),
-/// 并按 redirect type 聚合属性.
+/// 重定向只进导出快照 `aikv_redirects_total`. commandstats 不再回放成另一条计数.
 #[cfg(feature = "monitoring")]
 #[test]
-fn sync_commandstats_mirrors_cluster_redirects_total() {
+fn redirects_export_from_counters_not_commandstats() {
     use aikv::server::otel_metrics::testutil;
 
     let (exporter, otel) = testutil::init_in_memory();
@@ -98,6 +97,21 @@ fn sync_commandstats_mirrors_cluster_redirects_total() {
     otel.sync_commandstats(&metrics);
     assert_eq!(
         testutil::counter_sum(&exporter, "aikv_cluster_redirects_total"),
-        3
+        0
     );
+    let snap = aikv::server::export::collect_export_snapshot(&metrics, 0, &[], None, &[]);
+    let value = |kind: &str| {
+        snap.counters
+            .iter()
+            .find(|sample| {
+                sample.name == "aikv_redirects_total"
+                    && sample
+                        .labels
+                        .iter()
+                        .any(|(key, value)| key == "type" && value == kind)
+            })
+            .map(|sample| sample.value)
+    };
+    assert_eq!(value("moved"), Some(2));
+    assert_eq!(value("ask"), Some(1));
 }

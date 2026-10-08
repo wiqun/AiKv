@@ -121,8 +121,12 @@ async fn test_metrics_health_endpoint() {
     stream.read_to_end(&mut response).await.unwrap();
     let body = String::from_utf8_lossy(&response);
     assert!(
-        body.contains("404 Not Found"),
-        "expected /metrics removed: {body}"
+        body.contains("200 OK"),
+        "expected /metrics to stay available: {body}"
+    );
+    assert!(
+        body.contains("text/plain"),
+        "expected prometheus content type: {body}"
     );
 }
 /// 验证关键 tracing span 名称与文档规范一致.
@@ -407,11 +411,9 @@ async fn process_resident_memory_bytes_in_registry() {
 async fn test_net_bytes_metrics() {
     use std::sync::Arc;
 
-    use aikv::server::otel_metrics::testutil;
     use aikv::server::{ConnectionConfig, Server, ServerSharedState};
     use aikv::storage::{KvStorage, MemoryEngine};
 
-    let (exporter, _otel) = testutil::init_in_memory();
     let storage: Arc<dyn KvStorage> = MemoryEngine::new(16);
     let state = ServerSharedState::new(
         ConnectionConfig {
@@ -458,13 +460,21 @@ async fn test_net_bytes_metrics() {
         "INFO stats missing total_net_output_bytes: {info_text}"
     );
 
+    let snap = aikv::server::export::collect_export_snapshot(state.metrics(), 0, &[], None, &[]);
+    let counter = |name: &str| {
+        snap.counters
+            .iter()
+            .find(|sample| sample.name == name)
+            .map(|sample| sample.value)
+            .unwrap_or(0)
+    };
     assert!(
-        testutil::counter_sum(&exporter, "aikv_net_input_bytes_total") > 0,
-        "expected net input bytes in otel"
+        counter("aikv_net_input_bytes_total") > 0,
+        "expected net input bytes on the export snapshot"
     );
     assert!(
-        testutil::counter_sum(&exporter, "aikv_net_output_bytes_total") > 0,
-        "expected net output bytes in otel"
+        counter("aikv_net_output_bytes_total") > 0,
+        "expected net output bytes on the export snapshot"
     );
 }
 
@@ -482,15 +492,9 @@ fn info_field_u64(text: &str, key: &str) -> Option<u64> {
 async fn info_metrics_consistency_after_commands() {
     use std::sync::Arc;
 
-    use aikv::server::otel_metrics::testutil;
     use aikv::server::{ConnectionConfig, ServerSharedState};
     use aikv::storage::{KvStorage, MemoryEngine, StorageEngineKind, StorageObservation};
     use bytes::Bytes;
-
-    let (exporter, _otel) = testutil::init_in_memory();
-    let pre_hits = testutil::counter_sum(&exporter, "aikv_keyspace_hits_total");
-    let pre_misses = testutil::counter_sum(&exporter, "aikv_keyspace_misses_total");
-    let pre_cmds = testutil::counter_sum(&exporter, "aikv_commands_total");
 
     fn b(s: &str) -> Bytes {
         Bytes::copy_from_slice(s.as_bytes())
@@ -581,18 +585,29 @@ async fn info_metrics_consistency_after_commands() {
 
     state.refresh_runtime_metrics().await;
 
-    assert_eq!(
-        testutil::counter_sum(&exporter, "aikv_keyspace_hits_total") - pre_hits,
-        hits
-    );
-    assert_eq!(
-        testutil::counter_sum(&exporter, "aikv_keyspace_misses_total") - pre_misses,
-        misses
-    );
-    assert_eq!(
-        testutil::counter_sum(&exporter, "aikv_commands_total") - pre_cmds,
-        state.metrics().total_commands_processed()
-    );
+    let snap = aikv::server::export::collect_export_snapshot(state.metrics(), 0, &[], None, &[]);
+    let labeled = |name: &str, key: &str, value: &str| {
+        snap.counters
+            .iter()
+            .find(|sample| {
+                sample.name == name
+                    && sample
+                        .labels
+                        .iter()
+                        .any(|(label, label_value)| label == key && label_value == value)
+            })
+            .map(|sample| sample.value)
+            .unwrap_or(0)
+    };
+    assert_eq!(labeled("aikv_point_reads_total", "result", "hit"), hits);
+    assert_eq!(labeled("aikv_point_reads_total", "result", "miss"), misses);
+    let commands: u64 = snap
+        .counters
+        .iter()
+        .filter(|sample| sample.name == "aikv_commands_total")
+        .map(|sample| sample.value)
+        .sum();
+    assert_eq!(commands, state.metrics().total_commands_processed());
 }
 
 /// 热路径不写 OTel. refresh 不再把命令计数推进旧 meter. 导出快照才带这些数.
@@ -773,7 +788,7 @@ fn test_metric_catalog_contract() {
     let server_metrics = ServerMetrics::default().with_otel(otel);
     server_metrics.on_connect();
     server_metrics.on_command("PING", true);
-    server_metrics.on_command_duration("PING", 1000, true);
+    server_metrics.on_command_done("PING", true, 1000);
     server_metrics.on_keyspace_hit();
     server_metrics.set_uptime_secs(1);
     server_metrics.set_db_key_count(0, 0);
@@ -781,11 +796,21 @@ fn test_metric_catalog_contract() {
     aikv::server::info_catalog::sync_otel_from_server_metrics(&server_metrics);
 
     for name in AIKV_METRIC_NAMES {
+        if *name == "aikv_command_duration_seconds" {
+            continue;
+        }
         assert!(
             testutil::metric_exists(&exporter, name),
             "missing otel metric: {name}"
         );
     }
+    let snap = aikv::server::export::collect_export_snapshot(&server_metrics, 0, &[], None, &[]);
+    assert!(
+        snap.histograms
+            .iter()
+            .any(|sample| sample.name == "aikv_command_duration_seconds"),
+        "command duration lives on the export snapshot, not a replayed meter"
+    );
 }
 
 struct SpanCapture {

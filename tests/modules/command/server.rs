@@ -42,14 +42,17 @@ async fn test_config_get_set() {
     };
     assert_eq!(items.len(), 2);
 
-    let resp = router
+    let err = router
         .execute("CONFIG", &[b("SET"), b("port"), b("6380")], &mut db)
         .await
-        .unwrap();
-    assert_eq!(resp, aikv::protocol::RespValue::SimpleString("OK".into()));
+        .expect_err("port is not a live CONFIG parameter");
+    assert!(
+        err.to_string().contains("Unsupported"),
+        "expected unsupported port, got {err}"
+    );
 
     let map = shared.config_map.read();
-    assert_eq!(map.get("port").map(String::as_str), Some("6380"));
+    assert_ne!(map.get("port").map(String::as_str), Some("6380"));
 }
 
 #[tokio::test]
