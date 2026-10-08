@@ -84,7 +84,7 @@ flowchart TD
 
 `InfoRenderer` 支持 Redis 8.8 规范的全部 11 个标准段:
 
-1. **`Server`**: 版本 (`redis_version: 1.0.0` 与 `redis_compatible_version: 8.8`), 运行模式, OS, 启动时间;
+1. **`Server`**: 版本 (`redis_version: 8.8`，客户端按这个版本判断 SCAN 等能力；`redis_compatible_version: 8.8`), 运行模式, OS, 启动时间;
 2. **`Clients`**: 当前连接数 (`connected_clients`), 最大连接上限, 阻塞客户端数 (`blocked_clients`);
 3. **`Memory`**: 使用内存 (`used_memory`), 峰值内存 (`used_memory_peak`), 碎片率 (`mem_fragmentation_ratio`);
 4. **`Persistence`**: 持久化引擎状态, 最后一次快照时间戳 (`rdb_last_save_time`), 正在进行的 BGSAVE 状态;

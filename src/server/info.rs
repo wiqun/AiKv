@@ -167,7 +167,7 @@ impl<'a> InfoRenderer<'a> {
             "poll"
         };
         let mut out = String::from("# Server\r\n");
-        append_kv(&mut out, "redis_version", env!("CARGO_PKG_VERSION"));
+        append_kv(&mut out, "redis_version", REDIS_COMPAT_VERSION);
         append_kv(&mut out, "redis_git_sha1", "0000000");
         append_kv(&mut out, "redis_git_dirty", "0");
         append_kv(&mut out, "redis_build_id", "aikv");

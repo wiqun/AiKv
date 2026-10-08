@@ -91,7 +91,7 @@ description: AiKv OTel aikv_* 指标目录与 INFO 字段对照表. 查询指标
 
 | INFO 字段名 | 实际输出示例 | 字段性质与说明 |
 | :--- | :--- | :--- |
-| `redis_version` | `1.0.0` | **真实值**: AiKv 实际发行版本号 |
+| `redis_version` | `8.8` | **真实值**: 客户端用来判断命令能力的 Redis 兼容版本。包版本不放在这个字段，否则只认 `redis_version >= 2.8` 的客户端不会发 SCAN |
 | `redis_compatible_version` | `8.8` | **真实值**: 对齐的 Redis 兼容协议版本 |
 | `role` | `master` / `slave` | **真实值**: 节点在当前分片中的角色 |
 | `cluster_enabled` | `1` / `0` | **真实值**: 是否启用了 Redis Cluster 模式 |

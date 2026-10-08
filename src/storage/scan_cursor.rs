@@ -44,6 +44,19 @@ impl ScanCursorTable {
             .unwrap_or(keys.len())
     }
 
+    pub fn lookup(&self, cursor: u64) -> Option<Vec<u8>> {
+        if cursor == 0 {
+            return None;
+        }
+        self.cursors.lock().get(&cursor).cloned()
+    }
+
+    pub fn remember(&self, key: Vec<u8>) -> u64 {
+        let id = self.alloc_id();
+        self.cursors.lock().insert(id, key);
+        id
+    }
+
     fn alloc_id(&self) -> u64 {
         loop {
             let id = self.next_id.fetch_add(1, Ordering::Relaxed);

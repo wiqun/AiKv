@@ -33,7 +33,7 @@ use std::sync::{Arc, OnceLock};
 use async_trait::async_trait;
 
 use crate::error::{Error, Result};
-use crate::storage::memory::glob_match;
+use crate::storage::memory::{glob_match, glob_range_prefix};
 use crate::storage::observation::{PointReadCounter, StorageObservation};
 use crate::storage::types::{
     now_ms, CollectionKind, ExpiresCounters, KeyspaceStats, KvStorage, ScanResult,
@@ -107,6 +107,37 @@ pub trait StorageAdapter: Send + Sync {
     ) -> Result<()> {
         for (k, v) in self.scan_prefix(&prefix).await? {
             f(k, v)?;
+        }
+        Ok(())
+    }
+
+    /// 按字节序访问 `[start, end)`。`f` 返回 `Ok(false)` 后不再继续。
+    /// 默认实现用 `start` 与 `end` 的公共前缀走 `scan_prefix`，再按区间过滤。
+    async fn visit_range(
+        &self,
+        start: Vec<u8>,
+        end: Option<Vec<u8>>,
+        mut f: Box<dyn FnMut(Vec<u8>, Vec<u8>) -> Result<bool> + Send>,
+    ) -> Result<()> {
+        let prefix = match &end {
+            Some(end) => common_prefix(&start, end),
+            None => start.clone(),
+        };
+        let mut rows = self.scan_prefix(&prefix).await?;
+        rows.sort();
+        for (key, value) in rows {
+            if key.as_slice() < start.as_slice() {
+                continue;
+            }
+            if end
+                .as_ref()
+                .is_some_and(|end| key.as_slice() >= end.as_slice())
+            {
+                continue;
+            }
+            if !f(key, value)? {
+                break;
+            }
         }
         Ok(())
     }
@@ -304,9 +335,16 @@ impl KvStorageAdapter {
         }
     }
 
+    fn pattern_prefix(db: usize, pattern: &[u8]) -> Vec<u8> {
+        match glob_range_prefix(pattern) {
+            Some(user_prefix) => Self::encode(db, user_prefix),
+            None => Self::db_prefix(db),
+        }
+    }
+
     async fn keys_for_db(&self, db: usize, pattern: &[u8]) -> Result<Vec<Vec<u8>>> {
         self.check_db(db)?;
-        let prefix = Self::db_prefix(db);
+        let prefix = Self::pattern_prefix(db, pattern);
         let pattern = pattern.to_vec();
         let observation = self.observation.clone();
         let keys = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -624,11 +662,84 @@ impl KvStorage for KvStorageAdapter {
         pattern: &[u8],
         count: usize,
     ) -> Result<ScanResult> {
-        let valid = self.keys_for_db(db, pattern).await?;
-        let (next_cursor, keys) = self.scan_cursors.page(cursor, valid, count);
+        self.check_db(db)?;
+        if count == 0 {
+            return Ok(ScanResult {
+                cursor: 0,
+                keys: Vec::new(),
+            });
+        }
+        let prefix = Self::pattern_prefix(db, pattern);
+        let end = AiDbEngine::prefix_end(&prefix);
+        let mut start = prefix;
+        if cursor != 0 {
+            let Some(bound) = self.scan_cursors.lookup(cursor) else {
+                return Ok(ScanResult {
+                    cursor: 0,
+                    keys: Vec::new(),
+                });
+            };
+            let seek = Self::encode(db, &bound);
+            if seek.as_slice() > start.as_slice() {
+                start = seek;
+            }
+        }
+
+        let pattern = pattern.to_vec();
+        let observation = self.observation.clone();
+        let matched = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let matched_c = matched.clone();
+        let expired = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let expired_c = expired.clone();
+        let limit = count + 1;
+        self.storage
+            .visit_range(
+                start,
+                end,
+                Box::new(move |encoded, raw| {
+                    let Some(user_key) = Self::decode_user_key(&encoded) else {
+                        return Ok(true);
+                    };
+                    if is_watch_meta_user_key(&user_key) {
+                        return Ok(true);
+                    }
+                    let Ok(stored) = Self::deserialize(&raw) else {
+                        return Ok(true);
+                    };
+                    if stored.is_expired() {
+                        if let Some(obs) = &observation {
+                            obs.record_expired_key();
+                        }
+                        expired_c.lock().unwrap().push(user_key);
+                        return Ok(true);
+                    }
+                    if pattern.is_empty() || glob_match(&pattern, &user_key) {
+                        let mut keys = matched_c.lock().unwrap();
+                        keys.push(user_key);
+                        let full = keys.len() >= limit;
+                        return Ok(!full);
+                    }
+                    Ok(true)
+                }),
+            )
+            .await?;
+
+        let expired = Arc::try_unwrap(expired).unwrap().into_inner().unwrap();
+        for key in expired {
+            self.try_lazy_expire_delete(db, &key).await;
+        }
+        let mut matched = Arc::try_unwrap(matched).unwrap().into_inner().unwrap();
+        if matched.len() <= count {
+            return Ok(ScanResult {
+                cursor: 0,
+                keys: matched,
+            });
+        }
+        let next = matched.pop().expect("count + 1 matches");
+        let next_cursor = self.scan_cursors.remember(next);
         Ok(ScanResult {
             cursor: next_cursor,
-            keys,
+            keys: matched,
         })
     }
 
@@ -929,6 +1040,15 @@ impl KvStorage for KvStorageAdapter {
         self.check_db(db)?;
         self.storage.for_each_prefix(prefix, f).await
     }
+}
+
+fn common_prefix(left: &[u8], right: &[u8]) -> Vec<u8> {
+    let n = left
+        .iter()
+        .zip(right.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    left[..n].to_vec()
 }
 
 fn unix_nanos() -> u128 {

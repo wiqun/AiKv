@@ -686,6 +686,18 @@ impl StorageAdapter for ClusterDataAdapter {
         Ok(())
     }
 
+    async fn visit_range(
+        &self,
+        start: Vec<u8>,
+        end: Option<Vec<u8>>,
+        mut f: Box<dyn FnMut(Vec<u8>, Vec<u8>) -> Result<bool> + Send>,
+    ) -> Result<()> {
+        match CLUSTER_STATE_MGR.get() {
+            Some(mgr) => merge_local_ranges(mgr, start, end, &mut f).await,
+            None => self.local.visit_range(start, end, f).await,
+        }
+    }
+
     async fn for_each_prefix(
         &self,
         prefix: Vec<u8>,
@@ -693,16 +705,15 @@ impl StorageAdapter for ClusterDataAdapter {
     ) -> Result<()> {
         match CLUSTER_STATE_MGR.get() {
             Some(mgr) => {
+                let end = AiDbEngine::prefix_end(&prefix);
                 for gid in mgr.multi_raft.local_group_ids() {
                     let pairs = mgr
                         .multi_raft
-                        .scan_local_pairs(gid)
+                        .scan_local_pairs_in_range(gid, prefix.clone(), end.clone())
                         .await
                         .map_err(Self::map_err)?;
                     for (k, v) in pairs {
-                        if k.starts_with(&prefix) {
-                            f(k, v)?;
-                        }
+                        f(k, v)?;
                     }
                 }
                 Ok(())
@@ -715,16 +726,14 @@ impl StorageAdapter for ClusterDataAdapter {
         match CLUSTER_STATE_MGR.get() {
             Some(mgr) => {
                 for gid in mgr.multi_raft.local_group_ids() {
-                    let pairs = mgr
+                    let keys = mgr
                         .multi_raft
-                        .scan_local_pairs(gid)
+                        .scan_keys(gid, Some((start.clone(), end.clone())))
                         .await
                         .map_err(Self::map_err)?;
                     let mut tb = ThinWriteBatch::new();
-                    for (k, _) in pairs {
-                        if k.as_slice() >= start.as_slice() && k.as_slice() < end.as_slice() {
-                            tb.delete(k);
-                        }
+                    for key in keys {
+                        tb.delete(key);
                     }
                     if !tb.ops.is_empty() {
                         let resp = mgr
@@ -844,6 +853,75 @@ impl StorageAdapter for ClusterDataAdapter {
             // 路由本身失败 (如迁移 epoch 缺失): 保守放弃, 交由下次读/写连接清理.
             Err(_) => false,
         }
+    }
+}
+
+type RangeVisitor = Box<dyn FnMut(Vec<u8>, Vec<u8>) -> Result<bool> + Send>;
+type RangeItem = std::result::Result<(Vec<u8>, Vec<u8>), String>;
+
+async fn merge_local_ranges(
+    mgr: &ClusterStateManager,
+    start: Vec<u8>,
+    end: Option<Vec<u8>>,
+    f: &mut RangeVisitor,
+) -> Result<()> {
+    let gids = mgr.multi_raft.local_group_ids();
+    let mut receivers = Vec::with_capacity(gids.len());
+    for gid in gids {
+        let (tx, rx) = tokio::sync::mpsc::channel::<RangeItem>(32);
+        let raft = Arc::clone(&mgr.multi_raft);
+        let start = start.clone();
+        let end = end.clone();
+        tokio::spawn(async move {
+            let tx_pairs = tx.clone();
+            let scanned = raft
+                .visit_local_user_range(gid, start, end, move |key, value| {
+                    tx_pairs.blocking_send(Ok((key, value))).is_ok()
+                })
+                .await;
+            if let Err(err) = scanned {
+                let _ = tx.blocking_send(Err(err.to_string()));
+            }
+        });
+        receivers.push(rx);
+    }
+
+    let mut heads = Vec::with_capacity(receivers.len());
+    for rx in &mut receivers {
+        heads.push(recv_user_pair(rx).await?);
+    }
+    loop {
+        let mut best: Option<usize> = None;
+        for (index, head) in heads.iter().enumerate() {
+            if let Some((key, _)) = head {
+                let take = match best {
+                    None => true,
+                    Some(chosen) => key.as_slice() < heads[chosen].as_ref().unwrap().0.as_slice(),
+                };
+                if take {
+                    best = Some(index);
+                }
+            }
+        }
+        let Some(index) = best else {
+            break;
+        };
+        let (key, value) = heads[index].take().unwrap();
+        if !f(key, value)? {
+            break;
+        }
+        heads[index] = recv_user_pair(&mut receivers[index]).await?;
+    }
+    Ok(())
+}
+
+async fn recv_user_pair(
+    rx: &mut tokio::sync::mpsc::Receiver<RangeItem>,
+) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+    match rx.recv().await {
+        None => Ok(None),
+        Some(Ok(pair)) => Ok(Some(pair)),
+        Some(Err(err)) => Err(ClusterDataAdapter::map_err(err)),
     }
 }
 

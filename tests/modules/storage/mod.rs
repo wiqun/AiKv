@@ -4,6 +4,7 @@ pub mod aidb_integration_test;
 pub mod compat;
 pub mod counters;
 pub mod memory;
+pub mod prefix_scan;
 pub mod prod_options;
 pub mod rebuild_counters_test;
 pub mod rename_subkey;

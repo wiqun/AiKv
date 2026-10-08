@@ -110,6 +110,7 @@ async fn info_default_section_order_and_fields() {
         "Storage",
     ];
     assert_eq!(headers, expected);
+    assert!(text.contains("redis_version:8.8"));
     assert!(text.contains("redis_compatible_version:8.8"));
     assert!(text.contains("redis_mode:standalone"));
 }

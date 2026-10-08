@@ -163,6 +163,21 @@ pub fn glob_match(pattern: &[u8], text: &[u8]) -> bool {
     glob_match_impl(pattern, text, 0, 0)
 }
 
+/// 能收成一段字节区间的字面值前缀。
+///
+/// `Some` 的前缀（含空前缀）后面只有结尾的一个 `*`，或者根本没有通配符。
+/// 开头或中间出现 `*` / `?` 时返回 `None`，调用方只能扫整个库再过滤。
+pub fn glob_range_prefix(pattern: &[u8]) -> Option<&[u8]> {
+    if pattern.is_empty() || pattern == b"*" {
+        return Some(b"");
+    }
+    match pattern.iter().position(|b| *b == b'*' || *b == b'?') {
+        None => Some(pattern),
+        Some(pos) if pattern[pos] == b'*' && pos + 1 == pattern.len() => Some(&pattern[..pos]),
+        Some(_) => None,
+    }
+}
+
 fn glob_match_impl(pattern: &[u8], text: &[u8], pi: usize, ti: usize) -> bool {
     if pi == pattern.len() {
         return ti == text.len();

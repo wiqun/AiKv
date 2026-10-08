@@ -172,14 +172,33 @@ impl StorageAdapter for AiDbEngine {
         prefix: Vec<u8>,
         mut f: Box<dyn FnMut(Vec<u8>, Vec<u8>) -> Result<()> + Send>,
     ) -> Result<()> {
+        let end = AiDbEngine::prefix_end(&prefix);
+        self.visit_range(
+            prefix,
+            end,
+            Box::new(move |key, value| {
+                f(key, value)?;
+                Ok(true)
+            }),
+        )
+        .await
+    }
+
+    async fn visit_range(
+        &self,
+        start: Vec<u8>,
+        end: Option<Vec<u8>>,
+        mut f: Box<dyn FnMut(Vec<u8>, Vec<u8>) -> Result<bool> + Send>,
+    ) -> Result<()> {
         self.blocking(move |db| {
-            let end = AiDbEngine::prefix_end(&prefix);
             let iter = db
-                .scan(Some(prefix.as_slice()), end.as_deref())
+                .scan(Some(start.as_slice()), end.as_deref())
                 .map_err(|e| Error::Storage(e.to_string()))?;
             for item in iter {
-                let (k, v) = item.map_err(|e| Error::Storage(e.to_string()))?;
-                f(k, v)?;
+                let (key, value) = item.map_err(|e| Error::Storage(e.to_string()))?;
+                if !f(key, value)? {
+                    break;
+                }
             }
             Ok(())
         })
