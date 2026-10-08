@@ -120,7 +120,7 @@ pub(super) fn classify_command(cmd: &str) -> crate::cluster::router::CommandType
         "get" | "exists" | "hget" | "hgetall" | "hkeys" | "hvals" | "hlen" | "hexists"
         | "lrange" | "lindex" | "llen" | "smembers" | "scard" | "sismember" | "zrange"
         | "zcard" | "zscore" | "zrank" | "type" | "ttl" | "pttl" | "strlen" | "getbit"
-        | "getrange" | "mget" | "json.get" | "json.mget" => {
+        | "getrange" | "mget" | "json.get" | "json.mget" | "object" => {
             crate::cluster::router::CommandType::Read
         }
         _ => crate::cluster::router::CommandType::Write,
@@ -143,6 +143,14 @@ mod tests {
         assert!(
             !is_cluster_local_admin_cmd("get"),
             "GET must still go through slot routing"
+        );
+    }
+
+    #[test]
+    fn object_is_a_read() {
+        assert_eq!(
+            super::classify_command("object"),
+            crate::cluster::router::CommandType::Read
         );
     }
 }
