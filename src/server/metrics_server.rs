@@ -10,6 +10,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
+use pprof::protos::Message;
 use tokio::net::TcpListener;
 
 pub struct MetricsServer {
@@ -82,6 +83,7 @@ async fn handle_request(
                 .body(Full::new(Bytes::from(body)))
                 .unwrap())
         }
+        "/debug/pprof/profile" => profile_response(req.uri().query()).await,
         "/" => {
             let body = r#"<!DOCTYPE html>
 <html>
@@ -101,5 +103,76 @@ async fn handle_request(
             .status(StatusCode::NOT_FOUND)
             .body(Full::new(Bytes::from("Not Found")))
             .unwrap()),
+    }
+}
+
+pub fn pprof_enabled() -> bool {
+    std::env::var("AIKV_PPROF").ok().as_deref() == Some("1")
+}
+
+fn profile_seconds(query: Option<&str>) -> u64 {
+    let mut seconds = 1u64;
+    if let Some(query) = query {
+        for pair in query.split('&') {
+            let mut parts = pair.splitn(2, '=');
+            if parts.next() == Some("seconds") {
+                if let Ok(parsed) = parts.next().unwrap_or("1").parse::<u64>() {
+                    seconds = parsed.clamp(1, 30);
+                }
+            }
+        }
+    }
+    seconds
+}
+
+async fn profile_response(query: Option<&str>) -> Result<Response<Full<Bytes>>, Infallible> {
+    if !pprof_enabled() {
+        return Ok(Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(Full::new(Bytes::from("Not Found")))
+            .unwrap());
+    }
+    match capture_profile(profile_seconds(query)).await {
+        Ok(body) => Ok(Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "application/octet-stream")
+            .body(Full::new(Bytes::from(body)))
+            .unwrap()),
+        Err(err) => Ok(Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(Full::new(Bytes::from(err)))
+            .unwrap()),
+    }
+}
+
+async fn capture_profile(seconds: u64) -> Result<Vec<u8>, String> {
+    let guard = pprof::ProfilerGuardBuilder::default()
+        .frequency(99)
+        .blocklist(&["libc", "libgcc", "pthread", "vdso"])
+        .build()
+        .map_err(|err| err.to_string())?;
+    tokio::time::sleep(std::time::Duration::from_secs(seconds)).await;
+    let report = guard.report().build().map_err(|err| err.to_string())?;
+    let profile = report.pprof().map_err(|err| err.to_string())?;
+    Ok(profile.encode_to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pprof_enabled;
+
+    #[test]
+    fn pprof_is_off_unless_the_env_is_one() {
+        let previous = std::env::var("AIKV_PPROF").ok();
+        std::env::remove_var("AIKV_PPROF");
+        assert!(!pprof_enabled());
+        std::env::set_var("AIKV_PPROF", "1");
+        assert!(pprof_enabled());
+        std::env::set_var("AIKV_PPROF", "0");
+        assert!(!pprof_enabled());
+        match previous {
+            Some(value) => std::env::set_var("AIKV_PPROF", value),
+            None => std::env::remove_var("AIKV_PPROF"),
+        }
     }
 }
