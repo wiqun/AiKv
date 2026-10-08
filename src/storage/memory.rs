@@ -37,6 +37,7 @@ pub struct MemoryEngine {
     point_reads: OnceLock<Arc<PointReadCounter>>,
     watchers: Arc<WatchRegistry>,
     expires: ExpiresCounters,
+    scan_cursors: crate::storage::scan_cursor::ScanCursorTable,
 }
 
 impl MemoryEngine {
@@ -55,6 +56,7 @@ impl MemoryEngine {
             point_reads: OnceLock::new(),
             watchers: WatchRegistry::new(),
             expires: ExpiresCounters::new(),
+            scan_cursors: crate::storage::scan_cursor::ScanCursorTable::new(),
         })
     }
 
@@ -306,7 +308,7 @@ impl KvStorage for MemoryEngine {
     ) -> Result<ScanResult> {
         self.check_db(db)?;
         let map = self.databases[db].read();
-        let mut valid: Vec<Vec<u8>> = map
+        let valid: Vec<Vec<u8>> = map
             .iter()
             .filter(|(_, v)| !v.is_expired())
             .filter(|(k, _)| !is_watch_meta_user_key(k))
@@ -314,12 +316,8 @@ impl KvStorage for MemoryEngine {
             .map(|(k, _)| k.clone())
             .collect();
         drop(map);
-        valid.sort();
 
-        let skip = cursor as usize;
-        let end = (skip + count).min(valid.len());
-        let keys = valid[skip..end].to_vec();
-        let next_cursor = if end < valid.len() { end as u64 } else { 0 };
+        let (next_cursor, keys) = self.scan_cursors.page(cursor, valid, count);
         Ok(ScanResult {
             cursor: next_cursor,
             keys,

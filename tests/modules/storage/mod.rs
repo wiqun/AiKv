@@ -6,6 +6,8 @@ pub mod counters;
 pub mod memory;
 pub mod prod_options;
 pub mod rebuild_counters_test;
+pub mod rename_subkey;
+pub mod scan_cursor;
 pub mod ttl_filter;
 pub mod types;
 pub mod watch_bump_batch;

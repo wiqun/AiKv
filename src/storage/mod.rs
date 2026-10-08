@@ -10,6 +10,7 @@ mod cluster_batcher;
 pub mod dump;
 pub mod memory;
 pub mod observation;
+pub mod scan_cursor;
 pub mod subkey;
 pub mod ttl_filter;
 pub mod types;

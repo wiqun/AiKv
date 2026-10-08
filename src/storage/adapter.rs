@@ -36,8 +36,8 @@ use crate::error::{Error, Result};
 use crate::storage::memory::glob_match;
 use crate::storage::observation::{PointReadCounter, StorageObservation};
 use crate::storage::types::{
-    now_ms, ExpiresCounters, KeyspaceStats, KvStorage, ScanResult, StorageEngineKind, StoredValue,
-    ValueType, WriteOp, DB_COUNT, TTL_NO_EXPIRY, WRONGTYPE,
+    now_ms, CollectionKind, ExpiresCounters, KeyspaceStats, KvStorage, ScanResult,
+    StorageEngineKind, StoredValue, ValueType, WriteOp, DB_COUNT, TTL_NO_EXPIRY, WRONGTYPE,
 };
 use crate::storage::watch_registry::WatchRegistry;
 use crate::storage::watch_version::{
@@ -169,6 +169,7 @@ pub struct KvStorageAdapter {
     point_reads: OnceLock<Arc<PointReadCounter>>,
     expires: Arc<ExpiresCounters>,
     watchers: Arc<WatchRegistry>,
+    scan_cursors: crate::storage::scan_cursor::ScanCursorTable,
 }
 
 impl KvStorageAdapter {
@@ -194,6 +195,7 @@ impl KvStorageAdapter {
             point_reads: OnceLock::new(),
             expires: Arc::new(ExpiresCounters::new()),
             watchers: WatchRegistry::new(),
+            scan_cursors: crate::storage::scan_cursor::ScanCursorTable::new(),
         })
     }
 
@@ -393,6 +395,102 @@ impl KvStorageAdapter {
         self.expires.reset_db(db);
         Ok(())
     }
+
+    async fn transfer_key(
+        &self,
+        src_db: usize,
+        dst_db: usize,
+        old_key: &[u8],
+        new_key: &[u8],
+        value: StoredValue,
+        delete_source: bool,
+    ) -> Result<()> {
+        let source_subkeys = self
+            .collection_subkeys(src_db, old_key, &value.value)
+            .await?;
+        let destination = self.load_typed(dst_db, new_key).await?;
+        let destination_subkeys = match &destination {
+            Some(existing) => {
+                self.collection_subkeys(dst_db, new_key, &existing.value)
+                    .await?
+            }
+            None => Vec::new(),
+        };
+        let destination_user_key = Self::encode(dst_db, new_key);
+        let mut ops = Vec::new();
+        for (encoded, _) in &destination_subkeys {
+            ops.push(AdapterWriteOp::Delete {
+                key: encoded.clone(),
+            });
+        }
+        ops.push(AdapterWriteOp::Put {
+            key: destination_user_key.clone(),
+            value: Self::serialize(&value)?,
+        });
+        for (encoded, raw) in &source_subkeys {
+            let Some((kind, field)) = crate::storage::subkey::decode_subkey(encoded) else {
+                continue;
+            };
+            let key = match kind {
+                CollectionKind::Hash => {
+                    crate::storage::subkey::encode_hash_field_key(&destination_user_key, &field)
+                }
+                CollectionKind::Set => {
+                    crate::storage::subkey::encode_set_member_key(&destination_user_key, &field)
+                }
+            };
+            ops.push(AdapterWriteOp::Put {
+                key,
+                value: raw.clone(),
+            });
+        }
+        if let Some((key, meta)) = self.next_watch_meta_put(dst_db, new_key).await? {
+            ops.push(AdapterWriteOp::Put { key, value: meta });
+        }
+        if delete_source {
+            ops.push(AdapterWriteOp::Delete {
+                key: Self::encode(src_db, old_key),
+            });
+            for (encoded, _) in &source_subkeys {
+                ops.push(AdapterWriteOp::Delete {
+                    key: encoded.clone(),
+                });
+            }
+            if let Some((key, meta)) = self.next_watch_meta_put(src_db, old_key).await? {
+                ops.push(AdapterWriteOp::Put { key, value: meta });
+            }
+        }
+        let source_had_ttl = value.expires_at.is_some();
+        self.storage.apply_writes(ops).await?;
+        if source_had_ttl {
+            self.expires.on_ttl_write(dst_db);
+            if delete_source {
+                self.expires.on_ttl_clear(src_db);
+            }
+        }
+        Ok(())
+    }
+
+    async fn collection_subkeys(
+        &self,
+        db: usize,
+        user_key: &[u8],
+        value: &ValueType,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let encoded = Self::encode(db, user_key);
+        let prefix = match value {
+            ValueType::CollectionHeader {
+                kind: CollectionKind::Hash,
+                ..
+            } => crate::storage::subkey::hash_subkey_prefix(&encoded),
+            ValueType::CollectionHeader {
+                kind: CollectionKind::Set,
+                ..
+            } => crate::storage::subkey::set_subkey_prefix(&encoded),
+            _ => return Ok(Vec::new()),
+        };
+        self.storage.scan_prefix(&prefix).await
+    }
 }
 
 #[async_trait]
@@ -526,12 +624,8 @@ impl KvStorage for KvStorageAdapter {
         pattern: &[u8],
         count: usize,
     ) -> Result<ScanResult> {
-        let mut valid = self.keys_for_db(db, pattern).await?;
-        valid.sort();
-        let skip = cursor as usize;
-        let end = (skip + count).min(valid.len());
-        let keys = valid[skip..end].to_vec();
-        let next_cursor = if end < valid.len() { end as u64 } else { 0 };
+        let valid = self.keys_for_db(db, pattern).await?;
+        let (next_cursor, keys) = self.scan_cursors.page(cursor, valid, count);
         Ok(ScanResult {
             cursor: next_cursor,
             keys,
@@ -730,8 +824,8 @@ impl KvStorage for KvStorageAdapter {
         let Some(value) = self.load_typed(db, old_key).await? else {
             return Err(Error::Command("ERR no such key".into()));
         };
-        self.delete(db, old_key).await?;
-        self.set_typed(db, new_key, value).await
+        self.transfer_key(db, db, old_key, new_key, value, true)
+            .await
     }
 
     async fn rename_key_nx(&self, db: usize, old_key: &[u8], new_key: &[u8]) -> Result<bool> {
@@ -744,8 +838,8 @@ impl KvStorage for KvStorageAdapter {
         if self.load_typed(db, new_key).await?.is_some() {
             return Ok(false);
         }
-        self.delete(db, old_key).await?;
-        self.set_typed(db, new_key, value).await?;
+        self.transfer_key(db, db, old_key, new_key, value, true)
+            .await?;
         Ok(true)
     }
 
@@ -771,7 +865,8 @@ impl KvStorage for KvStorageAdapter {
             .as_ref()
             .and_then(|value| value.expires_at)
             .is_some();
-        self.set_typed(dst_db, dst_key, stored).await?;
+        self.transfer_key(src_db, dst_db, src_key, dst_key, stored, false)
+            .await?;
         if saw_ttl {
             self.expires.on_ttl_clear(dst_db);
         }

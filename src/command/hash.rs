@@ -47,6 +47,10 @@ impl HashCommands {
             return Err(router::wrong_args("HSET", ""));
         }
         let key = &args[0];
+        crate::storage::subkey::reject_subkey_parent(key)?;
+        for chunk in args[1..].chunks(2) {
+            crate::storage::subkey::reject_subkey_field(&chunk[0])?;
+        }
         let _lock = self.key_lock.lock(key).await;
         let mut stored = self.load_or_create_hash(db, key).await?;
 

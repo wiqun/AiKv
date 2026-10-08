@@ -18,6 +18,7 @@
 //! `\x01` 用于分隔 user key 和 subkey 部分.
 //! 常规 key 不含 `\x01`, 因此 subkey entries 可被 `collect_db_entries` 过滤.
 
+use crate::error::{Error, Result};
 use crate::storage::types::CollectionKind;
 
 /// Subkey 键编码相关常量.
@@ -63,6 +64,26 @@ pub fn set_subkey_prefix(user_key: &[u8]) -> Vec<u8> {
     prefix.push(SUBKEY_SEPARATOR);
     prefix.push(SET_TAG);
     prefix
+}
+
+/// 父 key 里的 `0x01` 会让 `decode_subkey` 从错误的位置切开。
+pub fn reject_subkey_parent(user_key: &[u8]) -> Result<()> {
+    if user_key.contains(&SUBKEY_SEPARATOR) {
+        Err(Error::Command(
+            "ERR key must not contain a subkey separator".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// field 长度按 u16 写入。更长的 field 会被截断，读回来对不上。
+pub fn reject_subkey_field(field: &[u8]) -> Result<()> {
+    if field.len() > u16::MAX as usize {
+        Err(Error::Command("ERR field is too long".into()))
+    } else {
+        Ok(())
+    }
 }
 
 fn encode_collection_subkey(user_key: &[u8], tag: u8, sub: &[u8]) -> Vec<u8> {

@@ -46,6 +46,10 @@ impl SetCommands {
     pub async fn sadd(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_min_args("SADD", args, 2)?;
         let key = &args[0];
+        crate::storage::subkey::reject_subkey_parent(key)?;
+        for member in &args[1..] {
+            crate::storage::subkey::reject_subkey_field(member)?;
+        }
         let _lock = self.key_lock.lock(key).await;
         let mut stored = self.load_or_create_set(db, key).await?;
 
