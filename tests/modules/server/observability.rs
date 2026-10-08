@@ -838,12 +838,9 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SpanCapture {
     }
 }
 
-fn info_capture() -> (
-    SpanCapture,
-    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
-    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
-    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
-) {
+type SharedStrings = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+
+fn info_capture() -> (SpanCapture, SharedStrings, SharedStrings, SharedStrings) {
     let spans = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let info_events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let fields = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));

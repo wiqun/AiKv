@@ -21,6 +21,8 @@ static TRACER_PROVIDER: OnceLock<SdkTracerProvider> = OnceLock::new();
 static METER_PROVIDER: OnceLock<SdkMeterProvider> = OnceLock::new();
 static EXPORT_READER: OnceLock<Arc<ManualReader>> = OnceLock::new();
 static METRIC_EXPORTER: OnceLock<opentelemetry_otlp::MetricExporter> = OnceLock::new();
+static OTLP_ENDPOINT: OnceLock<String> = OnceLock::new();
+static EXPORT_RESOURCE: OnceLock<Resource> = OnceLock::new();
 
 /// OTel 初始化参数 (Resource 标签).
 #[derive(Debug, Clone)]
@@ -228,6 +230,8 @@ pub fn init_otel(config: &OtelInitConfig) -> bool {
         }
     };
     let _ = METRIC_EXPORTER.set(metric_exporter);
+    let _ = OTLP_ENDPOINT.set(endpoint.clone());
+    let _ = EXPORT_RESOURCE.set(resource.clone());
 
     let reader = Arc::new(ManualReader::builder().build());
     let _ = EXPORT_READER.set(Arc::clone(&reader));
@@ -292,6 +296,11 @@ impl MetricReader for SharedReader {
 }
 pub fn tracer_installed() -> bool {
     TRACER_PROVIDER.get().is_some()
+}
+
+/// 直方图导出使用同一次初始化里的端点和资源标签.
+pub fn histogram_export_context() -> Option<(&'static str, &'static Resource)> {
+    Some((OTLP_ENDPOINT.get()?.as_str(), EXPORT_RESOURCE.get()?))
 }
 
 pub fn shutdown_otel() {

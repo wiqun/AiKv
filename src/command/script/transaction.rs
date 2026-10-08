@@ -194,9 +194,7 @@ impl ScriptTransaction {
                         let preserved = !self.expire_at.contains_key(&key);
                         let exp = self.resolve_expires_at(storage, &key).await?;
                         if let Some(at) = exp {
-                            storage
-                                .set_with_ttl(self.db_index, &key, value, at)
-                                .await?;
+                            storage.set_with_ttl(self.db_index, &key, value, at).await?;
                             if preserved {
                                 storage.release_seen_ttl(self.db_index).await?;
                             }

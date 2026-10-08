@@ -704,9 +704,10 @@ async fn main() {
                 let text = aikv::server::export::render_prometheus(&current);
                 aikv::server::export::publish_metrics_text(text);
                 if otlp_enabled {
-                    let mut sink = aikv::server::export::OtelSink;
+                    let mut sink = aikv::server::export::OtelSink::default();
                     aikv::server::export::push_deltas(&current, &baseline, &mut sink);
                     aikv::server::otel::flush_otel_metrics().await;
+                    sink.flush_histograms().await;
                 }
                 baseline = current;
             }

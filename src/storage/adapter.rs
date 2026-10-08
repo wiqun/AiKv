@@ -511,9 +511,7 @@ impl KvStorage for KvStorageAdapter {
                 batch.push(AdapterWriteOp::Put { key: mk, value: mv });
             }
         }
-        if let Err(e) = self.storage.apply_writes(batch).await {
-            return Err(e);
-        }
+        self.storage.apply_writes(batch).await?;
         Ok(())
     }
 

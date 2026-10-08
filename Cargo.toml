@@ -29,7 +29,7 @@ path = "src/main.rs"
 
 [features]
 default = ["compression"]
-monitoring = ["dep:tracing-opentelemetry", "dep:opentelemetry-otlp", "dep:opentelemetry", "dep:opentelemetry_sdk", "dep:hyper", "dep:hyper-util", "dep:http-body-util", "aidb/monitoring"]
+monitoring = ["dep:tracing-opentelemetry", "dep:opentelemetry-otlp", "dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-proto", "dep:tonic", "dep:hyper", "dep:hyper-util", "dep:http-body-util", "aidb/monitoring"]
 cluster = ["aidb/cluster", "dep:openraft", "dep:openraft-rt-tokio"]
 cluster-test-util = ["cluster", "aidb/cluster-test-util"]
 compression = ["aidb/compression"]
@@ -83,6 +83,8 @@ http-body-util = { version = "0.1", optional = true }
 opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic", "metrics"], optional = true }
 opentelemetry = { version = "0.32", optional = true }
 opentelemetry_sdk = { version = "0.32", features = ["rt-tokio", "testing", "experimental_metrics_custom_reader"], optional = true }
+opentelemetry-proto = { version = "0.32", default-features = false, features = ["gen-tonic", "metrics"], optional = true }
+tonic = { version = "0.14", features = ["channel"], optional = true }
 tracing-opentelemetry = { version = "0.33", optional = true }
 
 [dev-dependencies]

@@ -150,7 +150,7 @@ pub fn collect_export_snapshot(
 }
 
 fn append_process(
-    mut snapshot: &mut ExportSnapshot,
+    snapshot: &mut ExportSnapshot,
     metrics: &crate::server::metrics::ServerMetrics,
     keys_estimate: u64,
     expires: &[(usize, u64)],
@@ -161,49 +161,49 @@ fn append_process(
         value: metrics.connected_clients() as f64,
     });
     push_counter(
-        &mut snapshot,
+        snapshot,
         "aikv_connections_rejected_total",
         vec![],
         metrics.rejected_connections(),
     );
     push_counter(
-        &mut snapshot,
+        snapshot,
         "aikv_net_input_bytes_total",
         vec![],
         metrics.net_input_bytes(),
     );
     push_counter(
-        &mut snapshot,
+        snapshot,
         "aikv_net_output_bytes_total",
         vec![],
         metrics.net_output_bytes(),
     );
     push_counter(
-        &mut snapshot,
+        snapshot,
         "aikv_scan_entries_total",
         vec![],
         metrics.scan_entries(),
     );
     push_counter(
-        &mut snapshot,
+        snapshot,
         "aikv_expired_keys_total",
         vec![],
         metrics.expired_keys(),
     );
     push_counter(
-        &mut snapshot,
+        snapshot,
         "aikv_slowlog_total",
         vec![],
         metrics.slowlog_commands_count(),
     );
     push_counter(
-        &mut snapshot,
+        snapshot,
         "aikv_point_reads_total",
         vec![("result".into(), "hit".into())],
         metrics.point_read_count(true),
     );
     push_counter(
-        &mut snapshot,
+        snapshot,
         "aikv_point_reads_total",
         vec![("result".into(), "miss".into())],
         metrics.point_read_count(false),
@@ -232,7 +232,7 @@ fn append_process(
     }
     for (reason, count) in metrics.connection_close_rows() {
         push_counter(
-            &mut snapshot,
+            snapshot,
             "aikv_connection_closes_total",
             vec![("reason".into(), reason)],
             count,
@@ -240,7 +240,7 @@ fn append_process(
     }
     for (errno, count) in metrics.accept_error_rows() {
         push_counter(
-            &mut snapshot,
+            snapshot,
             "aikv_accept_errors_total",
             vec![("errno".into(), errno)],
             count,
@@ -248,13 +248,10 @@ fn append_process(
     }
 }
 
-fn append_commands(
-    mut snapshot: &mut ExportSnapshot,
-    metrics: &crate::server::metrics::ServerMetrics,
-) {
+fn append_commands(snapshot: &mut ExportSnapshot, metrics: &crate::server::metrics::ServerMetrics) {
     for (command, ok, err) in metrics.command_counter_rows() {
         push_counter(
-            &mut snapshot,
+            snapshot,
             "aikv_commands_total",
             vec![
                 ("command".into(), command.clone()),
@@ -263,7 +260,7 @@ fn append_commands(
             ok,
         );
         push_counter(
-            &mut snapshot,
+            snapshot,
             "aikv_commands_total",
             vec![
                 ("command".into(), command),
@@ -579,9 +576,19 @@ fn labels_inside(labels: &[(String, String)]) -> String {
         .join(",")
 }
 
-/// monitoring 下计数器一次 `add(delta)`. 直方图不循环 `record`.
+/// monitoring 下计数器一次 `add(delta)`. 直方图一次交出累计桶, 不循环 `record`.
 #[cfg(feature = "monitoring")]
-pub struct OtelSink;
+#[derive(Default)]
+pub struct OtelSink {
+    histograms: Vec<HistogramSample>,
+}
+
+#[cfg(feature = "monitoring")]
+impl OtelSink {
+    pub async fn flush_histograms(&self) {
+        export_histogram_batch(&self.histograms).await;
+    }
+}
 
 #[cfg(feature = "monitoring")]
 impl ExportSink for OtelSink {
@@ -598,7 +605,175 @@ impl ExportSink for OtelSink {
     }
 
     fn set_histogram(&mut self, name: &str, labels: &[(&str, &str)], snap: &LatencySnapshot) {
-        let _ = (name, labels, snap.count, snap.sum_us);
+        if snap.buckets.iter().all(|count| *count == 0) {
+            return;
+        }
+        self.histograms.push(HistogramSample {
+            name: name.to_string(),
+            labels: labels
+                .iter()
+                .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+                .collect(),
+            snap: *snap,
+        });
+    }
+}
+
+#[cfg(feature = "monitoring")]
+fn export_attributes(
+    labels: &[(String, String)],
+) -> Vec<opentelemetry_proto::tonic::common::v1::KeyValue> {
+    labels
+        .iter()
+        .map(|(key, value)| proto_string_kv(key, value))
+        .collect()
+}
+
+#[cfg(feature = "monitoring")]
+fn proto_string_kv(key: &str, value: &str) -> opentelemetry_proto::tonic::common::v1::KeyValue {
+    use opentelemetry_proto::tonic::common::v1::any_value::Value;
+    use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue};
+    KeyValue {
+        key: key.to_string(),
+        value: Some(AnyValue {
+            value: Some(Value::StringValue(value.to_string())),
+        }),
+        key_strindex: 0,
+    }
+}
+
+#[cfg(feature = "monitoring")]
+fn unix_nanos(time: std::time::SystemTime) -> u64 {
+    time.duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
+/// 一条累计直方图. `bucket_counts` 是各桶自己的次数, 不是前缀和.
+#[cfg(feature = "monitoring")]
+pub(crate) fn histogram_data_point(
+    labels: &[(String, String)],
+    snap: &LatencySnapshot,
+    start: std::time::SystemTime,
+    now: std::time::SystemTime,
+) -> Option<opentelemetry_proto::tonic::metrics::v1::HistogramDataPoint> {
+    use aidb::statistics::COMMAND_DURATION_BOUNDS_US;
+    let bucket_counts = snap.buckets.to_vec();
+    let count: u64 = bucket_counts.iter().copied().sum();
+    if count == 0 {
+        return None;
+    }
+    let explicit_bounds = COMMAND_DURATION_BOUNDS_US
+        .iter()
+        .map(|bound_us| *bound_us as f64 / 1_000_000.0)
+        .collect();
+    Some(
+        opentelemetry_proto::tonic::metrics::v1::HistogramDataPoint {
+            attributes: export_attributes(labels),
+            start_time_unix_nano: unix_nanos(start),
+            time_unix_nano: unix_nanos(now),
+            count,
+            sum: Some(snap.sum_us as f64 / 1_000_000.0),
+            bucket_counts,
+            explicit_bounds,
+            exemplars: Vec::new(),
+            flags: 0,
+            min: None,
+            max: None,
+        },
+    )
+}
+
+#[cfg(feature = "monitoring")]
+fn histogram_request(
+    resource: &opentelemetry_sdk::Resource,
+    samples: &[HistogramSample],
+    start: std::time::SystemTime,
+    now: std::time::SystemTime,
+) -> opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest {
+    use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
+    use opentelemetry_proto::tonic::common::v1::InstrumentationScope;
+    use opentelemetry_proto::tonic::metrics::v1::metric::Data;
+    use opentelemetry_proto::tonic::metrics::v1::{
+        AggregationTemporality, Histogram, Metric, ResourceMetrics, ScopeMetrics,
+    };
+    use opentelemetry_proto::tonic::resource::v1::Resource as ProtoResource;
+    use std::collections::BTreeMap;
+
+    let mut by_name: BTreeMap<
+        &str,
+        Vec<opentelemetry_proto::tonic::metrics::v1::HistogramDataPoint>,
+    > = BTreeMap::new();
+    for sample in samples {
+        if let Some(point) = histogram_data_point(&sample.labels, &sample.snap, start, now) {
+            by_name.entry(sample.name.as_str()).or_default().push(point);
+        }
+    }
+    let metrics = by_name
+        .into_iter()
+        .map(|(name, data_points)| Metric {
+            name: name.to_string(),
+            description: String::new(),
+            unit: String::new(),
+            metadata: Vec::new(),
+            data: Some(Data::Histogram(Histogram {
+                data_points,
+                aggregation_temporality: AggregationTemporality::Cumulative as i32,
+            })),
+        })
+        .collect();
+    let attributes = resource
+        .iter()
+        .map(|(key, value)| proto_string_kv(key.as_str(), &value.to_string()))
+        .collect();
+    ExportMetricsServiceRequest {
+        resource_metrics: vec![ResourceMetrics {
+            resource: Some(ProtoResource {
+                attributes,
+                dropped_attributes_count: 0,
+                entity_refs: Vec::new(),
+            }),
+            scope_metrics: vec![ScopeMetrics {
+                scope: Some(InstrumentationScope {
+                    name: "aikv-export".to_string(),
+                    version: String::new(),
+                    attributes: Vec::new(),
+                    dropped_attributes_count: 0,
+                }),
+                metrics,
+                schema_url: String::new(),
+            }],
+            schema_url: String::new(),
+        }],
+    }
+}
+
+#[cfg(feature = "monitoring")]
+async fn export_histogram_batch(samples: &[HistogramSample]) {
+    use opentelemetry_proto::tonic::collector::metrics::v1::metrics_service_client::MetricsServiceClient;
+    use std::time::SystemTime;
+    use tonic::transport::Channel;
+
+    if samples.is_empty() {
+        return;
+    }
+    let Some((endpoint, resource)) = crate::server::otel::histogram_export_context() else {
+        return;
+    };
+    static STARTED: std::sync::OnceLock<SystemTime> = std::sync::OnceLock::new();
+    let start = *STARTED.get_or_init(SystemTime::now);
+    let request = histogram_request(resource, samples, start, SystemTime::now());
+    let channel = match Channel::from_shared(endpoint.to_string()) {
+        Ok(endpoint) => endpoint
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .connect_lazy(),
+        Err(err) => {
+            eprintln!("warn: histogram export channel failed: {err}");
+            return;
+        }
+    };
+    if let Err(err) = MetricsServiceClient::new(channel).export(request).await {
+        eprintln!("warn: histogram export failed: {err}");
     }
 }
 
@@ -868,6 +1043,35 @@ mod tests {
         push_deltas(&current, &baseline, &mut sink);
         assert_eq!(sink.adds.borrow().as_slice(), &[3]);
         assert_eq!(sink.record_calls, 0);
+    }
+
+    #[cfg(feature = "monitoring")]
+    #[test]
+    fn histogram_otlp_point_keeps_real_buckets() {
+        use super::histogram_data_point;
+        use std::time::{Duration, UNIX_EPOCH};
+        let histogram = LatencyHistogram::default();
+        histogram.record(150);
+        histogram.record(3_000);
+        let snap = histogram.snapshot();
+        let point = histogram_data_point(
+            &[
+                ("command".into(), "GET".into()),
+                ("status".into(), "ok".into()),
+            ],
+            &snap,
+            UNIX_EPOCH,
+            UNIX_EPOCH + Duration::from_secs(1),
+        )
+        .expect("point");
+        assert_eq!(point.count, 2);
+        assert!((point.sum.unwrap() - 0.00315).abs() < 1e-12);
+        assert_eq!(point.explicit_bounds.len() + 1, point.bucket_counts.len());
+        assert_eq!(point.bucket_counts.iter().sum::<u64>(), 2);
+        assert_eq!(point.bucket_counts[1], 1);
+        assert_eq!(point.bucket_counts[5], 1);
+        assert_eq!(point.explicit_bounds[0], 0.0001);
+        assert!(point.attributes.iter().any(|attr| attr.key == "command"));
     }
 
     #[test]

@@ -26,7 +26,6 @@ use parking_lot::Mutex;
 use aidb::cluster::router::key_to_slot;
 use aidb::cluster::{
     MigOp, Request, Response, ShardedStorage, SlotMigrationState, SlotStatus, ThinWriteBatch,
-    ThinWriteOp,
 };
 use aidb::error::ClusterError as AidbClusterError;
 use aidb::Checkpoint;
@@ -542,8 +541,7 @@ impl StorageAdapter for ClusterDataAdapter {
         }
 
         for (gid, (mgr, items)) in by_gid {
-            let batch: Vec<_> = items.into_iter().map(|(k, v)| (k, v)).collect();
-            submit_write_ops(&self.set_batchers, self.eager_flush, mgr, gid, batch).await?;
+            submit_write_ops(&self.set_batchers, self.eager_flush, mgr, gid, items).await?;
         }
 
         for (gid, (mgr, epoch, items)) in by_mig {
