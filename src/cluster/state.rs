@@ -250,6 +250,17 @@ impl ClusterStateManager {
 /// 全局集群状态管理器
 pub static CLUSTER_STATE_MGR: OnceLock<std::sync::Arc<ClusterStateManager>> = OnceLock::new();
 
+fn unheard_secs(group: u64) -> f64 {
+    use std::time::Instant;
+    static FIRST: std::sync::LazyLock<parking_lot::Mutex<HashMap<u64, Instant>>> =
+        std::sync::LazyLock::new(|| parking_lot::Mutex::new(HashMap::new()));
+    let mut map = FIRST.lock();
+    map.entry(group)
+        .or_insert_with(Instant::now)
+        .elapsed()
+        .as_secs_f64()
+}
+
 /// 导出时读每个本地 data group 的 OpenRaft metrics. 没有集群时是空.
 pub fn raft_export_views() -> Vec<(String, crate::server::export::RaftExportView)> {
     use crate::server::export::RaftExportView;
@@ -272,15 +283,28 @@ pub fn raft_export_views() -> Vec<(String, crate::server::export::RaftExportView
             ServerState::Learner => "learner",
             ServerState::Shutdown => "shutdown",
         };
-        let max_voter_matched = metrics
-            .replication
-            .as_ref()
-            .and_then(|map| {
-                map.values()
-                    .filter_map(|id| id.as_ref().map(|log| log.index))
-                    .max()
-            })
-            .unwrap_or(0);
+        let is_leader = metrics.state == ServerState::Leader;
+        let min_voter_matched = if is_leader {
+            metrics
+                .membership_config
+                .voter_ids()
+                .filter(|voter| *voter != metrics.id)
+                .map(|voter| {
+                    metrics
+                        .replication
+                        .as_ref()
+                        .and_then(|map| map.get(&voter))
+                        .and_then(|id| id.as_ref().map(|log| log.index))
+                        .unwrap_or(0)
+                })
+                .min()
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        let heard = aidb::cluster::contact::leader_contact_age_secs(*gid);
+        let leader_contact_age_secs =
+            crate::server::export::contact_age_for_export(is_leader, heard, unheard_secs(*gid));
         out.push((
             gid.to_string(),
             RaftExportView {
@@ -295,9 +319,9 @@ pub fn raft_export_views() -> Vec<(String, crate::server::export::RaftExportView
                     .map(|id| id.index)
                     .unwrap_or(0),
                 last_log_index: metrics.last_log_index.unwrap_or(0),
-                max_voter_matched,
-                is_leader: metrics.state == ServerState::Leader,
-                leader_contact_age_secs: 0.0,
+                min_voter_matched,
+                is_leader,
+                leader_contact_age_secs,
                 role,
             },
         ));

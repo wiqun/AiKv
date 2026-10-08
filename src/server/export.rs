@@ -508,10 +508,19 @@ pub struct RaftExportView {
     pub commit_index: u64,
     pub applied_index: u64,
     pub last_log_index: u64,
-    pub max_voter_matched: u64,
+    pub min_voter_matched: u64,
     pub is_leader: bool,
     pub leader_contact_age_secs: f64,
     pub role: &'static str,
+}
+
+/// leader 的接触年龄是 0. follower 用已经听到的年龄, 没听到过就用调用方给的未接触秒数.
+pub fn contact_age_for_export(is_leader: bool, heard: Option<f64>, unheard_secs: f64) -> f64 {
+    if is_leader {
+        0.0
+    } else {
+        heard.unwrap_or(unheard_secs)
+    }
 }
 
 /// 导出时用这份视图算滞后. 不在请求路径上做减法.
@@ -524,7 +533,7 @@ pub fn raft_samples(group: &str, view: &RaftExportView) -> ExportSnapshot {
         value: view.commit_index.saturating_sub(view.applied_index) as f64,
     });
     let replication = if view.is_leader {
-        view.last_log_index.saturating_sub(view.max_voter_matched)
+        view.last_log_index.saturating_sub(view.min_voter_matched)
     } else {
         0
     };
@@ -829,13 +838,21 @@ mod tests {
     }
 
     #[test]
+    fn contact_age_for_export_is_zero_on_the_leader() {
+        use super::contact_age_for_export;
+        assert_eq!(contact_age_for_export(true, Some(4.0), 9.0), 0.0);
+        assert_eq!(contact_age_for_export(false, None, 9.0), 9.0);
+        assert_eq!(contact_age_for_export(false, Some(2.5), 9.0), 2.5);
+    }
+
+    #[test]
     fn raft_lag_uses_the_view() {
         use super::{raft_samples, RaftExportView};
         let leader = RaftExportView {
             commit_index: 10,
             applied_index: 7,
             last_log_index: 10,
-            max_voter_matched: 6,
+            min_voter_matched: 6,
             is_leader: true,
             leader_contact_age_secs: 4.0,
             role: "leader",
@@ -923,7 +940,7 @@ mod tests {
             commit_index: 10,
             applied_index: 7,
             last_log_index: 10,
-            max_voter_matched: 6,
+            min_voter_matched: 6,
             is_leader: true,
             leader_contact_age_secs: 4.0,
             role: "leader",
