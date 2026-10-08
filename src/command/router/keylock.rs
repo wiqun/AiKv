@@ -1,4 +1,4 @@
-//! 分桶 KeyLock 与多 key 字典序加锁.
+//! 分桶 KeyLock. 多 key 按桶号加锁, 同一个桶只锁一次.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -24,12 +24,25 @@ impl KeyLock {
         }
     }
 
+    fn bucket(&self, key: &[u8]) -> usize {
+        hash_key(key) % self.locks.len()
+    }
+
+    fn sort_keys_by_bucket(&self, keys: &mut Vec<&[u8]>) {
+        keys.sort_by(|left, right| {
+            self.bucket(left)
+                .cmp(&self.bucket(right))
+                .then(left.cmp(right))
+        });
+        keys.dedup_by(|left, right| self.bucket(left) == self.bucket(right));
+    }
+
     pub async fn lock(&self, key: &[u8]) -> tokio::sync::MutexGuard<'_, ()> {
-        let idx = hash_key(key) % self.locks.len();
+        let idx = self.bucket(key);
         self.locks[idx].lock().await
     }
 
-    /// 按 key 字节序加锁; 同一 key 只锁一次 (避免 Mutex 重入死锁)
+    /// 按桶号加锁. 同一个桶只锁一次.
     pub async fn lock_two(
         &self,
         a: &[u8],
@@ -38,10 +51,10 @@ impl KeyLock {
         tokio::sync::MutexGuard<'_, ()>,
         Option<tokio::sync::MutexGuard<'_, ()>>,
     ) {
-        if a == b {
+        if a == b || self.bucket(a) == self.bucket(b) {
             return (self.lock(a).await, None);
         }
-        if a < b {
+        if self.bucket(a) < self.bucket(b) {
             let ga = self.lock(a).await;
             let gb = self.lock(b).await;
             (ga, Some(gb))
@@ -52,11 +65,10 @@ impl KeyLock {
         }
     }
 
-    /// 多 key 字典序加锁 (去重); Drop 时逆序释放
+    /// 多 key 按桶号加锁. 同一个桶只锁一次. Drop 时逆序释放.
     pub async fn lock_keys_sorted<'a>(&'a self, keys: &[&[u8]]) -> KeyLocksGuard<'a> {
         let mut unique: Vec<&[u8]> = keys.to_vec();
-        unique.sort();
-        unique.dedup();
+        self.sort_keys_by_bucket(&mut unique);
         let mut guards = Vec::with_capacity(unique.len());
         for k in unique {
             guards.push(self.lock(k).await);
@@ -64,15 +76,14 @@ impl KeyLock {
         KeyLocksGuard { locks: guards }
     }
 
-    /// 多 key 字典序加锁, 带总超时; 超时或部分失败时已持有锁随 guard drop 释放.
+    /// 多 key 按桶号加锁, 带总超时. 超时或部分失败时已持有锁随 guard drop 释放.
     pub async fn lock_keys_sorted_with_timeout<'a>(
         &'a self,
         keys: &[&[u8]],
         timeout: Duration,
     ) -> Result<KeyLocksGuard<'a>> {
         let mut unique: Vec<&[u8]> = keys.to_vec();
-        unique.sort();
-        unique.dedup();
+        self.sort_keys_by_bucket(&mut unique);
         if unique.is_empty() {
             return Ok(KeyLocksGuard { locks: Vec::new() });
         }
@@ -112,4 +123,21 @@ fn hash_key(key: &[u8]) -> usize {
     let mut h = DefaultHasher::new();
     key.hash(&mut h);
     h.finish() as usize
+}
+
+#[cfg(test)]
+mod tests {
+    use super::KeyLock;
+
+    #[tokio::test]
+    async fn one_bucket_locks_two_keys_without_waiting() {
+        let lock = KeyLock::new(1);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            lock.lock_two(b"a", b"b"),
+        )
+        .await;
+        let (_first, second) = result.expect("same bucket must not deadlock");
+        assert!(second.is_none());
+    }
 }
