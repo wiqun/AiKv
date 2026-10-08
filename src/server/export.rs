@@ -888,6 +888,18 @@ mod tests {
     }
 
     #[test]
+    fn redirect_counter_does_not_invent_a_command() {
+        use crate::server::metrics::{RedirectKind, ServerMetrics};
+        let metrics = ServerMetrics::default();
+        metrics.on_cluster_redirect("moved");
+        assert_eq!(metrics.redirect_count(RedirectKind::Moved), 1);
+        assert!(metrics
+            .command_counter_rows()
+            .iter()
+            .all(|(name, _, _)| name != "CLUSTER.REDIRECT.MOVED"));
+    }
+
+    #[test]
     fn redirect_ignores_gossip() {
         use crate::server::metrics::{RedirectKind, ServerMetrics};
         let metrics = ServerMetrics::default();

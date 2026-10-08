@@ -679,10 +679,8 @@ impl ServerMetrics {
         match redirect_type {
             "moved" => self.on_redirect(RedirectKind::Moved),
             "ask" => self.on_redirect(RedirectKind::Ask),
-            _ => return,
+            _ => {}
         }
-        let key = format!("CLUSTER.redirect.{}", redirect_type);
-        self.on_command(&key, true);
     }
 
     pub fn on_redirect(&self, kind: RedirectKind) {

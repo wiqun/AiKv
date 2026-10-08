@@ -25,8 +25,6 @@ use opentelemetry::KeyValue;
 mod helpers;
 pub mod testutil;
 
-#[cfg(feature = "cluster")]
-use self::helpers::cluster_redirect_type_from_cmd;
 use self::helpers::{counter_delta, updown_delta};
 
 const CMD_DURATION_BUCKETS: [f64; 14] = [
@@ -60,8 +58,6 @@ pub(crate) struct SyncSnapshot {
     commands_usec: HashMap<String, u64>,
     commands_slowlog: HashMap<String, u64>,
     json_commands: HashMap<String, u64>,
-    #[cfg(feature = "cluster")]
-    cluster_redirects: HashMap<String, u64>,
 }
 
 /// Gauge 类指标快照 (Observable 回调读取).
@@ -590,23 +586,6 @@ impl OtelMetrics {
                     );
                 }
                 snap.json_commands.insert(json_name, current);
-            }
-
-            #[cfg(feature = "cluster")]
-            if let Some(redirect_type) = cluster_redirect_type_from_cmd(&cmd) {
-                let prev = snap
-                    .cluster_redirects
-                    .get(&redirect_type)
-                    .copied()
-                    .unwrap_or(0);
-                let delta = totals.ok.saturating_sub(prev);
-                if delta > 0 {
-                    self.cluster_redirects_total.add(
-                        delta,
-                        &[KeyValue::new(ATTR_REDIRECT_TYPE, redirect_type.clone())],
-                    );
-                }
-                snap.cluster_redirects.insert(redirect_type, totals.ok);
             }
         }
     }
