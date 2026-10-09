@@ -37,7 +37,8 @@ use crate::storage::memory::{glob_match, glob_range_prefix};
 use crate::storage::observation::{PointReadCounter, StorageObservation};
 use crate::storage::types::{
     now_ms, CollectionKind, ExpiresCounters, KeyspaceStats, KvStorage, ScanResult,
-    StorageEngineKind, StoredValue, ValueType, WriteOp, DB_COUNT, TTL_NO_EXPIRY, WRONGTYPE,
+    StorageEngineKind, StoredBatchOp, StoredValue, ValueType, WriteOp, DB_COUNT, TTL_NO_EXPIRY,
+    WRONGTYPE,
 };
 use crate::storage::watch_registry::WatchRegistry;
 use crate::storage::watch_version::{
@@ -916,6 +917,53 @@ impl KvStorage for KvStorageAdapter {
         self.storage.put_many(ops).await?;
         if value.expires_at.is_some() {
             self.expires.on_ttl_write(db);
+        }
+        Ok(())
+    }
+
+    async fn apply_stored_batch(
+        &self,
+        db: usize,
+        ops: Vec<(Vec<u8>, StoredBatchOp)>,
+    ) -> Result<()> {
+        self.check_db(db)?;
+        let mut batch = Vec::with_capacity(ops.len());
+        let mut ttl_writes = 0u64;
+        let mut ttl_clears = 0u64;
+        for (key, value) in ops {
+            match value {
+                StoredBatchOp::Delete { had_ttl } => {
+                    if had_ttl {
+                        ttl_clears += 1;
+                    }
+                    batch.push(AdapterWriteOp::Delete {
+                        key: Self::encode(db, &key),
+                    });
+                }
+                StoredBatchOp::Put(stored) => {
+                    if stored.expires_at.is_some() {
+                        ttl_writes += 1;
+                    }
+                    let bytes = Self::serialize(&stored)?;
+                    batch.push(AdapterWriteOp::Put {
+                        key: Self::encode(db, &key),
+                        value: bytes,
+                    });
+                }
+            }
+            if let Some((mk, mv)) = self.next_watch_meta_put(db, &key).await? {
+                batch.push(AdapterWriteOp::Put { key: mk, value: mv });
+            }
+        }
+        if batch.is_empty() {
+            return Ok(());
+        }
+        self.storage.apply_writes(batch).await?;
+        for _ in 0..ttl_writes {
+            self.expires.on_ttl_write(db);
+        }
+        if ttl_clears > 0 {
+            self.expires.on_ttl_clear_n(db, ttl_clears);
         }
         Ok(())
     }

@@ -13,9 +13,10 @@
 //!     │    └─ buffer_len + n > max_buffer_size → break (静默断连, 不写 ERR)
 //!     ├─ parser.feed(&buf[..n])
 //!     └─ 内层循环 (pipeline):
-//!          parse_frame
-//!            ├─ Ok(Some) → process_value → queue_response → (批末或立即命令) flush
-//!            ├─ Ok(None) → break 内层 → flush_responses → 等更多数据
+//!          先把缓冲区里已经完整的帧都解析出来
+//!            ├─ 相邻 EVAL/EVALSHA 且声明 key 相同 → 一次提交，按原顺序回包
+//!            ├─ 其它命令 → process_value
+//!            ├─ Ok(None) → flush_responses → 等更多数据
 //!            ├─ Err fatal (is_fatal_protocol) → best-effort flush → return Err (断连)
 //!            └─ Err recoverable → queue_error → 继续 (同批末 flush)
 //!   }
@@ -31,8 +32,8 @@
 //! # Invariant
 //!
 //! - 每连接一 task: `tokio::spawn(Connection::handle)`; 连接状态不跨连接共享.
-//! - Pipeline 内层循环: 单次 `read` 后 `feed`, 然后循环 `parse_frame → process_value`
-//!   直到 `Ok(None)`, 批末统一 `flush_responses` (与 `protocol/parser.rs` 单帧语义一致).
+//! - Pipeline 内层循环: 单次 `read` 后 `feed`, 把已经完整的帧解析出来再执行。
+//!   相邻且声明 key 相同的 EVAL/EVALSHA 合成一次提交。批末统一 `flush_responses`.
 //! - Buffer 超限断连: `buffer_len + n > max_buffer_size()` 时直接 break, 不写 ERR.
 //! - Fatal vs recoverable: `is_fatal_protocol` (depth / too large / buffer size /
 //!   line too long) → 断连; 其它 `Protocol` → `queue_error` 后继续.
@@ -42,7 +43,7 @@
 //! - Router 懒加载: `ServerSharedState::router()` 经 `OnceLock` 首次调用时建
 //!   `CommandRouter`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -257,43 +258,41 @@ impl Connection {
             self.parser.feed(&buf[..n]);
 
             loop {
-                match self.parse_frame().await {
-                    Ok(Some(value)) => {
-                        let is_immediate_flush = should_flush_immediately(&value);
-                        // 阻塞命令 await 前必须先刷出同批已排队响应 (Redis 语义)
-                        if is_blocking_command(&value) {
-                            self.flush_responses().await?;
-                        }
-                        if let Err(e) = self.process_value(value).await {
-                            // best-effort: 同批已入队响应尽量先写出; 保留原错误, 忽略 flush 失败
+                let mut frames = Vec::new();
+                let mut recoverable = None;
+                loop {
+                    match self.parse_frame().await {
+                        Ok(Some(value)) => frames.push(value),
+                        Ok(None) => break,
+                        Err(e) if is_fatal_protocol(&e) => {
+                            if let Err(err) = self.dispatch_frames(frames).await {
+                                let _ = self.flush_responses().await;
+                                return Err(err);
+                            }
                             let _ = self.flush_responses().await;
                             return Err(e);
                         }
-                        self.last_active = Instant::now();
-                        if is_immediate_flush || self.quit {
-                            self.flush_responses().await?;
-                            if self.quit {
-                                break;
-                            }
+                        Err(e) => {
+                            recoverable = Some(e);
+                            break;
                         }
-                        if self.mode == ConnectionMode::Monitor {
-                            self.flush_responses().await?;
-                            self.run_monitor(&mut buf).await?;
-                            return Ok(());
-                        }
-                    }
-                    Ok(None) => break,
-                    Err(e) if is_fatal_protocol(&e) => {
-                        // best-effort: 保留致命协议错误, 忽略 flush 自身 IO 失败
-                        let _ = self.flush_responses().await;
-                        return Err(e);
-                    }
-                    Err(e) => {
-                        self.write_error(&e).await?;
                     }
                 }
+                if let Err(e) = self.dispatch_frames(frames).await {
+                    let _ = self.flush_responses().await;
+                    return Err(e);
+                }
+                if let Some(error) = recoverable {
+                    self.write_error(&error).await?;
+                    continue;
+                }
+                break;
             }
             self.flush_responses().await?;
+            if self.mode == ConnectionMode::Monitor {
+                self.run_monitor(&mut buf).await?;
+                return Ok(());
+            }
         }
         Ok(())
     }
@@ -315,6 +314,90 @@ impl Connection {
             tracing::debug!(frame_size, "kv.parse.complete");
         }
         result
+    }
+
+    async fn dispatch_frames(&mut self, frames: Vec<RespValue>) -> Result<()> {
+        let mut frames: VecDeque<RespValue> = frames.into();
+        while let Some(value) = frames.pop_front() {
+            if self.quit || self.mode == ConnectionMode::Monitor {
+                break;
+            }
+            self.last_active = Instant::now();
+            if self.can_batch_script(&value) {
+                let mut calls = vec![script_call(&value).expect("script frame")];
+                while frames
+                    .front()
+                    .is_some_and(|frame| self.can_batch_script(frame))
+                {
+                    let frame = frames.pop_front().expect("peeked frame");
+                    calls.push(script_call(&frame).expect("script frame"));
+                }
+                self.process_script_burst(calls).await?;
+                continue;
+            }
+            let is_immediate_flush = should_flush_immediately(&value);
+            if is_blocking_command(&value) {
+                self.flush_responses().await?;
+            }
+            self.process_value(value).await?;
+            if is_immediate_flush || self.quit {
+                self.flush_responses().await?;
+            }
+        }
+        Ok(())
+    }
+
+    fn can_batch_script(&self, frame: &RespValue) -> bool {
+        if self.tx_state.in_multi || self.mode == ConnectionMode::Monitor {
+            return false;
+        }
+        script_call(frame).is_some()
+    }
+
+    async fn process_script_burst(&mut self, calls: Vec<(String, Vec<Bytes>)>) -> Result<()> {
+        for (cmd, args) in &calls {
+            if self.mode != ConnectionMode::Monitor {
+                self.broadcast_monitor(cmd, args);
+            }
+        }
+        let started = Instant::now();
+        let results = self
+            .state
+            .router()
+            .execute_script_burst_with_client(
+                calls.clone(),
+                &mut self.current_db,
+                Some(self.client_id),
+                Some(self.remote),
+                self.protocol_version,
+                #[cfg(feature = "cluster")]
+                Some(&self.cluster_state),
+            )
+            .await;
+        #[cfg(feature = "cluster")]
+        self.cluster_state.reset_asking();
+        for ((cmd, args), result) in calls.into_iter().zip(results) {
+            let track = should_track_observability(&cmd);
+            let arg_strings = if track {
+                args.iter()
+                    .map(|arg| String::from_utf8_lossy(arg).into_owned())
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            self.finish_immediate_command(
+                &cmd,
+                &args,
+                arg_strings,
+                track.then_some(started),
+                result,
+            )
+            .await?;
+            if self.quit {
+                break;
+            }
+        }
+        Ok(())
     }
 
     async fn process_value(&mut self, value: RespValue) -> Result<()> {
@@ -686,6 +769,25 @@ fn hello_map(client_id: usize, proto: ProtocolVersion) -> RespValue {
             RespValue::BulkString(Some(Bytes::from(role))),
         ])),
     }
+}
+
+fn script_call(frame: &RespValue) -> Option<(String, Vec<Bytes>)> {
+    let RespValue::Array(Some(items)) = frame else {
+        return None;
+    };
+    if items.is_empty() {
+        return None;
+    }
+    let cmd = extract_bulk(items.first()?)?;
+    let name = String::from_utf8_lossy(&cmd).to_ascii_uppercase();
+    if name != "EVAL" && name != "EVALSHA" {
+        return None;
+    }
+    let mut args = Vec::with_capacity(items.len() - 1);
+    for item in &items[1..] {
+        args.push(extract_bulk(item)?);
+    }
+    Some((name, args))
 }
 
 fn extract_bulk(value: &RespValue) -> Option<Bytes> {

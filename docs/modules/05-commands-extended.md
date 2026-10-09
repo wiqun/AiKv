@@ -46,7 +46,7 @@ description: AiKv 扩展 Redis 命令 — JSON/JSONPath 引擎、Lua EVAL/SCRIPT
   - 采用 `mlua` 运行独立 Lua 5.4 虚拟机, 裁剪 `os`, `io`, `debug` 等不安全库;
   - `EVAL` 执行前必须提取所有参数 Key, 并调用 `KeyLock::lock_keys_sorted_with_timeout(keys, 30s)` 获取锁;
   - 脚本可以访问未写进 KEYS 的 key。集群构建下, 这些 key 必须与第一把声明 key 同 slot; 没有声明 key 时, 以脚本里第一次访问的 key 为槽位锚点;
-  - `redis.call` 写操作收集在 `ScriptTransaction` 的 `WriteBatch` 中, 脚本成功时原子提交, 抛出异常或超时时丢弃修改实现回滚.
+  - `redis.call` 写操作收集在 `ScriptTransaction` 的 `WriteBatch` 中. 脚本成功时一次 `apply_writes` 提交; 集群下由凑批器按最多 512 笔拆成若干次 Raft. 抛出异常或超时时丢弃修改实现回滚. 声明 key 完全相同的排队脚本可以合成一次 `apply_writes`, 客户端在该次提交成功后才收到成功回复.
 - **`BlockingRegistry` 唤醒机制**:
   - 当客户端执行 `BLPOP`, `BRPOP`, `BZPOPMIN` 等命令且目标 Key 为空时, 将连接注册至 `BlockingRegistry` 对应 Key 的等待通道中, 挂起当前 Task;
   - 任何写命令 (如 `LPUSH`, `RPUSH`, `ZADD`) 成功写入后, 必须调用 `BlockingRegistry::notify_keys(&[key])` 唤醒等待队列头部的连接.

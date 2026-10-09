@@ -202,6 +202,69 @@ impl CommandRouter {
         result
     }
 
+    /// 同一条连接上已经读完的 EVAL / EVALSHA。声明 key 相同的相邻脚本一次提交。
+    pub async fn execute_script_burst(
+        &self,
+        db: usize,
+        calls: Vec<(String, Vec<Bytes>)>,
+    ) -> Vec<Result<RespValue>> {
+        self.script.eval_many(db, calls).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_script_burst_with_client(
+        &self,
+        calls: Vec<(String, Vec<Bytes>)>,
+        db: &mut usize,
+        client_id: Option<usize>,
+        client_addr: Option<SocketAddr>,
+        protocol_version: ProtocolVersion,
+        #[cfg(feature = "cluster")] conn_state: Option<
+            &crate::cluster::connection::ClusterConnectionState,
+        >,
+    ) -> Vec<Result<RespValue>> {
+        #[cfg(not(feature = "cluster"))]
+        let _ = (client_id, client_addr, protocol_version);
+        #[cfg(feature = "cluster")]
+        if let Some(state) = conn_state {
+            let mut local = true;
+            for (cmd, args) in &calls {
+                if self.cluster_route(cmd, args, state).await.is_some() {
+                    local = false;
+                    break;
+                }
+            }
+            if !local {
+                let mut out = Vec::with_capacity(calls.len());
+                for (cmd, args) in &calls {
+                    out.push(
+                        self.execute_with_client(
+                            cmd,
+                            args,
+                            db,
+                            client_id,
+                            client_addr,
+                            protocol_version,
+                            Some(state),
+                        )
+                        .await,
+                    );
+                }
+                return out;
+            }
+        }
+        let names: Vec<String> = calls.iter().map(|(cmd, _)| cmd.clone()).collect();
+        let started = std::time::Instant::now();
+        let results = self.script.eval_many(*db, calls).await;
+        let duration_us = started.elapsed().as_micros() as u64;
+        for (cmd, result) in names.iter().zip(&results) {
+            record_command_outcome(&self.metrics, cmd, result, duration_us);
+            #[cfg(feature = "monitoring")]
+            record_command_span_status(result);
+        }
+        results
+    }
+
     /// Cluster routing check: returns Some(response) if the request should be
     /// redirected (MOVED/ASK) or rejected (CROSSSLOT/CLUSTERDOWN).
     #[cfg(feature = "cluster")]

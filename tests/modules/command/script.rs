@@ -18,6 +18,38 @@ async fn test_script_eval_basic() {
 }
 
 #[tokio::test]
+async fn test_script_globals_do_not_leak() {
+    let r = router();
+    let mut db = 0;
+    r.execute(
+        "EVAL",
+        &[b("_G.leaked = KEYS[1]"), b("1"), b("secret")],
+        &mut db,
+    )
+    .await
+    .unwrap();
+    let resp = r
+        .execute("EVAL", &[b("return leaked"), b("0")], &mut db)
+        .await
+        .unwrap();
+    assert_eq!(resp, RespValue::Null);
+}
+
+#[tokio::test]
+async fn test_script_load_stays_sealed_after_another_script() {
+    let r = router();
+    let mut db = 0;
+    r.execute("EVAL", &[b("return 1"), b("0")], &mut db)
+        .await
+        .unwrap();
+    let err = r
+        .execute("EVAL", &[b("return load('return 1')"), b("0")], &mut db)
+        .await
+        .unwrap_err();
+    assert_err_contains(err, "ERR");
+}
+
+#[tokio::test]
 async fn test_script_syntax_error() {
     let r = router();
     let mut db = 0;
@@ -969,4 +1001,28 @@ async fn test_script_zset_score_ranges() {
         .await
         .unwrap();
     assert_eq!(resp, RespValue::BulkString(Some(b("a:c:c:3"))));
+}
+
+#[tokio::test]
+async fn test_script_zset_repeated_add_rem_keeps_tail() {
+    let r = router();
+    let mut db = 0;
+    let script = r#"
+        for i = 1, 400 do
+            redis.call('ZADD', KEYS[1], i, 'm' .. i)
+        end
+        for i = 1, 399 do
+            redis.call('ZREM', KEYS[1], 'm' .. i)
+        end
+        local card = redis.call('ZCARD', KEYS[1])
+        local score = redis.call('ZSCORE', KEYS[1], 'm400')
+        redis.call('ZREM', KEYS[1], 'm400')
+        local gone = redis.call('ZCARD', KEYS[1])
+        return card .. ':' .. score .. ':' .. gone
+    "#;
+    let resp = r
+        .execute("EVAL", &[b(script), b("1"), b("{z}:seg")], &mut db)
+        .await
+        .unwrap();
+    assert_eq!(resp, RespValue::BulkString(Some(b("1:400:0"))));
 }

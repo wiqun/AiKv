@@ -28,6 +28,18 @@ impl KeyLock {
         hash_key(key) % self.locks.len()
     }
 
+    /// 声明 key 的链身份。按桶号再按字节排序，只去掉重复 key，不去掉同桶的不同 key。
+    pub(crate) fn canonical_key_set(&self, keys: &[impl AsRef<[u8]>]) -> Vec<Vec<u8>> {
+        let mut owned: Vec<Vec<u8>> = keys.iter().map(|key| key.as_ref().to_vec()).collect();
+        owned.sort_by(|left, right| {
+            self.bucket(left)
+                .cmp(&self.bucket(right))
+                .then(left.cmp(right))
+        });
+        owned.dedup();
+        owned
+    }
+
     fn sort_keys_by_bucket(&self, keys: &mut Vec<&[u8]>) {
         keys.sort_by(|left, right| {
             self.bucket(left)

@@ -86,6 +86,16 @@ pub enum CollectionKind {
     Set = 2,
 }
 
+/// 脚本或上层一次提交里的一笔写。删除不回读存储。
+#[derive(Debug, Clone, PartialEq)]
+pub enum StoredBatchOp {
+    Put(StoredValue),
+    /// `had_ttl` 表示存储里的原值带过期时间，提交时应扣 TTL 计数。
+    Delete {
+        had_ttl: bool,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StoredValue {
     pub value: ValueType,
@@ -298,6 +308,27 @@ pub trait KvStorage: Send + Sync {
     async fn get_typed(&self, db: usize, key: &[u8]) -> Result<Option<StoredValue>>;
     async fn set_typed(&self, db: usize, key: &[u8], value: StoredValue) -> Result<()>;
 
+    /// 一次提交多笔类型化写。
+    /// 默认逐条 `set_typed` / `delete`。适配器覆盖为一次 `apply_writes`。
+    /// `Delete.had_ttl` 由调用方在已经读到该 key 时给出，适配器不再为删除回读。
+    async fn apply_stored_batch(
+        &self,
+        db: usize,
+        ops: Vec<(Vec<u8>, StoredBatchOp)>,
+    ) -> Result<()> {
+        for (key, value) in ops {
+            match value {
+                StoredBatchOp::Delete { .. } => {
+                    self.delete(db, &key).await?;
+                }
+                StoredBatchOp::Put(stored) => {
+                    self.set_typed(db, &key, stored).await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// 这次调用已经看到该逻辑 DB 上的一条 TTL 时饱和减. 盲写不要调用.
     async fn release_seen_ttl(&self, db: usize) -> Result<()> {
         let _ = db;
@@ -447,7 +478,7 @@ impl ExpiresCounters {
         if n == 0 || db >= DB_COUNT {
             return;
         }
-        let _ = self.counts[db].fetch_update(Ordering::Relaxed, Ordering::Relaxed, |curr| {
+        let _ = self.counts[db].try_update(Ordering::Relaxed, Ordering::Relaxed, |curr| {
             Some(curr.saturating_sub(n))
         });
     }

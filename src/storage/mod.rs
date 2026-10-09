@@ -27,7 +27,7 @@ pub use memory::MemoryEngine;
 pub use observation::StorageObservation;
 pub use types::{
     is_wrongtype, now_ms, CollectionKind, KeyspaceStats, KvStorage, ScanResult, StorageEngineKind,
-    StoredValue, ValueType, WriteOp, TTL_NO_EXPIRY, WRONGTYPE,
+    StoredBatchOp, StoredValue, ValueType, WriteOp, TTL_NO_EXPIRY, WRONGTYPE,
 };
 
 pub use ttl_filter::TtlExpireFilter;

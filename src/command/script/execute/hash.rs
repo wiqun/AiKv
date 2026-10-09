@@ -1,6 +1,5 @@
 //! Lua `redis.call` Hash 域 `exec_*` (HGET/HSET/HDEL/HGETALL/HMGET/HINCRBY/HEXISTS/HLEN).
-
-use std::collections::HashMap;
+//! 读借用脚本里已经装入的哈希；写在同一份缓冲上原地改。
 
 use bytes::Bytes;
 
@@ -10,7 +9,7 @@ use crate::error::Result;
 use crate::protocol::RespValue;
 use crate::storage::KvStorage;
 
-use super::{key, wrong_count};
+use super::wrong_count;
 
 pub(super) async fn exec_hget(
     storage: &dyn KvStorage,
@@ -20,15 +19,15 @@ pub(super) async fn exec_hget(
     if args.len() != 2 {
         return Err(wrong_count("HGET"));
     }
-    if let Some(stored) = txn.get_value(storage, &args[0]).await? {
-        let hash = stored.as_hash()?;
-        Ok(match hash.get(args[1].as_ref()) {
-            Some(v) => router::bulk(v.clone()),
-            None => RespValue::Null,
+    let found = txn
+        .with_hash(storage, &args[0], |hash| {
+            Ok(hash.get(args[1].as_ref()).cloned())
         })
-    } else {
-        Ok(RespValue::Null)
-    }
+        .await?;
+    Ok(match found.flatten() {
+        Some(value) => router::bulk(value),
+        None => RespValue::Null,
+    })
 }
 
 pub(super) async fn exec_hset(
@@ -39,25 +38,24 @@ pub(super) async fn exec_hset(
     if args.len() < 3 || args.len().is_multiple_of(2) {
         return Err(wrong_count("HSET"));
     }
-    let mut hash = if let Some(stored) = txn.get_value(storage, &args[0]).await? {
-        stored.as_hash()?.clone()
-    } else {
-        HashMap::new()
-    };
-    let mut added = 0i64;
-    for i in (1..args.len()).step_by(2) {
-        if hash
-            .insert(args[i].to_vec(), args[i + 1].to_vec())
-            .is_none()
-        {
-            added += 1;
-        }
-    }
-    txn.set_hash(key(&args[0]), hash);
+    let added = txn
+        .update_hash(storage, &args[0], true, false, |hash| {
+            let mut added = 0i64;
+            for i in (1..args.len()).step_by(2) {
+                if hash
+                    .insert(args[i].to_vec(), args[i + 1].to_vec())
+                    .is_none()
+                {
+                    added += 1;
+                }
+            }
+            Ok(added)
+        })
+        .await?;
     if args.len() > 3 {
         Ok(RespValue::SimpleString("OK".into()))
     } else {
-        Ok(router::integer(added))
+        Ok(router::integer(added.unwrap_or(0)))
     }
 }
 
@@ -69,16 +67,19 @@ pub(super) async fn exec_hsetnx(
     if args.len() != 3 {
         return Err(wrong_count("HSETNX"));
     }
-    let mut hash = if let Some(stored) = txn.get_value(storage, &args[0]).await? {
-        stored.as_hash()?.clone()
-    } else {
-        HashMap::new()
-    };
-    if hash.contains_key(args[1].as_ref()) {
+    let exists = txn
+        .with_hash(storage, &args[0], |hash| {
+            Ok(hash.contains_key(args[1].as_ref()))
+        })
+        .await?;
+    if exists == Some(true) {
         return Ok(router::integer(0));
     }
-    hash.insert(args[1].to_vec(), args[2].to_vec());
-    txn.set_hash(key(&args[0]), hash);
+    txn.update_hash(storage, &args[0], true, false, |hash| {
+        hash.insert(args[1].to_vec(), args[2].to_vec());
+        Ok(())
+    })
+    .await?;
     Ok(router::integer(1))
 }
 
@@ -90,22 +91,18 @@ pub(super) async fn exec_hdel(
     if args.len() < 2 {
         return Err(wrong_count("HDEL"));
     }
-    let Some(stored) = txn.get_value(storage, &args[0]).await? else {
-        return Ok(router::integer(0));
-    };
-    let mut hash = stored.as_hash()?.clone();
-    let mut count = 0i64;
-    for f in &args[1..] {
-        if hash.remove(f.as_ref()).is_some() {
-            count += 1;
-        }
-    }
-    if hash.is_empty() {
-        txn.delete(key(&args[0]));
-    } else {
-        txn.set_hash(key(&args[0]), hash);
-    }
-    Ok(router::integer(count))
+    let count = txn
+        .update_hash(storage, &args[0], false, true, |hash| {
+            let mut count = 0i64;
+            for field in &args[1..] {
+                if hash.remove(field.as_ref()).is_some() {
+                    count += 1;
+                }
+            }
+            Ok(count)
+        })
+        .await?;
+    Ok(router::integer(count.unwrap_or(0)))
 }
 
 pub(super) async fn exec_hgetall(
@@ -116,16 +113,17 @@ pub(super) async fn exec_hgetall(
     if args.len() != 1 {
         return Err(wrong_count("HGETALL"));
     }
-    let Some(stored) = txn.get_value(storage, &args[0]).await? else {
-        return Ok(RespValue::Array(Some(Vec::new())));
-    };
-    let hash = stored.as_hash()?;
-    let mut out = Vec::new();
-    for (f, v) in hash {
-        out.push(router::bulk(f.clone()));
-        out.push(router::bulk(v.clone()));
-    }
-    Ok(RespValue::Array(Some(out)))
+    let rows = txn
+        .with_hash(storage, &args[0], |hash| {
+            let mut out = Vec::with_capacity(hash.len() * 2);
+            for (field, value) in hash {
+                out.push(router::bulk(field.clone()));
+                out.push(router::bulk(value.clone()));
+            }
+            Ok(out)
+        })
+        .await?;
+    Ok(RespValue::Array(Some(rows.unwrap_or_default())))
 }
 
 pub(super) async fn exec_hmget(
@@ -136,23 +134,21 @@ pub(super) async fn exec_hmget(
     if args.len() < 2 {
         return Err(wrong_count("HMGET"));
     }
-    let hash = if let Some(stored) = txn.get_value(storage, &args[0]).await? {
-        Some(stored.as_hash()?.clone())
-    } else {
-        None
-    };
-    let out: Vec<RespValue> = args[1..]
-        .iter()
-        .map(|f| {
-            if let Some(h) = &hash {
-                if let Some(v) = h.get(f.as_ref()) {
-                    return router::bulk(v.clone());
-                }
-            }
-            RespValue::Null
+    let out = txn
+        .with_hash(storage, &args[0], |hash| {
+            Ok(args[1..]
+                .iter()
+                .map(|field| match hash.get(field.as_ref()) {
+                    Some(value) => router::bulk(value.clone()),
+                    None => RespValue::Null,
+                })
+                .collect::<Vec<_>>())
         })
-        .collect();
-    Ok(RespValue::Array(Some(out)))
+        .await?;
+    Ok(RespValue::Array(Some(match out {
+        Some(rows) => rows,
+        None => args[1..].iter().map(|_| RespValue::Null).collect(),
+    })))
 }
 
 pub(super) async fn exec_hincrby(
@@ -164,20 +160,19 @@ pub(super) async fn exec_hincrby(
         return Err(wrong_count("HINCRBY"));
     }
     let inc = parse_i64_arg(&args[2], "increment")?;
-    let mut hash = if let Some(stored) = txn.get_value(storage, &args[0]).await? {
-        stored.as_hash()?.clone()
-    } else {
-        HashMap::new()
-    };
-    let cur = hash
-        .get(args[1].as_ref())
-        .map(|v| parse_i64_arg(&Bytes::from(v.clone()), "field value"))
-        .transpose()?
-        .unwrap_or(0);
-    let new_val = cur.saturating_add(inc);
-    hash.insert(args[1].to_vec(), new_val.to_string().into_bytes());
-    txn.set_hash(key(&args[0]), hash);
-    Ok(router::integer(new_val))
+    let new_val = txn
+        .update_hash(storage, &args[0], true, false, |hash| {
+            let cur = hash
+                .get(args[1].as_ref())
+                .map(|value| parse_i64_arg(&Bytes::from(value.clone()), "field value"))
+                .transpose()?
+                .unwrap_or(0);
+            let new_val = cur.saturating_add(inc);
+            hash.insert(args[1].to_vec(), new_val.to_string().into_bytes());
+            Ok(new_val)
+        })
+        .await?;
+    Ok(router::integer(new_val.unwrap_or(0)))
 }
 
 pub(super) async fn exec_hexists(
@@ -188,12 +183,12 @@ pub(super) async fn exec_hexists(
     if args.len() != 2 {
         return Err(wrong_count("HEXISTS"));
     }
-    let exists = if let Some(stored) = txn.get_value(storage, &args[0]).await? {
-        stored.as_hash()?.contains_key(args[1].as_ref())
-    } else {
-        false
-    };
-    Ok(router::integer(i64::from(exists)))
+    let exists = txn
+        .with_hash(storage, &args[0], |hash| {
+            Ok(hash.contains_key(args[1].as_ref()))
+        })
+        .await?;
+    Ok(router::integer(i64::from(exists == Some(true))))
 }
 
 pub(super) async fn exec_hlen(
@@ -204,10 +199,8 @@ pub(super) async fn exec_hlen(
     if args.len() != 1 {
         return Err(wrong_count("HLEN"));
     }
-    let len = if let Some(stored) = txn.get_value(storage, &args[0]).await? {
-        stored.as_hash()?.len()
-    } else {
-        0
-    };
-    Ok(router::integer(len as i64))
+    let len = txn
+        .with_hash(storage, &args[0], |hash| Ok(hash.len() as i64))
+        .await?;
+    Ok(router::integer(len.unwrap_or(0)))
 }

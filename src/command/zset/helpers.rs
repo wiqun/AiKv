@@ -14,6 +14,12 @@ pub(crate) struct ScoreBound {
     inclusive: bool,
 }
 
+impl ScoreBound {
+    pub(crate) fn endpoint(&self) -> (f64, bool) {
+        (self.value, self.inclusive)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum LexBound {
     NegInf,
@@ -52,24 +58,6 @@ pub(crate) fn apply_limit<T: Clone>(items: &mut Vec<T>, offset: usize, count: Op
             *items = items[offset..end].to_vec();
         }
     }
-}
-
-pub(crate) fn sorted_by_score(zset: &BTreeMap<Vec<u8>, f64>, reverse: bool) -> Vec<(Vec<u8>, f64)> {
-    let mut v: Vec<(Vec<u8>, f64)> = zset.iter().map(|(k, s)| (k.clone(), *s)).collect();
-    if reverse {
-        v.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| b.0.cmp(&a.0))
-        });
-    } else {
-        v.sort_by(|a, b| {
-            a.1.partial_cmp(&b.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.0.cmp(&b.0))
-        });
-    }
-    v
 }
 
 pub(crate) fn normalize_range(len: usize, start: i64, stop: i64) -> (usize, usize) {

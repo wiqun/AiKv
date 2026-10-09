@@ -187,6 +187,31 @@ async fn test_tcp_pipeline_commands() {
 }
 
 #[tokio::test]
+async fn test_tcp_pipeline_same_key_eval() {
+    let (addr, _handle) = start_server().await;
+    let mut stream = connect(addr).await;
+    let mut payload = String::new();
+    for script in [
+        "redis.call('SET', KEYS[1], 'first'); return redis.call('GET', KEYS[1])",
+        "local v = redis.call('GET', KEYS[1]); redis.call('SET', KEYS[1], 'second'); return v",
+    ] {
+        payload.push_str(&format!(
+            "*4\r\n$4\r\nEVAL\r\n${}\r\n{script}\r\n$1\r\n1\r\n$4\r\ndata\r\n",
+            script.len()
+        ));
+    }
+    stream.write_all(payload.as_bytes()).await.unwrap();
+    let resp = read_all_available(&mut stream).await;
+    let expected = b"$5\r\nfirst\r\n$5\r\nfirst\r\n";
+    assert!(
+        resp.windows(expected.len())
+            .any(|window| window == expected),
+        "resp {}",
+        String::from_utf8_lossy(&resp)
+    );
+}
+
+#[tokio::test]
 async fn test_tcp_pipeline() {
     let (addr, _handle) = start_server().await;
     let mut stream = connect(addr).await;

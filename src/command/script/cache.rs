@@ -17,6 +17,7 @@ pub struct ScriptCache {
 struct ScriptCacheInner {
     map: HashMap<String, CachedScript>,
     order: VecDeque<String>,
+    generation: u64,
 }
 
 impl Default for ScriptCache {
@@ -25,6 +26,7 @@ impl Default for ScriptCache {
             inner: RwLock::new(ScriptCacheInner {
                 map: HashMap::new(),
                 order: VecDeque::new(),
+                generation: 0,
             }),
         }
     }
@@ -41,14 +43,20 @@ impl ScriptCache {
         inner.map.get(sha1).map(|c| c.script.clone())
     }
 
+    pub fn generation(&self) -> u64 {
+        self.inner.read().generation
+    }
+
     pub fn insert(&self, sha1: String, script: String) {
         let mut inner = self.inner.write();
         if inner.map.contains_key(&sha1) {
             inner.order.retain(|s| s != &sha1);
+            inner.generation = inner.generation.wrapping_add(1);
         } else if inner.map.len() >= MAX_SCRIPTS {
             if let Some(old) = inner.order.pop_front() {
                 inner.map.remove(&old);
             }
+            inner.generation = inner.generation.wrapping_add(1);
         }
         inner.order.push_back(sha1.clone());
         inner.map.insert(sha1, CachedScript { script });
@@ -62,5 +70,6 @@ impl ScriptCache {
         let mut inner = self.inner.write();
         inner.map.clear();
         inner.order.clear();
+        inner.generation = inner.generation.wrapping_add(1);
     }
 }

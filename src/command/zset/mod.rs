@@ -2,20 +2,21 @@
 //! ZCOUNT/ZLEXCOUNT/ZPOPMIN/ZPOPMAX/BZPOPMIN/BZPOPMAX/ZINCRBY/ZSCAN, 以及聚合
 //! ZINTER/ZUNION/ZDIFF (含 *STORE 变体).
 //!
-//! 子模块: `helpers` (范围边界 / LIMIT / 聚合解析).
+//! 子模块: `helpers` (范围边界 / LIMIT / 聚合解析), `index` (内存分数序).
 //!
 //! # 存储表示
 //!
 //! ```text
 //! ValueType::ZSet(BTreeMap<Vec<u8>, f64>)
 //!   member → score (f64); BTreeMap 按 member 字节序排列
-//!   经 get_typed / set_typed 整体读写; 无独立 score 索引
+//!   经 get_typed / set_typed 整体读写
+//!   分数序只在内存中的 ScoreIndex，不进入磁盘
 //! ```
 //!
 //! # 关键点
 //!
-//! - 有序访问: 按 score 排序用 `sorted_by_score` 临时排序; 按 lex 利用 BTreeMap 天然字典序
-//!   (ZRANGEBYLEX/ZLEXCOUNT); rank 为排序后下标 (ZRANK/ZREVRANK).
+//! - 有序访问: 按 score 走内存 `ScoreIndex`，范围在 LIMIT 处停止; 按 lex 利用
+//!   BTreeMap 天然字典序 (ZRANGEBYLEX/ZLEXCOUNT); rank 沿分数序计数 (ZRANK/ZREVRANK).
 //! - 范围边界: score 用 `ScoreBound` (`-inf`/`+inf`, `(` 开区间, 见 `score_in_range`);
 //!   lex 用 `LexBound` (`-`/`+`, `(`/`[`, 见 `lex_in_range`).
 //! - 聚合: ZINTER/ZUNION/ZDIFF 经 `parse_zset_combine_args` 解析 numkeys/WEIGHTS/AGGREGATE,
@@ -42,13 +43,15 @@ use crate::storage::memory::glob_match;
 use crate::storage::{KvStorage, StoredValue, ValueType};
 
 pub(crate) mod helpers;
+pub(crate) mod index;
 
 use self::helpers::{
     aggregate_score, apply_limit, array_of_bulk, bytes_to_str, eq_ignore_case, format_score,
     lex_in_range, members_to_resp, normalize_range, parse_i64, parse_lex_bound, parse_limit_args,
     parse_score, parse_score_bound, parse_zset_combine_args, scan_response, score_in_range,
-    sort_by_score_then_member, sorted_by_score,
+    sort_by_score_then_member,
 };
+use self::index::ScoreIndex;
 
 pub struct ZSetCommands {
     storage: Arc<dyn KvStorage>,
@@ -166,11 +169,10 @@ impl ZSetCommands {
         if !zset.contains_key(member.as_ref()) {
             return Ok(router::nil_bulk());
         }
-        let sorted = sorted_by_score(&zset, reverse);
-        let pos = sorted
-            .iter()
-            .position(|(m, _)| m.as_slice() == member.as_ref())
-            .unwrap();
+        let index = ScoreIndex::from_members(&zset);
+        let pos = index
+            .rank(member.as_ref(), reverse)
+            .expect("member present");
         Ok(router::integer(pos as i64))
     }
 
@@ -198,14 +200,14 @@ impl ZSetCommands {
         let Some(zset) = zset else {
             return Ok(RespValue::Array(Some(vec![])));
         };
-        let sorted = sorted_by_score(&zset, reverse);
-        let len = sorted.len();
+        let index = ScoreIndex::from_members(&zset);
+        let len = zset.len();
         let (start_idx, stop_idx) = normalize_range(len, start, stop);
         if start_idx > stop_idx {
             return Ok(RespValue::Array(Some(vec![])));
         }
-        let slice = &sorted[start_idx..=stop_idx];
-        Ok(members_to_resp(slice, withscores))
+        let sorted = index.collect_rank_window(start_idx, stop_idx + 1, reverse);
+        Ok(members_to_resp(&sorted, withscores))
     }
 
     pub async fn zrangebyscore(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
@@ -261,13 +263,9 @@ impl ZSetCommands {
         let Some(zset) = zset else {
             return Ok(RespValue::Array(Some(vec![])));
         };
-        let mut sorted: Vec<(Vec<u8>, f64)> = sorted_by_score(&zset, reverse)
-            .into_iter()
-            .filter(|(_, score)| score_in_range(*score, &min, &max))
-            .collect();
-        if let Some((offset, count)) = limit {
-            apply_limit(&mut sorted, offset, count);
-        }
+        let index = ScoreIndex::from_members(&zset);
+        let (offset, count) = limit.unwrap_or((0, None));
+        let sorted = index.collect_score_window(&min, &max, reverse, offset, count);
         Ok(members_to_resp(&sorted, withscores))
     }
 
@@ -359,10 +357,10 @@ impl ZSetCommands {
             return Ok(RespValue::Array(Some(vec![])));
         };
         let zset = stored.as_zset_mut()?;
-        let sorted = sorted_by_score(zset, max);
-        let n = count.min(sorted.len());
+        let n = count.min(zset.len());
+        let picked = ScoreIndex::from_members(zset).collect_extreme(n, max);
         let mut items = Vec::with_capacity(n * 2);
-        for (member, score) in sorted.into_iter().take(n) {
+        for (member, score) in picked {
             zset.remove(&member);
             items.push(router::bulk(member));
             items.push(router::bulk(format_score(score).into_bytes()));

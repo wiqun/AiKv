@@ -1045,3 +1045,118 @@ async fn test_zscan() {
     }
     assert_eq!(seen.len(), 5);
 }
+
+#[tokio::test]
+async fn test_zrangebyscore_equal_scores_and_limit() {
+    let r = router();
+    let mut db = 0;
+    r.execute(
+        "ZADD",
+        &[
+            b("z"),
+            b("1"),
+            b("c"),
+            b("1"),
+            b("a"),
+            b("1"),
+            b("b"),
+            b("2"),
+            b("d"),
+        ],
+        &mut db,
+    )
+    .await
+    .unwrap();
+    let items = members(
+        r.execute(
+            "ZRANGEBYSCORE",
+            &[b("z"), b("-inf"), b("+inf"), b("LIMIT"), b("0"), b("2")],
+            &mut db,
+        )
+        .await
+        .unwrap(),
+    );
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0], RespValue::BulkString(Some(b("a"))));
+    assert_eq!(items[1], RespValue::BulkString(Some(b("b"))));
+}
+
+#[tokio::test]
+async fn test_zrangebyscore_exclusive_and_rescore() {
+    let r = router();
+    let mut db = 0;
+    r.execute(
+        "ZADD",
+        &[b("z"), b("1"), b("a"), b("2"), b("b"), b("3"), b("c")],
+        &mut db,
+    )
+    .await
+    .unwrap();
+    let items = members(
+        r.execute(
+            "ZRANGEBYSCORE",
+            &[b("z"), b("(1"), b("3"), b("WITHSCORES")],
+            &mut db,
+        )
+        .await
+        .unwrap(),
+    );
+    assert_eq!(items.len(), 4);
+    assert_eq!(items[0], RespValue::BulkString(Some(b("b"))));
+    assert_eq!(items[2], RespValue::BulkString(Some(b("c"))));
+
+    let rev = members(
+        r.execute("ZREVRANGEBYSCORE", &[b("z"), b("3"), b("(1")], &mut db)
+            .await
+            .unwrap(),
+    );
+    assert_eq!(rev[0], RespValue::BulkString(Some(b("c"))));
+    assert_eq!(rev[1], RespValue::BulkString(Some(b("b"))));
+
+    assert_int(
+        r.execute("ZRANK", &[b("z"), b("b")], &mut db)
+            .await
+            .unwrap(),
+        1,
+    );
+    assert_int(
+        r.execute("ZREVRANK", &[b("z"), b("b")], &mut db)
+            .await
+            .unwrap(),
+        1,
+    );
+
+    r.execute("ZADD", &[b("z"), b("9"), b("b")], &mut db)
+        .await
+        .unwrap();
+    let after = members(
+        r.execute("ZRANGEBYSCORE", &[b("z"), b("2"), b("2")], &mut db)
+            .await
+            .unwrap(),
+    );
+    assert!(after.is_empty());
+    assert_int(
+        r.execute("ZRANK", &[b("z"), b("b")], &mut db)
+            .await
+            .unwrap(),
+        2,
+    );
+}
+
+#[tokio::test]
+async fn test_zset_dump_bytes_stay_member_map() {
+    use std::collections::BTreeMap;
+
+    use aikv::storage::{dump_decode, dump_encode, StoredValue};
+
+    let mut map = BTreeMap::new();
+    map.insert(b"a".to_vec(), 1.0);
+    map.insert(b"b".to_vec(), 1.0);
+    map.insert(b"c".to_vec(), 2.5);
+    let stored = StoredValue::new_zset(map.clone());
+    let bytes = dump_encode(&stored).unwrap();
+    let back = dump_decode(&bytes).unwrap();
+    assert_eq!(stored, back);
+    let again = dump_encode(&StoredValue::new_zset(map)).unwrap();
+    assert_eq!(bytes, again);
+}

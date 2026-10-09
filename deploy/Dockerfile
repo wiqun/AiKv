@@ -10,7 +10,12 @@ RUN apt-get update \
 
 WORKDIR /src/aikv
 
-COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+# rust-toolchain.toml 要求 stable. 基础镜像里的编译器版本可能更旧,
+# rustup 会因此下载一整套工具链. 这一层与源码无关, 避免每次改代码都重新下载.
+COPY rust-toolchain.toml ./
+RUN rustup show
+
+COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
