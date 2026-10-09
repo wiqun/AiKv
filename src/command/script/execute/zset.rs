@@ -6,6 +6,10 @@ use bytes::Bytes;
 
 use crate::command::router;
 use crate::command::script::transaction::{parse_f64_arg, parse_i64_arg, ScriptTransaction};
+use crate::command::zset::helpers::{
+    apply_limit, bytes_to_str, members_to_resp, parse_limit_args, parse_score_bound,
+    score_in_range, sorted_by_score,
+};
 use crate::error::Result;
 use crate::protocol::RespValue;
 use crate::storage::KvStorage;
@@ -115,8 +119,26 @@ pub(super) async fn exec_zrange(
     txn: &ScriptTransaction,
     args: &[Bytes],
 ) -> Result<RespValue> {
+    range_by_rank(storage, txn, args, false).await
+}
+
+pub(super) async fn exec_zrevrange(
+    storage: &dyn KvStorage,
+    txn: &ScriptTransaction,
+    args: &[Bytes],
+) -> Result<RespValue> {
+    range_by_rank(storage, txn, args, true).await
+}
+
+async fn range_by_rank(
+    storage: &dyn KvStorage,
+    txn: &ScriptTransaction,
+    args: &[Bytes],
+    reverse: bool,
+) -> Result<RespValue> {
+    let cmd = if reverse { "ZREVRANGE" } else { "ZRANGE" };
     if args.len() < 3 {
-        return Err(wrong_count("ZRANGE"));
+        return Err(wrong_count(cmd));
     }
     let start = parse_i64_arg(&args[1], "start")?;
     let stop = parse_i64_arg(&args[2], "stop")?;
@@ -132,6 +154,9 @@ pub(super) async fn exec_zrange(
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.0.cmp(b.0))
     });
+    if reverse {
+        sorted.reverse();
+    }
     let start_idx = (if start < 0 { len + start } else { start }).clamp(0, len) as usize;
     let stop_idx = (if stop < 0 { len + stop + 1 } else { stop + 1 }).clamp(0, len) as usize;
     if start_idx >= stop_idx {
@@ -145,6 +170,78 @@ pub(super) async fn exec_zrange(
         }
     }
     Ok(RespValue::Array(Some(out)))
+}
+
+pub(super) async fn exec_zrangebyscore(
+    storage: &dyn KvStorage,
+    txn: &ScriptTransaction,
+    args: &[Bytes],
+) -> Result<RespValue> {
+    range_by_score(storage, txn, args, false).await
+}
+
+pub(super) async fn exec_zrevrangebyscore(
+    storage: &dyn KvStorage,
+    txn: &ScriptTransaction,
+    args: &[Bytes],
+) -> Result<RespValue> {
+    range_by_score(storage, txn, args, true).await
+}
+
+async fn range_by_score(
+    storage: &dyn KvStorage,
+    txn: &ScriptTransaction,
+    args: &[Bytes],
+    reverse: bool,
+) -> Result<RespValue> {
+    let cmd = if reverse {
+        "ZREVRANGEBYSCORE"
+    } else {
+        "ZRANGEBYSCORE"
+    };
+    if args.len() < 3 {
+        return Err(wrong_count(cmd));
+    }
+    let (min, max) = if reverse {
+        (
+            parse_score_bound(bytes_to_str(&args[2])?, true)?,
+            parse_score_bound(bytes_to_str(&args[1])?, false)?,
+        )
+    } else {
+        (
+            parse_score_bound(bytes_to_str(&args[1])?, true)?,
+            parse_score_bound(bytes_to_str(&args[2])?, false)?,
+        )
+    };
+    let mut with_scores = false;
+    let mut limit = None;
+    let mut i = 3;
+    while i < args.len() {
+        if args[i].eq_ignore_ascii_case(b"WITHSCORES") {
+            with_scores = true;
+            i += 1;
+        } else if args[i].eq_ignore_ascii_case(b"LIMIT") {
+            if i + 2 >= args.len() {
+                return Err(router::wrong_args(cmd, ""));
+            }
+            limit = Some(parse_limit_args(cmd, &args[i + 1], &args[i + 2])?);
+            i += 3;
+        } else {
+            return Err(router::wrong_args(cmd, ""));
+        }
+    }
+    let Some(stored) = txn.get_value(storage, &args[0]).await? else {
+        return Ok(RespValue::Array(Some(Vec::new())));
+    };
+    let zset = stored.as_zset()?;
+    let mut sorted: Vec<(Vec<u8>, f64)> = sorted_by_score(zset, reverse)
+        .into_iter()
+        .filter(|(_, score)| score_in_range(*score, &min, &max))
+        .collect();
+    if let Some((offset, count)) = limit {
+        apply_limit(&mut sorted, offset, count);
+    }
+    Ok(members_to_resp(&sorted, with_scores))
 }
 
 pub(super) async fn exec_zcard(

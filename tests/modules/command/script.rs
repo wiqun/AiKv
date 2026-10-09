@@ -157,15 +157,39 @@ async fn test_script_redis_pcall() {
 }
 
 #[tokio::test]
-async fn test_script_keys_validation() {
+async fn test_script_constructed_key_is_allowed() {
     let r = router();
     let mut db = 0;
-    let script = r#"return redis.call('GET', 'undeclared')"#;
+    let script = r#"
+        redis.call('SET', KEYS[1] .. 'id', 'v')
+        return redis.call('GET', KEYS[1] .. 'id')
+    "#;
+    let resp = r
+        .execute("EVAL", &[b(script), b("1"), b("{tag}:")], &mut db)
+        .await
+        .unwrap();
+    assert_eq!(resp, RespValue::BulkString(Some(b("v"))));
+}
+
+#[cfg(feature = "cluster")]
+#[tokio::test]
+async fn test_script_cross_slot_rejected() {
+    use aidb::cluster::router::key_to_slot;
+    let declared = b"{slot-a}:p".as_slice();
+    let other = b"{slot-b}:p".as_slice();
+    assert_ne!(key_to_slot(declared), key_to_slot(other));
+    let r = router();
+    let mut db = 0;
+    let script = r#"return redis.call('GET', ARGV[1])"#;
     let err = r
-        .execute("EVAL", &[b(script), b("0")], &mut db)
+        .execute(
+            "EVAL",
+            &[b(script), b("1"), b("{slot-a}:p"), b("{slot-b}:p")],
+            &mut db,
+        )
         .await
         .unwrap_err();
-    assert_err_contains(err, "undeclared");
+    assert_err_contains(err, "same slot");
 }
 
 #[tokio::test]
@@ -714,14 +738,14 @@ async fn test_script_json_mget() {
     let mut db = 0;
     r.execute(
         "JSON.SET",
-        &[b("j1"), b("$"), b(r#"{"name":"Alice"}"#)],
+        &[b("{mget}:j1"), b("$"), b(r#"{"name":"Alice"}"#)],
         &mut db,
     )
     .await
     .unwrap();
     r.execute(
         "JSON.SET",
-        &[b("j2"), b("$"), b(r#"{"name":"Bob"}"#)],
+        &[b("{mget}:j2"), b("$"), b(r#"{"name":"Bob"}"#)],
         &mut db,
     )
     .await
@@ -730,7 +754,11 @@ async fn test_script_json_mget() {
     return redis.call('JSON.MGET', KEYS[1], KEYS[2], '$.name')
   "#;
     let resp = r
-        .execute("EVAL", &[b(script), b("2"), b("j1"), b("j2")], &mut db)
+        .execute(
+            "EVAL",
+            &[b(script), b("2"), b("{mget}:j1"), b("{mget}:j2")],
+            &mut db,
+        )
         .await
         .unwrap();
     let RespValue::Array(Some(items)) = resp else {
@@ -751,27 +779,31 @@ async fn test_script_json_mget() {
 async fn test_script_json_mget_keys_validation() {
     let r = router();
     let mut db = 0;
-    r.execute("JSON.SET", &[b("j1"), b("$"), b(r#"{"a":1}"#)], &mut db)
+    r.execute("JSON.SET", &[b("{t}:j1"), b("$"), b(r#"{"a":1}"#)], &mut db)
         .await
         .unwrap();
-    let script = r#"return redis.call('JSON.MGET', KEYS[1], 'undeclared', '$.a')"#;
-    let err = r
-        .execute("EVAL", &[b(script), b("1"), b("j1")], &mut db)
+    let script = r#"return redis.call('JSON.MGET', KEYS[1], '{t}:missing', '$.a')"#;
+    let resp = r
+        .execute("EVAL", &[b(script), b("1"), b("{t}:j1")], &mut db)
         .await
-        .unwrap_err();
-    assert_err_contains(err, "undeclared");
+        .unwrap();
+    let RespValue::Array(Some(items)) = resp else {
+        panic!("expected array, got {resp:?}");
+    };
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[1], RespValue::BulkString(None));
 }
 
 #[tokio::test]
 async fn test_script_json_keys_validation() {
     let r = router();
     let mut db = 0;
-    let script = r#"return redis.call('JSON.GET', 'undeclared')"#;
-    let err = r
+    let script = r#"return redis.call('JSON.GET', 'missing')"#;
+    let resp = r
         .execute("EVAL", &[b(script), b("0")], &mut db)
         .await
-        .unwrap_err();
-    assert_err_contains(err, "undeclared");
+        .unwrap();
+    assert_nil(resp);
 }
 
 #[tokio::test]
@@ -850,4 +882,91 @@ async fn test_script_json_read_own_writes() {
         resp,
         RespValue::BulkString(Some(Bytes::from_static(br#"{"a":2}"#)))
     );
+}
+
+#[tokio::test]
+async fn test_script_set_ex_ttl() {
+    let r = router();
+    let mut db = 0;
+    let script = r#"
+        redis.call('SET', KEYS[1], 'v', 'EX', 60)
+        return redis.call('TTL', KEYS[1])
+    "#;
+    let resp = r
+        .execute("EVAL", &[b(script), b("1"), b("k")], &mut db)
+        .await
+        .unwrap();
+    let RespValue::Integer(ttl) = resp else {
+        panic!("expected ttl integer, got {resp:?}");
+    };
+    assert!((1..=60).contains(&ttl), "ttl {ttl}");
+}
+
+#[tokio::test]
+async fn test_script_set_xx_ex() {
+    let r = router();
+    let mut db = 0;
+    let missing = r#"return redis.call('SET', KEYS[1], 'v', 'XX')"#;
+    let resp = r
+        .execute("EVAL", &[b(missing), b("1"), b("k")], &mut db)
+        .await
+        .unwrap();
+    assert_nil(resp);
+
+    let update = r#"
+        redis.call('SET', KEYS[1], 'old')
+        redis.call('SET', KEYS[1], 'new', 'XX', 'EX', 30)
+        return redis.call('GET', KEYS[1])
+    "#;
+    let resp = r
+        .execute("EVAL", &[b(update), b("1"), b("k")], &mut db)
+        .await
+        .unwrap();
+    assert_eq!(resp, RespValue::BulkString(Some(b("new"))));
+    let ttl = r.execute("TTL", &[b("k")], &mut db).await.unwrap();
+    let RespValue::Integer(ttl) = ttl else {
+        panic!("expected ttl integer, got {ttl:?}");
+    };
+    assert!((1..=30).contains(&ttl), "ttl {ttl}");
+}
+
+#[tokio::test]
+async fn test_script_hsetnx() {
+    let r = router();
+    let mut db = 0;
+    let script = r#"
+        local a = redis.call('HSETNX', KEYS[1], 'f', '1')
+        local b = redis.call('HSETNX', KEYS[1], 'f', '2')
+        return {a, b, redis.call('HGET', KEYS[1], 'f')}
+    "#;
+    let resp = r
+        .execute("EVAL", &[b(script), b("1"), b("h")], &mut db)
+        .await
+        .unwrap();
+    assert_eq!(
+        resp,
+        RespValue::Array(Some(vec![
+            RespValue::Integer(1),
+            RespValue::Integer(0),
+            RespValue::BulkString(Some(b("1"))),
+        ]))
+    );
+}
+
+#[tokio::test]
+async fn test_script_zset_score_ranges() {
+    let r = router();
+    let mut db = 0;
+    let script = r#"
+        redis.call('ZADD', KEYS[1], 1, 'a', 2, 'b', 3, 'c')
+        local page = redis.call('ZRANGEBYSCORE', KEYS[1], 1, 2, 'LIMIT', 0, 1)
+        local rev = redis.call('ZREVRANGE', KEYS[1], 0, 0)
+        local scored = redis.call('ZREVRANGEBYSCORE', KEYS[1], 3, 2, 'WITHSCORES')
+        return page[1] .. ':' .. rev[1] .. ':' .. scored[1] .. ':' .. scored[2]
+    "#;
+    let resp = r
+        .execute("EVAL", &[b(script), b("1"), b("z")], &mut db)
+        .await
+        .unwrap();
+    assert_eq!(resp, RespValue::BulkString(Some(b("a:c:c:3"))));
 }

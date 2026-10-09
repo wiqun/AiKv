@@ -41,7 +41,7 @@ use crate::server::ServerMetrics;
 use crate::storage::memory::glob_match;
 use crate::storage::{KvStorage, StoredValue, ValueType};
 
-mod helpers;
+pub(crate) mod helpers;
 
 use self::helpers::{
     aggregate_score, apply_limit, array_of_bulk, bytes_to_str, eq_ignore_case, format_score,

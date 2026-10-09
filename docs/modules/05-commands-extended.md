@@ -28,7 +28,7 @@ description: AiKv 扩展 Redis 命令 — JSON/JSONPath 引擎、Lua EVAL/SCRIPT
 | [`src/command/jsonpath_util.rs`](../../src/command/jsonpath_util.rs) | JSON 与 RESP 之间的类型转换辅助工具 | `json_to_resp`, `resp_to_json` |
 | [`src/command/script.rs`](../../src/command/script.rs) | Lua 脚本命令入口 (`EVAL`, `EVALSHA`, `SCRIPT LOAD`, `SCRIPT EXISTS`, `SCRIPT FLUSH`) | `script::dispatch` |
 | [`src/command/script/`](../../src/command/script/) | Lua 5.4 沙箱执行环境、`redis.call` 桥接与 `ScriptTransaction` 批处理 | `ScriptEngine`, `ScriptTransaction` |
-| [`src/command/script/execute/`](../../src/command/script/execute/) | Lua `redis.call` / `redis.pcall` 异步执行: KEYS 校验与按类型 `exec_*` | `redis_call_async` |
+| [`src/command/script/execute/`](../../src/command/script/execute/) | Lua `redis.call` / `redis.pcall` 异步执行: 集群同 slot 校验与按类型 `exec_*` | `redis_call_async` |
 | [`src/command/blocking.rs`](../../src/command/blocking.rs) | `BlockingRegistry` 阻塞等待队列、超时管理与跨连接键写入唤醒机制 | `BlockingRegistry`, `block_on_keys`, `notify_keys` |
 | [`src/command/migrate.rs`](../../src/command/migrate.rs) | `MIGRATE` / `RESTORE` 命令, 槽位迁移数据网络传输与原子导入 | `migrate::dispatch` |
 | [`src/command/persistence.rs`](../../src/command/persistence.rs) | 持久化管理命令 (`SAVE`, `BGSAVE`, `LASTSAVE`, `SHUTDOWN`) | `persistence::dispatch` |
@@ -45,6 +45,7 @@ description: AiKv 扩展 Redis 命令 — JSON/JSONPath 引擎、Lua EVAL/SCRIPT
 - **Lua 沙箱与原子事务提交 (`ScriptTransaction`)**:
   - 采用 `mlua` 运行独立 Lua 5.4 虚拟机, 裁剪 `os`, `io`, `debug` 等不安全库;
   - `EVAL` 执行前必须提取所有参数 Key, 并调用 `KeyLock::lock_keys_sorted_with_timeout(keys, 30s)` 获取锁;
+  - 脚本可以访问未写进 KEYS 的 key。集群构建下, 这些 key 必须与第一把声明 key 同 slot; 没有声明 key 时, 以脚本里第一次访问的 key 为槽位锚点;
   - `redis.call` 写操作收集在 `ScriptTransaction` 的 `WriteBatch` 中, 脚本成功时原子提交, 抛出异常或超时时丢弃修改实现回滚.
 - **`BlockingRegistry` 唤醒机制**:
   - 当客户端执行 `BLPOP`, `BRPOP`, `BZPOPMIN` 等命令且目标 Key 为空时, 将连接注册至 `BlockingRegistry` 对应 Key 的等待通道中, 挂起当前 Task;

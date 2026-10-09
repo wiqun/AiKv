@@ -18,6 +18,7 @@
 //! # Invariant
 //!
 //! - 原子性: 脚本内写操作进 `ScriptTransaction` 缓冲; 成功结束单次 `commit`, 失败 drop.
+//! - 集群下 `redis.call` 的 key 必须与 `KEYS[1]` 同 slot; 未声明的、同 slot 的 key 允许访问.
 //! - 仅 `SCRIPT LOAD` 写入 LRU 缓存 (max 256); **EVAL 不自动缓存**; EVALSHA 未命中 → NOSCRIPT.
 //! - 超时与内存上限由 mlua hook 与 memory limit 强制; SCRIPT KILL 恒 NOTBUSY (stub).
 
@@ -28,7 +29,6 @@ pub(crate) mod json_exec;
 mod sandbox;
 mod transaction;
 
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -39,7 +39,7 @@ use tokio::sync::Mutex;
 
 use self::cache::ScriptCache;
 use self::convert::lua_to_resp;
-use self::execute::redis_call_async;
+use self::execute::{redis_call_async, script_access};
 use self::sandbox::new_sandbox_lua;
 use self::transaction::ScriptTransaction;
 use crate::command::router::{self, KeyLock};
@@ -189,7 +189,7 @@ impl ScriptCommands {
             )
         };
 
-        let declared: HashSet<Vec<u8>> = keys.iter().map(|k| k.to_vec()).collect();
+        let access = script_access(keys);
         let txn = Arc::new(Mutex::new(ScriptTransaction::new(db)));
         let lua = new_sandbox_lua()?;
         lua.set_memory_limit(self.script_memory_limit)
@@ -210,7 +210,7 @@ impl ScriptCommands {
         populate_keys_argv(&lua, keys, argv)?;
 
         if with_redis {
-            install_redis_api(&lua, self.storage.clone(), Arc::clone(&txn), declared)?;
+            install_redis_api(&lua, self.storage.clone(), Arc::clone(&txn), access)?;
         }
 
         let result: LuaValue = lua
@@ -295,7 +295,7 @@ fn install_redis_api(
     lua: &mlua::Lua,
     storage: Arc<dyn KvStorage>,
     txn: Arc<Mutex<ScriptTransaction>>,
-    declared: HashSet<Vec<u8>>,
+    access: self::execute::ScriptAccess,
 ) -> Result<()> {
     let redis = lua
         .create_table()
@@ -303,30 +303,30 @@ fn install_redis_api(
 
     let storage_call = storage.clone();
     let txn_call = Arc::clone(&txn);
-    let declared_call = declared.clone();
+    let access_call = access.clone();
     let call_fn = lua
         .create_async_function(move |lua, args: MultiValue| {
             let storage = storage_call.clone();
             let txn = Arc::clone(&txn_call);
-            let declared = declared_call.clone();
+            let access = access_call.clone();
             async move {
                 let mut guard = txn.lock().await;
-                redis_call_async(&lua, storage.as_ref(), &mut guard, &declared, args, true).await
+                redis_call_async(&lua, storage.as_ref(), &mut guard, &access, args, true).await
             }
         })
         .map_err(|e| Error::Command(format!("ERR {e}")))?;
 
     let storage_pcall = storage;
     let txn_pcall = txn;
-    let declared_pcall = declared;
+    let access_pcall = access;
     let pcall_fn = lua
         .create_async_function(move |lua, args: MultiValue| {
             let storage = storage_pcall.clone();
             let txn = Arc::clone(&txn_pcall);
-            let declared = declared_pcall.clone();
+            let access = access_pcall.clone();
             async move {
                 let mut guard = txn.lock().await;
-                redis_call_async(&lua, storage.as_ref(), &mut guard, &declared, args, false).await
+                redis_call_async(&lua, storage.as_ref(), &mut guard, &access, args, false).await
             }
         })
         .map_err(|e| Error::Command(format!("ERR {e}")))?;

@@ -24,11 +24,50 @@ pub(super) async fn exec_get(
     }
 }
 
-pub(super) fn exec_set(txn: &mut ScriptTransaction, args: &[Bytes]) -> Result<RespValue> {
+pub(super) async fn exec_set(
+    storage: &dyn KvStorage,
+    txn: &mut ScriptTransaction,
+    args: &[Bytes],
+) -> Result<RespValue> {
     if args.len() < 2 {
         return Err(wrong_count("SET"));
     }
-    txn.set_string(key(&args[0]), args[1].to_vec());
+    let opts = crate::command::string::parse_set_options(args)?;
+    let old = if opts.return_old {
+        txn.get(storage, &opts.key).await?
+    } else {
+        None
+    };
+    let exists = if opts.return_old {
+        old.is_some()
+    } else {
+        txn.exists(storage, &opts.key).await?
+    };
+    let blocked = match opts.condition {
+        crate::command::string::SetCondition::Nx if exists => true,
+        crate::command::string::SetCondition::Xx if !exists => true,
+        _ => false,
+    };
+    if blocked {
+        return Ok(if opts.return_old && exists {
+            match old {
+                Some(v) => router::bulk(v),
+                None => RespValue::Null,
+            }
+        } else {
+            RespValue::Null
+        });
+    }
+    txn.set_string(opts.key.clone(), opts.value);
+    if !opts.keep_ttl {
+        txn.set_expire_at(opts.key, opts.expire_at);
+    }
+    if opts.return_old {
+        return Ok(match old {
+            Some(v) => router::bulk(v),
+            None => RespValue::Null,
+        });
+    }
     Ok(RespValue::SimpleString("OK".into()))
 }
 

@@ -7,7 +7,7 @@ use bytes::Bytes;
 use crate::error::{Error, Result};
 use crate::storage::subkey;
 use crate::storage::{
-    now_ms, AiDbEngine, CollectionKind, KvStorage, StoredValue, ValueType, WRONGTYPE,
+    now_ms, AiDbEngine, CollectionKind, KvStorage, StoredValue, ValueType, TTL_NO_EXPIRY, WRONGTYPE,
 };
 
 #[derive(Debug, Clone)]
@@ -161,6 +161,31 @@ impl ScriptTransaction {
             }
             _ => Ok(Some(stored)),
         }
+    }
+
+    /// 脚本缓冲里的剩余 TTL（毫秒）。`None` 表示 key 不存在，`Some(TTL_NO_EXPIRY)` 表示没有过期时间。
+    pub async fn ttl_ms(&self, storage: &dyn KvStorage, key: &[u8]) -> Result<Option<i64>> {
+        if matches!(self.write_buffer.get(key), Some(ExtendedBatchOp::Delete)) {
+            return Ok(None);
+        }
+        if let Some(exp) = self.expire_at.get(key) {
+            return match exp {
+                None => Ok(Some(TTL_NO_EXPIRY)),
+                Some(at) => {
+                    let now = now_ms();
+                    if now >= *at {
+                        Ok(None)
+                    } else {
+                        Ok(Some((*at - now) as i64))
+                    }
+                }
+            };
+        }
+        let stored = storage.ttl(self.db_index, key).await?;
+        if stored.is_none() && self.write_buffer.contains_key(key) {
+            return Ok(Some(TTL_NO_EXPIRY));
+        }
+        Ok(stored)
     }
 
     pub async fn exists(&self, storage: &dyn KvStorage, key: &[u8]) -> Result<bool> {

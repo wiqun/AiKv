@@ -61,6 +61,27 @@ pub(super) async fn exec_hset(
     }
 }
 
+pub(super) async fn exec_hsetnx(
+    storage: &dyn KvStorage,
+    txn: &mut ScriptTransaction,
+    args: &[Bytes],
+) -> Result<RespValue> {
+    if args.len() != 3 {
+        return Err(wrong_count("HSETNX"));
+    }
+    let mut hash = if let Some(stored) = txn.get_value(storage, &args[0]).await? {
+        stored.as_hash()?.clone()
+    } else {
+        HashMap::new()
+    };
+    if hash.contains_key(args[1].as_ref()) {
+        return Ok(router::integer(0));
+    }
+    hash.insert(args[1].to_vec(), args[2].to_vec());
+    txn.set_hash(key(&args[0]), hash);
+    Ok(router::integer(1))
+}
+
 pub(super) async fn exec_hdel(
     storage: &dyn KvStorage,
     txn: &mut ScriptTransaction,

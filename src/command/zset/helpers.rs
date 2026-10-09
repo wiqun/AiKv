@@ -9,20 +9,20 @@ use crate::error::{Error, Result};
 use crate::protocol::RespValue;
 
 #[derive(Debug, Clone)]
-pub(super) struct ScoreBound {
+pub(crate) struct ScoreBound {
     value: f64,
     inclusive: bool,
 }
 
 #[derive(Debug, Clone)]
-pub(super) enum LexBound {
+pub(crate) enum LexBound {
     NegInf,
     PosInf,
     Value(Vec<u8>, bool),
 }
 
 /// `LIMIT offset count`; `count < 0` means unlimited (StackExchange.Redis convention).
-pub(super) fn parse_limit_args(
+pub(crate) fn parse_limit_args(
     cmd: &str,
     offset_b: &Bytes,
     count_b: &Bytes,
@@ -40,7 +40,7 @@ pub(super) fn parse_limit_args(
     Ok((offset as usize, count))
 }
 
-pub(super) fn apply_limit<T: Clone>(items: &mut Vec<T>, offset: usize, count: Option<usize>) {
+pub(crate) fn apply_limit<T: Clone>(items: &mut Vec<T>, offset: usize, count: Option<usize>) {
     if offset >= items.len() {
         items.clear();
         return;
@@ -54,7 +54,7 @@ pub(super) fn apply_limit<T: Clone>(items: &mut Vec<T>, offset: usize, count: Op
     }
 }
 
-pub(super) fn sorted_by_score(zset: &BTreeMap<Vec<u8>, f64>, reverse: bool) -> Vec<(Vec<u8>, f64)> {
+pub(crate) fn sorted_by_score(zset: &BTreeMap<Vec<u8>, f64>, reverse: bool) -> Vec<(Vec<u8>, f64)> {
     let mut v: Vec<(Vec<u8>, f64)> = zset.iter().map(|(k, s)| (k.clone(), *s)).collect();
     if reverse {
         v.sort_by(|a, b| {
@@ -72,7 +72,7 @@ pub(super) fn sorted_by_score(zset: &BTreeMap<Vec<u8>, f64>, reverse: bool) -> V
     v
 }
 
-pub(super) fn normalize_range(len: usize, start: i64, stop: i64) -> (usize, usize) {
+pub(crate) fn normalize_range(len: usize, start: i64, stop: i64) -> (usize, usize) {
     let len_i = len as i64;
     let start_idx = if start < 0 {
         (len_i + start).max(0) as usize
@@ -87,7 +87,7 @@ pub(super) fn normalize_range(len: usize, start: i64, stop: i64) -> (usize, usiz
     (start_idx, stop_idx)
 }
 
-pub(super) fn members_to_resp(members: &[(Vec<u8>, f64)], withscores: bool) -> RespValue {
+pub(crate) fn members_to_resp(members: &[(Vec<u8>, f64)], withscores: bool) -> RespValue {
     let mut items = Vec::new();
     for (member, score) in members {
         items.push(router::bulk(member.clone()));
@@ -98,7 +98,7 @@ pub(super) fn members_to_resp(members: &[(Vec<u8>, f64)], withscores: bool) -> R
     RespValue::Array(Some(items))
 }
 
-pub(super) fn scan_response(cursor: u64, page: &[(Vec<u8>, f64)]) -> RespValue {
+pub(crate) fn scan_response(cursor: u64, page: &[(Vec<u8>, f64)]) -> RespValue {
     let mut items = vec![RespValue::BulkString(Some(Bytes::from(cursor.to_string())))];
     let mut members = Vec::new();
     for (member, score) in page {
@@ -109,11 +109,11 @@ pub(super) fn scan_response(cursor: u64, page: &[(Vec<u8>, f64)]) -> RespValue {
     RespValue::Array(Some(items))
 }
 
-pub(super) fn array_of_bulk(items: Vec<Vec<u8>>) -> RespValue {
+pub(crate) fn array_of_bulk(items: Vec<Vec<u8>>) -> RespValue {
     RespValue::Array(Some(items.into_iter().map(router::bulk).collect()))
 }
 
-pub(super) fn format_score(score: f64) -> String {
+pub(crate) fn format_score(score: f64) -> String {
     if score.fract() == 0.0 && score.is_finite() {
         format!("{}", score as i64)
     } else {
@@ -121,7 +121,7 @@ pub(super) fn format_score(score: f64) -> String {
     }
 }
 
-pub(super) fn parse_score(b: &Bytes) -> Result<f64> {
+pub(crate) fn parse_score(b: &Bytes) -> Result<f64> {
     let s = bytes_to_str(b)?;
     let score = s
         .parse::<f64>()
@@ -132,7 +132,7 @@ pub(super) fn parse_score(b: &Bytes) -> Result<f64> {
     Ok(score)
 }
 
-pub(super) fn parse_score_bound(s: &str, _is_min: bool) -> Result<ScoreBound> {
+pub(crate) fn parse_score_bound(s: &str, _is_min: bool) -> Result<ScoreBound> {
     if s == "-inf" {
         return Ok(ScoreBound {
             value: f64::NEG_INFINITY,
@@ -158,7 +158,7 @@ pub(super) fn parse_score_bound(s: &str, _is_min: bool) -> Result<ScoreBound> {
     Ok(ScoreBound { value, inclusive })
 }
 
-pub(super) fn score_in_range(score: f64, min: &ScoreBound, max: &ScoreBound) -> bool {
+pub(crate) fn score_in_range(score: f64, min: &ScoreBound, max: &ScoreBound) -> bool {
     let above = if min.inclusive {
         score >= min.value
     } else {
@@ -172,7 +172,7 @@ pub(super) fn score_in_range(score: f64, min: &ScoreBound, max: &ScoreBound) -> 
     above && below
 }
 
-pub(super) fn parse_lex_bound(s: &str) -> Result<LexBound> {
+pub(crate) fn parse_lex_bound(s: &str) -> Result<LexBound> {
     if s == "-" {
         return Ok(LexBound::NegInf);
     }
@@ -189,7 +189,7 @@ pub(super) fn parse_lex_bound(s: &str) -> Result<LexBound> {
     Ok(LexBound::Value(rest.as_bytes().to_vec(), inclusive))
 }
 
-pub(super) fn lex_in_range(member: &[u8], min: &LexBound, max: &LexBound) -> bool {
+pub(crate) fn lex_in_range(member: &[u8], min: &LexBound, max: &LexBound) -> bool {
     let above_min = match min {
         LexBound::NegInf => true,
         LexBound::PosInf => false,
@@ -215,18 +215,18 @@ pub(super) fn lex_in_range(member: &[u8], min: &LexBound, max: &LexBound) -> boo
     above_min && below_max
 }
 
-pub(super) fn bytes_to_str(b: &Bytes) -> Result<&str> {
+pub(crate) fn bytes_to_str(b: &Bytes) -> Result<&str> {
     std::str::from_utf8(b).map_err(|_| Error::Command("ERR syntax error".into()))
 }
 
-pub(super) fn parse_i64(b: &Bytes) -> Result<i64> {
+pub(crate) fn parse_i64(b: &Bytes) -> Result<i64> {
     let s =
         std::str::from_utf8(b).map_err(|_| Error::Command("ERR value is not an integer".into()))?;
     s.parse::<i64>()
         .map_err(|_| Error::Command("ERR value is not an integer".into()))
 }
 
-pub(super) fn eq_ignore_case(a: &Bytes, b: &[u8]) -> bool {
+pub(crate) fn eq_ignore_case(a: &Bytes, b: &[u8]) -> bool {
     a.len() == b.len()
         && a.iter()
             .zip(b.iter())
@@ -236,20 +236,20 @@ pub(super) fn eq_ignore_case(a: &Bytes, b: &[u8]) -> bool {
 // ---- ZINTER / ZUNION 辅助类型 ----
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(super) enum Aggregate {
+pub(crate) enum Aggregate {
     Sum,
     Min,
     Max,
 }
 
-pub(super) struct ZSetCombineArgs {
-    pub(super) keys: Vec<Bytes>,
-    pub(super) weights: Vec<f64>,
-    pub(super) aggregate: Aggregate,
-    pub(super) withscores: bool,
+pub(crate) struct ZSetCombineArgs {
+    pub(crate) keys: Vec<Bytes>,
+    pub(crate) weights: Vec<f64>,
+    pub(crate) aggregate: Aggregate,
+    pub(crate) withscores: bool,
 }
 
-pub(super) fn parse_zset_combine_args(cmd: &str, args: &[Bytes]) -> Result<ZSetCombineArgs> {
+pub(crate) fn parse_zset_combine_args(cmd: &str, args: &[Bytes]) -> Result<ZSetCombineArgs> {
     router::require_min_args(cmd, args, 2)?;
     let nkeys_str = bytes_to_str(&args[0])?;
     let numkeys: usize = nkeys_str
@@ -307,7 +307,7 @@ fn parse_aggregate(b: &Bytes) -> Result<Aggregate> {
     }
 }
 
-pub(super) fn aggregate_score(
+pub(crate) fn aggregate_score(
     zsets: &[BTreeMap<Vec<u8>, f64>],
     member: &[u8],
     weights: &[f64],
@@ -342,7 +342,7 @@ pub(super) fn aggregate_score(
     result
 }
 
-pub(super) fn sort_by_score_then_member(items: &mut [(Vec<u8>, f64)]) {
+pub(crate) fn sort_by_score_then_member(items: &mut [(Vec<u8>, f64)]) {
     items.sort_by(|a, b| {
         a.1.partial_cmp(&b.1)
             .unwrap_or(std::cmp::Ordering::Equal)

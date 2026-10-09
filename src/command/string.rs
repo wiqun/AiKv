@@ -24,7 +24,7 @@ pub struct StringCommands {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SetCondition {
+pub(crate) enum SetCondition {
     None,
     Nx,
     Xx,
@@ -450,16 +450,16 @@ impl StringCommands {
     }
 }
 
-struct SetOptions {
-    key: Vec<u8>,
-    value: Vec<u8>,
-    expire_at: Option<u64>,
-    condition: SetCondition,
-    return_old: bool,
-    keep_ttl: bool,
+pub(crate) struct SetOptions {
+    pub(crate) key: Vec<u8>,
+    pub(crate) value: Vec<u8>,
+    pub(crate) expire_at: Option<u64>,
+    pub(crate) condition: SetCondition,
+    pub(crate) return_old: bool,
+    pub(crate) keep_ttl: bool,
 }
 
-fn parse_set_options(args: &[Bytes]) -> Result<SetOptions> {
+pub(crate) fn parse_set_options(args: &[Bytes]) -> Result<SetOptions> {
     let key = args[0].to_vec();
     let value = args[1].to_vec();
     let mut expire_at: Option<u64> = None;
