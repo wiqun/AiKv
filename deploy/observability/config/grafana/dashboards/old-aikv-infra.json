@@ -1,0 +1,578 @@
+{
+  "title": "Infra",
+  "uid": "aikv-infra",
+  "tags": [
+    "aikv",
+    "infra",
+    "cadvisor",
+    "node-exporter",
+    "aikv-nav"
+  ],
+  "schemaVersion": 39,
+  "version": 2,
+  "editable": true,
+  "refresh": "30s",
+  "timezone": "browser",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "links": [
+    {
+      "title": "面板",
+      "type": "dashboards",
+      "tags": [
+        "aikv-nav"
+      ],
+      "asDropdown": true,
+      "includeVars": true,
+      "keepTime": true,
+      "icon": "dashboard",
+      "targetBlank": false
+    }
+  ],
+  "annotations": {
+    "list": []
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "cluster",
+        "label": "cluster",
+        "type": "query",
+        "query": "label_values(aikv_uptime_seconds{service_name=\"aikv\"}, cluster)",
+        "definition": "label_values(aikv_uptime_seconds{service_name=\"aikv\"}, cluster)",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "refresh": 1,
+        "includeAll": false,
+        "multi": false,
+        "allValue": ".*",
+        "sort": 1,
+        "description": "逻辑 AiKV 集群 (OTel Resource cluster, 同值覆盖 6 节点). 分布式部署主维度; 单机多集群时不可仅用 host 区分."
+      },
+      {
+        "name": "host",
+        "label": "host",
+        "type": "query",
+        "query": "label_values(aikv_uptime_seconds{service_name=\"aikv\",cluster=~\"$cluster\"}, host_name)",
+        "definition": "label_values(aikv_uptime_seconds{service_name=\"aikv\",cluster=~\"$cluster\"}, host_name)",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "refresh": 1,
+        "includeAll": false,
+        "multi": false,
+        "allValue": ".*",
+        "sort": 1,
+        "description": "worker 物理机 (OTel host.name). 先选 cluster 再选 host; 同机多集群时 host 单独不够.",
+        "current": {
+          "selected": true,
+          "text": "192.168.1.112",
+          "value": "192.168.1.112"
+        }
+      },
+      {
+        "name": "node",
+        "label": "node",
+        "type": "query",
+        "query": "label_values(aikv_uptime_seconds{service_name=\"aikv\",cluster=~\"$cluster\",host_name=~\"$host\"}, node_id)",
+        "definition": "label_values(aikv_uptime_seconds{service_name=\"aikv\",cluster=~\"$cluster\",host_name=~\"$host\"}, node_id)",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "refresh": 1,
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "sort": 3,
+        "description": "aikv 集群节点 id (AIKV_CLUSTER_NODE_ID, 通常 1..6). All = 当前 host 下多节点对比."
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "宿主机 (node-exporter)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": []
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Node CPU",
+      "description": "**面板作用**\nworker 宿主机 CPU 使用率.\n\n**图示/阈值**\nCPU used = 1 - idle rate (全核平均).\n\n>70% 关注; >90% 危险 (参考 old 面板).\n\n**数据来源**\nworker 宿主机 node-exporter (:9100) → Prometheus scrape (`instance=$host:9100`)\n\n**PromQL**\n`1 - avg(rate(node_cpu_seconds_total{instance=~\"$host:9100\",mode=\"idle\"}[$__rate_interval]))`",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "expr": "1 - avg(rate(node_cpu_seconds_total{instance=~\"$host:9100\",mode=\"idle\"}[$__rate_interval]))",
+          "legendFormat": "CPU used",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Node memory",
+      "description": "**面板作用**\nworker 内存使用率.\n\n**图示/阈值**\nmem used ratio = 1 - MemAvailable/MemTotal.\n\n>85% 关注 OOM 风险.\n\n**数据来源**\nworker 宿主机 node-exporter (:9100) → Prometheus scrape (`instance=$host:9100`)\n\n**PromQL**\n`(1 - node_memory_MemAvailable_bytes{instance=~\"$host:9100\"} / node_memory_MemTotal_bytes{instance=~\"$host:9100\"})`",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "expr": "(1 - (node_memory_MemAvailable_bytes{instance=~\"$host:9100\"} / node_memory_MemTotal_bytes{instance=~\"$host:9100\"}))",
+          "legendFormat": "mem used ratio",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Disk I/O",
+      "description": "**面板作用**\n宿主机磁盘读写吞吐.\n\n**图示/阈值**\nread / write = bytes/s.\n\n无面板级颜色阈值 (palette-classic).\n\n**数据来源**\nworker 宿主机 node-exporter (:9100) → Prometheus scrape (`instance=$host:9100`)\n\n**PromQL**\n`sum(rate(node_disk_read_bytes_total{instance=~\"$host:9100\"}[$__rate_interval]))`\n\n**调优**\nFlush/Compaction 高峰时 write 升高.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(node_disk_read_bytes_total{instance=~\"$host:9100\"}[$__rate_interval]))",
+          "legendFormat": "read",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(node_disk_written_bytes_total{instance=~\"$host:9100\"}[$__rate_interval]))",
+          "legendFormat": "write",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "容器 (cAdvisor)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 9
+      },
+      "panels": []
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Container memory working set",
+      "description": "**面板作用**\n各 aikv 容器 working set 内存.\n\n**图示/阈值**\n每条曲线 = `aikv-N` (compose service).\n\n无面板级颜色阈值 (palette-classic).\n\n**数据来源**\nAlloy cAdvisor (:8088) → Prometheus scrape\n过滤: `container_label_app=aikv`, `container_label_com_docker_compose_service=~aikv-${node}`\n\n**PromQL**\n`sum by (container_label_com_docker_compose_service) (container_memory_working_set_bytes{host=~\"$host\",container_label_app=\"aikv\",container_label_com_docker_compose_service=~\"aikv-${node}\"})`",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 10
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (container_label_com_docker_compose_service) (container_memory_working_set_bytes{host=~\"$host\",container_label_app=\"aikv\",container_label_com_docker_compose_service=~\"aikv-${node}\"})",
+          "legendFormat": "{{container_label_com_docker_compose_service}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Container disk I/O",
+      "description": "**面板作用**\n各 aikv 容器磁盘读写吞吐.\n\n**图示/阈值**\nread / write per `aikv-N`.\n\n无面板级颜色阈值 (palette-classic).\n\n**数据来源**\nAlloy cAdvisor (:8088) → Prometheus scrape\n过滤: `container_label_app=aikv`, `container_label_com_docker_compose_service=~aikv-${node}`\n\n**PromQL**\n`rate(container_fs_reads_bytes_total{host=~\"$host\",container_label_app=\"aikv\",container_label_com_docker_compose_service=~\"aikv-${node}\"}[$__rate_interval])`",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 10
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (container_label_com_docker_compose_service) (rate(container_fs_reads_bytes_total{host=~\"$host\",container_label_app=\"aikv\",container_label_com_docker_compose_service=~\"aikv-${node}\"}[$__rate_interval]))",
+          "legendFormat": "read {{container_label_com_docker_compose_service}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (container_label_com_docker_compose_service) (rate(container_fs_writes_bytes_total{host=~\"$host\",container_label_app=\"aikv\",container_label_com_docker_compose_service=~\"aikv-${node}\"}[$__rate_interval]))",
+          "legendFormat": "write",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "进程 (OTLP)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 18
+      },
+      "panels": []
+    },
+    {
+      "id": 25,
+      "type": "timeseries",
+      "title": "Memory & CPU (aikv process)",
+      "description": "**面板作用**\naikv 进程内存与 CPU (OTel semconv).\n\n**图示/阈值**\nmem = aikv_used_memory_bytes; cpu user/sys = process_cpu_time rate.\n\nCPU 为 cores 占比 (rate 值); 内存单位 bytes.\n\n**数据来源**\naikv/aidb 进程 → OTLP gRPC (:4317) → OTel Collector → Prometheus remote write\nResource 标签: `service_name=aikv`, `cluster`, `host_name`, `node_id`\n\n**PromQL**\n`aikv_used_memory_bytes{service_name=\"aikv\",cluster=~\"$cluster\",node_id=~\"$node\",host_name=~\"$host\"}`",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 19
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "expr": "aikv_used_memory_bytes{service_name=\"aikv\",cluster=~\"$cluster\",node_id=~\"$node\",host_name=~\"$host\"}",
+          "legendFormat": "mem node {{node_id}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "A"
+        },
+        {
+          "expr": "rate(process_cpu_time_seconds_total{service_name=\"aikv\",cluster=~\"$cluster\",node_id=~\"$node\",host_name=~\"$host\",cpu_mode=\"user\"}[$__rate_interval])",
+          "legendFormat": "cpu user node {{node_id}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "B"
+        },
+        {
+          "expr": "rate(process_cpu_time_seconds_total{service_name=\"aikv\",cluster=~\"$cluster\",node_id=~\"$node\",host_name=~\"$host\",cpu_mode=\"system\"}[$__rate_interval])",
+          "legendFormat": "cpu sys",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "OTLP vs 容器 (对照)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 27
+      },
+      "panels": []
+    },
+    {
+      "id": 30,
+      "type": "timeseries",
+      "title": "process.memory.usage vs container RSS",
+      "description": "**面板作用**\nOTLP 进程内存 vs cAdvisor RSS 交叉验证.\n\n**图示/阈值**\notlp = process_memory_usage(used); rss = container_memory_rss.\n\n口径差异正常; 长期大幅偏离查 label/cgroup.\n\n**数据来源**\naikv/aidb 进程 → OTLP gRPC (:4317) → OTel Collector → Prometheus remote write\nResource 标签: `service_name=aikv`, `cluster`, `host_name`, `node_id`\n对照: Alloy cAdvisor (:8088) → Prometheus scrape\n过滤: `container_label_app=aikv`, `container_label_com_docker_compose_service=~aikv-${node}`\n\n**PromQL**\n`process_memory_usage{service_name=\"aikv\",cluster=~\"$cluster\",node_id=~\"$node\",host_name=~\"$host\",process_memory_state=\"used\"}`\n\n**调优**\nLoki 日志: `{host=\"$host\", container=\"aikv-$node\"}`.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 28
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "expr": "process_memory_usage{service_name=\"aikv\",cluster=~\"$cluster\",node_id=~\"$node\",host_name=~\"$host\",process_memory_state=\"used\"}",
+          "legendFormat": "otlp {{host_name}}/{{node_id}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (container_label_com_docker_compose_service) (container_memory_rss{host=~\"$host\",container_label_app=\"aikv\",container_label_com_docker_compose_service=~\"aikv-${node}\"})",
+          "legendFormat": "rss {{container_label_com_docker_compose_service}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "B"
+        }
+      ]
+    }
+  ],
+  "description": "**基础设施**: worker (node-exporter) + aikv 容器 (cAdvisor) + OTLP 进程指标.\n\n`node` N → 容器 `aikv-N`. 面板 **!** 统一模板. 契约见 `dashboards/README.md`."
+}

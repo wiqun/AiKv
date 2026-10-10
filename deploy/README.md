@@ -80,8 +80,8 @@ flowchart TD
 | **AiKv 集群节点 2** | 2GB 内存 | `2,3` (2 核) | 512MB 内存 | `AIKV_NODE2_CPUSET` |
 | **AiKv 集群节点 3** | 2GB 内存 | `4,5` (2 核) | 512MB 内存 | `AIKV_NODE3_CPUSET` |
 | **AiKv 集群节点 4** | 2GB 内存 | `6,7` (2 核) | 512MB 内存 | `AIKV_NODE4_CPUSET` |
-| **AiKv 集群节点 5** | 2GB 内存 | `8,9` (2 核) | 512MB 内存 | `AIKV_NODE5_CPUSET` |
-| **AiKv 集群节点 6** | 2GB 内存 | `10,11` (2 核) | 512MB 内存 | `AIKV_NODE6_CPUSET` |
+| **AiKv 集群节点 5** | 2GB 内存 | `2,3` (2 核, 与节点 2 相同) | 512MB 内存 | `AIKV_NODE5_CPUSET` |
+| **AiKv 集群节点 6** | 2GB 内存 | `4,5` (2 核, 与节点 3 相同) | 512MB 内存 | `AIKV_NODE6_CPUSET` |
 | **OTel Collector** | 1.0 CPU, 256MB 内存 | 无限制 (共享) | 0.2 CPU, 64MB 内存 | `OTEL_CPU_LIMIT`, `OTEL_MEM_LIMIT` |
 | **Prometheus** | 1.0 CPU, 512MB 内存 | 无限制 (共享) | 0.2 CPU, 128MB 内存 | `PROMETHEUS_CPU_LIMIT`, `PROMETHEUS_MEM_LIMIT` |
 | **Grafana** | 1.0 CPU, 512MB 内存 | 无限制 (共享) | 0.2 CPU, 128MB 内存 | `GRAFANA_CPU_LIMIT`, `GRAFANA_MEM_LIMIT` |
@@ -89,7 +89,10 @@ flowchart TD
 | **cAdvisor** | 0.5 CPU, 128MB 内存 | 无限制 (共享) | 0.1 CPU, 64MB 内存 | `CADVISOR_CPU_LIMIT` |
 
 - **宿主机核心规划 (以 16 核物理机为例)**:
-  - 核 `0-11`: 独占分配给 6 个存储实例 (每节点固定 2C2G 规格, 消除跨核 Cache 失效与 CFS 节流).
+  - 核 `0,1`: 节点 1.
+  - 核 `2,3`: 节点 2 与节点 5 共用.
+  - 核 `4,5`: 节点 3 与节点 6 共用.
+  - 核 `6,7`: 节点 4.
   - 核 `12-13`: 保留给压测引擎 (`loadgen`) 与宿主机系统基础进程.
   - 核 `14-15`: 承载可观测性监控栈, 消除监控解析对被测引擎的干扰.
 - **弹性调节与跨机适配**:

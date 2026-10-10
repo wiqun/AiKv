@@ -126,7 +126,8 @@ services:
   aikv-5:
     <<: *aikv-node
     container_name: aikv-5
-    cpuset: "${AIKV_NODE5_CPUSET-8,9}"
+    # cpuset: "${AIKV_NODE5_CPUSET-8,9}"
+    cpuset: "${AIKV_NODE5_CPUSET-2,3}"
     ports:
       - "${AIKV_BIND_IP:-127.0.0.1}:7380:7380"
       - "${AIKV_BIND_IP:-127.0.0.1}:17380:17380"
@@ -150,7 +151,8 @@ services:
   aikv-6:
     <<: *aikv-node
     container_name: aikv-6
-    cpuset: "${AIKV_NODE6_CPUSET-10,11}"
+    # cpuset: "${AIKV_NODE6_CPUSET-10,11}"
+    cpuset: "${AIKV_NODE6_CPUSET-4,5}"
     ports:
       - "${AIKV_BIND_IP:-127.0.0.1}:7381:7381"
       - "${AIKV_BIND_IP:-127.0.0.1}:17381:17381"

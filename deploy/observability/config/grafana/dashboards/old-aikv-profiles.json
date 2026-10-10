@@ -1,0 +1,186 @@
+{
+  "title": "Profiles",
+  "uid": "aikv-profiles",
+  "tags": [
+    "aikv",
+    "aikv-nav",
+    "profiles",
+    "pyroscope"
+  ],
+  "schemaVersion": 39,
+  "version": 2,
+  "editable": true,
+  "description": "**Pyroscope 火焰图** (Alloy eBPF → Pyroscope). 标签 `service_name=aikv`, `host` = worker IP.\n\n面板 **!** 统一模板: 面板作用 | 图示/阈值 | 数据来源.",
+  "refresh": "30s",
+  "timezone": "browser",
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "links": [
+    {
+      "title": "面板",
+      "type": "dashboards",
+      "tags": [
+        "aikv-nav"
+      ],
+      "asDropdown": true,
+      "includeVars": true,
+      "keepTime": true,
+      "icon": "dashboard",
+      "targetBlank": false
+    },
+    {
+      "asDropdown": false,
+      "icon": "compass",
+      "includeVars": true,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": true,
+      "placement": "inControlsMenu",
+      "title": "Explore Profiles",
+      "tooltip": "Grafana Explore → Pyroscope (Profiles Drilldown)",
+      "type": "link",
+      "url": "/explore?orgId=1&left=%7B%22datasource%22:%22pyroscope%22,%22queries%22:%5B%7B%22refId%22:%22A%22,%22datasource%22:%7B%22type%22:%22grafana-pyroscope-datasource%22,%22uid%22:%22pyroscope%22%7D,%22profileTypeId%22:%22process_cpu:cpu:nanoseconds:cpu:nanoseconds%22,%22labelSelector%22:%22%7Bservice_name%3D%5C%22aikv%5C%22,host%3D%5C%22${host:raw}%5C%22%7D%22%7D%5D,%22range%22:%7B%22from%22:%22now-15m%22,%22to%22:%22now%22%7D%7D"
+    }
+  ],
+  "annotations": {
+    "list": []
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "host",
+        "label": "host",
+        "type": "custom",
+        "query": "192.168.1.112,192.168.1.113,127.0.0.1,dev,local",
+        "options": [
+          {
+            "selected": true,
+            "text": "192.168.1.112",
+            "value": "192.168.1.112"
+          },
+          {
+            "selected": false,
+            "text": "192.168.1.113",
+            "value": "192.168.1.113"
+          },
+          {
+            "selected": false,
+            "text": "127.0.0.1",
+            "value": "127.0.0.1"
+          },
+          {
+            "selected": false,
+            "text": "dev",
+            "value": "dev"
+          },
+          {
+            "selected": false,
+            "text": "local",
+            "value": "local"
+          }
+        ],
+        "current": {
+          "selected": true,
+          "text": "192.168.1.112",
+          "value": "192.168.1.112"
+        },
+        "includeAll": false,
+        "multi": false,
+        "allValue": ".*",
+        "description": "worker IP (与 OTLP host_name / Alloy HOST_LABEL 一致)."
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 2,
+      "type": "row",
+      "title": "CPU Profiles",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": []
+    },
+    {
+      "id": 3,
+      "type": "flamegraph",
+      "title": "CPU Flame Graph",
+      "description": "**面板作用**\n展示 aikv 进程 CPU 热点调用栈 (eBPF 采样).\n\n**图示/阈值**\n火焰图: 横条越宽 = 该栈占用 CPU 越多; 点击可下钻.\n\n无面板级颜色阈值.\n\n**数据来源**\nAlloy `pyroscope.ebpf` → Pyroscope (:4040) → Grafana Pyroscope datasource\n\n标签: `{service_name=\"aikv\", host=~\"$host\"}`\n\n**PromQL**\nN/A (Profiles 非 PromQL)\n\n**调优**\n结合 Cluster 延迟/QPS 面板定位慢路径; Drilldown 需 HTTPS 打开 Grafana.",
+      "gridPos": {
+        "h": 14,
+        "w": 24,
+        "x": 0,
+        "y": 1
+      },
+      "datasource": {
+        "type": "grafana-pyroscope-datasource",
+        "uid": "pyroscope"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-pyroscope-datasource",
+            "uid": "pyroscope"
+          },
+          "profileTypeId": "process_cpu:cpu:nanoseconds:cpu:nanoseconds",
+          "labelSelector": "{service_name=\"aikv\",host=~\"$host\"}"
+        }
+      ],
+      "options": {
+        "showFlameGraph": true,
+        "showTable": true
+      }
+    },
+    {
+      "id": 4,
+      "type": "row",
+      "title": "Memory Profiles",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 15
+      },
+      "panels": []
+    },
+    {
+      "id": 5,
+      "type": "flamegraph",
+      "title": "Memory Flame Graph",
+      "description": "**面板作用**\n展示 aikv 进程内存分配热点 (eBPF, 若已采集).\n\n**图示/阈值**\n火焰图: 横条越宽 = 该栈分配越多.\n\n无面板级颜色阈值.\n\n**数据来源**\nAlloy `pyroscope.ebpf` → Pyroscope (:4040) → Grafana Pyroscope datasource\n\nprofileType: `process_memory:memory:bytes:memory:bytes`\n\n**调优**\n无数据时检查 worker Alloy 是否启用 memory profile.",
+      "gridPos": {
+        "h": 14,
+        "w": 24,
+        "x": 0,
+        "y": 16
+      },
+      "datasource": {
+        "type": "grafana-pyroscope-datasource",
+        "uid": "pyroscope"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-pyroscope-datasource",
+            "uid": "pyroscope"
+          },
+          "profileTypeId": "process_memory:memory:bytes:memory:bytes",
+          "labelSelector": "{service_name=\"aikv\",host=~\"$host\"}"
+        }
+      ],
+      "options": {
+        "showFlameGraph": true,
+        "showTable": true
+      }
+    }
+  ]
+}

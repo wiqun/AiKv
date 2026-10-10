@@ -1,6 +1,6 @@
 # AiKv 可观测性监控栈 (Observability Stack)
 
-本目录提供面向 `aikv` 存储引擎与协议层的轻量级, 免维护, 安全默认的可观测性监控栈. 内置 OpenTelemetry Collector, Prometheus 和 Grafana 三件套, 自动挂载预置数据源与五张看板: 总览, 排障, 容量, 集群, 连接.
+本目录提供面向 `aikv` 存储引擎与协议层的轻量级, 免维护, 安全默认的可观测性监控栈. 内置 OpenTelemetry Collector, Prometheus 和 Grafana 三件套, 自动挂载预置数据源与十二张看板.
 
 ---
 
@@ -109,13 +109,20 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317
 
 ## 6. 预置监控大盘
 
-Grafana 启动后加载 `AiKv` 目录下的五张看板. 查询只使用已经导出的序列, 速率窗口是变量 `$rate_window`.
+Grafana 启动后加载 `AiKv` 目录下的十二张看板. 查询只使用已经导出的序列, 速率窗口是变量 `$rate_window`.
 
 1. `aikv-overview` 总览: 命令速率, 错误比例, 不按命令拆开的延迟, 慢查询, 点查命中率, 连接与拒绝, L0 和写停顿.
 2. `aikv-troubleshoot` 排障: MemTable, Block Cache, 各层 SST, WAL, flush 与 compaction 的字节速率和最近一次耗时, Bloom, 读放大, 以及按命令的 P99.
 3. `aikv-capacity` 容量: 引擎条目估值, 本进程登记的 TTL, 过期键速率, SST 字节合计和 RSS.
 4. `aikv-cluster` 集群: 每个 group 一行的角色和滞后. 只有启用 Raft 时使用. L0, MemTable 和本周期最大停顿是进程合计.
 5. `aikv-connections` 连接: 网络入出字节, 按 errno 分开的 accept 错误, 按关闭原因分开的断开, 以及 SCAN 扫描量.
+6. `cold-recovery.20261008-021615` 冷启动恢复: WAL 重放, Manifest, SSTable 打开和键计数器重扫的 RTO 分段耗时.
+7. `process-system.20261008-021615` 进程与协议: OS 线程, 上下文切换, CPU, 磁盘 I/O, RSS, 命令 QPS, 连接和网络带宽.
+8. `storage-engine.20261008-021615` 存储引擎: 写放大, 读放大, Block Cache, 写停顿, Compaction 积压和 Bloom 假阳性率.
+9. `old-aikv-cluster` 旧版 Cluster: 按节点的 Ops, 容器资源, 命令分布, Keyspace, 重定向和 Raft RPC.
+10. `old-aikv-engine` 旧版 Engine: 引擎 Ops, WAL 与 Flush, Block Cache, 各层 SSTable 和 Compaction.
+11. `old-aikv-infra` 旧版 Infra: 宿主机 node-exporter, 容器 cAdvisor, 以及进程 OTLP 对照.
+12. `old-aikv-profiles` 旧版 Profiles: CPU 与内存火焰图.
 
 ---
 

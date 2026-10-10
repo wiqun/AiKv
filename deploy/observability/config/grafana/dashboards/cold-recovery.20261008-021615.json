@@ -1,0 +1,297 @@
+{
+  "title": "AiKv - 冷启动恢复与 RTO 分析 (Cold Recovery & RTO)",
+  "uid": "aikv-cold-recovery",
+  "tags": [
+    "aikv",
+    "recovery",
+    "rto"
+  ],
+  "timezone": "browser",
+  "editable": true,
+  "schemaVersion": 38,
+  "version": 1,
+  "panels": [
+    {
+      "id": 1,
+      "title": "冷启动恢复核心 RTO 耗时指标",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "collapsed": false
+    },
+    {
+      "id": 2,
+      "title": "WAL 重放与解析耗时",
+      "type": "stat",
+      "gridPos": {
+        "h": 7,
+        "w": 5,
+        "x": 0,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "aidb_recovery_wal_replay_duration_seconds",
+          "refId": "A",
+          "legendFormat": "WAL Replay"
+        }
+      ],
+      "description": "冷启动 WAL 重放与日志记录解析耗时。对账契约: OTel 秒 = INFO storage recovery_wal_replay_duration_us × 10⁻⁶。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "title": "WAL 重放物理字节总大小",
+      "type": "stat",
+      "gridPos": {
+        "h": 7,
+        "w": 5,
+        "x": 5,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "aidb_recovery_wal_replayed_bytes",
+          "refId": "A",
+          "legendFormat": "WAL Replayed Bytes"
+        }
+      ],
+      "description": "冷启动过程中重放的 WAL 物理日志文件字节量。对账契约: OTel 字节 = INFO storage recovery_wal_replayed_bytes。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "title": "Manifest 元数据恢复耗时",
+      "type": "stat",
+      "gridPos": {
+        "h": 7,
+        "w": 4,
+        "x": 10,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "aidb_recovery_manifest_duration_seconds",
+          "refId": "A",
+          "legendFormat": "Manifest Duration"
+        }
+      ],
+      "description": "Manifest 版本控制元数据恢复耗时。对账契约: OTel 秒 = INFO storage recovery_manifest_duration_us × 10⁻⁶。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "title": "SSTable 打开与校验耗时",
+      "type": "stat",
+      "gridPos": {
+        "h": 7,
+        "w": 5,
+        "x": 14,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "aidb_recovery_sstable_open_duration_seconds",
+          "refId": "A",
+          "legendFormat": "SSTable Open Duration"
+        }
+      ],
+      "description": "全量 SSTable 文件句柄打开与校验耗时。对账契约: OTel 秒 = INFO storage recovery_sstable_open_duration_us × 10⁻⁶。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "title": "全库键计数器重扫耗时",
+      "type": "stat",
+      "gridPos": {
+        "h": 7,
+        "w": 5,
+        "x": 19,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "aikv_recovery_rebuild_counters_duration_seconds",
+          "refId": "A",
+          "legendFormat": "Rebuild Counters"
+        }
+      ],
+      "description": "aikv 启动时多逻辑 DB 键计数器全库重扫初始化耗时。对账契约: OTel 秒 = INFO storage recovery_rebuild_counters_duration_us × 10⁻⁶。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "title": "恢复性能深度分析与阶段构成",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 8
+      },
+      "collapsed": false
+    },
+    {
+      "id": 8,
+      "title": "WAL 重放吞吐带宽 (WAL Replay Bandwidth)",
+      "type": "gauge",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "aidb_recovery_wal_replayed_bytes / aidb_recovery_wal_replay_duration_seconds",
+          "refId": "A",
+          "legendFormat": "Bandwidth"
+        }
+      ],
+      "description": "冷启动阶段 WAL 物理回放有效带宽速率 (物理重放字节 / 重放耗时)。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "binBps"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 9,
+      "title": "RTO 4 阶段耗时构成 (RTO Phase Breakdown)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 16,
+        "x": 8,
+        "y": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "aidb_recovery_manifest_duration_seconds",
+          "refId": "A",
+          "legendFormat": "1. Manifest Recovery"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "aidb_recovery_sstable_open_duration_seconds",
+          "refId": "B",
+          "legendFormat": "2. SSTable Open"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "aidb_recovery_wal_replay_duration_seconds",
+          "refId": "C",
+          "legendFormat": "3. WAL Replay"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "aikv_recovery_rebuild_counters_duration_seconds",
+          "refId": "D",
+          "legendFormat": "4. Rebuild Counters"
+        }
+      ],
+      "description": "冷启动各恢复阶段耗时对比。对账契约: OTel 秒 = INFO 微秒 × 10⁻⁶。受 Statistics::reset 保护白名单常驻保留。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    }
+  ]
+}

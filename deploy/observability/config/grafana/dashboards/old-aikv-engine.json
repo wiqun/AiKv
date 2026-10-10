@@ -1,0 +1,996 @@
+{
+  "title": "Engine",
+  "uid": "aikv-engine",
+  "tags": [
+    "aikv",
+    "aidb",
+    "engine",
+    "aikv-nav"
+  ],
+  "schemaVersion": 39,
+  "version": 14,
+  "editable": true,
+  "refresh": "30s",
+  "timezone": "browser",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "links": [
+    {
+      "title": "面板",
+      "type": "dashboards",
+      "tags": [
+        "aikv-nav"
+      ],
+      "asDropdown": true,
+      "includeVars": true,
+      "keepTime": true,
+      "icon": "dashboard",
+      "targetBlank": false
+    }
+  ],
+  "annotations": {
+    "list": []
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "cluster",
+        "label": "cluster",
+        "type": "query",
+        "query": "label_values(aikv_uptime_seconds{service_name=\"aikv\"}, cluster)",
+        "definition": "label_values(aikv_uptime_seconds{service_name=\"aikv\"}, cluster)",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "refresh": 1,
+        "includeAll": false,
+        "multi": false,
+        "allValue": ".*",
+        "sort": 1,
+        "description": "逻辑 AiKV 集群 (OTel Resource cluster)."
+      },
+      {
+        "name": "host",
+        "label": "host",
+        "type": "query",
+        "query": "label_values(aikv_uptime_seconds{service_name=\"aikv\",cluster=~\"$cluster\"}, host_name)",
+        "definition": "label_values(aikv_uptime_seconds{service_name=\"aikv\",cluster=~\"$cluster\"}, host_name)",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "refresh": 1,
+        "includeAll": false,
+        "multi": false,
+        "allValue": ".*",
+        "sort": 1,
+        "description": "worker 物理机 (OTel host.name)."
+      },
+      {
+        "name": "node",
+        "label": "node",
+        "type": "query",
+        "query": "label_values(aikv_uptime_seconds{service_name=\"aikv\",cluster=~\"$cluster\",host_name=~\"$host\"}, node_id)",
+        "definition": "label_values(aikv_uptime_seconds{service_name=\"aikv\",cluster=~\"$cluster\",host_name=~\"$host\"}, node_id)",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "refresh": 1,
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "sort": 3,
+        "description": "aikv 节点 id (1..6). All = 多节点对比."
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "1. 负载",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": []
+    },
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Engine Ops",
+      "description": "**面板作用**\nAiDb 引擎全部操作 **ops/s** (与 QPS 同义): get / put / write_batch / stall / snapshot 等.\n\n**指标类型**\nCounter `aidb_operations_total` 的 `rate()`.\n\n**图示**\n- **Total** (粗虚线): 当前过滤下全节点合计\n- **node N**: 按 `node_id` 分线, 看分片倾斜 (含 Raft apply 的 write_batch)\n\n**数据来源**\naikv/aidb → OTLP (:4317) → OTel Collector → Prom remote write\nResource: `cluster`, `host_name`, `node_id`\n\n**PromQL**\n`sum(rate(...))` + `sum(rate(...)) by (node_id)`",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "lineInterpolation": "smooth",
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Total"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 3
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    10,
+                    10
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(aidb_operations_total{service_name=\"aikv\",cluster=~\"$cluster\",node_id=~\"$node\",host_name=~\"$host\"}[$__rate_interval]))",
+          "legendFormat": "Total",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(aidb_operations_total{service_name=\"aikv\",cluster=~\"$cluster\",node_id=~\"$node\",host_name=~\"$host\"}[$__rate_interval])) by (node_id)",
+          "legendFormat": "node {{node_id}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Write stall Ops",
+      "description": "**面板作用**\n写路径 **stall 事件** 频率 (ops/s). L0 SST 过多时引擎在 put/delete/write_batch 前主动 sleep/阻塞.\n\n**指标类型**\nCounter 事件计数 (`aidb_operations_total`, `aidb_operation_name=stall_slowdown|stall_stop`). `rate()` = 每秒触发 stall 的写次数, **不是** 写延迟秒数, **不是** Gauge.\n\n**图示/阈值**\n- **Timeseries 折线** (本面板): 正常应 ≈0; 分线看 slowdown vs stop\n- stop 线 >0 → 写几乎被堵住, 优先看 Compaction + L0 文件数\n- slowdown → 写减速, compaction 跟不上\n\n**数据来源**\naikv/aidb → OTLP (:4317) → OTel Collector → Prom remote write\nResource: `cluster`, `host_name`, `node_id`\n\n**PromQL**\n`sum(rate(aidb_operations_total{...,aidb_operation_name=~\"stall_.*\"}[$__rate_interval])) by (aidb_operation_name, node_id)`\n\n**No data**\nCounter 从未 +1 则无 series (正常). 需 L0>8 且 memtable 已 flush.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "lineInterpolation": "smooth",
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/stop/"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/slowdown/"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(aidb_operations_total{service_name=\"aikv\",cluster=~\"$cluster\",node_id=~\"$node\",host_name=~\"$host\",aidb_operation_name=~\"stall_.*\"}[$__rate_interval])) by (aidb_operation_name, node_id) or label_replace(sum by (node_id) (rate(aidb_operations_total{service_name=\"aikv\",cluster=~\"$cluster\",node_id=~\"$node\",host_name=~\"$host\"}[$__rate_interval])) * 0, \"aidb_operation_name\", \"stall_slowdown\", \"\", \"\")",
+          "legendFormat": "{{aidb_operation_name}} n{{node_id}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "数据面 Operation p95",
+      "description": "**面板作用**\nput / get / delete / write_batch 延迟 P95 (秒).\n\n**图示**\nstall / snapshot 无 histogram, 不在此图.\n\n**数据来源**\naikv/aidb → OTLP (:4317) → OTel Collector → Prom remote write\nResource: `cluster`, `host_name`, `node_id`",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "lineInterpolation": "smooth",
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(aidb_operation_duration_seconds_bucket{service_name=\"aikv\",cluster=~\"$cluster\",node_id=~\"$node\",host_name=~\"$host\",aidb_operation_name=~\"get|put|delete|write_batch\"}[$__rate_interval])) by (le, aidb_operation_name, node_id))",
+          "legendFormat": "{{aidb_operation_name}} n{{node_id}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "2. 写路径",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 9
+      },
+      "panels": []
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "WAL & MemTable",
+      "description": "**面板作用**\n写缓冲: WAL 追加体积 + MemTable (active/frozen).\n\n**图示**\nWAL 持续涨 → flush 跟不上.\n\n**数据来源**\naikv/aidb → OTLP (:4317) → OTel Collector → Prom remote write\nResource: `cluster`, `host_name`, `node_id`",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 10
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "lineInterpolation": "smooth",
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "aidb_wal_size_bytes{service_name=\"aikv\",cluster=~\"$cluster\",node_id=~\"$node\",host_name=~\"$host\"}",
+          "legendFormat": "wal n{{node_id}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "A"
+        },
+        {
+          "expr": "aidb_memtable_size_bytes{service_name=\"aikv\",cluster=~\"$cluster\",node_id=~\"$node\",host_name=~\"$host\"}",
+          "legendFormat": "memtable {{aidb_memtable_state}} n{{node_id}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 30,
+      "type": "timeseries",
+      "title": "Flush",
+      "description": "**面板作用**\nMemTable → L0 SST: flush 频率与 P95 耗时.\n\n**图示**\nflush/s + p95; p95 升 → 磁盘或 memtable 过大.\n\n**数据来源**\naikv/aidb → OTLP (:4317) → OTel Collector → Prom remote write\nResource: `cluster`, `host_name`, `node_id`\n\n**No data**\nmemtable 未满 (默认 64MB) 不会 flush; counter 无 series 直到首次 flush.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 10
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "lineInterpolation": "smooth",
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/p95.*/"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(aidb_flush_total{service_name=\"aikv\",cluster=~\"$cluster\",node_id=~\"$node\",host_name=~\"$host\"}[$__rate_interval])) by (node_id) or (sum by (node_id) (rate(aidb_operations_total{service_name=\"aikv\",cluster=~\"$cluster\",node_id=~\"$node\",host_name=~\"$host\"}[$__rate_interval])) * 0)",
+          "legendFormat": "flush/s n{{node_id}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(aidb_flush_duration_seconds_bucket{service_name=\"aikv\",cluster=~\"$cluster\",node_id=~\"$node\",host_name=~\"$host\"}[$__rate_interval])) by (le, node_id)) or (sum by (node_id) (rate(aidb_operations_total{service_name=\"aikv\",cluster=~\"$cluster\",node_id=~\"$node\",host_name=~\"$host\"}[$__rate_interval])) * 0)",
+          "legendFormat": "p95 s n{{node_id}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "3. 读路径",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 18
+      },
+      "panels": []
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Block cache 命中率",
+      "description": "**面板作用**\nSST 读 cache 命中比例; miss 高 → 更多读盘.\n\n**图示**\n0–1; 读多场景宜 >80%.\n\n**数据来源**\naikv/aidb → OTLP (:4317) → OTel Collector → Prom remote write\nResource: `cluster`, `host_name`, `node_id`\n\n**No data**\n读路径未走 SST Block cache (数据在 MemTable) 时 hit/miss 不产生 series.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 19
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "lineInterpolation": "smooth",
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(aidb_block_cache_hits_total{service_name=\"aikv\",cluster=~\"$cluster\",node_id=~\"$node\",host_name=~\"$host\"}[$__rate_interval])) by (node_id) / clamp_min(sum(rate(aidb_block_cache_hits_total{service_name=\"aikv\",cluster=~\"$cluster\",node_id=~\"$node\",host_name=~\"$host\"}[$__rate_interval])) by (node_id) + sum(rate(aidb_block_cache_misses_total{service_name=\"aikv\",cluster=~\"$cluster\",node_id=~\"$node\",host_name=~\"$host\"}[$__rate_interval])) by (node_id), 1e-9) or (0 * sum by (node_id) (aidb_memtable_size_bytes{service_name=\"aikv\",cluster=~\"$cluster\",node_id=~\"$node\",host_name=~\"$host\",aidb_memtable_state=\"active\"}))",
+          "legendFormat": "n{{node_id}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 23,
+      "type": "timeseries",
+      "title": "Block cache 使用率",
+      "description": "**面板作用**\nsize / capacity.\n\n**图示**\n>90% 接近饱和.\n\n**数据来源**\naikv/aidb → OTLP (:4317) → OTel Collector → Prom remote write\nResource: `cluster`, `host_name`, `node_id`\n\n**No data**\ncache 无 entry 时 `aidb_block_cache_size_bytes` 无 series.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 19
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "lineInterpolation": "smooth",
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "aidb_block_cache_size_bytes{service_name=\"aikv\",cluster=~\"$cluster\",node_id=~\"$node\",host_name=~\"$host\"} / aidb_block_cache_capacity_bytes{service_name=\"aikv\",cluster=~\"$cluster\",node_id=~\"$node\",host_name=~\"$host\"}",
+          "legendFormat": "n{{node_id}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 24,
+      "type": "timeseries",
+      "title": "Block cache miss Ops",
+      "description": "**面板作用**\ncache miss 速率 ≈ SST block 读盘次数代理.\n\n**图示**\n与 Engine Ops / get 对照.\n\n**数据来源**\naikv/aidb → OTLP (:4317) → OTel Collector → Prom remote write\nResource: `cluster`, `host_name`, `node_id`",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 19
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "lineInterpolation": "smooth",
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(aidb_block_cache_misses_total{service_name=\"aikv\",cluster=~\"$cluster\",node_id=~\"$node\",host_name=~\"$host\"}[$__rate_interval])) by (node_id) or (sum by (node_id) (rate(aidb_operations_total{service_name=\"aikv\",cluster=~\"$cluster\",node_id=~\"$node\",host_name=~\"$host\"}[$__rate_interval])) * 0)",
+          "legendFormat": "miss/s n{{node_id}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "4. 磁盘形态 (LSM)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 27
+      },
+      "panels": []
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "SSTable 文件数",
+      "description": "**面板作用**\n各 level SST 文件数; L0 多 → compaction 压力.\n\n**数据来源**\naikv/aidb → OTLP (:4317) → OTel Collector → Prom remote write\nResource: `cluster`, `host_name`, `node_id`\n\n**No data**\n需 memtable flush 后才有 L0 SST; gauge 在 flush 时更新.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 28
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "lineInterpolation": "smooth",
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "aidb_sstable_count{service_name=\"aikv\",cluster=~\"$cluster\",node_id=~\"$node\",host_name=~\"$host\"} or (0 * sum by (node_id, aidb_sstable_level) (aidb_memtable_size_bytes{service_name=\"aikv\",cluster=~\"$cluster\",node_id=~\"$node\",host_name=~\"$host\",aidb_memtable_state=\"active\"}))",
+          "legendFormat": "L{{aidb_sstable_level}} n{{node_id}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "SSTable 体积",
+      "description": "**面板作用**\n各 level SST 字节数.\n\n**数据来源**\naikv/aidb → OTLP (:4317) → OTel Collector → Prom remote write\nResource: `cluster`, `host_name`, `node_id`\n\n**No data**\n需 memtable flush 后才有 L0 SST; gauge 在 flush 时更新.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 28
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "lineInterpolation": "smooth",
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "aidb_sstable_size_bytes{service_name=\"aikv\",cluster=~\"$cluster\",node_id=~\"$node\",host_name=~\"$host\"} or (0 * sum by (node_id, aidb_sstable_level) (aidb_memtable_size_bytes{service_name=\"aikv\",cluster=~\"$cluster\",node_id=~\"$node\",host_name=~\"$host\",aidb_memtable_state=\"active\"}))",
+          "legendFormat": "L{{aidb_sstable_level}} n{{node_id}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Key 总数",
+      "description": "**面板作用**\n引擎物理 key 数 (`aidb_total_key_count`).\n\n**数据来源**\naikv/aidb → OTLP (:4317) → OTel Collector → Prom remote write\nResource: `cluster`, `host_name`, `node_id`\n\n**PromQL**\n旧版 aikv OTel 导出名为 `aidb_total_key_count_ratio`; 新版 aikv 为 `aidb_total_key_count`. 集群写走 write_batch, 旧版未更新该 gauge (始终 0).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 28
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "lineInterpolation": "smooth",
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "aidb_total_key_count{service_name=\"aikv\",cluster=~\"$cluster\",node_id=~\"$node\",host_name=~\"$host\"} or aidb_total_key_count_ratio{service_name=\"aikv\",cluster=~\"$cluster\",node_id=~\"$node\",host_name=~\"$host\"}",
+          "legendFormat": "n{{node_id}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "5. 后台 (Compaction)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 36
+      },
+      "panels": []
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "Compaction Ops",
+      "description": "**面板作用**\ncompaction 各 phase (pick/run/apply) 频率.\n\n**图示**\nrun 高 → 后台在读写的 SST 多.\n\n**数据来源**\naikv/aidb → OTLP (:4317) → OTel Collector → Prom remote write\nResource: `cluster`, `host_name`, `node_id`\n\n**No data**\n无 compaction 时 counter 无 series (需先 flush 出 L0).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 37
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "lineInterpolation": "smooth",
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(aidb_compaction_total{service_name=\"aikv\",cluster=~\"$cluster\",node_id=~\"$node\",host_name=~\"$host\"}[$__rate_interval])) by (aidb_compaction_phase, node_id) or (label_replace(sum by (node_id) (rate(aidb_operations_total{service_name=\"aikv\",cluster=~\"$cluster\",node_id=~\"$node\",host_name=~\"$host\"}[$__rate_interval])) * 0, \"aidb_compaction_phase\", \"run\", \"\", \"\"))",
+          "legendFormat": "{{aidb_compaction_phase}} n{{node_id}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 32,
+      "type": "timeseries",
+      "title": "Compaction p95 耗时",
+      "description": "**面板作用**\n各 phase compaction P95 (秒).\n\n**数据来源**\naikv/aidb → OTLP (:4317) → OTel Collector → Prom remote write\nResource: `cluster`, `host_name`, `node_id`",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 37
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "lineInterpolation": "smooth",
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(aidb_compaction_duration_seconds_bucket{service_name=\"aikv\",cluster=~\"$cluster\",node_id=~\"$node\",host_name=~\"$host\"}[$__rate_interval])) by (le, aidb_compaction_phase, node_id)) or (label_replace(sum by (node_id) (rate(aidb_operations_total{service_name=\"aikv\",cluster=~\"$cluster\",node_id=~\"$node\",host_name=~\"$host\"}[$__rate_interval])) * 0, \"aidb_compaction_phase\", \"run\", \"\", \"\"))",
+          "legendFormat": "{{aidb_compaction_phase}} n{{node_id}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "description": "**AiDb 引擎** 按 5 层观测: 负载 → 写路径 → 读路径 → LSM 形态 → 后台 compaction.\n\n集群复制 (`aidb_raft_*`) 见 **Cluster** 面板. 容器磁盘 I/O 见 **Infra**."
+}
