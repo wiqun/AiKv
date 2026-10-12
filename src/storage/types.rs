@@ -69,6 +69,7 @@ pub enum ValueType {
     Hash(HashMap<Vec<u8>, Vec<u8>>),
     List(VecDeque<Vec<u8>>),
     Set(HashSet<Vec<u8>>),
+    #[serde(deserialize_with = "deserialize_zset_members")]
     ZSet(BTreeMap<Vec<u8>, f64>),
     /// Subkey 格式的集合元数据.
     /// key 自身存储 `StoredValue { value: CollectionHeader, expires_at }`,
@@ -94,6 +95,21 @@ pub enum StoredBatchOp {
     Delete {
         had_ttl: bool,
     },
+}
+
+/// ZSet 成员的反序列化: 先读成 `Vec<(member, score)>`, 再由 `BTreeMap::from_iter` 批量建树.
+///
+/// 编码字节与 `BTreeMap` 的 serde 编码一致 (postcard 中两者都是 "长度 + 逐对 key/value"),
+/// 因此磁盘格式不变. 逐条 `insert` 建树时, 每个成员都要做一次树内查找与节点分配,
+/// 对数千成员的热点 ZSet 是主要 CPU 开销; 批量建树的输入已按 key 有序, 只需线性处理.
+fn deserialize_zset_members<'de, D>(
+    deserializer: D,
+) -> std::result::Result<BTreeMap<Vec<u8>, f64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let pairs = Vec::<(Vec<u8>, f64)>::deserialize(deserializer)?;
+    Ok(pairs.into_iter().collect())
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -519,6 +535,28 @@ pub enum StorageEngineKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 回归: ZSet 反序列化改为先读 `Vec<(member, score)>` 再批量建树后, 磁盘字节必须保持不变.
+    /// 期望: `StoredValue { ZSet(..), expires_at: None }` 的 postcard 编码 = 变体序号 4 + 成员序列 + `None` (0x00),
+    /// 且解码回原集合. 该改动只影响解码路径, 不改变编码格式.
+    #[test]
+    fn zset_bulk_decode_keeps_wire_format() {
+        let mut map = BTreeMap::new();
+        for i in 0..500u32 {
+            map.insert(format!("m{i:04}").into_bytes(), i as f64 / 4.0);
+        }
+        let stored = StoredValue::new_zset(map.clone());
+        let bytes = postcard::to_allocvec(&stored).unwrap();
+
+        let payload: Vec<(Vec<u8>, f64)> = map.into_iter().collect();
+        let mut expected = vec![4u8];
+        expected.extend(postcard::to_allocvec(&payload).unwrap());
+        expected.push(0u8);
+        assert_eq!(bytes, expected);
+
+        let decoded: StoredValue = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded, stored);
+    }
 
     #[test]
     fn test_is_wrongtype() {

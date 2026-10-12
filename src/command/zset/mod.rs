@@ -451,7 +451,11 @@ impl ZSetCommands {
         let Some(stored) = self.storage.get_typed(db, key).await? else {
             return Ok(None);
         };
-        Ok(Some(stored.as_zset()?.clone()))
+        // `get_typed` 返回所有权, 直接移出成员表, 避免整表克隆.
+        match stored.value {
+            ValueType::ZSet(zset) => Ok(Some(zset)),
+            _ => Err(router::wrongtype()),
+        }
     }
 
     async fn load_or_create_zset(&self, db: usize, key: &[u8]) -> Result<StoredValue> {
