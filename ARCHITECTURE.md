@@ -103,10 +103,11 @@ aikv/src/
 │   ├── aidb_options.rs  # LSM 预设映射 (default, high-write, high-read)
 │   ├── cluster_adapter.rs # ClusterDataAdapter 与 Batcher 异步 propose
 │   ├── cluster_batcher.rs # GroupSetBatcher 写凑批 actor
-│   ├── subkey.rs        # Subkey 扁平化前缀编解码
-│   ├── types.rs         # StoredValue, ValueType, SubkeyData
+│   ├── subkey.rs        # 大集合版本化 subkey 编解码与集群路由 user key 解析
+│   ├── collection.rs    # 集合内联阈值, 版本号生成, 暂存写提交结构, GC 宽限期
+│   ├── types.rs         # StoredValue, ValueType, CollectionHeader, KvStorage
 │   ├── dump.rs          # DUMP / RESTORE 紧凑 postcard 编解码
-│   ├── ttl_filter.rs    # TTL 惰性过期与 Compaction Filter 联动
+│   ├── compaction_filter.rs # AikvCompactionFilter: compaction 回收过期主键与孤儿 subkey
 │   ├── observation.rs   # 存储层延迟与吞吐监控统计
 │   └── mod.rs
 ├── command/             # 命令路由、并发控制与业务处理器
@@ -187,13 +188,14 @@ AiKv 将 Redis 的丰富数据结构映射到底层 AiDb 的单一扁平 KV 空�
 | Redis 数据类型 | 元数据 Key 格式 | 数据 Key (Subkey) 格式 | 存储 Value 结构 |
 | :--- | :--- | :--- | :--- |
 | **String** | `{db}:{user_key}` | — | `StoredValue { type: String, expire_at, data }` |
-| **Hash** | `{db}:{user_key}` (元数据: 长度/版本) | `{db}:{user_key}:{field}` | 字段 Value 切片 |
+| **Hash** | `{db}:{user_key}` (header: `CollectionHeader { kind, count, version }`; 小集合直接为内联值) | `{db}\x01{len}{user_key}{version}H{field}` | 字段 Value 切片 |
 | **List** | `{db}:{user_key}` (元数据: head/tail/len) | `{db}:{user_key}:{index}` | 元素 Value 切片 |
-| **Set** | `{db}:{user_key}` (元数据: 长度/版本) | `{db}:{user_key}:{member}` | 空标记字节 |
+| **Set** | `{db}:{user_key}` (header: `CollectionHeader { kind, count, version }`; 小集合直接为内联值) | `{db}\x01{len}{user_key}{version}S{member}` | 空 |
 | **ZSet** | `{db}:{user_key}` (元数据: 长度/版本) | `{db}:{user_key}:{member}` / 分数索引 | Score 二进制浮点编码 |
 | **JSON** | `{db}:{user_key}` | — | `StoredValue { type: String, data: JSON 文本 }` |
 
-- **Subkey 分隔符**: 内部使用专有前缀与分隔符隔离, 支持对 Hash 单字段或 List 端点的高效 $O(1)$ 读写, 避免整存整取导致的写放大.
+- **小集合内联**: Hash / Set 元素数不超过 64 时, 整个集合内联在 `{db}:{user_key}` 的单个 `StoredValue` 中; 超过后转为版本化 subkey 布局 (详见 [03-storage.md](docs/modules/03-storage.md) §3).
+- **Subkey 隔离**: 版本化 subkey 以 `\x01` 与主键空间 `:` 隔离, user key 带长度前缀 (父 key 可含任意字节); 集合版本变化后旧 subkey 对读取不可见, 删除集合只删 header (O(1)), 旧 subkey 由 compaction 回收.
 
 ---
 

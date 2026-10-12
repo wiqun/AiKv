@@ -30,7 +30,15 @@
 
 **DBSIZE**: 返回引擎条目估值, 不随 `SELECT` 改变. `SET NX` / `XX`, `DEL` 返回值和 `EXISTS` 仍是精确命令结果.
 
-**键过期语义**: `TtlExpireFilter` 在 compaction 时丢弃过期值, 且不改 `ExpiresCounters`. `KvStorage::delete` 用一次存在性读取决定返回个数.
+**键过期语义**: `AikvCompactionFilter` 在 compaction 时丢弃过期主键与无效 subkey, 且不改 `ExpiresCounters`. `KvStorage::delete` 用一次存在性读取决定返回个数.
+
+**集合版本 (collection version)**: 大集合 (Hash/Set 超过 64 个元素) 的 header `CollectionHeader.version` 标识当前有效的 subkey 集合. subkey 键中带版本号, 版本与 header 不一致的 subkey 对读取不可见, 等待 compaction 回收.
+
+**暂存写 (staged write)**: 分配新集合版本时, 先分批写入全部新版本 subkey, 再一次性切换 header. 中途失败不会对外呈现半个集合.
+
+**GC 宽限期 (grace period)**: 1 小时 (`SUBKEY_GC_GRACE_US`). 宽限期内的 subkey 即使版本不匹配也保留, 覆盖暂存写时间与副本时钟偏差.
+
+**开发阶段无存量数据**: subkey 格式变更不做旧数据兼容 (2026-10-10 决定).
 
 ## 集群层
 

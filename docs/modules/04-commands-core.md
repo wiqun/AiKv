@@ -111,3 +111,23 @@ sequenceDiagram
 | **ZSet** | `ZADD`, `ZREM`, `ZSCORE`, `ZRANK`, `ZREVRANK`, `ZRANGE`, `ZREVRANGE`, `ZRANGEBYSCORE`, `ZREVRANGEBYSCORE`, `ZCARD`, `ZCOUNT`, `ZINCRBY`, `ZSCAN`, `ZPOPMIN`, `ZPOPMAX`, `BZPOPMIN`, `BZPOPMAX`, `ZRANGEBYLEX`, `ZREVRANGEBYLEX`, `ZLEXCOUNT`, `ZINTER`, `ZUNION`, `ZDIFF` |
 | **Key** | `DEL`, `EXISTS`, `TYPE`, `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `PEXPIREAT`, `TTL`, `PTTL`, `PERSIST`, `EXPIRETIME`, `PEXPIRETIME`, `RENAME`, `RENAMENX`, `COPY`, `KEYS`, `SCAN`, `RANDOMKEY`, `DUMP`, `RESTORE`, `MIGRATE` |
 | **DB** | `SELECT`, `FLUSHDB`, `FLUSHALL`, `DBSIZE`, `SWAPDB`, `MOVE` |
+
+---
+
+## 大集合 (Hash / Set) 键级语义
+
+物理布局与 GC 见 [03-storage.md §3](03-storage.md). 本节只列命令层可观察行为.
+
+| 操作 | 行为 |
+| :--- | :--- |
+| `DEL` / `UNLINK` | 大集合只删 header, O(1). 旧 subkey 由 compaction 回收 |
+| 惰性过期 / compaction TTL | 只删 header |
+| `RENAME` / `RENAMENX` / `COPY` | 目标获得新版本 subkey 集合; 目标原有内容被覆盖 |
+| `MOVE` | 跨库迁移大集合, 目标库可读出全部元素 |
+| `SWAPDB` | 两侧大集合整体交换, 非原子 (见 03-storage.md §3.4) |
+| `DUMP` / `RESTORE` / `MIGRATE` | 序列化前展开为完整内联值, payload 格式不变 |
+| `SUNIONSTORE` / `SINTERSTORE` / `SDIFFSTORE` | 目标已存在且不是 Set 时直接覆盖 (与 Redis 一致); 结果为空时删除目标, 返回 0 |
+| `SMOVE` | 目标 Set 增长超过阈值时转为 subkey 布局 (经 `put_value`) |
+| `OBJECT ENCODING` | 内联集合返回 `listpack`; subkey 布局的大集合返回 `hashtable` |
+| `HSCAN` / `SSCAN` | 游标越界返回游标 0 与空页, 不 panic |
+| `KEYS` / `SCAN` / `RANDOMKEY` | 只返回用户 key, 不返回 subkey |
