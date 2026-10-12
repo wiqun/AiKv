@@ -7,12 +7,13 @@ pub mod aidb_options;
 pub mod cluster_adapter;
 #[cfg(feature = "cluster")]
 mod cluster_batcher;
+pub mod collection;
+pub mod compaction_filter;
 pub mod dump;
 pub mod memory;
 pub mod observation;
 pub mod scan_cursor;
 pub mod subkey;
-pub mod ttl_filter;
 pub mod types;
 pub mod watch_registry;
 pub mod watch_version;
@@ -30,5 +31,5 @@ pub use types::{
     StoredBatchOp, StoredValue, ValueType, WriteOp, TTL_NO_EXPIRY, WRONGTYPE,
 };
 
-pub use ttl_filter::TtlExpireFilter;
+pub use compaction_filter::AikvCompactionFilter;
 pub use watch_registry::WatchRegistry;

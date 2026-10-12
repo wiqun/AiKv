@@ -68,15 +68,8 @@ impl DatabaseCommands {
         if src_db == target {
             return Ok(router::integer(0));
         }
-        let Some(value) = self.storage.get_typed(src_db, key).await? else {
-            return Ok(router::integer(0));
-        };
-        if self.storage.get_typed(target, key).await?.is_some() {
-            return Ok(router::integer(0));
-        }
-        self.storage.set_typed(target, key, value).await?;
-        self.storage.delete(src_db, key).await?;
-        Ok(router::integer(1))
+        let moved = self.storage.move_key(src_db, target, key).await?;
+        Ok(router::integer(i64::from(moved)))
     }
 }
 

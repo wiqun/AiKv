@@ -7,7 +7,8 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use aikv::storage::{now_ms, AiDbEngine, StoredValue, TtlExpireFilter, ValueType};
+use aikv::storage::compaction_filter::AikvCompactionFilter;
+use aikv::storage::{now_ms, AiDbEngine, StoredValue, ValueType};
 use tempfile::TempDir;
 
 #[ignore = "stress: concurrent write with TTL filter ~5s"]
@@ -16,7 +17,7 @@ fn test_concurrent_write_with_ttl_filter() {
     let dir = TempDir::new().unwrap();
     let engine = AiDbEngine::open_for_testing(dir.path()).expect("open");
     let db = engine.db.clone();
-    db.set_compaction_filter(Some(Arc::new(TtlExpireFilter)));
+    db.set_compaction_filter(Some(Arc::new(AikvCompactionFilter::single_node())));
 
     let stop = Arc::new(AtomicBool::new(false));
     let write_count = Arc::new(AtomicUsize::new(0));

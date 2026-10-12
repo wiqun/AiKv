@@ -11,7 +11,7 @@
 //! - 双 key 写: RENAME/RENAMENX/COPY 用 `key_lock.lock_two` (字典序, 同 key 不重入).
 //! - DUMP 格式: `[u8 version=1][postcard(StoredValue)]` (非 Redis DUMP); RESTORE 校验
 //!   version, 失败 → `ERR DUMP payload version or checksum error`.
-//! - MIGRATE: 本文件编排 — `get_typed` → `dump_encode` → `migrate::send_restore` (TCP) →
+//! - MIGRATE: 本文件编排 — `get_expanded` → `dump_encode` → `migrate::send_restore` (TCP) →
 //!   非 COPY 时源端 `delete`; 支持 KEYS/AUTH/AUTH2/REPLACE 等选项.
 
 use std::sync::Arc;
@@ -227,7 +227,7 @@ impl KeyCommands {
     /// DUMP — AiKv 内部格式 `[version: u8=1][postcard(StoredValue)]`, 非 Redis 兼容.
     pub async fn dump(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_args("DUMP", args, 1)?;
-        match self.storage.get_typed(db, &args[0]).await? {
+        match self.storage.get_expanded(db, &args[0]).await? {
             None => Ok(router::nil_bulk()),
             Some(stored) => {
                 let payload = dump_encode(&stored)?;
@@ -277,9 +277,9 @@ impl KeyCommands {
                 ));
             }
         }
-        let set_result = self.storage.set_typed(db, key, stored).await;
+        let set_result = self.storage.put_value(db, key, stored).await;
         if let Err(e) = &set_result {
-            tracing::error!(key = %String::from_utf8_lossy(key), error = %e, "RESTORE set_typed failed");
+            tracing::error!(key = %String::from_utf8_lossy(key), error = %e, "RESTORE put_value failed");
         }
         set_result?;
         Ok(router::ok())
@@ -345,7 +345,7 @@ impl KeyCommands {
 
         if !batch_keys.is_empty() {
             for key in batch_keys {
-                let Some(stored) = self.storage.get_typed(db, key).await? else {
+                let Some(stored) = self.storage.get_expanded(db, key).await? else {
                     continue;
                 };
                 let payload = dump_encode(&stored)?;
@@ -370,7 +370,7 @@ impl KeyCommands {
         }
 
         let _lock = self.key_lock.lock(key).await;
-        let Some(stored) = self.storage.get_typed(db, key).await? else {
+        let Some(stored) = self.storage.get_expanded(db, key).await? else {
             return Ok(router::ok());
         };
 

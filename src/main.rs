@@ -21,7 +21,7 @@ use aikv::config::{
     print_resolved_config, resolve, should_export_traces, Cli, EngineKind, ResolvedSettings,
 };
 use aikv::server::{ConnectionConfig, Server, ServerSharedState};
-use aikv::storage::ttl_filter::TtlExpireFilter;
+use aikv::storage::compaction_filter::AikvCompactionFilter;
 use aikv::storage::{
     server_db_options_with_preset, AiDbEngine, DbPreset, KvStorage, KvStorageAdapter, MemoryEngine,
     StorageEngineKind, StorageObservation,
@@ -63,9 +63,9 @@ async fn build_storage(
                 server_db_options_with_preset(settings.sync_wal, preset),
             )
             .map_err(|e| e.to_string())?;
-            engine
-                .db
-                .set_compaction_filter(Some(std::sync::Arc::new(TtlExpireFilter)));
+            engine.db.set_compaction_filter(Some(std::sync::Arc::new(
+                AikvCompactionFilter::single_node(),
+            )));
             let db = engine.db.clone();
             let adapter: Arc<dyn aikv::storage::StorageAdapter> = engine;
             #[cfg(feature = "cluster")]
@@ -357,7 +357,7 @@ async fn init_cluster(
         data_dir: data_dir.to_path_buf(),
         raft_node_config: data_raft_config,
         options: data_options,
-        compaction_filter: Some(std::sync::Arc::new(TtlExpireFilter)),
+        compaction_filter: Some(std::sync::Arc::new(AikvCompactionFilter::cluster())),
         compaction_removal_listener_factory: None,
     };
     let _lifecycle_shutdown = multi_raft.start_lifecycle_with_data(lifecycle_cfg);

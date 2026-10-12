@@ -1,22 +1,20 @@
-//! Set 命令: SADD/SREM/SMEMBERS/SISMEMBER/SCARD/SPOP/SRANDMEMBER/SMOVE/SSCAN,
-//! 以及集合运算 SUNION/SINTER/SDIFF 与其 *STORE 变体.
+//! Set 命令: SADD/SREM/SISMEMBER/SMEMBERS/SCARD/SPOP/SRANDMEMBER/SUNION/SINTER/SDIFF/
+//! SUNIONSTORE/SINTERSTORE/SDIFFSTORE/SMOVE/SSCAN.
 //!
-//! # 存储表示 (双格式)
+//! # 存储表示 (双格式, 见 `storage::collection`)
 //!
 //! ```text
-//! 小 set (≤ 64 members): ValueType::Set(HashSet<member>)
-//!                        postcard 存于 StoredValue
-//! 大 set (> 64 members): ValueType::CollectionHeader { kind: Set, count }
-//!                        member 独立 subkey:
-//!                        {encoded_user_key}\x01S{member_len:2B}{member} → 空值 (仅存在性)
+//! 小 set (≤ 64 members): ValueType::Set(HashSet<member>), 内联于 StoredValue
+//! 大 set (> 64 members): ValueType::CollectionHeader { kind: Set, count, version }
+//!                        member 为独立 subkey, 物理 key 带版本号, 见 `storage::subkey`
 //! ```
 //!
-//! 写路径: `key_lock.lock(key)` → `load_or_create_set` → 修改 → 超过
-//! `SET_MAX_INLINE_MEMBERS` (64) 时 `migrate_set_to_subkey`; 删空后 `delete`.
-//! SMOVE 跨源/目标双 key 用 `lock_two`; store 类集合运算读多 key 不加锁.
-//! 类型分轨: `get_typed`/`set_typed`; 非 Set → WRONGTYPE.
+//! 读写一律经 `SetState` 判定格式. 多 member 写入只调用一次 `commit_collection`
+//! 或 `rewrite_stored`. `*STORE` 写目标时走 `put_value`, 因此同样遵守阈值.
+//! 类型分轨: 非 Set → WRONGTYPE. `*STORE` 的目标按 Redis 语义直接覆盖任意类型
+//! (结果为空时删除目标).
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -26,16 +24,24 @@ use crate::command::router::{self, KeyLock};
 use crate::command::scan_util;
 use crate::error::{Error, Result};
 use crate::protocol::RespValue;
+use crate::storage::collection::{CollectionWrite, HeaderWrite};
 use crate::storage::memory::glob_match;
-use crate::storage::subkey;
-use crate::storage::{AiDbEngine, CollectionKind, KvStorage, StoredValue, ValueType};
-
-/// 小集合 inline 编码于 StoredValue; 超过此阈值自动切到 subkey 格式.
-const SET_MAX_INLINE_MEMBERS: usize = 64;
+use crate::storage::{CollectionKind, KvStorage, StoredValue, ValueType};
 
 pub struct SetCommands {
     storage: Arc<dyn KvStorage>,
     key_lock: Arc<KeyLock>,
+}
+
+/// 一次读取到的 Set 存储状态.
+enum SetState {
+    Missing,
+    Inline(StoredValue),
+    Subkey {
+        expires_at: Option<u64>,
+        count: u64,
+        version: u64,
+    },
 }
 
 impl SetCommands {
@@ -46,153 +52,44 @@ impl SetCommands {
     pub async fn sadd(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_min_args("SADD", args, 2)?;
         let key = &args[0];
-        crate::storage::subkey::reject_subkey_parent(key)?;
-        for member in &args[1..] {
-            crate::storage::subkey::reject_subkey_field(member)?;
-        }
         let _lock = self.key_lock.lock(key).await;
-        let mut stored = self.load_or_create_set(db, key).await?;
-
-        match &mut stored.value {
-            ValueType::Set(ref mut set) => {
-                let mut count = 0i64;
-                for member in &args[1..] {
-                    if set.insert(member.to_vec()) {
-                        count += 1;
-                    }
-                }
-                if set.len() > SET_MAX_INLINE_MEMBERS {
-                    self.migrate_set_to_subkey(db, key, &stored.expires_at, set)
-                        .await?;
-                } else {
-                    self.storage.rewrite_stored(db, key, stored).await?;
-                }
-                Ok(router::integer(count))
-            }
-            ValueType::CollectionHeader {
-                kind: CollectionKind::Set,
-                ref mut count,
-            } => {
-                let encoded_user_key = AiDbEngine::encode_key(db, key);
-                let mut new_members = 0i64;
-                for member in &args[1..] {
-                    let subkey_key =
-                        subkey::encode_set_member_key(&encoded_user_key, member.as_ref());
-                    let existed = self
-                        .storage
-                        .raw_subkey_get(db, subkey_key.clone())
-                        .await
-                        .unwrap_or_default()
-                        .is_some();
-                    if !existed {
-                        new_members += 1;
-                        *count += 1;
-                    }
-                    // Set member 值用空字节 (仅 key 存在性)
-                    self.storage.raw_subkey_set(db, subkey_key, vec![]).await?;
-                }
-                self.storage.rewrite_stored(db, key, stored).await?;
-                Ok(router::integer(new_members))
-            }
-            _ => Err(router::wrongtype()),
-        }
+        let state = self.load_state(db, key).await?;
+        let members = args[1..].iter().map(|m| m.to_vec()).collect();
+        let added = self.add_members(db, key, state, members).await?;
+        Ok(router::integer(added))
     }
 
     pub async fn srem(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_min_args("SREM", args, 2)?;
         let key = &args[0];
         let _lock = self.key_lock.lock(key).await;
-        let Some(mut stored) = self.storage.get_typed(db, key).await? else {
-            return Ok(router::integer(0));
-        };
-
-        match &mut stored.value {
-            ValueType::Set(ref mut set) => {
-                let mut count = 0i64;
-                for member in &args[1..] {
-                    if set.remove(member.as_ref()) {
-                        count += 1;
-                    }
-                }
-                if set.is_empty() {
-                    self.storage.delete(db, key).await?;
-                } else {
-                    self.storage.rewrite_stored(db, key, stored).await?;
-                }
-                Ok(router::integer(count))
-            }
-            ValueType::CollectionHeader {
-                kind: CollectionKind::Set,
-                ref mut count,
-            } => {
-                let encoded_user_key = AiDbEngine::encode_key(db, key);
-                let mut removed = 0i64;
-                for member in &args[1..] {
-                    let subkey_key =
-                        subkey::encode_set_member_key(&encoded_user_key, member.as_ref());
-                    if self
-                        .storage
-                        .raw_subkey_delete(db, subkey_key)
-                        .await
-                        .unwrap_or_default()
-                    {
-                        removed += 1;
-                    }
-                }
-                *count = count.saturating_sub(removed as u32);
-                if *count == 0 {
-                    self.storage.delete(db, key).await?;
-                } else {
-                    self.storage.rewrite_stored(db, key, stored).await?;
-                }
-                Ok(router::integer(removed))
-            }
-            _ => Err(router::wrongtype()),
-        }
+        let state = self.load_state(db, key).await?;
+        let members = args[1..].iter().map(|m| m.to_vec()).collect();
+        let removed = self.remove_members(db, key, state, members).await?;
+        Ok(router::integer(removed.len() as i64))
     }
 
     pub async fn sismember(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_args("SISMEMBER", args, 2)?;
-        let Some(stored) = self.storage.get_typed(db, &args[0]).await? else {
-            return Ok(router::integer(0));
-        };
-        let exists = match &stored.value {
-            ValueType::Set(set) => set.contains(args[1].as_ref()),
-            ValueType::CollectionHeader {
-                kind: CollectionKind::Set,
-                ..
-            } => {
-                let encoded_user_key = AiDbEngine::encode_key(db, &args[0]);
-                let subkey_key = subkey::encode_set_member_key(&encoded_user_key, args[1].as_ref());
-                self.storage
-                    .raw_subkey_get(db, subkey_key)
-                    .await
-                    .unwrap_or_default()
-                    .is_some()
-            }
-            _ => return Err(router::wrongtype()),
-        };
-        Ok(router::integer(i64::from(exists)))
+        let found = self.contains(db, &args[0], &args[1]).await?;
+        Ok(router::integer(i64::from(found)))
     }
 
     pub async fn smembers(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_args("SMEMBERS", args, 1)?;
-        let set = self.load_set_full(db, &args[0]).await?;
-        Ok(array_of_bulk(set.into_iter().collect()))
+        let members = self.load_members(db, &args[0]).await?;
+        Ok(array_of_bulk(members))
     }
 
     pub async fn scard(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_args("SCARD", args, 1)?;
-        let len = match self.storage.get_typed(db, &args[0]).await? {
-            None => 0,
-            Some(stored) => match stored.value {
+        let len = match self.load_state(db, &args[0]).await? {
+            SetState::Missing => 0,
+            SetState::Inline(stored) => match stored.value {
                 ValueType::Set(set) => set.len() as i64,
-                ValueType::CollectionHeader {
-                    kind: CollectionKind::Set,
-                    count,
-                } => count as i64,
-                _ => return Err(router::wrongtype()),
+                _ => unreachable!("inline state is always a Set"),
             },
+            SetState::Subkey { count, .. } => count as i64,
         };
         Ok(router::integer(len))
     }
@@ -206,58 +103,19 @@ impl SetCommands {
         };
         let key = &args[0];
         let _lock = self.key_lock.lock(key).await;
-        let Some(mut stored) = self.storage.get_typed(db, key).await? else {
+        let state = self.load_state(db, key).await?;
+        if matches!(state, SetState::Missing) {
             return Ok(router::nil_bulk());
-        };
+        }
         let count = count.unwrap_or(1);
         if count == 0 {
             return Ok(RespValue::Array(Some(vec![])));
         }
-
-        let mut members: Vec<Vec<u8>> = match &stored.value {
-            ValueType::Set(set) => set.iter().cloned().collect(),
-            ValueType::CollectionHeader {
-                kind: CollectionKind::Set,
-                ..
-            } => {
-                let encoded_user_key = AiDbEngine::encode_key(db, key);
-                self.scan_set_subkeys(db, &encoded_user_key, None).await?
-            }
-            _ => return Err(router::wrongtype()),
-        };
+        let mut members = self.members_of(db, key, &state).await?;
         members.shuffle(&mut rand::thread_rng());
         let n = (count as usize).min(members.len());
-        let picked: Vec<Vec<u8>> = members.into_iter().take(n).collect();
-
-        match &mut stored.value {
-            ValueType::Set(ref mut set) => {
-                for m in &picked {
-                    set.remove(m);
-                }
-                if set.is_empty() {
-                    self.storage.delete(db, key).await?;
-                } else {
-                    self.storage.rewrite_stored(db, key, stored).await?;
-                }
-            }
-            ValueType::CollectionHeader {
-                kind: CollectionKind::Set,
-                ref mut count,
-            } => {
-                let encoded_user_key = AiDbEngine::encode_key(db, key);
-                for m in &picked {
-                    let subkey_key = subkey::encode_set_member_key(&encoded_user_key, m);
-                    let _ = self.storage.raw_subkey_delete(db, subkey_key).await;
-                    *count = count.saturating_sub(1);
-                }
-                if *count == 0 {
-                    self.storage.delete(db, key).await?;
-                } else {
-                    self.storage.rewrite_stored(db, key, stored).await?;
-                }
-            }
-            _ => unreachable!(),
-        }
+        members.truncate(n);
+        let picked = self.remove_members(db, key, state, members).await?;
 
         if count == 1 && picked.len() == 1 {
             return Ok(router::bulk(picked.into_iter().next().unwrap()));
@@ -272,15 +130,14 @@ impl SetCommands {
         } else {
             None
         };
-        let set = self.load_set_full(db, &args[0]).await?;
-        if set.is_empty() {
+        let mut members = self.load_members(db, &args[0]).await?;
+        if members.is_empty() {
             return if count.is_some() {
                 Ok(RespValue::Array(Some(vec![])))
             } else {
                 Ok(router::nil_bulk())
             };
         }
-        let mut members: Vec<Vec<u8>> = set.into_iter().collect();
         let count = count.unwrap_or(1);
         if count == 0 {
             return Ok(RespValue::Array(Some(vec![])));
@@ -321,23 +178,20 @@ impl SetCommands {
 
     pub async fn sunionstore(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_min_args("SUNIONSTORE", args, 2)?;
-        let dest = &args[0];
         let result = self.compute_union(db, &args[1..]).await?;
-        self.store_set(db, dest, result).await
+        self.store_set(db, &args[0], result).await
     }
 
     pub async fn sinterstore(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_min_args("SINTERSTORE", args, 2)?;
-        let dest = &args[0];
         let result = self.compute_inter(db, &args[1..]).await?;
-        self.store_set(db, dest, result).await
+        self.store_set(db, &args[0], result).await
     }
 
     pub async fn sdiffstore(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_min_args("SDIFFSTORE", args, 2)?;
-        let dest = &args[0];
         let result = self.compute_diff(db, &args[1..]).await?;
-        self.store_set(db, dest, result).await
+        self.store_set(db, &args[0], result).await
     }
 
     pub async fn smove(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
@@ -349,93 +203,18 @@ impl SetCommands {
         let (_lock_a, _lock_b) = self.key_lock.lock_two(source, dest).await;
         let same_key = source == dest;
 
-        let Some(mut src_stored) = self.storage.get_typed(db, source).await? else {
-            return Ok(router::integer(0));
-        };
-
-        // 检查 source 中是否存在 member
-        let exists_in_src = match &src_stored.value {
-            ValueType::Set(set) => set.contains(&member),
-            ValueType::CollectionHeader {
-                kind: CollectionKind::Set,
-                ..
-            } => {
-                let encoded = AiDbEngine::encode_key(db, source);
-                let subkey_key = subkey::encode_set_member_key(&encoded, &member);
-                self.storage
-                    .raw_subkey_get(db, subkey_key)
-                    .await
-                    .unwrap_or_default()
-                    .is_some()
-            }
-            _ => return Err(router::wrongtype()),
-        };
-        if !exists_in_src {
+        if !self.contains(db, source, &member).await? {
             return Ok(router::integer(0));
         }
-
+        // 先读目标状态: 目标类型错误时源不被修改 (与 Redis 一致).
+        let dest_state = self.load_state(db, dest).await?;
         if same_key {
             return Ok(router::integer(1));
         }
-
-        // 从 source 删除
-        match &mut src_stored.value {
-            ValueType::Set(ref mut set) => {
-                set.remove(&member);
-                if set.is_empty() {
-                    self.storage.delete(db, source).await?;
-                } else {
-                    self.storage.rewrite_stored(db, source, src_stored).await?;
-                }
-            }
-            ValueType::CollectionHeader {
-                kind: CollectionKind::Set,
-                ref mut count,
-            } => {
-                let encoded = AiDbEngine::encode_key(db, source);
-                let subkey_key = subkey::encode_set_member_key(&encoded, &member);
-                self.storage.raw_subkey_delete(db, subkey_key).await?;
-                *count = count.saturating_sub(1);
-                if *count == 0 {
-                    self.storage.delete(db, source).await?;
-                } else {
-                    self.storage.rewrite_stored(db, source, src_stored).await?;
-                }
-            }
-            _ => unreachable!(),
-        }
-
-        // 添加到 dest
-        let mut dest_stored = match self.storage.get_typed(db, dest).await? {
-            None => StoredValue::new_set(HashSet::new()),
-            Some(stored) => match stored.value {
-                ValueType::Set(_) => stored,
-                ValueType::CollectionHeader {
-                    kind: CollectionKind::Set,
-                    ..
-                } => stored,
-                _ => return Err(router::wrongtype()),
-            },
-        };
-
-        match &mut dest_stored.value {
-            ValueType::Set(ref mut set) => {
-                set.insert(member);
-                self.storage.rewrite_stored(db, dest, dest_stored).await?;
-            }
-            ValueType::CollectionHeader {
-                kind: CollectionKind::Set,
-                ref mut count,
-            } => {
-                let encoded = AiDbEngine::encode_key(db, dest);
-                let subkey_key = subkey::encode_set_member_key(&encoded, &member);
-                self.storage.raw_subkey_set(db, subkey_key, vec![]).await?;
-                *count += 1;
-                self.storage.rewrite_stored(db, dest, dest_stored).await?;
-            }
-            _ => unreachable!(),
-        }
-
+        let src_state = self.load_state(db, source).await?;
+        self.remove_members(db, source, src_state, vec![member.clone()])
+            .await?;
+        self.add_members(db, dest, dest_state, vec![member]).await?;
         Ok(router::integer(1))
     }
 
@@ -444,65 +223,45 @@ impl SetCommands {
         let cursor = scan_util::parse_u64(&args[1])?;
         let opts = scan_util::parse_scan_options("SSCAN", args, 2)?;
 
-        let Some(stored) = self.storage.get_typed(db, &args[0]).await? else {
-            return Ok(scan_util::scan_response_bulk(0, &[]));
-        };
-
-        let members: Vec<Vec<u8>> = match stored.value {
-            ValueType::Set(set) => {
-                let mut m: Vec<Vec<u8>> = set
-                    .into_iter()
-                    .filter(|m| {
-                        opts.pattern
-                            .as_ref()
-                            .is_none_or(|p| glob_match(p, m.as_slice()))
-                    })
-                    .collect();
-                m.sort();
-                m
-            }
-            ValueType::CollectionHeader {
-                kind: CollectionKind::Set,
-                ..
-            } => {
-                let encoded_user_key = AiDbEngine::encode_key(db, &args[0]);
-                let mut m = self
-                    .scan_set_subkeys(db, &encoded_user_key, opts.pattern.as_deref())
-                    .await?;
-                m.sort();
-                m
-            }
-            _ => return Err(router::wrongtype()),
-        };
-
+        let mut members: Vec<Vec<u8>> = self
+            .load_members(db, &args[0])
+            .await?
+            .into_iter()
+            .filter(|m| {
+                opts.pattern
+                    .as_ref()
+                    .is_none_or(|p| glob_match(p, m.as_slice()))
+            })
+            .collect();
+        members.sort();
         let (next_cursor, page) = scan_util::paginate_slice(&members, cursor, opts.count);
         Ok(scan_util::scan_response_bulk(next_cursor, page))
     }
 
-    // ---- helpers ----
-
+    /// `*STORE` 的写入: 结果为空时删除目标 (若存在), 否则按阈值写入 (可覆盖任意类型).
     async fn store_set(&self, db: usize, dest: &Bytes, set: HashSet<Vec<u8>>) -> Result<RespValue> {
         let _lock = self.key_lock.lock(dest).await;
-        if let Some(stored) = self.storage.get_typed(db, dest).await? {
-            if !matches!(
-                stored.value,
-                ValueType::Set(_) | ValueType::CollectionHeader { .. }
-            ) {
-                return Err(router::wrongtype());
-            }
-        }
+        let old = self.storage.get_typed(db, dest).await?;
         let len = set.len() as i64;
+        if set.is_empty() {
+            if old.is_some() {
+                self.storage.delete(db, dest).await?;
+            }
+            return Ok(router::integer(0));
+        }
         self.storage
-            .set_typed(db, dest, StoredValue::new_set(set))
+            .put_value(db, dest, StoredValue::new_set(set))
             .await?;
+        if old.and_then(|v| v.expires_at).is_some() {
+            self.storage.release_seen_ttl(db).await?;
+        }
         Ok(router::integer(len))
     }
 
     async fn compute_union(&self, db: usize, keys: &[Bytes]) -> Result<HashSet<Vec<u8>>> {
         let mut result = HashSet::new();
         for key in keys {
-            let set = self.load_set_full(db, key).await?;
-            result.extend(set);
+            result.extend(self.load_members(db, key).await?);
         }
         Ok(result)
     }
@@ -510,7 +269,7 @@ impl SetCommands {
     async fn compute_inter(&self, db: usize, keys: &[Bytes]) -> Result<HashSet<Vec<u8>>> {
         let mut result: Option<HashSet<Vec<u8>>> = None;
         for key in keys {
-            let set = self.load_set_full(db, key).await?;
+            let set: HashSet<Vec<u8>> = self.load_members(db, key).await?.into_iter().collect();
             result = Some(match result {
                 None => set,
                 Some(mut acc) => {
@@ -523,112 +282,223 @@ impl SetCommands {
     }
 
     async fn compute_diff(&self, db: usize, keys: &[Bytes]) -> Result<HashSet<Vec<u8>>> {
-        let mut result = self.load_set_full(db, &keys[0]).await?;
+        let mut result: HashSet<Vec<u8>> =
+            self.load_members(db, &keys[0]).await?.into_iter().collect();
         for key in &keys[1..] {
-            let set = self.load_set_full(db, key).await?;
+            let set: HashSet<Vec<u8>> = self.load_members(db, key).await?.into_iter().collect();
             result.retain(|m| !set.contains(m));
         }
         Ok(result)
     }
 
-    /// 加载 set 全部 members (兼容所有格式).
-    async fn load_set_full(&self, db: usize, key: &[u8]) -> Result<HashSet<Vec<u8>>> {
+    /// 读取 Set 状态; 类型不符返回 WRONGTYPE.
+    async fn load_state(&self, db: usize, key: &[u8]) -> Result<SetState> {
         let Some(stored) = self.storage.get_typed(db, key).await? else {
-            return Ok(HashSet::new());
+            return Ok(SetState::Missing);
         };
         match stored.value {
-            ValueType::Set(set) => Ok(set),
+            ValueType::Set(_) => Ok(SetState::Inline(stored)),
             ValueType::CollectionHeader {
                 kind: CollectionKind::Set,
-                ..
-            } => {
-                let encoded_user_key = AiDbEngine::encode_key(db, key);
-                Ok(self
-                    .scan_set_subkeys(db, &encoded_user_key, None)
-                    .await?
-                    .into_iter()
-                    .collect())
-            }
+                count,
+                version,
+            } => Ok(SetState::Subkey {
+                expires_at: stored.expires_at,
+                count,
+                version,
+            }),
             _ => Err(router::wrongtype()),
         }
     }
 
-    /// 加载或创建 set (兼容所有格式).
-    async fn load_or_create_set(&self, db: usize, key: &[u8]) -> Result<StoredValue> {
-        match self.storage.get_typed(db, key).await? {
-            None => Ok(StoredValue::new_set(HashSet::new())),
-            Some(stored) => match stored.value {
-                ValueType::Set(_) => Ok(stored),
-                ValueType::CollectionHeader {
-                    kind: CollectionKind::Set,
-                    ..
-                } => Ok(stored),
-                _ => Err(router::wrongtype()),
-            },
-        }
-    }
-
-    /// 扫描 subkey set 的所有 members.
-    async fn scan_set_subkeys(
-        &self,
-        db: usize,
-        encoded_user_key: &[u8],
-        pattern: Option<&[u8]>,
-    ) -> Result<Vec<Vec<u8>>> {
-        let prefix = subkey::set_subkey_prefix(encoded_user_key);
-        let out = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let out_c = out.clone();
-        let pattern = pattern.map(|p| p.to_vec());
-
-        let _ = self
-            .storage
-            .raw_subkey_for_each(
-                db,
-                prefix,
-                Box::new(move |encoded, _raw| {
-                    if let Some((kind, member)) = subkey::decode_subkey(&encoded) {
-                        if kind != CollectionKind::Set {
-                            return Ok(());
-                        }
-                        if let Some(ref pat) = pattern {
-                            if !glob_match(pat, &member) {
-                                return Ok(());
-                            }
-                        }
-                        out_c.lock().unwrap().push(member);
-                    }
-                    Ok(())
-                }),
-            )
-            .await;
-
-        Ok(Arc::try_unwrap(out).unwrap().into_inner().unwrap())
-    }
-
-    /// 将 inline set 迁移为 subkey 格式.
-    async fn migrate_set_to_subkey(
-        &self,
-        db: usize,
-        key: &[u8],
-        expires_at: &Option<u64>,
-        set: &HashSet<Vec<u8>>,
-    ) -> Result<()> {
-        let encoded_user_key = AiDbEngine::encode_key(db, key);
-        let count = set.len() as u32;
-
-        for member in set {
-            let subkey_key = subkey::encode_set_member_key(&encoded_user_key, member);
-            self.storage.raw_subkey_set(db, subkey_key, vec![]).await?;
-        }
-
-        let metadata = StoredValue {
+    fn header(count: u64, version: u64, expires_at: Option<u64>) -> StoredValue {
+        StoredValue {
             value: ValueType::CollectionHeader {
                 kind: CollectionKind::Set,
                 count,
+                version,
             },
-            expires_at: *expires_at,
-        };
-        self.storage.rewrite_stored(db, key, metadata).await
+            expires_at,
+        }
+    }
+
+    /// 返回新增成员数. 调用方持有 key 锁.
+    async fn add_members(
+        &self,
+        db: usize,
+        key: &[u8],
+        state: SetState,
+        members: Vec<Vec<u8>>,
+    ) -> Result<i64> {
+        let members: BTreeSet<Vec<u8>> = members.into_iter().collect();
+        match state {
+            SetState::Missing => {
+                let added = members.len() as i64;
+                let set: HashSet<Vec<u8>> = members.into_iter().collect();
+                self.storage
+                    .rewrite_stored(db, key, StoredValue::new_set(set))
+                    .await?;
+                Ok(added)
+            }
+            SetState::Inline(mut stored) => {
+                let ValueType::Set(set) = &mut stored.value else {
+                    unreachable!("inline state is always a Set")
+                };
+                let added = members
+                    .into_iter()
+                    .filter(|m| set.insert(m.clone()))
+                    .count() as i64;
+                if added > 0 {
+                    self.storage.rewrite_stored(db, key, stored).await?;
+                }
+                Ok(added)
+            }
+            SetState::Subkey {
+                expires_at,
+                count,
+                version,
+            } => {
+                let subs: Vec<&[u8]> = members.iter().map(Vec::as_slice).collect();
+                let existing = self
+                    .storage
+                    .subkey_get_many(db, key, version, CollectionKind::Set, &subs)
+                    .await?;
+                let puts: Vec<(Vec<u8>, Vec<u8>)> = members
+                    .iter()
+                    .zip(existing)
+                    .filter(|(_, v)| v.is_none())
+                    .map(|(m, _)| (m.clone(), Vec::new()))
+                    .collect();
+                let added = puts.len() as u64;
+                if added == 0 {
+                    return Ok(0);
+                }
+                self.storage
+                    .commit_collection(
+                        db,
+                        key,
+                        CollectionWrite {
+                            header: HeaderWrite::Put(Self::header(
+                                count + added,
+                                version,
+                                expires_at,
+                            )),
+                            version,
+                            kind: CollectionKind::Set,
+                            puts,
+                            deletes: Vec::new(),
+                        },
+                    )
+                    .await?;
+                Ok(added as i64)
+            }
+        }
+    }
+
+    /// 返回实际删除的成员. 调用方持有 key 锁.
+    async fn remove_members(
+        &self,
+        db: usize,
+        key: &[u8],
+        state: SetState,
+        members: Vec<Vec<u8>>,
+    ) -> Result<Vec<Vec<u8>>> {
+        let members: BTreeSet<Vec<u8>> = members.into_iter().collect();
+        match state {
+            SetState::Missing => Ok(Vec::new()),
+            SetState::Inline(mut stored) => {
+                let ValueType::Set(set) = &mut stored.value else {
+                    unreachable!("inline state is always a Set")
+                };
+                let removed: Vec<Vec<u8>> = members.into_iter().filter(|m| set.remove(m)).collect();
+                if set.is_empty() {
+                    self.storage.delete(db, key).await?;
+                } else if !removed.is_empty() {
+                    self.storage.rewrite_stored(db, key, stored).await?;
+                }
+                Ok(removed)
+            }
+            SetState::Subkey {
+                expires_at,
+                count,
+                version,
+            } => {
+                let subs: Vec<&[u8]> = members.iter().map(Vec::as_slice).collect();
+                let existing = self
+                    .storage
+                    .subkey_get_many(db, key, version, CollectionKind::Set, &subs)
+                    .await?;
+                let removed: Vec<Vec<u8>> = members
+                    .into_iter()
+                    .zip(existing)
+                    .filter_map(|(m, v)| v.map(|_| m))
+                    .collect();
+                if removed.is_empty() {
+                    return Ok(removed);
+                }
+                let remaining = count.saturating_sub(removed.len() as u64);
+                let header = if remaining == 0 {
+                    HeaderWrite::Delete {
+                        had_ttl: expires_at.is_some(),
+                    }
+                } else {
+                    HeaderWrite::Put(Self::header(remaining, version, expires_at))
+                };
+                self.storage
+                    .commit_collection(
+                        db,
+                        key,
+                        CollectionWrite {
+                            header,
+                            version,
+                            kind: CollectionKind::Set,
+                            puts: Vec::new(),
+                            deletes: removed.clone(),
+                        },
+                    )
+                    .await?;
+                Ok(removed)
+            }
+        }
+    }
+
+    async fn contains(&self, db: usize, key: &[u8], member: &[u8]) -> Result<bool> {
+        match self.load_state(db, key).await? {
+            SetState::Missing => Ok(false),
+            SetState::Inline(stored) => match stored.value {
+                ValueType::Set(set) => Ok(set.contains(member)),
+                _ => unreachable!("inline state is always a Set"),
+            },
+            SetState::Subkey { version, .. } => Ok(self
+                .storage
+                .subkey_get_many(db, key, version, CollectionKind::Set, &[member])
+                .await?
+                .pop()
+                .flatten()
+                .is_some()),
+        }
+    }
+
+    async fn load_members(&self, db: usize, key: &[u8]) -> Result<Vec<Vec<u8>>> {
+        let state = self.load_state(db, key).await?;
+        self.members_of(db, key, &state).await
+    }
+
+    async fn members_of(&self, db: usize, key: &[u8], state: &SetState) -> Result<Vec<Vec<u8>>> {
+        match state {
+            SetState::Missing => Ok(Vec::new()),
+            SetState::Inline(stored) => match &stored.value {
+                ValueType::Set(set) => Ok(set.iter().cloned().collect()),
+                _ => unreachable!("inline state is always a Set"),
+            },
+            SetState::Subkey { version, .. } => Ok(self
+                .storage
+                .subkey_scan(db, key, *version, CollectionKind::Set)
+                .await?
+                .into_iter()
+                .map(|(m, _)| m)
+                .collect()),
+        }
     }
 }
 

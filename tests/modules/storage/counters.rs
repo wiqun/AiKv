@@ -1,6 +1,6 @@
 use aidb::engine::compaction::{CompactionFilter, FilterDecision};
 use aikv::storage::adapter::KvStorageAdapter;
-use aikv::storage::ttl_filter::TtlExpireFilter;
+use aikv::storage::compaction_filter::AikvCompactionFilter;
 use aikv::storage::types::StoredValue;
 use aikv::storage::types::{now_ms, ExpiresCounters, KvStorage};
 use aikv::storage::AiDbEngine;
@@ -66,7 +66,7 @@ fn ttl_expire_filter_does_not_touch_expires_counters() {
     };
     let bytes = postcard::to_allocvec(&stored).unwrap();
     assert_eq!(
-        TtlExpireFilter.filter(0, b"k", &bytes),
+        AikvCompactionFilter::single_node().filter(0, b"k", &bytes),
         FilterDecision::Remove
     );
     assert_eq!(counters.get(0), 1);

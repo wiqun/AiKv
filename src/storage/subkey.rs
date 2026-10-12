@@ -1,205 +1,178 @@
-//! Subkey 编码: 将大集合 (Hash/Set) 的 field/member 存储为独立 key.
-//!
-//! # 编码方案
+//! 大集合 (Hash/Set) 的版本化 subkey 编码.
 //!
 //! ```text
-//! Inline (小集合):    {encoded_user_key}
-//!                     值: postcard(StoredValue)
-//!
-//! Subkey 元数据:     {encoded_user_key}  (ValueType::CollectionHeader)
-//!
-//! Hash field subkey: {encoded_user_key}\x01H{field_len:2B}{field}
-//!                     值: raw bytes (field value)
-//!
-//! Set member subkey: {encoded_user_key}\x01S{member_len:2B}{member}
-//!                     值: 空 (仅 key 存在性表示 member)
+//! header: {db}:{user_key}                                  值: postcard(StoredValue{CollectionHeader})
+//! subkey: {db}\x01{len u32 BE}{user_key}{version u64 BE}{tag}{sub}
+//!         tag = b'H' (值为 field 值) | b'S' (值为空)
 //! ```
 //!
-//! `\x01` 用于分隔 user key 和 subkey 部分.
-//! 常规 key 不含 `\x01`, 因此 subkey entries 可被 `collect_db_entries` 过滤.
+//! `\x01 < b':'`, 所以 `{db}\x01` 与 `{db}:` 不共享前缀, 主键扫描看不到 subkey.
+//! 只有版本与 header 相同的 subkey 可见; 其余由 compaction filter 回收.
+//! 物理 key 不再依赖 user key 中不含分隔符, 任意字节的 key 均可使用.
 
-use crate::error::{Error, Result};
+use crate::storage::aidb::AiDbEngine;
 use crate::storage::types::CollectionKind;
 
-/// Subkey 键编码相关常量.
-const SUBKEY_SEPARATOR: u8 = 0x01;
+/// Hash field subkey 的标签字节.
 const HASH_TAG: u8 = b'H';
+/// Set member subkey 的标签字节.
 const SET_TAG: u8 = b'S';
-/// Subkey 中 field/member 长度字段的字节数 (u16).
-const SUBKEY_LEN_BYTES: usize = 2;
 
-// ---- 编码函数 ----
+// ---- 版本化 subkey 编解码 ----
 
-/// 构造 Hash field subkey 的完整 engine key.
-///
-/// 格式: `{user_key}\x01H{field_len:2B}{field}`
-pub fn encode_hash_field_key(user_key: &[u8], field: &[u8]) -> Vec<u8> {
-    encode_collection_subkey(user_key, HASH_TAG, field)
-}
+/// 版本化 subkey 键空间标记 `\x01`: `{db}\x01...` 与主键空间 `{db}:` 不共享前缀.
+const SUBKEY_SPACE: u8 = 0x01;
 
-/// 构造 Set member subkey 的完整 engine key.
-///
-/// 格式: `{user_key}\x01S{member_len:2B}{member}`
-pub fn encode_set_member_key(user_key: &[u8], member: &[u8]) -> Vec<u8> {
-    encode_collection_subkey(user_key, SET_TAG, member)
-}
-
-/// 构造 Hash field 的扫描前缀.
-///
-/// 格式: `{user_key}\x01H`
-pub fn hash_subkey_prefix(user_key: &[u8]) -> Vec<u8> {
-    let mut prefix = Vec::with_capacity(user_key.len() + 2);
-    prefix.extend_from_slice(user_key);
-    prefix.push(SUBKEY_SEPARATOR);
-    prefix.push(HASH_TAG);
-    prefix
-}
-
-/// 构造 Set member 的扫描前缀.
-///
-/// 格式: `{user_key}\x01S`
-pub fn set_subkey_prefix(user_key: &[u8]) -> Vec<u8> {
-    let mut prefix = Vec::with_capacity(user_key.len() + 2);
-    prefix.extend_from_slice(user_key);
-    prefix.push(SUBKEY_SEPARATOR);
-    prefix.push(SET_TAG);
-    prefix
-}
-
-/// 父 key 里的 `0x01` 会让 `decode_subkey` 从错误的位置切开。
-pub fn reject_subkey_parent(user_key: &[u8]) -> Result<()> {
-    if user_key.contains(&SUBKEY_SEPARATOR) {
-        Err(Error::Command(
-            "ERR key must not contain a subkey separator".into(),
-        ))
-    } else {
-        Ok(())
+/// 集合类型对应的 subkey 标签字节.
+pub fn kind_tag(kind: CollectionKind) -> u8 {
+    match kind {
+        CollectionKind::Hash => HASH_TAG,
+        CollectionKind::Set => SET_TAG,
     }
 }
 
-/// field 长度按 u16 写入。更长的 field 会被截断，读回来对不上。
-pub fn reject_subkey_field(field: &[u8]) -> Result<()> {
-    if field.len() > u16::MAX as usize {
-        Err(Error::Command("ERR field is too long".into()))
-    } else {
-        Ok(())
-    }
-}
-
-fn encode_collection_subkey(user_key: &[u8], tag: u8, sub: &[u8]) -> Vec<u8> {
-    let mut key = Vec::with_capacity(user_key.len() + 3 + SUBKEY_LEN_BYTES + sub.len());
-    key.extend_from_slice(user_key);
-    key.push(SUBKEY_SEPARATOR);
-    key.push(tag);
-    let len = (sub.len() as u16).to_be_bytes();
-    key.extend_from_slice(&len);
-    key.extend_from_slice(sub);
-    key
-}
-
-// ---- 解码函数 ----
-
-/// 解码结果: (collection_kind, field_or_member_bytes).
-pub fn decode_subkey(encoded_key: &[u8]) -> Option<(CollectionKind, Vec<u8>)> {
-    let sep_pos = encoded_key.iter().position(|&b| b == SUBKEY_SEPARATOR)?;
-    if sep_pos + 1 >= encoded_key.len() {
-        return None;
-    }
-    let tag = encoded_key[sep_pos + 1];
-    let kind = match tag {
-        HASH_TAG => CollectionKind::Hash,
-        SET_TAG => CollectionKind::Set,
-        _ => return None,
-    };
-    // 跳过 tag + 2B 长度前缀
-    let data_start = sep_pos + 4;
-    if data_start > encoded_key.len() {
-        return None;
-    }
-    let field = encoded_key[data_start..].to_vec();
-    Some((kind, field))
-}
-
-/// 判断某个 engine key 是否为 subkey entry (field/member, 非 metadata).
-///
-/// 返回 user_key + subkey 标记; 常规 key/meta key 返回 None.
-pub fn extract_user_key_from_subkey(encoded_key: &[u8]) -> Option<Vec<u8>> {
-    let sep_pos = encoded_key.iter().position(|&b| b == SUBKEY_SEPARATOR)?;
-    if sep_pos + 1 >= encoded_key.len() {
-        return None;
-    }
-    let tag = encoded_key[sep_pos + 1];
+fn kind_from_tag(tag: u8) -> Option<CollectionKind> {
     match tag {
-        HASH_TAG | SET_TAG => Some(encoded_key[..sep_pos].to_vec()),
+        HASH_TAG => Some(CollectionKind::Hash),
+        SET_TAG => Some(CollectionKind::Set),
         _ => None,
     }
 }
 
-/// 检查是否为 regular key 或 metadata key (不含 subkey 分隔符).
-pub fn is_not_subkey(encoded_key: &[u8]) -> bool {
-    !encoded_key.contains(&SUBKEY_SEPARATOR)
+/// 版本化 subkey 的库前缀: `{db}\x01`.
+pub fn subkey_db_prefix(db: usize) -> Vec<u8> {
+    let mut prefix = db.to_string().into_bytes();
+    prefix.push(SUBKEY_SPACE);
+    prefix
+}
+
+/// 某个父 key 某个版本的 subkey 扫描前缀.
+///
+/// 格式: `{db}\x01{user_key_len:u32 BE}{user_key}{version:u64 BE}{tag}`
+pub fn subkey_version_prefix(
+    db: usize,
+    user_key: &[u8],
+    version: u64,
+    kind: CollectionKind,
+) -> Vec<u8> {
+    let mut prefix = subkey_db_prefix(db);
+    prefix.reserve(4 + user_key.len() + 9);
+    prefix.extend_from_slice(&(user_key.len() as u32).to_be_bytes());
+    prefix.extend_from_slice(user_key);
+    prefix.extend_from_slice(&version.to_be_bytes());
+    prefix.push(kind_tag(kind));
+    prefix
+}
+
+/// 构造版本化 subkey 的完整物理 key.
+pub fn encode_subkey(
+    db: usize,
+    user_key: &[u8],
+    version: u64,
+    kind: CollectionKind,
+    sub: &[u8],
+) -> Vec<u8> {
+    let mut key = subkey_version_prefix(db, user_key, version, kind);
+    key.extend_from_slice(sub);
+    key
+}
+
+/// 版本化 subkey 解码结果; 借用原始物理 key.
+#[derive(Debug, PartialEq, Eq)]
+pub struct DecodedSubkey<'a> {
+    pub db: usize,
+    pub user_key: &'a [u8],
+    pub version: u64,
+    pub kind: CollectionKind,
+    pub sub: &'a [u8],
+}
+
+/// 解码版本化 subkey. 主键 `{db}:{user_key}` 与非法输入返回 None.
+pub fn decode_versioned_subkey(physical: &[u8]) -> Option<DecodedSubkey<'_>> {
+    let sep = physical.iter().position(|&b| b == SUBKEY_SPACE)?;
+    let digits = &physical[..sep];
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    let db = std::str::from_utf8(digits).ok()?.parse().ok()?;
+    let rest = &physical[sep + 1..];
+    let len = u32::from_be_bytes(rest.get(..4)?.try_into().ok()?) as usize;
+    let rest = &rest[4..];
+    let user_key = rest.get(..len)?;
+    let rest = &rest[len..];
+    let version = u64::from_be_bytes(rest.get(..8)?.try_into().ok()?);
+    let kind = kind_from_tag(*rest.get(8)?)?;
+    Some(DecodedSubkey {
+        db,
+        user_key,
+        version,
+        kind,
+        sub: &rest[9..],
+    })
+}
+
+/// 集群路由用的 user key: subkey 取父 key, 主键取 `{db}:` 之后的部分.
+///
+/// subkey 与父 key 必须落在同一 slot, 否则集群模式下会路由到错误的 group.
+pub fn routing_user_key(physical: &[u8]) -> Option<Vec<u8>> {
+    if let Some(decoded) = decode_versioned_subkey(physical) {
+        return Some(decoded.user_key.to_vec());
+    }
+    AiDbEngine::decode_key(physical).map(|(_, key)| key)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// 验证 Hash 字段 Key 拼接编码与解码 Roundtrip
+    /// 版本化 subkey 编码后应能无损解出 db、父 key (含任意字节)、版本、类型与 sub.
     #[test]
-    fn test_hash_field_roundtrip() {
-        let user_key = b"myhash";
-        let field = b"email";
-        let encoded = encode_hash_field_key(user_key, field);
-
-        assert!(encoded.starts_with(user_key));
-        assert_eq!(encoded[user_key.len()], SUBKEY_SEPARATOR);
-        assert_eq!(encoded[user_key.len() + 1], HASH_TAG);
-
-        let decoded = decode_subkey(&encoded);
-        assert!(decoded.is_some());
-        let (kind, field2) = decoded.unwrap();
-        assert_eq!(kind, CollectionKind::Hash);
-        assert_eq!(field2, field);
+    fn versioned_subkey_roundtrip_with_any_key_bytes() {
+        let key = b"a\x01b:c";
+        let encoded = encode_subkey(3, key, 42, CollectionKind::Hash, b"f\x00ield");
+        let decoded = decode_versioned_subkey(&encoded).expect("decode");
+        assert_eq!(decoded.db, 3);
+        assert_eq!(decoded.user_key, key);
+        assert_eq!(decoded.version, 42);
+        assert_eq!(decoded.kind, CollectionKind::Hash);
+        assert_eq!(decoded.sub, b"f\x00ield");
     }
 
-    /// 验证 Set 成员 Key 编码与解码 Roundtrip
+    /// 版本化 subkey 不得与主键 `{db}:` 前缀相交, 也不得跨 db 前缀匹配.
     #[test]
-    fn test_set_member_roundtrip() {
-        let user_key = b"myset";
-        let member = b"alice";
-        let encoded = encode_set_member_key(user_key, member);
-
-        let decoded = decode_subkey(&encoded).unwrap();
-        assert_eq!(decoded.0, CollectionKind::Set);
-        assert_eq!(decoded.1, member);
+    fn versioned_subkeys_never_share_the_main_key_prefix() {
+        let sub = encode_subkey(0, b"k", 1, CollectionKind::Set, b"m");
+        assert!(!sub.starts_with(b"0:"));
+        assert!(sub.starts_with(&subkey_db_prefix(0)));
+        assert!(!encode_subkey(10, b"k", 1, CollectionKind::Set, b"m")
+            .starts_with(&subkey_db_prefix(1)));
     }
 
-    /// 验证 普通 Key 与 SubKey 判定分割符
+    /// 同一父 key 的不同版本互不匹配; 父 key 为前缀关系 (`k` vs `kk`) 时也互不匹配.
     #[test]
-    fn test_regular_key_is_not_subkey() {
-        assert!(is_not_subkey(b"0:mykey"));
-        assert!(!is_not_subkey(b"0:mykey\x01H\x00\x05hello"));
+    fn version_prefix_isolates_versions() {
+        let p1 = subkey_version_prefix(0, b"k", 1, CollectionKind::Hash);
+        let v2 = encode_subkey(0, b"k", 2, CollectionKind::Hash, b"f");
+        assert!(!v2.starts_with(&p1));
+        let other = encode_subkey(0, b"kk", 1, CollectionKind::Hash, b"f");
+        assert!(!other.starts_with(&p1));
     }
 
-    /// 验证 SubKey 前缀构建格式 (\x01H / \x01S)
+    /// 主键 (无 `\x01` 或不含版本段) 不能被误判为版本化 subkey.
     #[test]
-    fn test_subkey_prefixes() {
-        let user_key = b"myhash";
-        let h_prefix = hash_subkey_prefix(user_key);
-        let s_prefix = set_subkey_prefix(user_key);
-
-        assert_eq!(h_prefix, b"myhash\x01H");
-        assert_eq!(s_prefix, b"myhash\x01S");
+    fn main_keys_are_not_versioned_subkeys() {
+        assert!(decode_versioned_subkey(b"0:a\x01b").is_none());
+        assert!(decode_versioned_subkey(b"0:plain").is_none());
     }
 
-    /// 验证 从复合 SubKey 中提取原始 UserKey
+    /// subkey 与其父主键的路由 key 必须一致, 保证同 slot.
     #[test]
-    fn test_extract_user_key_from_subkey() {
-        let encoded = encode_hash_field_key(b"mykey", b"field1");
-        let extracted = extract_user_key_from_subkey(&encoded);
-        assert_eq!(extracted, Some(b"mykey".to_vec()));
-
-        // Regular key returns None
-        assert_eq!(extract_user_key_from_subkey(b"0:mykey"), None);
+    fn routing_key_matches_parent_for_both_spaces() {
+        let sub = encode_subkey(0, b"{tag}k", 9, CollectionKind::Hash, b"f");
+        assert_eq!(routing_user_key(&sub).as_deref(), Some(b"{tag}k".as_ref()));
+        assert_eq!(
+            routing_user_key(b"0:{tag}k").as_deref(),
+            Some(b"{tag}k".as_ref())
+        );
     }
 }

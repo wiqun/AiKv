@@ -36,6 +36,7 @@ use crate::cluster::state::{ClusterStateManager, CLUSTER_STATE_MGR};
 use crate::error::{Error, Result};
 use crate::storage::adapter::{AdapterWriteOp, StorageAdapter};
 use crate::storage::aidb::AiDbEngine;
+use crate::storage::subkey;
 use crate::storage::types::StorageEngineKind;
 
 const GROUP_READY_MAX_ATTEMPTS: u32 = 20;
@@ -223,18 +224,6 @@ impl ClusterDataAdapter {
         }
     }
 
-    /// 剥离子键后缀 (`\x01H{...}` 或 `\x01S{...}`), 返回路由用的纯 user_key.
-    /// Subkey 的 slot 必须与父 key 一致, 否则集群模式下会路由到错误的 group.
-    fn strip_subkey_suffix(user_key: &[u8]) -> &[u8] {
-        if let Some(pos) = user_key.iter().position(|&b| b == 0x01) {
-            if pos + 1 < user_key.len() && (user_key[pos + 1] == b'H' || user_key[pos + 1] == b'S')
-            {
-                return &user_key[..pos];
-            }
-        }
-        user_key
-    }
-
     /// 读路径: 按 router 已分配 slot 路由到本地 group, 或 F-056-A1 合并读.
     /// ReadyToCommit 读切 target (纯 target, 仅本地时走快路径); Frozen/Copying
     /// 读为合并读 (可能涉及远程 RPC, 由调用方 `merge_read` 处理).
@@ -242,10 +231,10 @@ impl ClusterDataAdapter {
         let Some(mgr) = CLUSTER_STATE_MGR.get().cloned() else {
             return Ok(None);
         };
-        let Some((_, user_key)) = AiDbEngine::decode_key(key) else {
+        let Some(routing_key) = subkey::routing_user_key(key) else {
             return Ok(None);
         };
-        let routing_key = Self::strip_subkey_suffix(&user_key);
+        let routing_key = routing_key.as_slice();
         let slot = key_to_slot(routing_key);
         if let Some(route) = Self::migration_read_route(&mgr, slot)? {
             return Ok(Some((mgr, route)));
@@ -268,10 +257,10 @@ impl ClusterDataAdapter {
         let Some(mgr) = CLUSTER_STATE_MGR.get().cloned() else {
             return Ok(None);
         };
-        let Some((_, user_key)) = AiDbEngine::decode_key(key) else {
+        let Some(routing_key) = subkey::routing_user_key(key) else {
             return Ok(None);
         };
-        let routing_key = Self::strip_subkey_suffix(&user_key);
+        let routing_key = routing_key.as_slice();
         Self::reject_if_write_frozen(&mgr, routing_key)?;
         let slot = key_to_slot(routing_key);
         let migration = Self::copying_migration_route(&mgr, slot)?;
@@ -338,7 +327,7 @@ impl ClusterDataAdapter {
 
     fn key_slot_status(key: &[u8]) -> Option<SlotStatus> {
         let mgr = CLUSTER_STATE_MGR.get()?;
-        let (_, user_key) = AiDbEngine::decode_key(key)?;
+        let user_key = subkey::routing_user_key(key)?;
         mgr.router
             .route_key(&user_key)
             .ok()

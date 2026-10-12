@@ -1,8 +1,10 @@
 pub mod aidb;
 pub mod aidb_blocking;
 pub mod aidb_integration_test;
+pub mod collection_lifecycle;
 pub mod compat;
 pub mod counters;
+pub mod map_adapter;
 pub mod memory;
 pub mod prefix_scan;
 pub mod prod_options;

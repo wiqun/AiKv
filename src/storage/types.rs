@@ -13,8 +13,8 @@
 //! # Invariant
 //!
 //! - `as_*` / `as_*_mut` 类型不符 → `Error::Command(WRONGTYPE)`.
-//! - `raw_subkey_*` 仅持久化引擎实现; `MemoryEngine` 返回
-//!   `Error::Storage("raw subkey access not supported")`.
+//! - 大集合 subkey 布局由 `KvStorage::{supports_subkeys, subkey_*, commit_collection}`
+//!   提供; `MemoryEngine` 不支持, 大集合一律内联.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -25,6 +25,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::storage::collection::CollectionWrite;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeyspaceStats {
@@ -76,7 +77,9 @@ pub enum ValueType {
     /// 每个 field/member 以独立 subkey 存储在引擎中.
     CollectionHeader {
         kind: CollectionKind,
-        count: u32,
+        count: u64,
+        /// 集合版本号; subkey 的物理 key 带上该版本, 旧版本 subkey 由 GC 回收.
+        version: u64,
     },
 }
 
@@ -260,6 +263,10 @@ pub fn is_wrongtype(err: &Error) -> bool {
     matches!(err, Error::Command(msg) if msg.starts_with("WRONGTYPE"))
 }
 
+fn subkey_unsupported() -> Error {
+    Error::Storage("subkey layout is not supported by this engine".into())
+}
+
 #[async_trait]
 pub trait KvStorage: Send + Sync {
     /// 暴露底层 AiDb 引擎的无锁原子统计实例 (若支持)
@@ -324,6 +331,52 @@ pub trait KvStorage: Send + Sync {
     async fn get_typed(&self, db: usize, key: &[u8]) -> Result<Option<StoredValue>>;
     async fn set_typed(&self, db: usize, key: &[u8], value: StoredValue) -> Result<()>;
 
+    /// 是否支持 subkey 布局. 内存引擎不支持, 大集合一律内联.
+    fn supports_subkeys(&self) -> bool {
+        false
+    }
+
+    /// 按版本读取一组 subkey (按入参顺序返回, 缺失为 None).
+    async fn subkey_get_many(
+        &self,
+        db: usize,
+        key: &[u8],
+        version: u64,
+        kind: CollectionKind,
+        subs: &[&[u8]],
+    ) -> Result<Vec<Option<Vec<u8>>>> {
+        let _ = (db, key, version, kind, subs);
+        Err(subkey_unsupported())
+    }
+
+    /// 扫描某版本的全部 subkey, 返回 (sub, value), 按 sub 字节序.
+    async fn subkey_scan(
+        &self,
+        db: usize,
+        key: &[u8],
+        version: u64,
+        kind: CollectionKind,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let _ = (db, key, version, kind);
+        Err(subkey_unsupported())
+    }
+
+    /// subkey 增删与 header 改写一次提交.
+    async fn commit_collection(&self, db: usize, key: &[u8], write: CollectionWrite) -> Result<()> {
+        let _ = (db, key, write);
+        Err(subkey_unsupported())
+    }
+
+    /// 写入完整值. 支持 subkey 的引擎会把超过阈值的 Hash/Set 转为新版本 subkey 布局.
+    async fn put_value(&self, db: usize, key: &[u8], value: StoredValue) -> Result<()> {
+        self.set_typed(db, key, value).await
+    }
+
+    /// 读取完整值; subkey 布局展开为内联 Hash/Set.
+    async fn get_expanded(&self, db: usize, key: &[u8]) -> Result<Option<StoredValue>> {
+        self.get_typed(db, key).await
+    }
+
     /// 一次提交多笔类型化写。
     /// 默认逐条 `set_typed` / `delete`。适配器覆盖为一次 `apply_writes`。
     /// `Delete.had_ttl` 由调用方在已经读到该 key 时给出，适配器不再为删除回读。
@@ -354,11 +407,24 @@ pub trait KvStorage: Send + Sync {
     /// 把已经读到的值写回同一个 key. 值上带 TTL 时, 写入的加 1 再饱和减.
     async fn rewrite_stored(&self, db: usize, key: &[u8], stored: StoredValue) -> Result<()> {
         let saw_ttl = stored.expires_at.is_some();
-        self.set_typed(db, key, stored).await?;
+        self.put_value(db, key, stored).await?;
         if saw_ttl {
             self.release_seen_ttl(db).await?;
         }
         Ok(())
+    }
+
+    /// MOVE: 目标库已存在同名 key 时返回 false.
+    async fn move_key(&self, src_db: usize, dst_db: usize, key: &[u8]) -> Result<bool> {
+        let Some(value) = self.get_typed(src_db, key).await? else {
+            return Ok(false);
+        };
+        if self.get_typed(dst_db, key).await?.is_some() {
+            return Ok(false);
+        }
+        self.set_typed(dst_db, key, value).await?;
+        self.delete(src_db, key).await?;
+        Ok(true)
     }
 
     async fn rename_key(&self, db: usize, old_key: &[u8], new_key: &[u8]) -> Result<()>;
@@ -418,40 +484,6 @@ pub trait KvStorage: Send + Sync {
     /// 近似内存占用 (字节); 默认 0, 各引擎自行实现.
     async fn memory_usage_bytes(&self) -> Result<u64> {
         Ok(0)
-    }
-
-    // ---- 原始 subkey 访问 (仅持久化引擎) ----
-
-    /// 绕过 StoredValue 反序列化, 直接读取 subkey 的原始字节.
-    /// 默认返回 None (MemoryEngine 不支持).
-    async fn raw_subkey_get(&self, _db: usize, _encoded_key: Vec<u8>) -> Result<Option<Vec<u8>>> {
-        Err(Error::Storage("raw subkey access not supported".into()))
-    }
-
-    /// 绕过 StoredValue 序列化, 直接写入 subkey 的原始字节.
-    async fn raw_subkey_set(
-        &self,
-        _db: usize,
-        _encoded_key: Vec<u8>,
-        _value: Vec<u8>,
-    ) -> Result<()> {
-        Err(Error::Storage("raw subkey access not supported".into()))
-    }
-
-    /// 绕过 StoredValue 编解码, 直接删除 subkey.
-    async fn raw_subkey_delete(&self, _db: usize, _encoded_key: Vec<u8>) -> Result<bool> {
-        Err(Error::Storage("raw subkey access not supported".into()))
-    }
-
-    /// 绕过 StoredValue 编解码, 扫描 subkey 前缀范围内的所有原始 KV 对.
-    /// 仅持久化引擎实现; MemoryEngine 返回 Err.
-    async fn raw_subkey_for_each(
-        &self,
-        _db: usize,
-        _prefix: Vec<u8>,
-        _f: Box<dyn FnMut(Vec<u8>, Vec<u8>) -> Result<()> + Send>,
-    ) -> Result<()> {
-        Err(Error::Storage("raw subkey access not supported".into()))
     }
 }
 

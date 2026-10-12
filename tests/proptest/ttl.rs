@@ -1,9 +1,9 @@
-//! TTL 过期边界与 TtlExpireFilter 的 property-based 测试.
+//! TTL 过期边界与 AikvCompactionFilter 的 property-based 测试.
 
 use proptest::prelude::*;
 
 use aidb::engine::compaction::{CompactionFilter, FilterDecision};
-use aikv::storage::{StoredValue, TtlExpireFilter, ValueType};
+use aikv::storage::{AikvCompactionFilter, StoredValue, ValueType};
 
 /// TTL 烟雾测试: is_expired() 不 panic, 返回 bool.
 ///
@@ -26,7 +26,7 @@ fn prop_ttl_expired_smoke() {
         .unwrap();
 }
 
-/// TtlExpireFilter 集成: 验证完整过滤链路.
+/// AikvCompactionFilter 集成: 验证完整过滤链路.
 ///
 /// - 已过期 entry → Remove
 /// - 未过期 entry → Keep
@@ -41,7 +41,7 @@ fn prop_ttl_filter_integration() {
     let mut runner = proptest::test_runner::TestRunner::default();
     runner
         .run(&strategy, |(expires_at, value_bytes)| {
-            let filter = TtlExpireFilter;
+            let filter = AikvCompactionFilter::single_node();
 
             // Case 1: 合法 StoredValue
             let stored = StoredValue {

@@ -11,7 +11,7 @@
 //!   ├─ 2. check_key_slots: 集群下命令 key 必须与 KEYS[1] 同 slot
 //!   │       无声明 key 时以第一次访问的 key 为锚; 跨 slot → "same slot"
 //!   ├─ 3. dispatch(cmd): match 到各域 exec_* (String/Hash/List/Set/ZSet/JSON/EXPIRE)
-//!   │       读: txn.get / txn.get_value (写缓冲优先; CollectionHeader 透明展开为完整集合)
+//!   │       读: txn.get / txn.get_value (写缓冲优先; subkey 布局经 `get_expanded` 展开为完整集合)
 //!   │       写: txn.set_* / txn.delete / txn.set_expire_at 缓冲
 //!   ├─ 4a. 成功 → resp_to_lua (RESP → LuaValue)
 //!   └─ 4b. 失败 → throw_error ? mlua RuntimeError : pcall_error_table ({err="…"})

@@ -43,9 +43,12 @@ pub(crate) fn parse_scan_options(cmd: &str, args: &[Bytes], start: usize) -> Res
     Ok(opts)
 }
 
+/// 按游标切一页. 游标超过长度时返回空页与游标 0, 不越界.
 pub(crate) fn paginate_slice<T>(entries: &[T], cursor: u64, count: usize) -> (u64, &[T]) {
-    let skip = cursor as usize;
-    let end = (skip + count).min(entries.len());
+    let skip = usize::try_from(cursor)
+        .unwrap_or(usize::MAX)
+        .min(entries.len());
+    let end = skip.saturating_add(count).min(entries.len());
     let next_cursor = if end < entries.len() { end as u64 } else { 0 };
     (next_cursor, &entries[skip..end])
 }

@@ -1,22 +1,19 @@
 //! Hash 命令: HSET/HMSET/HGET/HMGET/HDEL/HEXISTS/HLEN/HKEYS/HVALS/HGETALL/HSETNX/
 //! HINCRBY/HINCRBYFLOAT/HSCAN. HMSET 走 HSET 逻辑并返回 `OK`.
 //!
-//! # 存储表示 (双格式)
+//! # 存储表示 (双格式, 见 `storage::collection`)
 //!
 //! ```text
-//! 小 hash (≤ 64 fields): ValueType::Hash(HashMap<field, value>)
-//!                        postcard 存于 StoredValue
-//! 大 hash (> 64 fields): ValueType::CollectionHeader { kind: Hash, count }
-//!                        field 独立 subkey:
-//!                        {encoded_user_key}\x01H{field_len:2B}{field} → raw value
+//! 小 hash (≤ 64 fields): ValueType::Hash(HashMap<field, value>), 内联于 StoredValue
+//! 大 hash (> 64 fields): ValueType::CollectionHeader { kind: Hash, count, version }
+//!                        field 为独立 subkey, 物理 key 带版本号, 见 `storage::subkey`
 //! ```
 //!
-//! 写路径: `key_lock.lock(key)` → `load_or_create_hash` (兼容两种格式) → 修改 →
-//! 超过 `HASH_MAX_INLINE_FIELDS` (64) 时 `migrate_hash_to_subkey`; 删空后 `delete`.
-//! subkey 读写走 `raw_subkey_*`, 仅持久化引擎支持 (Memory 引擎返回 Err).
-//! 类型分轨: `get_typed`/`set_typed`; 非 Hash → WRONGTYPE.
+//! 读写一律经 `HashState` 判定格式, 不直接触碰 subkey 编码.
+//! 多 field 写入 (HSET 多对、HDEL 多个) 只调用一次 `commit_collection` 或 `rewrite_stored`.
+//! 类型分轨: 非 Hash → WRONGTYPE.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -25,16 +22,24 @@ use crate::command::router::{self, KeyLock};
 use crate::command::scan_util;
 use crate::error::{Error, Result};
 use crate::protocol::RespValue;
+use crate::storage::collection::{CollectionWrite, HeaderWrite};
 use crate::storage::memory::glob_match;
-use crate::storage::subkey;
-use crate::storage::{AiDbEngine, CollectionKind, KvStorage, StoredValue, ValueType, WRONGTYPE};
-
-/// 小集合 inline 编码于 StoredValue; 超过此阈值自动切到 subkey 格式.
-const HASH_MAX_INLINE_FIELDS: usize = 64;
+use crate::storage::{CollectionKind, KvStorage, StoredValue, ValueType, WRONGTYPE};
 
 pub struct HashCommands {
     storage: Arc<dyn KvStorage>,
     key_lock: Arc<KeyLock>,
+}
+
+/// 一次读取到的 Hash 存储状态.
+enum HashState {
+    Missing,
+    Inline(StoredValue),
+    Subkey {
+        expires_at: Option<u64>,
+        count: u64,
+        version: u64,
+    },
 }
 
 impl HashCommands {
@@ -47,74 +52,16 @@ impl HashCommands {
             return Err(router::wrong_args("HSET", ""));
         }
         let key = &args[0];
-        crate::storage::subkey::reject_subkey_parent(key)?;
-        for chunk in args[1..].chunks(2) {
-            crate::storage::subkey::reject_subkey_field(&chunk[0])?;
-        }
         let _lock = self.key_lock.lock(key).await;
-        let mut stored = self.load_or_create_hash(db, key).await?;
-
-        // 区分 inline / subkey 格式
-        match &stored.value {
-            ValueType::Hash(_) => {
-                let ValueType::Hash(ref mut map) = stored.value else {
-                    unreachable!()
-                };
-                let mut new_fields = 0i64;
-                for chunk in args[1..].chunks(2) {
-                    let field = chunk[0].to_vec();
-                    let value = chunk[1].to_vec();
-                    if !map.contains_key(&field) {
-                        new_fields += 1;
-                    }
-                    map.insert(field, value);
-                }
-                // 超过阈值则转换为 subkey 格式
-                if map.len() > HASH_MAX_INLINE_FIELDS {
-                    self.migrate_hash_to_subkey(db, key, &stored.expires_at, map)
-                        .await?;
-                } else {
-                    self.storage.rewrite_stored(db, key, stored).await?;
-                }
-                Ok(router::integer(new_fields))
-            }
-            ValueType::CollectionHeader {
-                kind: CollectionKind::Hash,
-                count,
-            } => {
-                let mut old_count = *count;
-                let mut new_fields = 0i64;
-                let encoded_user_key = AiDbEngine::encode_key(db, key);
-                for chunk in args[1..].chunks(2) {
-                    let field = chunk[0].as_ref();
-                    let value = chunk[1].to_vec();
-                    let subkey_key = subkey::encode_hash_field_key(&encoded_user_key, field);
-                    // 检查是否已存在
-                    let existed = self
-                        .storage
-                        .raw_subkey_get(db, subkey_key.clone())
-                        .await
-                        .unwrap_or_default()
-                        .is_some();
-                    if !existed {
-                        new_fields += 1;
-                        old_count += 1;
-                    }
-                    self.storage.raw_subkey_set(db, subkey_key, value).await?;
-                }
-                // 更新元数据 count
-                stored.value = ValueType::CollectionHeader {
-                    kind: CollectionKind::Hash,
-                    count: old_count,
-                };
-                self.storage.rewrite_stored(db, key, stored).await?;
-                Ok(router::integer(new_fields))
-            }
-            _ => Err(router::wrongtype()),
-        }
+        let state = self.load_state(db, key).await?;
+        let pairs: Vec<(Vec<u8>, Vec<u8>)> = args[1..]
+            .chunks(2)
+            .map(|c| (c[0].to_vec(), c[1].to_vec()))
+            .collect();
+        let added = self.write_fields(db, key, state, pairs).await?;
+        Ok(router::integer(added))
     }
 
-    /// HMSET — Redis 兼容: 始终返回 `OK` (HSET 返回新增字段数).
     pub async fn hmset(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         self.hset(db, args).await?;
         Ok(RespValue::SimpleString("OK".into()))
@@ -122,35 +69,14 @@ impl HashCommands {
 
     pub async fn hget(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_args("HGET", args, 2)?;
-        let key_bytes = &args[0];
-        let field = args[1].as_ref();
-
-        let Some(stored) = self.storage.get_typed(db, key_bytes).await? else {
-            return Ok(router::nil_bulk());
-        };
-
-        match &stored.value {
-            ValueType::Hash(map) => match map.get(field) {
-                Some(v) => Ok(router::bulk(v.clone())),
-                None => Ok(router::nil_bulk()),
-            },
-            ValueType::CollectionHeader {
-                kind: CollectionKind::Hash,
-                ..
-            } => {
-                let encoded_user_key = AiDbEngine::encode_key(db, key_bytes);
-                let subkey_key = subkey::encode_hash_field_key(&encoded_user_key, field);
-                let raw = self
-                    .storage
-                    .raw_subkey_get(db, subkey_key)
-                    .await
-                    .unwrap_or_default();
-                match raw {
-                    Some(v) => Ok(router::bulk(v)),
-                    None => Ok(router::nil_bulk()),
-                }
-            }
-            _ => Err(router::wrongtype()),
+        match self
+            .read_fields(db, &args[0], &[args[1].as_ref()])
+            .await?
+            .pop()
+            .flatten()
+        {
+            Some(v) => Ok(router::bulk(v)),
+            None => Ok(router::nil_bulk()),
         }
     }
 
@@ -158,121 +84,118 @@ impl HashCommands {
         router::require_min_args("HDEL", args, 2)?;
         let key = &args[0];
         let _lock = self.key_lock.lock(key).await;
-        let Some(mut stored) = self.storage.get_typed(db, key).await? else {
-            return Ok(router::integer(0));
-        };
-
-        match &stored.value {
-            ValueType::Hash(_) => {
-                let ValueType::Hash(ref mut map) = stored.value else {
-                    unreachable!()
+        let fields: Vec<&[u8]> = args[1..]
+            .iter()
+            .map(|f| f.as_ref())
+            .collect::<BTreeSet<&[u8]>>()
+            .into_iter()
+            .collect();
+        match self.load_state(db, key).await? {
+            HashState::Missing => Ok(router::integer(0)),
+            HashState::Inline(mut stored) => {
+                let ValueType::Hash(map) = &mut stored.value else {
+                    unreachable!("inline state is always a Hash")
                 };
-                let mut count = 0i64;
-                for field in &args[1..] {
-                    if map.remove(field.as_ref()).is_some() {
-                        count += 1;
-                    }
-                }
+                let removed = fields.iter().filter(|f| map.remove(**f).is_some()).count() as i64;
                 if map.is_empty() {
                     self.storage.delete(db, key).await?;
-                } else {
-                    self.storage.rewrite_stored(db, key, stored).await?;
-                }
-                Ok(router::integer(count))
-            }
-            ValueType::CollectionHeader {
-                kind: CollectionKind::Hash,
-                ref count,
-            } => {
-                let encoded_user_key = AiDbEngine::encode_key(db, key);
-                let mut removed = 0i64;
-                for field in &args[1..] {
-                    let subkey_key =
-                        subkey::encode_hash_field_key(&encoded_user_key, field.as_ref());
-                    if self
-                        .storage
-                        .raw_subkey_delete(db, subkey_key)
-                        .await
-                        .unwrap_or_default()
-                    {
-                        removed += 1;
-                    }
-                }
-                let new_count = count.saturating_sub(removed as u32);
-                if new_count == 0 {
-                    // 清理所有 subkey (防御性: 理论上上面已删除)
-                    self.delete_all_hash_subkeys(db, &encoded_user_key).await;
-                    self.storage.delete(db, key).await?;
-                } else {
-                    stored.value = ValueType::CollectionHeader {
-                        kind: CollectionKind::Hash,
-                        count: new_count,
-                    };
+                } else if removed > 0 {
                     self.storage.rewrite_stored(db, key, stored).await?;
                 }
                 Ok(router::integer(removed))
             }
-            _ => Err(router::wrongtype()),
+            HashState::Subkey {
+                expires_at,
+                count,
+                version,
+            } => {
+                let existing = self
+                    .storage
+                    .subkey_get_many(db, key, version, CollectionKind::Hash, &fields)
+                    .await?;
+                let deletes: Vec<Vec<u8>> = fields
+                    .iter()
+                    .zip(existing)
+                    .filter_map(|(f, v)| v.map(|_| f.to_vec()))
+                    .collect();
+                let removed = deletes.len() as u64;
+                if removed == 0 {
+                    return Ok(router::integer(0));
+                }
+                let remaining = count.saturating_sub(removed);
+                let header = if remaining == 0 {
+                    HeaderWrite::Delete {
+                        had_ttl: expires_at.is_some(),
+                    }
+                } else {
+                    HeaderWrite::Put(StoredValue {
+                        value: ValueType::CollectionHeader {
+                            kind: CollectionKind::Hash,
+                            count: remaining,
+                            version,
+                        },
+                        expires_at,
+                    })
+                };
+                self.storage
+                    .commit_collection(
+                        db,
+                        key,
+                        CollectionWrite {
+                            header,
+                            version,
+                            kind: CollectionKind::Hash,
+                            puts: Vec::new(),
+                            deletes,
+                        },
+                    )
+                    .await?;
+                Ok(router::integer(removed as i64))
+            }
         }
     }
 
     pub async fn hexists(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_args("HEXISTS", args, 2)?;
-        let Some(stored) = self.storage.get_typed(db, &args[0]).await? else {
-            return Ok(router::integer(0));
-        };
-        let exists = match &stored.value {
-            ValueType::Hash(map) => map.contains_key(args[1].as_ref()),
-            ValueType::CollectionHeader {
-                kind: CollectionKind::Hash,
-                ..
-            } => {
-                let encoded_user_key = AiDbEngine::encode_key(db, &args[0]);
-                let subkey_key = subkey::encode_hash_field_key(&encoded_user_key, args[1].as_ref());
-                self.storage
-                    .raw_subkey_get(db, subkey_key)
-                    .await
-                    .unwrap_or_default()
-                    .is_some()
-            }
-            _ => return Err(router::wrongtype()),
-        };
-        Ok(router::integer(i64::from(exists)))
+        let found = self
+            .read_fields(db, &args[0], &[args[1].as_ref()])
+            .await?
+            .pop()
+            .flatten()
+            .is_some();
+        Ok(router::integer(i64::from(found)))
     }
 
     pub async fn hlen(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_args("HLEN", args, 1)?;
-        let len = match self.storage.get_typed(db, &args[0]).await? {
-            None => 0,
-            Some(stored) => match stored.value {
+        let len = match self.load_state(db, &args[0]).await? {
+            HashState::Missing => 0,
+            HashState::Inline(stored) => match stored.value {
                 ValueType::Hash(map) => map.len() as i64,
-                ValueType::CollectionHeader {
-                    kind: CollectionKind::Hash,
-                    count,
-                } => count as i64,
-                _ => return Err(router::wrongtype()),
+                _ => unreachable!("inline state is always a Hash"),
             },
+            HashState::Subkey { count, .. } => count as i64,
         };
         Ok(router::integer(len))
     }
 
     pub async fn hkeys(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_args("HKEYS", args, 1)?;
-        let keys = self.load_hash_all_fields(db, &args[0]).await?;
-        Ok(array_of_bulk(keys.into_keys().collect()))
+        let rows = self.load_all(db, &args[0]).await?;
+        Ok(array_of_bulk(rows.into_iter().map(|(f, _)| f).collect()))
     }
 
     pub async fn hvals(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_args("HVALS", args, 1)?;
-        let keys = self.load_hash_all_fields(db, &args[0]).await?;
-        Ok(array_of_bulk(keys.into_values().collect()))
+        let rows = self.load_all(db, &args[0]).await?;
+        Ok(array_of_bulk(rows.into_iter().map(|(_, v)| v).collect()))
     }
 
     pub async fn hgetall(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_args("HGETALL", args, 1)?;
-        let map = self.load_hash_all_fields(db, &args[0]).await?;
-        let mut items = Vec::new();
-        for (k, v) in map {
+        let rows = self.load_all(db, &args[0]).await?;
+        let mut items = Vec::with_capacity(rows.len() * 2);
+        for (k, v) in rows {
             items.push(router::bulk(k));
             items.push(router::bulk(v));
         }
@@ -281,107 +204,44 @@ impl HashCommands {
 
     pub async fn hmget(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_min_args("HMGET", args, 2)?;
-        let stored = self.storage.get_typed(db, &args[0]).await?;
-        let mut items = Vec::with_capacity(args.len() - 1);
-
-        match stored {
-            None => {
-                for _ in &args[1..] {
-                    items.push(router::nil_bulk());
-                }
-            }
-            Some(stored) => match &stored.value {
-                ValueType::Hash(map) => {
-                    for field in &args[1..] {
-                        match map.get(field.as_ref()) {
-                            Some(v) => items.push(router::bulk(v.clone())),
-                            None => items.push(router::nil_bulk()),
-                        }
-                    }
-                }
-                ValueType::CollectionHeader {
-                    kind: CollectionKind::Hash,
-                    ..
-                } => {
-                    let encoded_user_key = AiDbEngine::encode_key(db, &args[0]);
-                    for field in &args[1..] {
-                        let subkey_key =
-                            subkey::encode_hash_field_key(&encoded_user_key, field.as_ref());
-                        let raw = self
-                            .storage
-                            .raw_subkey_get(db, subkey_key)
-                            .await
-                            .unwrap_or_default();
-                        match raw {
-                            Some(v) => items.push(router::bulk(v)),
-                            None => items.push(router::nil_bulk()),
-                        }
-                    }
-                }
-                _ => return Err(router::wrongtype()),
-            },
-        }
-        Ok(RespValue::Array(Some(items)))
+        let fields: Vec<&[u8]> = args[1..].iter().map(|f| f.as_ref()).collect();
+        let values = self.read_fields(db, &args[0], &fields).await?;
+        Ok(RespValue::Array(Some(
+            values
+                .into_iter()
+                .map(|v| match v {
+                    Some(v) => router::bulk(v),
+                    None => router::nil_bulk(),
+                })
+                .collect(),
+        )))
     }
 
     pub async fn hsetnx(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_args("HSETNX", args, 3)?;
         let key = &args[0];
+        let field = args[1].to_vec();
+        let value = args[2].to_vec();
         let _lock = self.key_lock.lock(key).await;
-        let mut stored = match self.storage.get_typed(db, key).await? {
-            None => StoredValue {
-                value: ValueType::Hash(HashMap::new()),
-                expires_at: None,
+        let state = self.load_state(db, key).await?;
+        let existing = match &state {
+            HashState::Missing => None,
+            HashState::Inline(stored) => match &stored.value {
+                ValueType::Hash(map) => map.get(&field).cloned(),
+                _ => unreachable!("inline state is always a Hash"),
             },
-            Some(s) => match s.value {
-                ValueType::Hash(_) => s,
-                ValueType::CollectionHeader {
-                    kind: CollectionKind::Hash,
-                    ..
-                } => s,
-                _ => return Err(router::wrongtype()),
-            },
+            HashState::Subkey { version, .. } => self
+                .storage
+                .subkey_get_many(db, key, *version, CollectionKind::Hash, &[&field])
+                .await?
+                .pop()
+                .flatten(),
         };
-
-        match &mut stored.value {
-            ValueType::Hash(ref mut map) => {
-                if map.contains_key(args[1].as_ref()) {
-                    return Ok(router::integer(0));
-                }
-                map.insert(args[1].to_vec(), args[2].to_vec());
-                if map.len() > HASH_MAX_INLINE_FIELDS {
-                    self.migrate_hash_to_subkey(db, key, &stored.expires_at, map)
-                        .await?;
-                } else {
-                    self.storage.rewrite_stored(db, key, stored).await?;
-                }
-            }
-            ValueType::CollectionHeader {
-                kind: CollectionKind::Hash,
-                count,
-            } => {
-                let encoded_user_key = AiDbEngine::encode_key(db, key);
-                let subkey_key = subkey::encode_hash_field_key(&encoded_user_key, args[1].as_ref());
-                let existed = self
-                    .storage
-                    .raw_subkey_get(db, subkey_key.clone())
-                    .await
-                    .unwrap_or_default()
-                    .is_some();
-                if existed {
-                    return Ok(router::integer(0));
-                }
-                self.storage
-                    .raw_subkey_set(db, subkey_key, args[2].to_vec())
-                    .await?;
-                stored.value = ValueType::CollectionHeader {
-                    kind: CollectionKind::Hash,
-                    count: *count + 1,
-                };
-                self.storage.rewrite_stored(db, key, stored).await?;
-            }
-            _ => return Err(router::wrongtype()),
+        if existing.is_some() {
+            return Ok(router::integer(0));
         }
+        self.write_fields(db, key, state, vec![(field, value)])
+            .await?;
         Ok(router::integer(1))
     }
 
@@ -390,37 +250,17 @@ impl HashCommands {
         let cursor = scan_util::parse_u64(&args[1])?;
         let opts = scan_util::parse_scan_options("HSCAN", args, 2)?;
 
-        let Some(stored) = self.storage.get_typed(db, &args[0]).await? else {
-            return Ok(hscan_response(0, &[]));
-        };
-
-        let pairs: Vec<(Vec<u8>, Vec<u8>)> = match stored.value {
-            ValueType::Hash(map) => {
-                let mut p: Vec<_> = map
-                    .into_iter()
-                    .filter(|(field, _)| {
-                        opts.pattern
-                            .as_ref()
-                            .is_none_or(|p| glob_match(p, field.as_slice()))
-                    })
-                    .collect();
-                p.sort_by(|a, b| a.0.cmp(&b.0));
-                p
-            }
-            ValueType::CollectionHeader {
-                kind: CollectionKind::Hash,
-                ..
-            } => {
-                let encoded_user_key = AiDbEngine::encode_key(db, &args[0]);
-                let mut p = self
-                    .scan_hash_subkeys(db, &encoded_user_key, opts.pattern.as_deref())
-                    .await?;
-                p.sort_by(|a, b| a.0.cmp(&b.0));
-                p
-            }
-            _ => return Err(router::wrongtype()),
-        };
-
+        let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = self
+            .load_all(db, &args[0])
+            .await?
+            .into_iter()
+            .filter(|(field, _)| {
+                opts.pattern
+                    .as_ref()
+                    .is_none_or(|p| glob_match(p, field.as_slice()))
+            })
+            .collect();
+        pairs.sort_by(|a, b| a.0.cmp(&b.0));
         let (next_cursor, page) = scan_util::paginate_slice(&pairs, cursor, opts.count);
         Ok(hscan_response(next_cursor, page))
     }
@@ -434,78 +274,22 @@ impl HashCommands {
         let key = &args[0];
         let field = args[1].to_vec();
         let _lock = self.key_lock.lock(key).await;
-        let mut stored = self.load_or_create_hash(db, key).await?;
-
-        let new_val = match &stored.value {
-            ValueType::Hash(ref _map) => {
-                let ValueType::Hash(ref mut map) = stored.value else {
-                    unreachable!()
-                };
-                let current = match map.get(&field) {
-                    None => 0.0f64,
-                    Some(existing) => parse_f64_field_bytes(existing)?,
-                };
-                let new_val = current + delta;
-                if !new_val.is_finite() {
-                    return Err(Error::Command(
-                        "ERR increment would produce NaN or Infinity".into(),
-                    ));
-                }
-                let s = format_hash_float(new_val);
-                map.insert(field, s.as_bytes().to_vec());
-                if map.len() > HASH_MAX_INLINE_FIELDS {
-                    self.migrate_hash_to_subkey(db, key, &stored.expires_at, map)
-                        .await?;
-                    return Ok(router::bulk(s.into_bytes()));
-                }
-                self.storage.rewrite_stored(db, key, stored).await?;
-                return Ok(router::bulk(s.into_bytes()));
-            }
-            ValueType::CollectionHeader {
-                kind: CollectionKind::Hash,
-                count,
-            } => {
-                let encoded_user_key = AiDbEngine::encode_key(db, key);
-                let subkey_key = subkey::encode_hash_field_key(&encoded_user_key, &field);
-                let current = match self
-                    .storage
-                    .raw_subkey_get(db, subkey_key.clone())
-                    .await
-                    .unwrap_or_default()
-                {
-                    None => 0.0f64,
-                    Some(existing) => parse_f64_field_bytes(&existing)?,
-                };
-                let new_val = current + delta;
-                if !new_val.is_finite() {
-                    return Err(Error::Command(
-                        "ERR increment would produce NaN or Infinity".into(),
-                    ));
-                }
-                let s = format_hash_float(new_val);
-                let existed = self
-                    .storage
-                    .raw_subkey_get(db, subkey_key.clone())
-                    .await
-                    .unwrap_or_default()
-                    .is_some();
-                self.storage
-                    .raw_subkey_set(db, subkey_key, s.as_bytes().to_vec())
-                    .await?;
-                // 仅新 field 才增加 count
-                if !existed {
-                    stored.value = ValueType::CollectionHeader {
-                        kind: CollectionKind::Hash,
-                        count: *count + 1,
-                    };
-                    self.storage.rewrite_stored(db, key, stored).await?;
-                }
-                s.as_bytes().to_vec()
-            }
-            _ => return Err(router::wrongtype()),
+        let state = self.load_state(db, key).await?;
+        let current = self.current_field(db, key, &state, &field).await?;
+        let base = match current {
+            None => 0.0f64,
+            Some(existing) => parse_f64_field_bytes(&existing)?,
         };
-
-        Ok(router::bulk(new_val))
+        let new_val = base + delta;
+        if !new_val.is_finite() {
+            return Err(Error::Command(
+                "ERR increment would produce NaN or Infinity".into(),
+            ));
+        }
+        let s = format_hash_float(new_val);
+        self.write_fields(db, key, state, vec![(field, s.clone().into_bytes())])
+            .await?;
+        Ok(router::bulk(s.into_bytes()))
     }
 
     pub async fn hincrby(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
@@ -514,214 +298,182 @@ impl HashCommands {
         let key = &args[0];
         let field = args[1].to_vec();
         let _lock = self.key_lock.lock(key).await;
-        let mut stored = self.load_or_create_hash(db, key).await?;
-
-        let new_val = match &stored.value {
-            ValueType::Hash(ref _map) => {
-                let ValueType::Hash(ref mut map) = stored.value else {
-                    unreachable!()
-                };
-                let new_val = match map.get(&field) {
-                    None => delta,
-                    Some(existing) => {
-                        let v = parse_i64_field(existing)?;
-                        v.checked_add(delta).ok_or_else(|| {
-                            Error::Command("ERR increment or decrement would overflow".into())
-                        })?
-                    }
-                };
-                map.insert(field, new_val.to_string().into_bytes());
-                if map.len() > HASH_MAX_INLINE_FIELDS {
-                    self.migrate_hash_to_subkey(db, key, &stored.expires_at, map)
-                        .await?;
-                    return Ok(router::integer(new_val));
-                }
-                self.storage.rewrite_stored(db, key, stored).await?;
-                return Ok(router::integer(new_val));
-            }
-            ValueType::CollectionHeader {
-                kind: CollectionKind::Hash,
-                count,
-            } => {
-                let encoded_user_key = AiDbEngine::encode_key(db, key);
-                let subkey_key = subkey::encode_hash_field_key(&encoded_user_key, &field);
-                let (current_val, existed) = match self
-                    .storage
-                    .raw_subkey_get(db, subkey_key.clone())
-                    .await
-                    .unwrap_or_default()
-                {
-                    None => (None, false),
-                    Some(existing) => (Some(parse_i64_field(&existing)?), true),
-                };
-                let new_val = match current_val {
-                    None => delta,
-                    Some(v) => v.checked_add(delta).ok_or_else(|| {
-                        Error::Command("ERR increment or decrement would overflow".into())
-                    })?,
-                };
-                self.storage
-                    .raw_subkey_set(db, subkey_key, new_val.to_string().into_bytes())
-                    .await?;
-                if !existed {
-                    stored.value = ValueType::CollectionHeader {
-                        kind: CollectionKind::Hash,
-                        count: *count + 1,
-                    };
-                    self.storage.rewrite_stored(db, key, stored).await?;
-                }
-                new_val
-            }
-            _ => return Err(router::wrongtype()),
+        let state = self.load_state(db, key).await?;
+        let current = self.current_field(db, key, &state, &field).await?;
+        let new_val = match current {
+            None => delta,
+            Some(existing) => parse_i64_field(&existing)?
+                .checked_add(delta)
+                .ok_or_else(|| {
+                    Error::Command("ERR increment or decrement would overflow".into())
+                })?,
         };
-
+        self.write_fields(
+            db,
+            key,
+            state,
+            vec![(field, new_val.to_string().into_bytes())],
+        )
+        .await?;
         Ok(router::integer(new_val))
     }
 
-    // ---- helpers ----
-
-    /// 读取 hash 的所有 field → value (兼容 inline 和 subkey).
-    async fn load_hash_all_fields(
-        &self,
-        db: usize,
-        key: &[u8],
-    ) -> Result<HashMap<Vec<u8>, Vec<u8>>> {
+    /// 读取 Hash 状态; 类型不符返回 WRONGTYPE.
+    async fn load_state(&self, db: usize, key: &[u8]) -> Result<HashState> {
         let Some(stored) = self.storage.get_typed(db, key).await? else {
-            return Ok(HashMap::new());
+            return Ok(HashState::Missing);
         };
         match stored.value {
-            ValueType::Hash(map) => Ok(map),
+            ValueType::Hash(_) => Ok(HashState::Inline(stored)),
             ValueType::CollectionHeader {
-                kind: CollectionKind::Hash,
-                ..
-            } => {
-                let encoded_user_key = AiDbEngine::encode_key(db, key);
-                self.scan_hash_subkeys(db, &encoded_user_key, None)
-                    .await
-                    .map(|pairs| pairs.into_iter().collect())
-            }
-            _ => Err(router::wrongtype()),
-        }
-    }
-
-    /// 加载或创建 hash (兼容所有格式).
-    async fn load_or_create_hash(&self, db: usize, key: &[u8]) -> Result<StoredValue> {
-        match self.storage.get_typed(db, key).await? {
-            None => Ok(StoredValue {
-                value: ValueType::Hash(HashMap::new()),
-                expires_at: None,
-            }),
-            Some(stored) => match stored.value {
-                ValueType::Hash(_) => Ok(stored),
-                ValueType::CollectionHeader {
-                    kind: CollectionKind::Hash,
-                    ..
-                } => Ok(stored),
-                _ => Err(router::wrongtype()),
-            },
-        }
-    }
-
-    /// 加载 hash 的所有 fields (兼容所有格式). 用于只读路径.
-    #[allow(dead_code)]
-    async fn load_hash(&self, db: usize, key: &[u8]) -> Result<Option<HashMap<Vec<u8>, Vec<u8>>>> {
-        let Some(stored) = self.storage.get_typed(db, key).await? else {
-            return Ok(None);
-        };
-        match stored.value {
-            ValueType::Hash(map) => Ok(Some(map)),
-            ValueType::CollectionHeader {
-                kind: CollectionKind::Hash,
-                ..
-            } => {
-                let encoded_user_key = AiDbEngine::encode_key(db, key);
-                Ok(Some(
-                    self.scan_hash_subkeys(db, &encoded_user_key, None)
-                        .await?
-                        .into_iter()
-                        .collect(),
-                ))
-            }
-            _ => Err(router::wrongtype()),
-        }
-    }
-
-    /// 扫描 subkey hash 的所有 field → value.
-    async fn scan_hash_subkeys(
-        &self,
-        db: usize,
-        encoded_user_key: &[u8],
-        pattern: Option<&[u8]>,
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        let prefix = subkey::hash_subkey_prefix(encoded_user_key);
-        let out = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let out_c = out.clone();
-        let pattern = pattern.map(|p| p.to_vec());
-
-        let _ = self
-            .storage
-            .raw_subkey_for_each(
-                db,
-                prefix,
-                Box::new(move |encoded, raw| {
-                    if let Some((kind, field)) = subkey::decode_subkey(&encoded) {
-                        if kind != CollectionKind::Hash {
-                            return Ok(());
-                        }
-                        if let Some(ref pat) = pattern {
-                            if !glob_match(pat, &field) {
-                                return Ok(());
-                            }
-                        }
-                        out_c.lock().unwrap().push((field, raw));
-                    }
-                    Ok(())
-                }),
-            )
-            .await;
-
-        Ok(Arc::try_unwrap(out).unwrap().into_inner().unwrap())
-    }
-
-    /// 将 inline hash map 迁移为 subkey 格式.
-    async fn migrate_hash_to_subkey(
-        &self,
-        db: usize,
-        key: &[u8],
-        expires_at: &Option<u64>,
-        map: &HashMap<Vec<u8>, Vec<u8>>,
-    ) -> Result<()> {
-        let encoded_user_key = AiDbEngine::encode_key(db, key);
-        let count = map.len() as u32;
-
-        for (field, value) in map {
-            let subkey_key = subkey::encode_hash_field_key(&encoded_user_key, field);
-            self.storage
-                .raw_subkey_set(db, subkey_key, value.clone())
-                .await?;
-        }
-
-        let metadata = StoredValue {
-            value: ValueType::CollectionHeader {
                 kind: CollectionKind::Hash,
                 count,
-            },
-            expires_at: *expires_at,
-        };
-        self.storage.rewrite_stored(db, key, metadata).await
+                version,
+            } => Ok(HashState::Subkey {
+                expires_at: stored.expires_at,
+                count,
+                version,
+            }),
+            _ => Err(router::wrongtype()),
+        }
     }
 
-    /// 删除某个 key 下的所有 hash subkey entries.
-    async fn delete_all_hash_subkeys(&self, _db: usize, encoded_user_key: &[u8]) {
-        // 收集并删除所有 subkey entries.
-        // 注意: raw_subkey_for_each 不能被 await 在 &mut dyn FnMut 闭包中, 所以先收集.
-        // 这里简化: 依赖引擎的 delete_range 可行, 但如果 prefix 跨越非 subkey keys 则有风险.
-        // 当前 subkey 都位于 encoded_user_key\x01H 前缀下, 相对独立.
-        //
-        // 对于 StorageAdapter 没有 delete_range 只适用于前缀范围内的场景,
-        // 在调用处 (hdel count==0) 我们已经逐字段删除了, 此函数作为防御性保险.
-        // 暂留空实现; 清理由调用方逐个 delete 完成.
-        let _ = encoded_user_key;
+    /// 写入 field (同名后者覆盖前者), 返回新增 field 数. 调用方持有 key 锁.
+    async fn write_fields(
+        &self,
+        db: usize,
+        key: &[u8],
+        state: HashState,
+        updates: Vec<(Vec<u8>, Vec<u8>)>,
+    ) -> Result<i64> {
+        let updates: BTreeMap<Vec<u8>, Vec<u8>> = updates.into_iter().collect();
+        match state {
+            HashState::Missing => {
+                let added = updates.len() as i64;
+                let map: HashMap<Vec<u8>, Vec<u8>> = updates.into_iter().collect();
+                self.storage
+                    .rewrite_stored(
+                        db,
+                        key,
+                        StoredValue {
+                            value: ValueType::Hash(map),
+                            expires_at: None,
+                        },
+                    )
+                    .await?;
+                Ok(added)
+            }
+            HashState::Inline(mut stored) => {
+                let ValueType::Hash(map) = &mut stored.value else {
+                    unreachable!("inline state is always a Hash")
+                };
+                let mut added = 0i64;
+                for (field, value) in updates {
+                    if map.insert(field, value).is_none() {
+                        added += 1;
+                    }
+                }
+                self.storage.rewrite_stored(db, key, stored).await?;
+                Ok(added)
+            }
+            HashState::Subkey {
+                expires_at,
+                count,
+                version,
+            } => {
+                let fields: Vec<&[u8]> = updates.keys().map(Vec::as_slice).collect();
+                let existing = self
+                    .storage
+                    .subkey_get_many(db, key, version, CollectionKind::Hash, &fields)
+                    .await?;
+                let added = existing.iter().filter(|v| v.is_none()).count() as u64;
+                self.storage
+                    .commit_collection(
+                        db,
+                        key,
+                        CollectionWrite {
+                            header: HeaderWrite::Put(StoredValue {
+                                value: ValueType::CollectionHeader {
+                                    kind: CollectionKind::Hash,
+                                    count: count + added,
+                                    version,
+                                },
+                                expires_at,
+                            }),
+                            version,
+                            kind: CollectionKind::Hash,
+                            puts: updates.into_iter().collect(),
+                            deletes: Vec::new(),
+                        },
+                    )
+                    .await?;
+                Ok(added as i64)
+            }
+        }
+    }
+
+    /// 按顺序读取 field; 不存在为 None.
+    async fn read_fields(
+        &self,
+        db: usize,
+        key: &[u8],
+        fields: &[&[u8]],
+    ) -> Result<Vec<Option<Vec<u8>>>> {
+        match self.load_state(db, key).await? {
+            HashState::Missing => Ok(vec![None; fields.len()]),
+            HashState::Inline(stored) => {
+                let ValueType::Hash(map) = stored.value else {
+                    unreachable!("inline state is always a Hash")
+                };
+                Ok(fields.iter().map(|f| map.get(*f).cloned()).collect())
+            }
+            HashState::Subkey { version, .. } => {
+                self.storage
+                    .subkey_get_many(db, key, version, CollectionKind::Hash, fields)
+                    .await
+            }
+        }
+    }
+
+    /// 读取全部 (field, value), 按存储顺序返回 (Inline 为哈希序, Subkey 为 field 字节序).
+    async fn load_all(&self, db: usize, key: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        match self.load_state(db, key).await? {
+            HashState::Missing => Ok(Vec::new()),
+            HashState::Inline(stored) => {
+                let ValueType::Hash(map) = stored.value else {
+                    unreachable!("inline state is always a Hash")
+                };
+                Ok(map.into_iter().collect())
+            }
+            HashState::Subkey { version, .. } => {
+                self.storage
+                    .subkey_scan(db, key, version, CollectionKind::Hash)
+                    .await
+            }
+        }
+    }
+
+    /// 读取单个 field 的当前值 (用于 HINCRBY 系列).
+    async fn current_field(
+        &self,
+        db: usize,
+        key: &[u8],
+        state: &HashState,
+        field: &[u8],
+    ) -> Result<Option<Vec<u8>>> {
+        match state {
+            HashState::Missing => Ok(None),
+            HashState::Inline(stored) => match &stored.value {
+                ValueType::Hash(map) => Ok(map.get(field).cloned()),
+                _ => unreachable!("inline state is always a Hash"),
+            },
+            HashState::Subkey { version, .. } => Ok(self
+                .storage
+                .subkey_get_many(db, key, *version, CollectionKind::Hash, &[field])
+                .await?
+                .pop()
+                .flatten()),
+        }
     }
 }
 
@@ -731,7 +483,7 @@ fn array_of_bulk(items: Vec<Vec<u8>>) -> RespValue {
 
 fn hscan_response(cursor: u64, page: &[(Vec<u8>, Vec<u8>)]) -> RespValue {
     let mut items = vec![RespValue::BulkString(Some(Bytes::from(cursor.to_string())))];
-    let mut pairs = Vec::new();
+    let mut pairs = Vec::with_capacity(page.len() * 2);
     for (field, value) in page {
         pairs.push(router::bulk(field.clone()));
         pairs.push(router::bulk(value.clone()));

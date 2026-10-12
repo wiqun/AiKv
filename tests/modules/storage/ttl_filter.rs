@@ -4,16 +4,15 @@
 
 use std::sync::Arc;
 
-use aikv::storage::{
-    now_ms, AiDbEngine, KvStorage, KvStorageAdapter, StoredValue, TtlExpireFilter, ValueType,
-};
+use aikv::storage::compaction_filter::AikvCompactionFilter;
+use aikv::storage::{now_ms, AiDbEngine, KvStorage, KvStorageAdapter, StoredValue, ValueType};
 use tempfile::TempDir;
 
 fn mk_storage(dir: &TempDir) -> (Arc<dyn KvStorage>, Arc<aidb::DB>) {
     let engine = AiDbEngine::open_for_testing(dir.path()).expect("open aidb");
     let db = engine.db.clone();
     // 注入 TTL filter
-    db.set_compaction_filter(Some(Arc::new(TtlExpireFilter)));
+    db.set_compaction_filter(Some(Arc::new(AikvCompactionFilter::single_node())));
     (KvStorageAdapter::new(engine), db)
 }
 
@@ -68,7 +67,7 @@ async fn test_ttl_filter_persistent_cleanup() {
     {
         let engine = AiDbEngine::open_for_testing(&db_path).unwrap();
         let db = engine.db.clone();
-        db.set_compaction_filter(Some(Arc::new(TtlExpireFilter)));
+        db.set_compaction_filter(Some(Arc::new(AikvCompactionFilter::single_node())));
         let storage = KvStorageAdapter::new(engine);
 
         storage
@@ -118,7 +117,7 @@ async fn test_ttl_filter_batch_mixed_expiry() {
 
     let engine = AiDbEngine::open_for_testing(dir.path()).unwrap();
     let db = engine.db.clone();
-    db.set_compaction_filter(Some(Arc::new(TtlExpireFilter)));
+    db.set_compaction_filter(Some(Arc::new(AikvCompactionFilter::single_node())));
     let storage = KvStorageAdapter::new(engine);
 
     let past_ms = now_ms() - 1000;
@@ -170,7 +169,7 @@ async fn test_ttl_filter_ignores_no_expiry() {
 
     let engine = AiDbEngine::open_for_testing(dir.path()).unwrap();
     let db = engine.db.clone();
-    db.set_compaction_filter(Some(Arc::new(TtlExpireFilter)));
+    db.set_compaction_filter(Some(Arc::new(AikvCompactionFilter::single_node())));
     let storage = KvStorageAdapter::new(engine);
 
     // 写入不含 expires_at 的普通 key
