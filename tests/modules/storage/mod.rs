@@ -12,6 +12,7 @@ pub mod rebuild_counters_test;
 pub mod rename_subkey;
 pub mod scan_cursor;
 pub mod script_commit_batch;
+pub mod subkey_gc;
 pub mod ttl_filter;
 pub mod types;
 pub mod watch_bump_batch;
