@@ -60,19 +60,15 @@ pub(crate) fn apply_limit<T: Clone>(items: &mut Vec<T>, offset: usize, count: Op
     }
 }
 
+/// Redis 名次语义: 负数从尾部计, 越界裁剪为闭区间 `[start, stop]`. 空区间返回 `(1, 0)` (`start > stop`).
 pub(crate) fn normalize_range(len: usize, start: i64, stop: i64) -> (usize, usize) {
     let len_i = len as i64;
-    let start_idx = if start < 0 {
-        (len_i + start).max(0) as usize
-    } else {
-        (start as usize).min(len.saturating_sub(1))
-    };
-    let stop_idx = if stop < 0 {
-        (len_i + stop).max(0) as usize
-    } else {
-        (stop as usize).min(len.saturating_sub(1))
-    };
-    (start_idx, stop_idx)
+    let s = (if start < 0 { len_i + start } else { start }).max(0);
+    let e = (if stop < 0 { len_i + stop } else { stop }).min(len_i - 1);
+    if len == 0 || s > e {
+        return (1, 0);
+    }
+    (s as usize, e as usize)
 }
 
 pub(crate) fn members_to_resp(members: &[(Vec<u8>, f64)], withscores: bool) -> RespValue {

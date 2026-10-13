@@ -8,19 +8,21 @@ use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 
-use crate::command::zset::index::{ScoreIndex, ZSetBuf};
+use crate::command::zset::index::ZSetBuf;
 use crate::error::{Error, Result};
+use crate::storage::collection::ZSetDelta;
 use crate::storage::{
-    now_ms, KvStorage, StoredBatchOp, StoredValue, ValueType, TTL_NO_EXPIRY, WRONGTYPE,
+    now_ms, CollectionKind, KvStorage, StoredBatchOp, StoredValue, ValueType, TTL_NO_EXPIRY,
+    WRONGTYPE,
 };
+
+pub(in crate::command::script) mod zset_view;
 
 /// 第一次碰到存储时记下的原值。`cached` 在值被搬进写缓冲后清空。
 struct StorageTouch {
     existed: bool,
     expires_at: Option<u64>,
     cached: Option<StoredValue>,
-    /// 本次脚本对未改动的 zset 已经建过的分数索引。
-    zset_index: Option<ScoreIndex>,
 }
 
 #[derive(Debug, Clone)]
@@ -71,8 +73,10 @@ impl BurstOverlay {
 pub struct ScriptTransaction {
     pub db_index: usize,
     write_buffer: HashMap<Vec<u8>, ExtendedBatchOp>,
-    /// 本次脚本已经确认过的存储原值。不参与提交。
+    /// 本次脚本已经确认过的存储原值。不参与提交。子键布局的 ZSET 这里只保留 header。
     seen: Mutex<HashMap<Vec<u8>, StorageTouch>>,
+    /// 子键布局 ZSET 的成员级增量 (相对磁盘版本), 见 `transaction::zset_view`。与 `write_buffer` 互斥。
+    zset_deltas: HashMap<Vec<u8>, ZSetDelta>,
     /// 显式 TTL 更新: Some(ts) = 过期时间; None = 清除 TTL
     expire_at: HashMap<Vec<u8>, Option<u64>>,
     /// 本轮更早的脚本写过、尚未提交的值。当前脚本自己的 `write_buffer` 优先。
@@ -89,6 +93,7 @@ impl ScriptTransaction {
             db_index,
             write_buffer: HashMap::new(),
             seen: Mutex::new(HashMap::new()),
+            zset_deltas: HashMap::new(),
             expire_at: HashMap::new(),
             overlay,
         }
@@ -108,7 +113,6 @@ impl ScriptTransaction {
                 existed: false,
                 expires_at: None,
                 cached: None,
-                zset_index: None,
             });
     }
 
@@ -121,6 +125,7 @@ impl ScriptTransaction {
     pub fn set_string(&mut self, key: Vec<u8>, value: Vec<u8>) {
         self.note_origin_if_unseen(&key);
         self.detach_cache(&key);
+        self.zset_deltas.remove(&key);
         self.write_buffer
             .insert(key, ExtendedBatchOp::SetString(value));
     }
@@ -128,6 +133,7 @@ impl ScriptTransaction {
     pub fn set_list(&mut self, key: Vec<u8>, list: VecDeque<Vec<u8>>) {
         self.note_origin_if_unseen(&key);
         self.detach_cache(&key);
+        self.zset_deltas.remove(&key);
         self.write_buffer
             .insert(key, ExtendedBatchOp::SetList(list));
     }
@@ -135,6 +141,7 @@ impl ScriptTransaction {
     pub fn set_set(&mut self, key: Vec<u8>, set: HashSet<Vec<u8>>) {
         self.note_origin_if_unseen(&key);
         self.detach_cache(&key);
+        self.zset_deltas.remove(&key);
         self.write_buffer.insert(key, ExtendedBatchOp::SetSet(set));
     }
 
@@ -161,41 +168,6 @@ impl ScriptTransaction {
                 Ok(Some(f(zset)?))
             }
         }
-    }
-
-    /// 按分数访问有序集合。索引在本脚本内复用，只读不标脏。
-    pub async fn with_score_index<R>(
-        &self,
-        storage: &dyn KvStorage,
-        key: &[u8],
-        f: impl FnOnce(&ScoreIndex) -> Result<R>,
-    ) -> Result<Option<R>> {
-        if let Some(op) = self.write_buffer.get(key) {
-            return match op {
-                ExtendedBatchOp::Delete => Ok(None),
-                ExtendedBatchOp::SetZSet(zset) => Ok(Some(f(zset.index())?)),
-                _ => Err(Error::Command(WRONGTYPE.into())),
-            };
-        }
-        self.ensure_cached(storage, key).await?;
-        let mut seen = self.seen.lock().unwrap();
-        let Some(touch) = seen.get_mut(key) else {
-            return Ok(None);
-        };
-        if touch.zset_index.is_none() {
-            let built = {
-                let Some(stored) = touch.cached.as_ref() else {
-                    return Ok(None);
-                };
-                Some(ScoreIndex::from_members(stored.as_zset()?))
-            };
-            touch.zset_index = built;
-        }
-        let index = touch
-            .zset_index
-            .as_ref()
-            .expect("zset index just populated");
-        Ok(Some(f(index)?))
     }
 
     /// 只读哈希。写缓冲或本次已装入的原值直接借用，不克隆，也不标脏。
@@ -366,6 +338,7 @@ impl ScriptTransaction {
 
     pub fn delete(&mut self, key: Vec<u8>) {
         self.detach_cache(&key);
+        self.zset_deltas.remove(&key);
         self.write_buffer.insert(key, ExtendedBatchOp::Delete);
     }
 
@@ -423,13 +396,13 @@ impl ScriptTransaction {
                 existed: loaded.is_some(),
                 expires_at: loaded.as_ref().and_then(|stored| stored.expires_at),
                 cached: loaded,
-                zset_index: None,
             },
         );
         Ok(())
     }
 
-    /// 从存储装入并展开 subkey 集合。调用方负责放进 `seen`。
+    /// 从存储装入并展开 subkey 集合 (ZSET 子键布局只取 header, 成员按需经 `zset_view` 读取)。
+    /// 调用方负责放进 `seen`。
     async fn fetch_stored(
         &self,
         storage: &dyn KvStorage,
@@ -439,9 +412,27 @@ impl ScriptTransaction {
             return match op {
                 StoredBatchOp::Delete { .. } => Ok(None),
                 StoredBatchOp::Put(stored) => Ok(Some(stored)),
+                StoredBatchOp::ZSetDelta(delta) if delta.visible_count() == 0 => Ok(None),
+                StoredBatchOp::ZSetDelta(delta) => Ok(Some(StoredValue {
+                    value: ValueType::CollectionHeader {
+                        kind: CollectionKind::ZSet,
+                        count: delta.visible_count(),
+                        version: delta.version,
+                    },
+                    expires_at: delta.expires_at,
+                })),
             };
         }
-        storage.get_expanded(self.db_index, key).await
+        let Some(raw) = storage.get_typed(self.db_index, key).await? else {
+            return Ok(None);
+        };
+        match raw.value {
+            ValueType::CollectionHeader {
+                kind: CollectionKind::Hash | CollectionKind::Set,
+                ..
+            } => storage.get_expanded(self.db_index, key).await,
+            _ => Ok(Some(raw)),
+        }
     }
 
     /// 脚本缓冲里的剩余 TTL（毫秒）。`None` 表示 key 不存在，`Some(TTL_NO_EXPIRY)` 表示没有过期时间。
@@ -451,6 +442,12 @@ impl ScriptTransaction {
         }
         if let Some(exp) = self.expire_at.get(key) {
             return Ok(remaining_ttl(*exp));
+        }
+        if let Some(delta) = self.zset_deltas.get(key) {
+            if delta.visible_count() == 0 {
+                return Ok(None);
+            }
+            return Ok(remaining_ttl(delta.expires_at));
         }
         if !self.seen.lock().unwrap().contains_key(key) {
             if self.write_buffer.contains_key(key) {
@@ -472,6 +469,9 @@ impl ScriptTransaction {
         if let Some(op) = self.write_buffer.get(key) {
             return Ok(!matches!(op, ExtendedBatchOp::Delete));
         }
+        if let Some(delta) = self.zset_deltas.get(key) {
+            return Ok(delta.visible_count() > 0);
+        }
         self.ensure_cached(storage, key).await?;
         Ok(self
             .seen
@@ -492,6 +492,7 @@ impl ScriptTransaction {
             return Ok(match op {
                 StoredBatchOp::Delete { .. } => None,
                 StoredBatchOp::Put(stored) => stored.expires_at,
+                StoredBatchOp::ZSetDelta(delta) => delta.expires_at,
             });
         }
         Ok(storage
@@ -523,9 +524,35 @@ impl ScriptTransaction {
         storage: &dyn KvStorage,
     ) -> Result<(Vec<(Vec<u8>, StoredBatchOp)>, u64)> {
         let db = self.db_index;
+        // 子键 ZSET 一律走增量路径: 只读装入或只改 TTL 的也要, 否则会用 header 整体覆盖成员增量.
+        let zset_headers: Vec<Vec<u8>> = {
+            let seen = self.seen.lock().unwrap();
+            seen.iter()
+                .filter(|(k, t)| {
+                    !self.write_buffer.contains_key(*k)
+                        && matches!(
+                            t.cached.as_ref().map(|s| &s.value),
+                            Some(ValueType::CollectionHeader {
+                                kind: CollectionKind::ZSet,
+                                ..
+                            })
+                        )
+                })
+                .map(|(k, _)| k.clone())
+                .collect()
+        };
+        let expire_keys: Vec<Vec<u8>> = self
+            .expire_at
+            .keys()
+            .filter(|k| !self.write_buffer.contains_key(*k))
+            .cloned()
+            .collect();
+        for key in zset_headers.into_iter().chain(expire_keys) {
+            self.zset_sub(storage, &key).await?;
+        }
         let mut keys: Vec<Vec<u8>> = self.write_buffer.keys().cloned().collect();
-        for key in self.expire_at.keys() {
-            if !self.write_buffer.contains_key(key) {
+        for key in self.expire_at.keys().chain(self.zset_deltas.keys()) {
+            if !self.write_buffer.contains_key(key) && !keys.contains(key) {
                 keys.push(key.clone());
             }
         }
@@ -534,7 +561,19 @@ impl ScriptTransaction {
         let mut release_ttl = 0u64;
         let mut write_buffer = std::mem::take(&mut self.write_buffer);
         for key in keys {
-            if let Some(op) = write_buffer.remove(&key) {
+            if let Some(mut delta) = self.zset_deltas.remove(&key) {
+                if let Some(exp) = self.expire_at.get(&key) {
+                    delta.expires_at = *exp;
+                }
+                if delta.is_noop() {
+                    continue;
+                }
+                // 与 Put 路径一致: header 仍存在时改写会计 +1, 这里抵消; 删除路径不抵消.
+                if delta.base_had_ttl() && delta.visible_count() > 0 {
+                    release_ttl += 1;
+                }
+                ops.push((key, StoredBatchOp::ZSetDelta(delta)));
+            } else if let Some(op) = write_buffer.remove(&key) {
                 match op {
                     ExtendedBatchOp::Delete => match self.delete_existed(&key) {
                         Some(false) => {}
@@ -555,6 +594,14 @@ impl ScriptTransaction {
                                     key,
                                     StoredBatchOp::Delete {
                                         had_ttl: stored.expires_at.is_some(),
+                                    },
+                                ));
+                            }
+                            Some(StoredBatchOp::ZSetDelta(delta)) => {
+                                ops.push((
+                                    key,
+                                    StoredBatchOp::Delete {
+                                        had_ttl: delta.base_had_ttl(),
                                     },
                                 ));
                             }
@@ -669,11 +716,10 @@ fn take_cached_zset(
     if touch.cached.is_some() && !is_zset {
         return Err(Error::Command(WRONGTYPE.into()));
     }
-    let index = touch.zset_index.take();
     match touch.cached.take() {
         None => Ok(CachedTake::Missing),
         Some(stored) => match stored.value {
-            ValueType::ZSet(zset) => Ok(CachedTake::Ready(ZSetBuf::from_parts(zset, index))),
+            ValueType::ZSet(zset) => Ok(CachedTake::Ready(ZSetBuf::from_members(zset))),
             _ => unreachable!("zset type checked above"),
         },
     }

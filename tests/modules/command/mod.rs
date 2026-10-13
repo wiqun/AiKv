@@ -15,3 +15,5 @@ pub mod server;
 pub mod set;
 pub mod string;
 pub mod zset;
+pub mod zset_bench;
+pub mod zset_subkey;

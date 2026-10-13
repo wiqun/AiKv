@@ -7,7 +7,7 @@ use aikv::command::CommandRouter;
 use aikv::protocol::RespValue;
 use aikv::storage::adapter::{KvStorageAdapter, StorageAdapter};
 use aikv::storage::collection::{CollectionWrite, HeaderWrite};
-use aikv::storage::subkey::subkey_db_prefix;
+use aikv::storage::subkey::{subkey_db_prefix, SubTag};
 use aikv::storage::{CollectionKind, KvStorage, MemoryEngine, StoredValue, ValueType};
 
 use bytes::Bytes;
@@ -109,16 +109,18 @@ async fn commit_collection_writes_in_one_call() {
                     expires_at: None,
                 }),
                 version,
-                kind,
-                puts: vec![(b"x".to_vec(), Vec::new()), (b"y".to_vec(), Vec::new())],
-                deletes: vec![vec![0]],
+                puts: vec![
+                    (SubTag::Set, b"x".to_vec(), Vec::new()),
+                    (SubTag::Set, b"y".to_vec(), Vec::new()),
+                ],
+                deletes: vec![(SubTag::Set, vec![0])],
             },
         )
         .await
         .unwrap();
     assert_eq!(map.apply_calls() - before, 1);
     let got = storage
-        .subkey_get_many(0, b"s", version, kind, &[b"x", &[0u8]])
+        .subkey_get_many(0, b"s", version, SubTag::Set, &[b"x", &[0u8]])
         .await
         .unwrap();
     assert_eq!(got, vec![Some(Vec::new()), None]);

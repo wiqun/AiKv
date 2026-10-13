@@ -29,7 +29,8 @@ description: AiKv 核心 Redis 命令 — String/Hash/List/Set/ZSet/Key/Database
 | [`src/command/hash.rs`](../../src/command/hash.rs) | Hash 系列命令 (HGET, HSET, HDEL, HGETALL, HINCRBY, HEXISTS 等) | `hash::dispatch` |
 | [`src/command/list.rs`](../../src/command/list.rs) | List 系列命令 (LPUSH, RPUSH, LPOP, RPOP, LRANGE, LLEN, LINDEX 等) | `list::dispatch` |
 | [`src/command/set.rs`](../../src/command/set.rs) | Set 系列命令 (SADD, SREM, SMEMBERS, SISMEMBER, SCARD, SINTER 等) | `set::dispatch` |
-| [`src/command/zset/`](../../src/command/zset/) | Sorted Set 系列命令 (ZADD, ZREM, ZRANGE, ZSCORE, ZCARD, ZINCRBY 等) | `zset::dispatch` |
+| [`src/command/zset/`](../../src/command/zset/) | Sorted Set 系列命令 (ZADD, ZREM, ZRANGE, ZSCORE, ZCARD, ZINCRBY 等); 子键布局路径见 `layout.rs` | `zset::dispatch` |
+| [`src/command/script/transaction/zset_view.rs`](../../src/command/script/transaction/zset_view.rs) | Lua 脚本内 ZSET 子键视图 (不整表展开) | `zset_view` |
 | [`src/command/key.rs`](../../src/command/key.rs) | Key 通用命令 (DEL, EXISTS, TYPE, EXPIRE, PEXPIRE, TTL, PTTL, PERSIST) | `key::dispatch` |
 | [`src/command/database.rs`](../../src/command/database.rs) | DB 管理命令 (SELECT, FLUSHDB, FLUSHALL, DBSIZE, SWAPDB) | `database::dispatch` |
 | [`src/command/scan_util.rs`](../../src/command/scan_util.rs) | SCAN / HSCAN / SSCAN / ZSCAN 游标编码与前缀迭代器辅助 | `encode_cursor`, `decode_cursor` |
@@ -131,3 +132,21 @@ sequenceDiagram
 | `OBJECT ENCODING` | 内联集合返回 `listpack`; subkey 布局的大集合返回 `hashtable` |
 | `HSCAN` / `SSCAN` | 游标越界返回游标 0 与空页, 不 panic |
 | `KEYS` / `SCAN` / `RANDOMKEY` | 只返回用户 key, 不返回 subkey |
+
+## 有序集合 (ZSet) 键级语义
+
+物理布局见 [03-storage.md §3](03-storage.md) ZSet 小节. 下表区分子键布局上的增量路径与整表路径.
+
+| 命令 | 子键布局 (大集合) | 内联 (≤ 64) |
+| :--- | :--- | :--- |
+| `ZADD` / `ZREM` / `ZSCORE` / `ZCARD` | 只读写相关 `Z`/`R` 与 header, 不展开整表 | 整值读写 |
+| `ZINCRBY` | 只读该成员旧分数, 增量写入 | 整值写回 |
+| `ZPOPMIN` / `ZPOPMAX` (含 `BZPOP*`) | 只从 `R` 索引两端取成员并删除 | 整值 |
+| `ZRANGE` / `ZREVRANGE` / `ZRANGEBYSCORE` / `ZREVRANGEBYSCORE` (含 `LIMIT`) | 按名次或分数区间前缀扫描, 只取窗口内成员 | 整表内存排序 |
+| `ZCOUNT` | 分数区间扫描计数 (O(区间内成员数)) | 整表 |
+| `ZRANK` / `ZREVRANK` / `ZRANGEBYLEX` / `ZREVRANGEBYLEX` / `ZLEXCOUNT` / `ZSCAN` / `ZINTER` / `ZUNION` / `ZDIFF` | 经 `get_expanded` 展开整表, O(N) | 整表 |
+| `DUMP` / `RESTORE` / `MIGRATE` / `RENAME` / `COPY` / `MOVE` / `SWAPDB` | 序列化前展开为内联整值; 目标按阈值重新决定布局 | 同左 |
+| `KEYS` | 只返回用户 key, 不返回 `Z`/`R` 子键 (有测试) | 同左 |
+| `DBSIZE` | **已知问题**: 经 `estimate_entry_count` 计入物理条目, 子键布局的集合会被多计 (100 成员的 ZSET 计为 201, `adapter.rs` `len` → `aidb.rs` `estimate_entry_count`); Hash/Set 同机制, 推断同样受影响 (未单独测) |
+
+脚本 (`EVAL`) 内的 ZSET 读写在子键布局上经 `zset_view` 直接访问存储: 写入累积为成员级 `ZSetDelta`, 同一 burst 内的后续脚本可见; 读取为存储区间与增量的有序合并. 内联 ZSET 仍在脚本缓冲中整表操作 (成员数 ≤ 64).

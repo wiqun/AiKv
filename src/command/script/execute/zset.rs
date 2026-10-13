@@ -1,18 +1,28 @@
 //! Lua `redis.call` ZSet 域 `exec_*` (ZADD/ZREM/ZSCORE/ZRANK/ZRANGE/ZCARD).
-//! 写操作通过 `ScriptTransaction::update_zset` 原地修改缓冲，避免每次调用克隆整表。
+//!
+//! 子键布局的 ZSET 走 `transaction::zset_view`: 读取只触达所需分数区间, 写入只更新成员增量,
+//! 不展开整表. 内联 ZSET 仍走 `ScriptTransaction::update_zset` / `with_zset` (成员数 ≤ 阈值, 整表在内存中).
 
 use bytes::Bytes;
 
 use crate::command::router;
-use crate::command::script::transaction::{parse_f64_arg, parse_i64_arg, ScriptTransaction};
-use crate::command::zset::helpers::{
-    bytes_to_str, members_to_resp, parse_limit_args, parse_score_bound,
+use crate::command::script::transaction::{
+    parse_f64_arg, parse_i64_arg, zset_view, ScriptTransaction,
 };
-use crate::error::Result;
+use crate::command::zset::helpers::{
+    bytes_to_str, members_to_resp, parse_limit_args, parse_score_bound, ScoreBound,
+};
+use crate::command::zset::index::ScoreIndex;
+use crate::error::{Error, Result};
 use crate::protocol::RespValue;
+use crate::storage::subkey::ScoreSpan;
 use crate::storage::KvStorage;
 
 use super::wrong_count;
+
+fn span_of(min: &ScoreBound, max: &ScoreBound) -> ScoreSpan {
+    ScoreSpan::new(min.endpoint(), max.endpoint())
+}
 
 pub(super) async fn exec_zadd(
     storage: &dyn KvStorage,
@@ -22,12 +32,24 @@ pub(super) async fn exec_zadd(
     if args.len() < 3 || !(args.len() - 1).is_multiple_of(2) {
         return Err(wrong_count("ZADD"));
     }
+    let mut pairs = Vec::with_capacity((args.len() - 1) / 2);
+    for i in (1..args.len()).step_by(2) {
+        let score = parse_f64_arg(&args[i], "score")?;
+        pairs.push((args[i + 1].to_vec(), score));
+    }
+    if txn.zset_sub(storage, &args[0]).await? {
+        let db = txn.db_index;
+        let delta = txn
+            .zset_delta_mut(&args[0])
+            .ok_or_else(|| Error::Command("ERR internal zset delta missing".into()))?;
+        let added = zset_view::add(storage, db, &args[0], delta, &pairs).await?;
+        return Ok(router::integer(added));
+    }
     let added = txn
         .update_zset(storage, &args[0], true, false, |zset| {
             let mut added = 0i64;
-            for i in (1..args.len()).step_by(2) {
-                let score = parse_f64_arg(&args[i], "score")?;
-                if zset.insert(args[i + 1].to_vec(), score).is_none() {
+            for (member, score) in &pairs {
+                if zset.insert(member.clone(), *score).is_none() {
                     added += 1;
                 }
             }
@@ -44,6 +66,18 @@ pub(super) async fn exec_zrem(
 ) -> Result<RespValue> {
     if args.len() < 2 {
         return Err(wrong_count("ZREM"));
+    }
+    if txn.zset_sub(storage, &args[0]).await? {
+        let db = txn.db_index;
+        let members: Vec<&[u8]> = args[1..].iter().map(|m| m.as_ref()).collect();
+        let delta = txn
+            .zset_delta_mut(&args[0])
+            .ok_or_else(|| Error::Command("ERR internal zset delta missing".into()))?;
+        let removed = zset_view::remove(storage, db, &args[0], delta, &members).await?;
+        if delta.visible_count() == 0 {
+            txn.delete(args[0].to_vec());
+        }
+        return Ok(router::integer(removed));
     }
     let count = txn
         .update_zset(storage, &args[0], false, true, |zset| {
@@ -67,12 +101,16 @@ pub(super) async fn exec_zscore(
     if args.len() != 2 {
         return Err(wrong_count("ZSCORE"));
     }
-    let found = txn
-        .with_zset(storage, &args[0], |zset| {
+    let score = if let Some(delta) = txn.zset_snapshot(storage, &args[0]).await? {
+        zset_view::score_of(storage, txn.db_index, &args[0], &delta, args[1].as_ref()).await?
+    } else {
+        txn.with_zset(storage, &args[0], |zset| {
             Ok(zset.get(args[1].as_ref()).copied())
         })
-        .await?;
-    Ok(match found.flatten() {
+        .await?
+        .flatten()
+    };
+    Ok(match score {
         Some(score) => router::bulk(score.to_string().into_bytes()),
         None => RespValue::Null,
     })
@@ -86,12 +124,24 @@ pub(super) async fn exec_zrank(
     if args.len() != 2 {
         return Err(wrong_count("ZRANK"));
     }
-    let rank = txn
-        .with_score_index(storage, &args[0], |index| {
-            Ok(index.rank(args[1].as_ref(), false))
+    let rank = if let Some(delta) = txn.zset_snapshot(storage, &args[0]).await? {
+        zset_view::rank_of(
+            storage,
+            txn.db_index,
+            &args[0],
+            &delta,
+            args[1].as_ref(),
+            false,
+        )
+        .await?
+    } else {
+        txn.with_zset(storage, &args[0], |zset| {
+            Ok(ScoreIndex::from_members(zset).rank(args[1].as_ref(), false))
         })
-        .await?;
-    Ok(match rank.flatten() {
+        .await?
+        .flatten()
+    };
+    Ok(match rank {
         Some(rank) => router::integer(rank as i64),
         None => RespValue::Null,
     })
@@ -113,6 +163,14 @@ pub(super) async fn exec_zrevrange(
     range_by_rank(storage, txn, args, true).await
 }
 
+/// 按名次取窗口: `start`/`stop` 与 ZRANGE 相同 (负数从尾部计, 闭区间).
+fn rank_window(len: usize, start: i64, stop: i64) -> (usize, usize) {
+    let len = len as i64;
+    let start_idx = (if start < 0 { len + start } else { start }).clamp(0, len) as usize;
+    let stop_idx = (if stop < 0 { len + stop + 1 } else { stop + 1 }).clamp(0, len) as usize;
+    (start_idx, stop_idx.max(start_idx))
+}
+
 async fn range_by_rank(
     storage: &dyn KvStorage,
     txn: &ScriptTransaction,
@@ -126,24 +184,37 @@ async fn range_by_rank(
     let start = parse_i64_arg(&args[1], "start")?;
     let stop = parse_i64_arg(&args[2], "stop")?;
     let with_scores = args.len() > 3 && args[3].eq_ignore_ascii_case(b"WITHSCORES");
-    let page = txn
-        .with_score_index(storage, &args[0], |index| {
-            let len = index.len() as i64;
-            let start_idx = (if start < 0 { len + start } else { start }).clamp(0, len) as usize;
-            let stop_idx =
-                (if stop < 0 { len + stop + 1 } else { stop + 1 }).clamp(0, len) as usize;
-            let window = index.collect_rank_window(start_idx, stop_idx, reverse);
-            let mut out = Vec::new();
-            for (member, score) in window {
-                out.push(router::bulk(member));
-                if with_scores {
-                    out.push(router::bulk(score.to_string().into_bytes()));
-                }
-            }
-            Ok(out)
+    let window: Vec<(Vec<u8>, f64)> = if let Some(delta) =
+        txn.zset_snapshot(storage, &args[0]).await?
+    {
+        let (start_idx, stop_idx) = rank_window(delta.visible_count() as usize, start, stop);
+        zset_view::range(
+            storage,
+            txn.db_index,
+            &args[0],
+            &delta,
+            &ScoreSpan::FULL,
+            reverse,
+            start_idx,
+            Some(stop_idx - start_idx),
+        )
+        .await?
+    } else {
+        txn.with_zset(storage, &args[0], |zset| {
+            let (start_idx, stop_idx) = rank_window(zset.len(), start, stop);
+            Ok(ScoreIndex::from_members(zset).collect_rank_window(start_idx, stop_idx, reverse))
         })
-        .await?;
-    Ok(RespValue::Array(Some(page.unwrap_or_default())))
+        .await?
+        .unwrap_or_default()
+    };
+    let mut out = Vec::new();
+    for (member, score) in window {
+        out.push(router::bulk(member));
+        if with_scores {
+            out.push(router::bulk(score.to_string().into_bytes()));
+        }
+    }
+    Ok(RespValue::Array(Some(out)))
 }
 
 pub(super) async fn exec_zrangebyscore(
@@ -204,13 +275,28 @@ async fn range_by_score(
             return Err(router::wrong_args(cmd, ""));
         }
     }
-    let sorted = txn
-        .with_score_index(storage, &args[0], |index| {
-            let (offset, count) = limit.unwrap_or((0, None));
-            Ok(index.collect_score_window(&min, &max, reverse, offset, count))
+    let (offset, count) = limit.unwrap_or((0, None));
+    let sorted = if let Some(delta) = txn.zset_snapshot(storage, &args[0]).await? {
+        zset_view::range(
+            storage,
+            txn.db_index,
+            &args[0],
+            &delta,
+            &span_of(&min, &max),
+            reverse,
+            offset,
+            count,
+        )
+        .await?
+    } else {
+        txn.with_zset(storage, &args[0], |zset| {
+            Ok(ScoreIndex::from_members(zset)
+                .collect_score_window(&min, &max, reverse, offset, count))
         })
-        .await?;
-    Ok(members_to_resp(&sorted.unwrap_or_default(), with_scores))
+        .await?
+        .unwrap_or_default()
+    };
+    Ok(members_to_resp(&sorted, with_scores))
 }
 
 pub(super) async fn exec_zcard(
@@ -221,9 +307,12 @@ pub(super) async fn exec_zcard(
     if args.len() != 1 {
         return Err(wrong_count("ZCARD"));
     }
-    let n = txn
-        .with_zset(storage, &args[0], |zset| Ok(zset.len()))
-        .await?
-        .unwrap_or(0);
-    Ok(router::integer(n as i64))
+    let n = if let Some(delta) = txn.zset_snapshot(storage, &args[0]).await? {
+        delta.visible_count() as i64
+    } else {
+        txn.with_zset(storage, &args[0], |zset| Ok(zset.len()))
+            .await?
+            .unwrap_or(0) as i64
+    };
+    Ok(router::integer(n))
 }

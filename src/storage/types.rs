@@ -25,7 +25,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
-use crate::storage::collection::CollectionWrite;
+use crate::storage::collection::{CollectionWrite, ZSetDelta};
+use crate::storage::subkey::{decode_zset_score_or_err, ScoreSpan, SubTag};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeyspaceStats {
@@ -88,6 +89,8 @@ pub enum ValueType {
 pub enum CollectionKind {
     Hash = 1,
     Set = 2,
+    /// 持久化变体序号追加在末尾 (已有变体序号不变).
+    ZSet = 3,
 }
 
 /// 脚本或上层一次提交里的一笔写。删除不回读存储。
@@ -98,6 +101,8 @@ pub enum StoredBatchOp {
     Delete {
         had_ttl: bool,
     },
+    /// 子键布局 ZSET 的成员级增量 (相对磁盘版本), 提交时展开为子键写入.
+    ZSetDelta(ZSetDelta),
 }
 
 /// ZSet 成员的反序列化: 先读成 `Vec<(member, score)>`, 再由 `BTreeMap::from_iter` 批量建树.
@@ -147,6 +152,7 @@ impl StoredValue {
             ValueType::CollectionHeader { kind, .. } => match kind {
                 CollectionKind::Hash => "hash",
                 CollectionKind::Set => "set",
+                CollectionKind::ZSet => "zset",
             },
         }
     }
@@ -342,22 +348,22 @@ pub trait KvStorage: Send + Sync {
         db: usize,
         key: &[u8],
         version: u64,
-        kind: CollectionKind,
+        tag: SubTag,
         subs: &[&[u8]],
     ) -> Result<Vec<Option<Vec<u8>>>> {
-        let _ = (db, key, version, kind, subs);
+        let _ = (db, key, version, tag, subs);
         Err(subkey_unsupported())
     }
 
-    /// 扫描某版本的全部 subkey, 返回 (sub, value), 按 sub 字节序.
+    /// 扫描某版本某标签的全部 subkey, 返回 (sub, value), 按 sub 字节序.
     async fn subkey_scan(
         &self,
         db: usize,
         key: &[u8],
         version: u64,
-        kind: CollectionKind,
+        tag: SubTag,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        let _ = (db, key, version, kind);
+        let _ = (db, key, version, tag);
         Err(subkey_unsupported())
     }
 
@@ -365,6 +371,50 @@ pub trait KvStorage: Send + Sync {
     async fn commit_collection(&self, db: usize, key: &[u8], write: CollectionWrite) -> Result<()> {
         let _ = (db, key, write);
         Err(subkey_unsupported())
+    }
+
+    /// ZSET 命令读取 key 的头部 (内联整值或子键 header). 默认等价 `get_typed`;
+    /// 支持同步快路径的适配器覆盖为不经 spawn_blocking 的读取.
+    async fn zset_load(&self, db: usize, key: &[u8]) -> Result<Option<StoredValue>> {
+        self.get_typed(db, key).await
+    }
+
+    /// ZSET 子键布局下一组 member 的分数 (按入参顺序, 缺失为 None).
+    async fn zset_subkey_scores(
+        &self,
+        db: usize,
+        key: &[u8],
+        version: u64,
+        members: &[&[u8]],
+    ) -> Result<Vec<Option<f64>>> {
+        let rows = self
+            .subkey_get_many(db, key, version, SubTag::ZMember, members)
+            .await?;
+        rows.into_iter()
+            .map(|row| row.map(|raw| decode_zset_score_or_err(&raw)).transpose())
+            .collect()
+    }
+
+    /// ZSET 子键布局按分数区间读取成员 (`(member, score)`), 按 `reverse` 决定方向.
+    /// `offset` 跳过前 N 个, `limit` 为 None 时取到区间末尾. 默认不支持子键布局.
+    #[allow(clippy::too_many_arguments)]
+    async fn zset_range(
+        &self,
+        db: usize,
+        key: &[u8],
+        version: u64,
+        span: &ScoreSpan,
+        reverse: bool,
+        offset: usize,
+        limit: Option<usize>,
+    ) -> Result<Vec<(Vec<u8>, f64)>> {
+        let _ = (db, key, version, span, reverse, offset, limit);
+        Err(subkey_unsupported())
+    }
+
+    /// ZSET 子键布局的一次提交 (header 与 Z/R 增删). 默认经 `commit_collection`.
+    async fn zset_commit(&self, db: usize, key: &[u8], write: CollectionWrite) -> Result<()> {
+        self.commit_collection(db, key, write).await
     }
 
     /// 写入完整值. 支持 subkey 的引擎会把超过阈值的 Hash/Set 转为新版本 subkey 布局.
@@ -393,6 +443,7 @@ pub trait KvStorage: Send + Sync {
                 StoredBatchOp::Put(stored) => {
                     self.set_typed(db, &key, stored).await?;
                 }
+                StoredBatchOp::ZSetDelta(_) => return Err(subkey_unsupported()),
             }
         }
         Ok(())

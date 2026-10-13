@@ -2,15 +2,16 @@
 //! ZCOUNT/ZLEXCOUNT/ZPOPMIN/ZPOPMAX/BZPOPMIN/BZPOPMAX/ZINCRBY/ZSCAN, 以及聚合
 //! ZINTER/ZUNION/ZDIFF (含 *STORE 变体).
 //!
-//! 子模块: `helpers` (范围边界 / LIMIT / 聚合解析), `index` (内存分数序).
+//! 子模块: `helpers` (范围边界 / LIMIT / 聚合解析), `index` (内存分数序), `layout`
+//! (2a 子键路径: ZADD/ZREM/ZSCORE/ZCARD).
 //!
 //! # 存储表示
 //!
 //! ```text
-//! ValueType::ZSet(BTreeMap<Vec<u8>, f64>)
-//!   member → score (f64); BTreeMap 按 member 字节序排列
-//!   经 get_typed / set_typed 整体读写
-//!   分数序只在内存中的 ScoreIndex，不进入磁盘
+//! 内联:   ValueType::ZSet(BTreeMap<Vec<u8>, f64>)  member → score, 成员数 ≤ 64
+//! 子键化: CollectionHeader{kind: ZSet, count, version} + Z (member → score) + R (分数索引)
+//!         ZADD/ZREM/ZSCORE/ZCARD 直接读写子键; 其它命令经 get_expanded 展开为整表
+//!         分数序只在内存中的 ScoreIndex，不进入磁盘
 //! ```
 //!
 //! # 关键点
@@ -40,10 +41,12 @@ use crate::protocol::RespValue;
 use crate::server::config::TransactionGate;
 use crate::server::ServerMetrics;
 use crate::storage::memory::glob_match;
+use crate::storage::subkey::ScoreSpan;
 use crate::storage::{KvStorage, StoredValue, ValueType};
 
 pub(crate) mod helpers;
 pub(crate) mod index;
+mod layout;
 
 use self::helpers::{
     aggregate_score, apply_limit, array_of_bulk, bytes_to_str, eq_ignore_case, format_score,
@@ -52,6 +55,14 @@ use self::helpers::{
     sort_by_score_then_member,
 };
 use self::index::ScoreIndex;
+
+/// 内联整值 → 成员表; 其它类型返回 WRONGTYPE.
+fn into_zset(stored: StoredValue) -> Result<BTreeMap<Vec<u8>, f64>> {
+    match stored.value {
+        ValueType::ZSet(zset) => Ok(zset),
+        _ => Err(router::wrongtype()),
+    }
+}
 
 pub struct ZSetCommands {
     storage: Arc<dyn KvStorage>,
@@ -85,63 +96,6 @@ impl ZSetCommands {
             key_lock,
             metrics: Some(metrics),
             transaction_gate,
-        }
-    }
-
-    pub async fn zadd(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
-        router::require_min_args("ZADD", args, 3)?;
-        if !(args.len() - 1).is_multiple_of(2) {
-            return Err(router::wrong_args("ZADD", ""));
-        }
-        let key = &args[0];
-        let _lock = self.key_lock.lock(key).await;
-        let mut stored = self.load_or_create_zset(db, key).await?;
-        let zset = stored.as_zset_mut()?;
-        let mut count = 0i64;
-        for chunk in args[1..].chunks(2) {
-            let score = parse_score(&chunk[0])?;
-            let member = chunk[1].to_vec();
-            if !zset.contains_key(&member) {
-                count += 1;
-            }
-            zset.insert(member, score);
-        }
-        self.storage.rewrite_stored(db, key, stored).await?;
-        BlockingRegistry::global().notify(key, RespValue::SimpleString("OK".into()));
-        Ok(router::integer(count))
-    }
-
-    pub async fn zrem(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
-        router::require_min_args("ZREM", args, 2)?;
-        let key = &args[0];
-        let _lock = self.key_lock.lock(key).await;
-        let Some(mut stored) = self.storage.get_typed(db, key).await? else {
-            return Ok(router::integer(0));
-        };
-        let zset = stored.as_zset_mut()?;
-        let mut count = 0i64;
-        for member in &args[1..] {
-            if zset.remove(member.as_ref()).is_some() {
-                count += 1;
-            }
-        }
-        if zset.is_empty() {
-            self.storage.delete(db, key).await?;
-        } else {
-            self.storage.rewrite_stored(db, key, stored).await?;
-        }
-        Ok(router::integer(count))
-    }
-
-    pub async fn zscore(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
-        router::require_args("ZSCORE", args, 2)?;
-        let zset = self.load_zset(db, &args[0]).await?;
-        let Some(zset) = zset else {
-            return Ok(router::nil_bulk());
-        };
-        match zset.get(args[1].as_ref()) {
-            None => Ok(router::nil_bulk()),
-            Some(score) => Ok(router::bulk(format_score(*score).into_bytes())),
         }
     }
 
@@ -196,10 +150,28 @@ impl ZSetCommands {
         let start = parse_i64(&args[1])?;
         let stop = parse_i64(&args[2])?;
         let withscores = args.iter().any(|a| eq_ignore_case(a, b"WITHSCORES"));
-        let zset = self.load_zset(db, key).await?;
-        let Some(zset) = zset else {
+        let Some(stored) = self.storage.zset_load(db, key).await? else {
             return Ok(RespValue::Array(Some(vec![])));
         };
+        if let Some((count, version)) = layout::subkey_header(&stored)? {
+            let (start_idx, stop_idx) = normalize_range(count as usize, start, stop);
+            if start_idx > stop_idx {
+                return Ok(RespValue::Array(Some(vec![])));
+            }
+            let items = self
+                .range_subkey(
+                    db,
+                    key,
+                    version,
+                    &ScoreSpan::FULL,
+                    reverse,
+                    start_idx,
+                    Some(stop_idx + 1 - start_idx),
+                )
+                .await?;
+            return Ok(members_to_resp(&items, withscores));
+        }
+        let zset = into_zset(stored)?;
         let index = ScoreIndex::from_members(&zset);
         let len = zset.len();
         let (start_idx, stop_idx) = normalize_range(len, start, stop);
@@ -259,34 +231,43 @@ impl ZSetCommands {
                 return Err(router::wrong_args("ZRANGEBYSCORE", ""));
             }
         }
-        let zset = self.load_zset(db, key).await?;
-        let Some(zset) = zset else {
+        let Some(stored) = self.storage.zset_load(db, key).await? else {
             return Ok(RespValue::Array(Some(vec![])));
         };
-        let index = ScoreIndex::from_members(&zset);
         let (offset, count) = limit.unwrap_or((0, None));
+        if let Some((_, version)) = layout::subkey_header(&stored)? {
+            let span = ScoreSpan::new(min.endpoint(), max.endpoint());
+            let sorted = self
+                .range_subkey(db, key, version, &span, reverse, offset, count)
+                .await?;
+            return Ok(members_to_resp(&sorted, withscores));
+        }
+        let zset = into_zset(stored)?;
+        let index = ScoreIndex::from_members(&zset);
         let sorted = index.collect_score_window(&min, &max, reverse, offset, count);
         Ok(members_to_resp(&sorted, withscores))
-    }
-
-    pub async fn zcard(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
-        router::require_args("ZCARD", args, 1)?;
-        let zset = self.load_zset(db, &args[0]).await?;
-        Ok(router::integer(zset.map(|z| z.len() as i64).unwrap_or(0)))
     }
 
     pub async fn zcount(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_args("ZCOUNT", args, 3)?;
         let min = parse_score_bound(bytes_to_str(&args[1])?, true)?;
         let max = parse_score_bound(bytes_to_str(&args[2])?, false)?;
-        let zset = self.load_zset(db, &args[0]).await?;
+        let Some(stored) = self.storage.zset_load(db, &args[0]).await? else {
+            return Ok(router::integer(0));
+        };
+        if let Some((_, version)) = layout::subkey_header(&stored)? {
+            let span = ScoreSpan::new(min.endpoint(), max.endpoint());
+            let n = self
+                .range_subkey(db, &args[0], version, &span, false, 0, None)
+                .await?
+                .len();
+            return Ok(router::integer(n as i64));
+        }
+        let zset = into_zset(stored)?;
         let count = zset
-            .map(|z| {
-                z.values()
-                    .filter(|score| score_in_range(**score, &min, &max))
-                    .count() as i64
-            })
-            .unwrap_or(0);
+            .values()
+            .filter(|score| score_in_range(**score, &min, &max))
+            .count() as i64;
         Ok(router::integer(count))
     }
 
@@ -296,7 +277,25 @@ impl ZSetCommands {
         let member = args[2].to_vec();
         let key = &args[0];
         let _lock = self.key_lock.lock(key).await;
-        let mut stored = self.load_or_create_zset(db, key).await?;
+        let stored = match self.storage.zset_load(db, key).await? {
+            Some(stored) => stored,
+            None => StoredValue::new_zset(BTreeMap::new()),
+        };
+        if let Some((count, version)) = layout::subkey_header(&stored)? {
+            let new_score = self
+                .zincrby_subkey(
+                    db,
+                    key,
+                    stored.expires_at,
+                    count,
+                    version,
+                    &member,
+                    increment,
+                )
+                .await?;
+            return Ok(router::bulk(format_score(new_score).into_bytes()));
+        }
+        let mut stored = stored;
         let zset = stored.as_zset_mut()?;
         let new_score = zset.get(&member).copied().unwrap_or(0.0) + increment;
         zset.insert(member, new_score);
@@ -353,9 +352,22 @@ impl ZSetCommands {
         max: bool,
     ) -> Result<RespValue> {
         let _lock = self.key_lock.lock(key).await;
-        let Some(mut stored) = self.storage.get_typed(db, key).await? else {
+        let Some(mut stored) = self.storage.zset_load(db, key).await? else {
             return Ok(RespValue::Array(Some(vec![])));
         };
+        if let Some((header_count, version)) = layout::subkey_header(&stored)? {
+            return self
+                .pop_subkey(
+                    db,
+                    key,
+                    stored.expires_at,
+                    header_count,
+                    version,
+                    count,
+                    max,
+                )
+                .await;
+        }
         let zset = stored.as_zset_mut()?;
         let n = count.min(zset.len());
         let picked = ScoreIndex::from_members(zset).collect_extreme(n, max);
@@ -448,23 +460,13 @@ impl ZSetCommands {
     }
 
     async fn load_zset(&self, db: usize, key: &[u8]) -> Result<Option<BTreeMap<Vec<u8>, f64>>> {
-        let Some(stored) = self.storage.get_typed(db, key).await? else {
+        let Some(stored) = self.storage.get_expanded(db, key).await? else {
             return Ok(None);
         };
         // `get_typed` 返回所有权, 直接移出成员表, 避免整表克隆.
         match stored.value {
             ValueType::ZSet(zset) => Ok(Some(zset)),
             _ => Err(router::wrongtype()),
-        }
-    }
-
-    async fn load_or_create_zset(&self, db: usize, key: &[u8]) -> Result<StoredValue> {
-        match self.storage.get_typed(db, key).await? {
-            None => Ok(StoredValue::new_zset(BTreeMap::new())),
-            Some(stored) => match stored.value {
-                ValueType::ZSet(_) => Ok(stored),
-                _ => Err(router::wrongtype()),
-            },
         }
     }
 

@@ -33,13 +33,13 @@ use std::sync::{Arc, OnceLock};
 use async_trait::async_trait;
 
 use crate::error::{Error, Result};
-use crate::storage::collection::CollectionWrite;
+use crate::storage::collection::{CollectionWrite, ZSET_MAX_INLINE_MEMBERS};
 use crate::storage::memory::{glob_match, glob_range_prefix};
 use crate::storage::observation::{PointReadCounter, StorageObservation};
+use crate::storage::subkey::{decode_zset_score_or_err, ScoreSpan, SubTag};
 use crate::storage::types::{
-    now_ms, CollectionKind, ExpiresCounters, KeyspaceStats, KvStorage, ScanResult,
-    StorageEngineKind, StoredBatchOp, StoredValue, ValueType, WriteOp, DB_COUNT, TTL_NO_EXPIRY,
-    WRONGTYPE,
+    now_ms, ExpiresCounters, KeyspaceStats, KvStorage, ScanResult, StorageEngineKind,
+    StoredBatchOp, StoredValue, ValueType, WriteOp, DB_COUNT, TTL_NO_EXPIRY, WRONGTYPE,
 };
 use crate::storage::watch_registry::WatchRegistry;
 use crate::storage::watch_version::{
@@ -55,6 +55,27 @@ pub enum AdapterWriteOp {
     Put { key: Vec<u8>, value: Vec<u8> },
     Delete { key: Vec<u8> },
 }
+
+/// 同步直连本地引擎的快路径 (仅单机 AiDb). ZSET 子键命令使用, 不经 `spawn_blocking`.
+///
+/// 只有不经过 Raft 的本地引擎可以实现它; 集群适配器必须返回 `None`, 写入只能经共识提交.
+pub trait SyncKv: Send + Sync {
+    fn get_sync(&self, key: &[u8]) -> Result<Option<Vec<u8>>>;
+    fn write_sync(&self, ops: Vec<AdapterWriteOp>) -> Result<()>;
+    /// 同步写是否可接受. `sync_wal` 开启时写入会在调用线程 fsync, 此时写必须回落到 async 路径.
+    fn sync_writes_allowed(&self) -> bool;
+    /// 按字节序访问 `[start, end)`; `reverse` 时从大到小. `f` 返回 `Ok(false)` 后停止.
+    fn visit_range_sync(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        reverse: bool,
+        f: &mut RangeVisitor<'_>,
+    ) -> Result<()>;
+}
+
+/// 范围访问回调: 返回 `Ok(false)` 停止遍历.
+pub type RangeVisitor<'a> = dyn FnMut(&[u8], &[u8]) -> Result<bool> + 'a;
 
 #[async_trait]
 pub trait StorageAdapter: Send + Sync {
@@ -111,6 +132,38 @@ pub trait StorageAdapter: Send + Sync {
     ) -> Result<()> {
         for (k, v) in self.scan_prefix(&prefix).await? {
             f(k, v)?;
+        }
+        Ok(())
+    }
+
+    /// 按字节序访问 `[start, end)`, `reverse` 时从大到小. 默认正向经 `visit_range`;
+    /// 反向默认先收集再倒序回调, 引擎应覆盖为惰性反向迭代.
+    async fn visit_range_dir(
+        &self,
+        start: Vec<u8>,
+        end: Vec<u8>,
+        reverse: bool,
+        mut f: Box<dyn FnMut(Vec<u8>, Vec<u8>) -> Result<bool> + Send>,
+    ) -> Result<()> {
+        if !reverse {
+            return self.visit_range(start, Some(end), f).await;
+        }
+        let rows = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = Arc::clone(&rows);
+        self.visit_range(
+            start,
+            Some(end),
+            Box::new(move |k, v| {
+                sink.lock().unwrap().push((k, v));
+                Ok(true)
+            }),
+        )
+        .await?;
+        let rows = std::mem::take(&mut *rows.lock().unwrap());
+        for (k, v) in rows.into_iter().rev() {
+            if !f(k, v)? {
+                break;
+            }
         }
         Ok(())
     }
@@ -185,6 +238,11 @@ pub trait StorageAdapter: Send + Sync {
         None
     }
 
+    /// 同步快路径; 仅不经共识的单机引擎返回 `Some`.
+    fn sync_kv(&self) -> Option<&dyn SyncKv> {
+        None
+    }
+
     /// 惰性过期清理路径是否应该对 `key` 发起物理删除写.
     ///
     /// 单机/本地引擎总是允许 (无 Raft, 删除即时生效). 集群模式下
@@ -246,6 +304,12 @@ impl KvStorageAdapter {
 
     fn encode(db: usize, key: &[u8]) -> Vec<u8> {
         AiDbEngine::encode_key(db, key)
+    }
+
+    fn note_point_read(&self, hit: bool) {
+        if let Some(counter) = self.point_reads.get() {
+            counter.note(hit);
+        }
     }
 
     fn decode_user_key(encoded: &[u8]) -> Option<Vec<u8>> {
@@ -817,9 +881,7 @@ impl KvStorage for KvStorageAdapter {
     async fn get_typed(&self, db: usize, key: &[u8]) -> Result<Option<StoredValue>> {
         let result = self.load_typed(db, key).await;
         if let Ok(value) = &result {
-            if let Some(counter) = self.point_reads.get() {
-                counter.note(value.is_some());
-            }
+            self.note_point_read(value.is_some());
         }
         result
     }
@@ -841,11 +903,10 @@ impl KvStorage for KvStorageAdapter {
         db: usize,
         key: &[u8],
         version: u64,
-        kind: CollectionKind,
+        tag: SubTag,
         subs: &[&[u8]],
     ) -> Result<Vec<Option<Vec<u8>>>> {
-        self.subkey_get_many_impl(db, key, version, kind, subs)
-            .await
+        self.subkey_get_many_impl(db, key, version, tag, subs).await
     }
 
     async fn subkey_scan(
@@ -853,13 +914,72 @@ impl KvStorage for KvStorageAdapter {
         db: usize,
         key: &[u8],
         version: u64,
-        kind: CollectionKind,
+        tag: SubTag,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        self.subkey_scan_impl(db, key, version, kind).await
+        self.subkey_scan_impl(db, key, version, tag).await
     }
 
     async fn commit_collection(&self, db: usize, key: &[u8], write: CollectionWrite) -> Result<()> {
         self.commit_collection_impl(db, key, write).await
+    }
+
+    async fn zset_load(&self, db: usize, key: &[u8]) -> Result<Option<StoredValue>> {
+        let Some(kv) = self.storage.sync_kv() else {
+            return self.get_typed(db, key).await;
+        };
+        self.check_db(db)?;
+        let Some(raw) = kv.get_sync(&Self::encode(db, key))? else {
+            self.note_point_read(false);
+            return Ok(None);
+        };
+        let stored = Self::deserialize(&raw)?;
+        if stored.is_expired() {
+            // 过期清理需要写入, 交给 async 路径处理 (惰性删除与 TTL 计数).
+            return self.get_typed(db, key).await;
+        }
+        self.note_point_read(true);
+        Ok(Some(stored))
+    }
+
+    async fn zset_subkey_scores(
+        &self,
+        db: usize,
+        key: &[u8],
+        version: u64,
+        members: &[&[u8]],
+    ) -> Result<Vec<Option<f64>>> {
+        match self.storage.sync_kv() {
+            Some(kv) => self.zset_subkey_scores_sync(kv, db, key, version, members),
+            None => {
+                let rows = self
+                    .subkey_get_many_impl(db, key, version, SubTag::ZMember, members)
+                    .await?;
+                rows.into_iter()
+                    .map(|row| row.map(|raw| decode_zset_score_or_err(&raw)).transpose())
+                    .collect()
+            }
+        }
+    }
+
+    async fn zset_range(
+        &self,
+        db: usize,
+        key: &[u8],
+        version: u64,
+        span: &ScoreSpan,
+        reverse: bool,
+        offset: usize,
+        limit: Option<usize>,
+    ) -> Result<Vec<(Vec<u8>, f64)>> {
+        self.zset_range_impl(db, key, version, span, reverse, offset, limit)
+            .await
+    }
+
+    async fn zset_commit(&self, db: usize, key: &[u8], write: CollectionWrite) -> Result<()> {
+        match self.storage.sync_kv() {
+            Some(kv) if kv.sync_writes_allowed() => self.commit_collection_sync(kv, db, key, write),
+            _ => self.commit_collection_impl(db, key, write).await,
+        }
     }
 
     async fn put_value(&self, db: usize, key: &[u8], value: StoredValue) -> Result<()> {
@@ -893,11 +1013,28 @@ impl KvStorage for KvStorageAdapter {
                     if stored.expires_at.is_some() {
                         ttl_writes += 1;
                     }
+                    let stored = match &stored.value {
+                        ValueType::ZSet(zset) if zset.len() > ZSET_MAX_INLINE_MEMBERS => {
+                            self.stage_if_large(db, &key, stored).await?
+                        }
+                        _ => stored,
+                    };
                     let bytes = Self::serialize(&stored)?;
                     batch.push(AdapterWriteOp::Put {
                         key: Self::encode(db, &key),
                         value: bytes,
                     });
+                }
+                StoredBatchOp::ZSetDelta(delta) => {
+                    let (ops, header_ttl, cleared_ttl) =
+                        self.zset_delta_ops(db, &key, delta).await?;
+                    batch.extend(ops);
+                    if header_ttl {
+                        ttl_writes += 1;
+                    }
+                    if cleared_ttl {
+                        ttl_clears += 1;
+                    }
                 }
             }
             if let Some((mk, mv)) = self.next_watch_meta_put(db, &key).await? {

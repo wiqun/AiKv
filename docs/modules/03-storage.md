@@ -31,10 +31,12 @@ description: AiKv 存储适配层 — KvStorage Trait、MemoryEngine、AiDbEngin
 | [`src/storage/cluster_adapter.rs`](../../src/storage/cluster_adapter.rs) | 集群数据面存储适配器: 槽位判断、写批处理 (`Batcher`) 与 Raft propose | `ClusterDataAdapter` (feature = "cluster") |
 | [`src/storage/watch_registry.rs`](../../src/storage/watch_registry.rs) | 本节点 WATCH 引用计数; 无人 watch 时跳过 meta 写 | `WatchRegistry` |
 | [`src/storage/watch_version.rs`](../../src/storage/watch_version.rs) | WATCH 版本 meta key 编码 (`{hash_tag}` 前缀保证同 slot) | `meta_user_key`, `is_watch_meta_user_key` |
-| [`src/storage/subkey.rs`](../../src/storage/subkey.rs) | 大集合 (Hash/Set) 版本化 subkey 物理键编解码与集群路由 user key 解析 | `encode_subkey`, `subkey_version_prefix`, `decode_versioned_subkey`, `routing_user_key` |
-| [`src/storage/collection.rs`](../../src/storage/collection.rs) | 集合内联阈值、版本号生成、暂存写与 GC 宽限期常量; 集合提交结构 | `HASH_MAX_INLINE_FIELDS`, `SET_MAX_INLINE_MEMBERS`, `SUBKEY_GC_GRACE_US`, `CollectionWrite`, `HeaderWrite` |
+| [`src/storage/subkey.rs`](../../src/storage/subkey.rs) | 大集合 (Hash/Set/ZSet) 版本化 subkey 物理键编解码、ZSET 分数序编码与分数区间键界、集群路由 user key 解析 | `encode_subkey`, `subkey_version_prefix`, `decode_versioned_subkey`, `routing_user_key`, `sortable_score`, `ScoreSpan`, `zset_score_range_keys` |
+| [`src/storage/collection.rs`](../../src/storage/collection.rs) | 集合内联阈值、版本号生成、暂存写与 GC 宽限期常量; 集合提交结构; ZSET 成员级增量 `ZSetDelta` | `HASH_MAX_INLINE_FIELDS`, `SET_MAX_INLINE_MEMBERS`, `ZSET_MAX_INLINE_MEMBERS`, `ZSET_DEMOTE_MEMBERS`, `SUBKEY_GC_GRACE_US`, `CollectionWrite`, `HeaderWrite`, `ZSetDelta` |
 | [`src/storage/adapter/collection_ops.rs`](../../src/storage/adapter/collection_ops.rs) | 集合 subkey 读写、分批暂存写、`RENAME`/`MOVE`/`SWAPDB` 的集合迁移实现 | `commit_collection_impl`, `put_value_impl`, `get_expanded_impl`, `move_key_impl`, `swap_db_impl` |
 | [`src/storage/dump.rs`](../../src/storage/dump.rs) | `DUMP` / `RESTORE` 紧凑 postcard 序列化与版本校验 | `dump_encode`, `dump_decode`, `DUMP_VERSION` |
+| [`src/command/zset/layout.rs`](../../src/command/zset/layout.rs) | ZSET 子键布局的命令路径: ZADD/ZREM/ZSCORE/ZCARD/ZINCRBY/ZPOPMIN/ZPOPMAX 与分数区间读取 (不展开整表) | `ZSetCommands::zadd`, `zrem`, `zincrby_subkey`, `pop_subkey`, `range_subkey` |
+| [`src/command/script/transaction/zset_view.rs`](../../src/command/script/transaction/zset_view.rs) | 脚本内 ZSET 视图: 存储 `Z`/`R` 与本次 `ZSetDelta` 有序合并 (区间读、名次、ZADD/ZREM 增量) | `zset_view::range`, `zset_view::rank_of`, `zset_view::add`, `zset_view::remove` |
 | [`src/storage/compaction_filter.rs`](../../src/storage/compaction_filter.rs) | compaction 时回收已过期主键与孤儿 subkey (单机/集群两种模式), 不改 `expires` | `AikvCompactionFilter` |
 | [`src/storage/observation.rs`](../../src/storage/observation.rs) | 存储层点查、批写与扫描延迟与吞吐监控统计 | `StorageObservation` |
 
@@ -111,11 +113,14 @@ pub struct StoredValue {
 
 ### 3. 集合编码规范 (Hash / Set)
 
-- **String / JSON / ZSet / List**: 直接写入 `{db}:{key}` 作为完整 `StoredValue`; List 与 ZSet 不走 subkey 布局 (List 扁平化不在本次范围, 见 §3.6).
+- **String / JSON / List**: 直接写入 `{db}:{key}` 作为完整 `StoredValue`; List 不走 subkey 布局 (见 §3.6). ZSet 见下方 ZSet 小节.
 - **Hash / Set**: 按元素数量分两种形态, 阈值为 `HASH_MAX_INLINE_FIELDS = 64`, `SET_MAX_INLINE_MEMBERS = 64` (`src/storage/collection.rs`):
   - **内联**: 元素数不超过阈值时, 整个集合是 `{db}:{key}` 下的一个完整 `StoredValue`. `OBJECT ENCODING` 返回 `listpack`.
   - **subkey 布局**: 超过阈值后, `{db}:{key}` 只保存 `ValueType::CollectionHeader { kind, count, version }`, 元素散落为独立 subkey 键. `OBJECT ENCODING` 返回 `hashtable`.
   - 内联集合增长越过阈值时, 经 `put_value` 转为 subkey 布局 (分配新版本, 走暂存写).
+- **ZSet**: 内联 `ValueType::ZSet` (成员数 ≤ `ZSET_MAX_INLINE_MEMBERS = 64`) 或 subkey 布局. 迟滞: 超过 64 转为子键; 子键成员数降到 ≤ `ZSET_DEMOTE_MEMBERS = 32` 时回落内联. 33..=64 之间保持原布局.
+  - subkey 布局物理键: `Z` tag 为 `member → f64 BE 分数`, `R` tag 为 `sortable_score(score) || member` (空值). `R` 按分数字节序排列, 分数区间读取为一次前缀范围扫描 (`zset_score_range_keys`).
+  - 写入增量: ZADD/ZREM/ZINCRBY/ZPOPMIN/ZPOPMAX 只提交变化的成员 (`Z`/`R` 增删) 与 header, 不整表重写; 脚本内同一 burst 的 ZSET 以 `ZSetDelta` 累积, 提交时展开为一次 `CollectionWrite`.
 
 #### 3.1 物理布局
 
@@ -197,6 +202,6 @@ version = max(last + 1, now_us << 11)
 
 #### 3.6 范围外
 
-- List 扁平化与 ZSET 的 subkey 布局不在本次范围. ZSET 的语义缺口另立 Issue.
+- List 扁平化不在本次范围. ZSET 已采用 subkey 布局 (2a 写路径, 2b 读路径与脚本视图); ZRANK / ZREVRANK / ZCOUNT 之外的 ZRANGEBYLEX / ZLEXCOUNT / ZSCAN / ZUNION / ZINTER / ZDIFF 仍经 `get_expanded` 展开整表 (O(N)), 留待后续.
 - HSCAN / SSCAN 当前为全量加载后切片, 分页性能不在本次范围.
 - 集群 slot 迁移: aidb 按物理 key 计算 slot, 不带 hash tag 时与 aikv 路由不一致, 既有问题, 单独记录.

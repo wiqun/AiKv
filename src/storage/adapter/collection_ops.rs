@@ -1,19 +1,94 @@
 //! `KvStorageAdapter` 的集合 (subkey 布局) 读写.
+//!
+//! Hash/Set 走 `subkey_*` / `commit_collection` 通用路径. ZSet 额外提供同步快路径
+//! (`*_sync`), 仅在 `StorageAdapter::sync_kv` 可用时由 `KvStorage::zset_*` 调用, 不经 spawn_blocking.
+
+use std::collections::{BTreeMap, HashMap};
 
 use crate::error::Result;
-use crate::storage::adapter::{AdapterWriteOp, KvStorageAdapter};
+use crate::storage::adapter::{AdapterWriteOp, KvStorageAdapter, SyncKv};
 use crate::storage::collection::{
-    next_collection_version, CollectionWrite, HeaderWrite, HASH_MAX_INLINE_FIELDS,
-    SET_MAX_INLINE_MEMBERS,
+    next_collection_version, CollectionWrite, HeaderWrite, ZSetDelta, HASH_MAX_INLINE_FIELDS,
+    SET_MAX_INLINE_MEMBERS, ZSET_MAX_INLINE_MEMBERS,
 };
-use crate::storage::subkey::{encode_subkey, subkey_version_prefix};
+use crate::storage::subkey::{
+    decode_zset_score_or_err, decode_zset_score_sub, encode_subkey, encode_zset_score, subkey_tags,
+    subkey_version_prefix, zset_score_range_keys, zset_score_sub, ScoreSpan, SubTag,
+};
 use crate::storage::types::{CollectionKind, StoredValue, ValueType};
+use crate::storage::watch_version::{
+    decode_version, encode_version, is_watch_meta_user_key, meta_user_key,
+};
 
 /// 暂存写每批条数; 远低于集群批处理器的 512 条.
 const STAGE_CHUNK: usize = 256;
 
-/// 集合展开后的 `(sub, value)` 列表.
-type Entries = Vec<(Vec<u8>, Vec<u8>)>;
+/// `zset_range` 的收集状态: 跳过 `skip` 条后收集至多 `left` 条 (None 为不限).
+struct RangeCollector {
+    prefix_len: usize,
+    skip: usize,
+    left: Option<usize>,
+    out: Vec<(Vec<u8>, f64)>,
+}
+
+impl RangeCollector {
+    /// 处理一条 `R` 物理 key; 返回 false 表示已满足 limit, 调用方应停止.
+    fn push(&mut self, physical: &[u8]) -> bool {
+        if self.skip > 0 {
+            self.skip -= 1;
+            return true;
+        }
+        let Some((score, member)) = decode_zset_score_sub(&physical[self.prefix_len..]) else {
+            return true;
+        };
+        self.out.push((member.to_vec(), score));
+        match self.left.as_mut() {
+            Some(left) => {
+                *left -= 1;
+                *left > 0
+            }
+            None => true,
+        }
+    }
+}
+
+/// 集合展开后的 `(tag, sub, value)` 列表.
+type Entries = Vec<(SubTag, Vec<u8>, Vec<u8>)>;
+
+/// 超过内联阈值的集合拆为 subkey 列表 `(kind, entries, count)`; 未超过则原样返回.
+fn large_entries(
+    value: ValueType,
+) -> std::result::Result<(CollectionKind, Entries, u64), ValueType> {
+    match value {
+        ValueType::Hash(map) if map.len() > HASH_MAX_INLINE_FIELDS => {
+            let count = map.len() as u64;
+            let entries = map
+                .into_iter()
+                .map(|(field, value)| (SubTag::Hash, field, value))
+                .collect();
+            Ok((CollectionKind::Hash, entries, count))
+        }
+        ValueType::Set(set) if set.len() > SET_MAX_INLINE_MEMBERS => {
+            let count = set.len() as u64;
+            let entries = set
+                .into_iter()
+                .map(|member| (SubTag::Set, member, Vec::new()))
+                .collect();
+            Ok((CollectionKind::Set, entries, count))
+        }
+        ValueType::ZSet(zset) if zset.len() > ZSET_MAX_INLINE_MEMBERS => {
+            let count = zset.len() as u64;
+            let mut entries = Vec::with_capacity(zset.len() * 2);
+            for (member, score) in zset {
+                let score_sub = zset_score_sub(score, &member);
+                entries.push((SubTag::ZMember, member, encode_zset_score(score).to_vec()));
+                entries.push((SubTag::ZScore, score_sub, Vec::new()));
+            }
+            Ok((CollectionKind::ZSet, entries, count))
+        }
+        other => Err(other),
+    }
+}
 
 impl KvStorageAdapter {
     pub(super) async fn subkey_get_many_impl(
@@ -21,7 +96,7 @@ impl KvStorageAdapter {
         db: usize,
         key: &[u8],
         version: u64,
-        kind: CollectionKind,
+        tag: SubTag,
         subs: &[&[u8]],
     ) -> Result<Vec<Option<Vec<u8>>>> {
         self.check_db(db)?;
@@ -29,11 +104,59 @@ impl KvStorageAdapter {
         for sub in subs {
             out.push(
                 self.storage
-                    .get(encode_subkey(db, key, version, kind, sub))
+                    .get(encode_subkey(db, key, version, tag, sub))
                     .await?,
             );
         }
         Ok(out)
+    }
+
+    /// ZSET 子键布局按分数区间读取 `(member, score)`, 方向由 `reverse` 决定.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn zset_range_impl(
+        &self,
+        db: usize,
+        key: &[u8],
+        version: u64,
+        span: &ScoreSpan,
+        reverse: bool,
+        offset: usize,
+        limit: Option<usize>,
+    ) -> Result<Vec<(Vec<u8>, f64)>> {
+        self.check_db(db)?;
+        if limit == Some(0) {
+            return Ok(Vec::new());
+        }
+        let Some((start, end)) = zset_score_range_keys(db, key, version, span) else {
+            return Ok(Vec::new());
+        };
+        let collector = std::sync::Arc::new(std::sync::Mutex::new(RangeCollector {
+            prefix_len: subkey_version_prefix(db, key, version, SubTag::ZScore).len(),
+            skip: offset,
+            left: limit,
+            out: Vec::new(),
+        }));
+        match self.storage.sync_kv() {
+            Some(kv) => {
+                let sink = std::sync::Arc::clone(&collector);
+                kv.visit_range_sync(&start, &end, reverse, &mut |physical, _| {
+                    Ok(sink.lock().unwrap().push(physical))
+                })?;
+            }
+            None => {
+                let sink = std::sync::Arc::clone(&collector);
+                self.storage
+                    .visit_range_dir(
+                        start,
+                        end,
+                        reverse,
+                        Box::new(move |physical, _| Ok(sink.lock().unwrap().push(&physical))),
+                    )
+                    .await?;
+            }
+        }
+        let mut guard = collector.lock().unwrap();
+        Ok(std::mem::take(&mut guard.out))
     }
 
     pub(super) async fn subkey_scan_impl(
@@ -41,10 +164,10 @@ impl KvStorageAdapter {
         db: usize,
         key: &[u8],
         version: u64,
-        kind: CollectionKind,
+        tag: SubTag,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         self.check_db(db)?;
-        let prefix = subkey_version_prefix(db, key, version, kind);
+        let prefix = subkey_version_prefix(db, key, version, tag);
         let skip = prefix.len();
         let mut rows = self.storage.scan_prefix(&prefix).await?;
         rows.sort_by(|a, b| a.0.cmp(&b.0));
@@ -54,30 +177,28 @@ impl KvStorageAdapter {
             .collect())
     }
 
-    pub(super) async fn commit_collection_impl(
-        &self,
+    /// 把一次提交翻译为扁平 KV 写操作; 返回 (ops, 是否清掉了 header 上的 TTL).
+    fn collection_write_ops(
         db: usize,
         key: &[u8],
         write: CollectionWrite,
-    ) -> Result<()> {
-        self.check_db(db)?;
+    ) -> Result<(Vec<AdapterWriteOp>, bool)> {
         let CollectionWrite {
             header,
             version,
-            kind,
             puts,
             deletes,
         } = write;
         let mut ops = Vec::with_capacity(puts.len() + deletes.len() + 2);
-        for (sub, value) in puts {
+        for (tag, sub, value) in puts {
             ops.push(AdapterWriteOp::Put {
-                key: encode_subkey(db, key, version, kind, &sub),
+                key: encode_subkey(db, key, version, tag, &sub),
                 value,
             });
         }
-        for sub in deletes {
+        for (tag, sub) in deletes {
             ops.push(AdapterWriteOp::Delete {
-                key: encode_subkey(db, key, version, kind, &sub),
+                key: encode_subkey(db, key, version, tag, &sub),
             });
         }
         let cleared_ttl = match header {
@@ -95,6 +216,62 @@ impl KvStorageAdapter {
                 had_ttl
             }
         };
+        Ok((ops, cleared_ttl))
+    }
+
+    /// ZSET 增量提交的扁平写操作. 返回 (ops, header 带 TTL, 清掉了 header 的 TTL).
+    /// 视图成员数落入内联阈值时降级为内联整值, 与 `ZREM` 的回落规则一致.
+    pub(super) async fn zset_delta_ops(
+        &self,
+        db: usize,
+        key: &[u8],
+        delta: ZSetDelta,
+    ) -> Result<(Vec<AdapterWriteOp>, bool, bool)> {
+        if delta.demotes() {
+            let rows = self
+                .subkey_scan_impl(db, key, delta.version, SubTag::ZMember)
+                .await?;
+            let mut zset = BTreeMap::new();
+            for (member, raw) in rows {
+                zset.insert(member, decode_zset_score_or_err(&raw)?);
+            }
+            for (member, change) in &delta.members {
+                match change.current {
+                    Some(score) => zset.insert(member.clone(), score),
+                    None => zset.remove(member),
+                };
+            }
+            let stored = StoredValue {
+                value: ValueType::ZSet(zset),
+                expires_at: delta.expires_at,
+            };
+            let header_ttl = stored.expires_at.is_some();
+            let op = AdapterWriteOp::Put {
+                key: Self::encode(db, key),
+                value: Self::serialize(&stored)?,
+            };
+            return Ok((vec![op], header_ttl, false));
+        }
+        let write = delta.into_collection_write();
+        let header_ttl = matches!(
+            &write.header,
+            HeaderWrite::Put(StoredValue {
+                expires_at: Some(_),
+                ..
+            })
+        );
+        let (ops, cleared_ttl) = Self::collection_write_ops(db, key, write)?;
+        Ok((ops, header_ttl, cleared_ttl))
+    }
+
+    pub(super) async fn commit_collection_impl(
+        &self,
+        db: usize,
+        key: &[u8],
+        write: CollectionWrite,
+    ) -> Result<()> {
+        self.check_db(db)?;
+        let (mut ops, cleared_ttl) = Self::collection_write_ops(db, key, write)?;
         if let Some((meta_key, meta)) = self.next_watch_meta_put(db, key).await? {
             ops.push(AdapterWriteOp::Put {
                 key: meta_key,
@@ -108,29 +285,97 @@ impl KvStorageAdapter {
         Ok(())
     }
 
+    /// `commit_collection_impl` 的同步版本: 直接经 `SyncKv` 写入, 不 spawn.
+    pub(super) fn commit_collection_sync(
+        &self,
+        kv: &dyn SyncKv,
+        db: usize,
+        key: &[u8],
+        write: CollectionWrite,
+    ) -> Result<()> {
+        self.check_db(db)?;
+        let (mut ops, cleared_ttl) = Self::collection_write_ops(db, key, write)?;
+        if let Some((meta_key, meta)) = self.next_watch_meta_put_sync(kv, db, key)? {
+            ops.push(AdapterWriteOp::Put {
+                key: meta_key,
+                value: meta,
+            });
+        }
+        kv.write_sync(ops)?;
+        if cleared_ttl {
+            self.expires.on_ttl_clear(db);
+        }
+        Ok(())
+    }
+
+    /// `next_watch_meta_put` 的同步版本.
+    fn next_watch_meta_put_sync(
+        &self,
+        kv: &dyn SyncKv,
+        db: usize,
+        user_key: &[u8],
+    ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        if is_watch_meta_user_key(user_key) || !self.watchers.is_watched(db, user_key) {
+            return Ok(None);
+        }
+        let meta = meta_user_key(user_key);
+        let current = match kv.get_sync(&Self::encode(db, &meta))? {
+            Some(bytes) => decode_version(&bytes),
+            None => 0,
+        };
+        Ok(Some((
+            Self::encode(db, &meta),
+            encode_version(current.saturating_add(1)).to_vec(),
+        )))
+    }
+
+    /// ZSet 子键布局下一组 member 的分数 (同步版本, 按入参顺序).
+    pub(super) fn zset_subkey_scores_sync(
+        &self,
+        kv: &dyn SyncKv,
+        db: usize,
+        key: &[u8],
+        version: u64,
+        members: &[&[u8]],
+    ) -> Result<Vec<Option<f64>>> {
+        self.check_db(db)?;
+        let mut out = Vec::with_capacity(members.len());
+        for member in members {
+            let physical = encode_subkey(db, key, version, SubTag::ZMember, member);
+            out.push(match kv.get_sync(&physical)? {
+                Some(raw) => Some(decode_zset_score_or_err(&raw)?),
+                None => None,
+            });
+        }
+        Ok(out)
+    }
+
     /// 新版本 subkey 分批写入; 调用方随后再写 header.
     pub(super) async fn stage_subkeys(
         &self,
         db: usize,
         key: &[u8],
         version: u64,
-        kind: CollectionKind,
-        entries: Vec<(Vec<u8>, Vec<u8>)>,
+        entries: Entries,
     ) -> Result<()> {
-        for chunk in entries.chunks(STAGE_CHUNK) {
+        let mut rest = entries.into_iter();
+        loop {
+            let chunk: Vec<_> = rest.by_ref().take(STAGE_CHUNK).collect();
+            if chunk.is_empty() {
+                return Ok(());
+            }
             let ops = chunk
-                .iter()
-                .map(|(sub, value)| AdapterWriteOp::Put {
-                    key: encode_subkey(db, key, version, kind, sub),
-                    value: value.clone(),
+                .into_iter()
+                .map(|(tag, sub, value)| AdapterWriteOp::Put {
+                    key: encode_subkey(db, key, version, tag, &sub),
+                    value,
                 })
                 .collect();
             self.storage.apply_writes(ops).await?;
         }
-        Ok(())
     }
 
-    /// 超过阈值的 Hash/Set 转为新版本 header, 其余原样返回.
+    /// 超过阈值的 Hash/Set/ZSet 转为新版本 header, 其余原样返回.
     pub(super) async fn stage_if_large(
         &self,
         db: usize,
@@ -138,24 +383,17 @@ impl KvStorageAdapter {
         value: StoredValue,
     ) -> Result<StoredValue> {
         let StoredValue { value, expires_at } = value;
-        let (kind, entries): (CollectionKind, Entries) = match value {
-            ValueType::Hash(map) if map.len() > HASH_MAX_INLINE_FIELDS => {
-                (CollectionKind::Hash, map.into_iter().collect())
-            }
-            ValueType::Set(set) if set.len() > SET_MAX_INLINE_MEMBERS => (
-                CollectionKind::Set,
-                set.into_iter().map(|member| (member, Vec::new())).collect(),
-            ),
-            other => {
+        let (kind, entries, count) = match large_entries(value) {
+            Ok(large) => large,
+            Err(inline) => {
                 return Ok(StoredValue {
-                    value: other,
+                    value: inline,
                     expires_at,
                 })
             }
         };
         let version = next_collection_version();
-        let count = entries.len() as u64;
-        self.stage_subkeys(db, key, version, kind, entries).await?;
+        self.stage_subkeys(db, key, version, entries).await?;
         Ok(StoredValue {
             value: ValueType::CollectionHeader {
                 kind,
@@ -188,11 +426,26 @@ impl KvStorageAdapter {
         let ValueType::CollectionHeader { kind, version, .. } = stored.value else {
             return Ok(Some(stored));
         };
-        let rows = self.subkey_scan_impl(db, key, version, kind).await?;
         let value = match kind {
-            CollectionKind::Hash => ValueType::Hash(rows.into_iter().collect()),
+            CollectionKind::Hash => {
+                let rows = self
+                    .subkey_scan_impl(db, key, version, SubTag::Hash)
+                    .await?;
+                ValueType::Hash(rows.into_iter().collect::<HashMap<_, _>>())
+            }
             CollectionKind::Set => {
+                let rows = self.subkey_scan_impl(db, key, version, SubTag::Set).await?;
                 ValueType::Set(rows.into_iter().map(|(member, _)| member).collect())
+            }
+            CollectionKind::ZSet => {
+                let rows = self
+                    .subkey_scan_impl(db, key, version, SubTag::ZMember)
+                    .await?;
+                let mut zset = BTreeMap::new();
+                for (member, raw) in rows {
+                    zset.insert(member, decode_zset_score_or_err(&raw)?);
+                }
+                ValueType::ZSet(zset)
             }
         };
         Ok(Some(StoredValue {
@@ -202,6 +455,7 @@ impl KvStorageAdapter {
     }
 
     /// subkey 布局的值复制为目标 key 的新版本 (暂存写), 返回目标 header; 其它值原样返回.
+    /// 复制该集合的全部标签 (ZSet 同时复制 `Z` 与 `R`).
     async fn restage(
         &self,
         src_db: usize,
@@ -218,11 +472,17 @@ impl KvStorageAdapter {
         else {
             return Ok(value);
         };
-        let rows = self
-            .subkey_scan_impl(src_db, src_key, version, kind)
-            .await?;
+        let mut entries: Entries = Vec::new();
+        for tag in subkey_tags(kind) {
+            for (sub, raw) in self
+                .subkey_scan_impl(src_db, src_key, version, *tag)
+                .await?
+            {
+                entries.push((*tag, sub, raw));
+            }
+        }
         let new_version = next_collection_version();
-        self.stage_subkeys(dst_db, dst_key, new_version, kind, rows)
+        self.stage_subkeys(dst_db, dst_key, new_version, entries)
             .await?;
         Ok(StoredValue {
             value: ValueType::CollectionHeader {

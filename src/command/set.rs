@@ -26,6 +26,7 @@ use crate::error::{Error, Result};
 use crate::protocol::RespValue;
 use crate::storage::collection::{CollectionWrite, HeaderWrite};
 use crate::storage::memory::glob_match;
+use crate::storage::subkey::SubTag;
 use crate::storage::{CollectionKind, KvStorage, StoredValue, ValueType};
 
 pub struct SetCommands {
@@ -361,13 +362,13 @@ impl SetCommands {
                 let subs: Vec<&[u8]> = members.iter().map(Vec::as_slice).collect();
                 let existing = self
                     .storage
-                    .subkey_get_many(db, key, version, CollectionKind::Set, &subs)
+                    .subkey_get_many(db, key, version, SubTag::Set, &subs)
                     .await?;
-                let puts: Vec<(Vec<u8>, Vec<u8>)> = members
+                let puts: Vec<(SubTag, Vec<u8>, Vec<u8>)> = members
                     .iter()
                     .zip(existing)
                     .filter(|(_, v)| v.is_none())
-                    .map(|(m, _)| (m.clone(), Vec::new()))
+                    .map(|(m, _)| (SubTag::Set, m.clone(), Vec::new()))
                     .collect();
                 let added = puts.len() as u64;
                 if added == 0 {
@@ -384,7 +385,6 @@ impl SetCommands {
                                 expires_at,
                             )),
                             version,
-                            kind: CollectionKind::Set,
                             puts,
                             deletes: Vec::new(),
                         },
@@ -426,7 +426,7 @@ impl SetCommands {
                 let subs: Vec<&[u8]> = members.iter().map(Vec::as_slice).collect();
                 let existing = self
                     .storage
-                    .subkey_get_many(db, key, version, CollectionKind::Set, &subs)
+                    .subkey_get_many(db, key, version, SubTag::Set, &subs)
                     .await?;
                 let removed: Vec<Vec<u8>> = members
                     .into_iter()
@@ -451,9 +451,8 @@ impl SetCommands {
                         CollectionWrite {
                             header,
                             version,
-                            kind: CollectionKind::Set,
                             puts: Vec::new(),
-                            deletes: removed.clone(),
+                            deletes: removed.iter().map(|m| (SubTag::Set, m.clone())).collect(),
                         },
                     )
                     .await?;
@@ -471,7 +470,7 @@ impl SetCommands {
             },
             SetState::Subkey { version, .. } => Ok(self
                 .storage
-                .subkey_get_many(db, key, version, CollectionKind::Set, &[member])
+                .subkey_get_many(db, key, version, SubTag::Set, &[member])
                 .await?
                 .pop()
                 .flatten()
@@ -493,7 +492,7 @@ impl SetCommands {
             },
             SetState::Subkey { version, .. } => Ok(self
                 .storage
-                .subkey_scan(db, key, *version, CollectionKind::Set)
+                .subkey_scan(db, key, *version, SubTag::Set)
                 .await?
                 .into_iter()
                 .map(|(m, _)| m)

@@ -24,6 +24,7 @@ use crate::error::{Error, Result};
 use crate::protocol::RespValue;
 use crate::storage::collection::{CollectionWrite, HeaderWrite};
 use crate::storage::memory::glob_match;
+use crate::storage::subkey::SubTag;
 use crate::storage::{CollectionKind, KvStorage, StoredValue, ValueType, WRONGTYPE};
 
 pub struct HashCommands {
@@ -111,12 +112,12 @@ impl HashCommands {
             } => {
                 let existing = self
                     .storage
-                    .subkey_get_many(db, key, version, CollectionKind::Hash, &fields)
+                    .subkey_get_many(db, key, version, SubTag::Hash, &fields)
                     .await?;
-                let deletes: Vec<Vec<u8>> = fields
+                let deletes: Vec<(SubTag, Vec<u8>)> = fields
                     .iter()
                     .zip(existing)
-                    .filter_map(|(f, v)| v.map(|_| f.to_vec()))
+                    .filter_map(|(f, v)| v.map(|_| (SubTag::Hash, f.to_vec())))
                     .collect();
                 let removed = deletes.len() as u64;
                 if removed == 0 {
@@ -144,7 +145,6 @@ impl HashCommands {
                         CollectionWrite {
                             header,
                             version,
-                            kind: CollectionKind::Hash,
                             puts: Vec::new(),
                             deletes,
                         },
@@ -232,7 +232,7 @@ impl HashCommands {
             },
             HashState::Subkey { version, .. } => self
                 .storage
-                .subkey_get_many(db, key, *version, CollectionKind::Hash, &[&field])
+                .subkey_get_many(db, key, *version, SubTag::Hash, &[&field])
                 .await?
                 .pop()
                 .flatten(),
@@ -384,7 +384,7 @@ impl HashCommands {
                 let fields: Vec<&[u8]> = updates.keys().map(Vec::as_slice).collect();
                 let existing = self
                     .storage
-                    .subkey_get_many(db, key, version, CollectionKind::Hash, &fields)
+                    .subkey_get_many(db, key, version, SubTag::Hash, &fields)
                     .await?;
                 let added = existing.iter().filter(|v| v.is_none()).count() as u64;
                 self.storage
@@ -401,8 +401,10 @@ impl HashCommands {
                                 expires_at,
                             }),
                             version,
-                            kind: CollectionKind::Hash,
-                            puts: updates.into_iter().collect(),
+                            puts: updates
+                                .into_iter()
+                                .map(|(field, value)| (SubTag::Hash, field, value))
+                                .collect(),
                             deletes: Vec::new(),
                         },
                     )
@@ -429,7 +431,7 @@ impl HashCommands {
             }
             HashState::Subkey { version, .. } => {
                 self.storage
-                    .subkey_get_many(db, key, version, CollectionKind::Hash, fields)
+                    .subkey_get_many(db, key, version, SubTag::Hash, fields)
                     .await
             }
         }
@@ -447,7 +449,7 @@ impl HashCommands {
             }
             HashState::Subkey { version, .. } => {
                 self.storage
-                    .subkey_scan(db, key, version, CollectionKind::Hash)
+                    .subkey_scan(db, key, version, SubTag::Hash)
                     .await
             }
         }
@@ -469,7 +471,7 @@ impl HashCommands {
             },
             HashState::Subkey { version, .. } => Ok(self
                 .storage
-                .subkey_get_many(db, key, *version, CollectionKind::Hash, &[field])
+                .subkey_get_many(db, key, *version, SubTag::Hash, &[field])
                 .await?
                 .pop()
                 .flatten()),

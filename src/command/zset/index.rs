@@ -77,17 +77,6 @@ impl ScoreIndex {
         self.by_score.insert(Key::At { score, member }, ());
     }
 
-    pub(crate) fn remove(&mut self, score: f64, member: &[u8]) {
-        self.by_score.remove(&Key::At {
-            score,
-            member: member.to_vec(),
-        });
-    }
-
-    pub(crate) fn len(&self) -> usize {
-        self.by_score.len()
-    }
-
     pub(crate) fn rank(&self, member: &[u8], reverse: bool) -> Option<usize> {
         let iter: Box<dyn Iterator<Item = &[u8]> + '_> = if reverse {
             Box::new(self.members_rev())
@@ -204,32 +193,23 @@ fn score_bounds(min: &ScoreBound, max: &ScoreBound) -> (Key, Key) {
     (start, end)
 }
 
-/// 脚本写缓冲里的有序集合。提交时只拿走 `members`。
-#[derive(Clone, Debug)]
+/// 脚本写缓冲里的内联有序集合。提交时只拿走 `members`。不维护分数索引: 读取需要时按次构建 `ScoreIndex`。
+#[derive(Clone, Debug, Default)]
 pub(crate) struct ZSetBuf {
     members: BTreeMap<Vec<u8>, f64>,
-    index: ScoreIndex,
 }
 
 impl ZSetBuf {
     pub(crate) fn new() -> Self {
-        Self {
-            members: BTreeMap::new(),
-            index: ScoreIndex::default(),
-        }
+        Self::default()
     }
 
-    pub(crate) fn from_parts(members: BTreeMap<Vec<u8>, f64>, index: Option<ScoreIndex>) -> Self {
-        let index = index.unwrap_or_else(|| ScoreIndex::from_members(&members));
-        Self { members, index }
+    pub(crate) fn from_members(members: BTreeMap<Vec<u8>, f64>) -> Self {
+        Self { members }
     }
 
     pub(crate) fn members(&self) -> &BTreeMap<Vec<u8>, f64> {
         &self.members
-    }
-
-    pub(crate) fn index(&self) -> &ScoreIndex {
-        &self.index
     }
 
     pub(crate) fn into_members(self) -> BTreeMap<Vec<u8>, f64> {
@@ -237,23 +217,10 @@ impl ZSetBuf {
     }
 
     pub(crate) fn insert(&mut self, member: Vec<u8>, score: f64) -> Option<f64> {
-        let old = self.members.insert(member.clone(), score);
-        if let Some(old_score) = old {
-            self.index.remove(old_score, &member);
-        }
-        self.index.insert(score, member);
-        old
+        self.members.insert(member, score)
     }
 
     pub(crate) fn remove(&mut self, member: &[u8]) -> Option<f64> {
-        let old = self.members.remove(member)?;
-        self.index.remove(old, member);
-        Some(old)
-    }
-}
-
-impl Default for ZSetBuf {
-    fn default() -> Self {
-        Self::new()
+        self.members.remove(member)
     }
 }

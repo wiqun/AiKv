@@ -22,17 +22,19 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use aidb::config::Options;
-use aidb::{Checkpoint, WriteBatch, WriteOp as DbWriteOp, DB};
+use aidb::{Checkpoint, DbIterGuard, WriteBatch, WriteOp as DbWriteOp, DB};
 use async_trait::async_trait;
 use tokio::task;
 
 use crate::error::{Error, Result};
-use crate::storage::adapter::{AdapterWriteOp, StorageAdapter};
+use crate::storage::adapter::{AdapterWriteOp, RangeVisitor, StorageAdapter, SyncKv};
 use crate::storage::types::StorageEngineKind;
 
 /// AiDb 扁平 KV 引擎
 pub struct AiDbEngine {
     pub db: Arc<DB>,
+    /// 构造时的 `sync_wal`; 为 true 时同步写会在调用线程 fsync, 不提供同步写快路径.
+    sync_wal: bool,
 }
 
 impl AiDbEngine {
@@ -78,8 +80,9 @@ impl AiDbEngine {
     pub fn open_with_options(path: impl AsRef<Path>, mut opts: Options) -> Result<Arc<Self>> {
         opts.create_if_missing = true;
         opts.validate().map_err(|e| Error::Storage(e.to_string()))?;
+        let sync_wal = opts.sync_wal;
         let db = DB::open(path, opts).map_err(|e| Error::Storage(e.to_string()))?;
-        Ok(Arc::new(Self { db }))
+        Ok(Arc::new(Self { db, sync_wal }))
     }
 
     pub fn approximate_data_memory_bytes(&self) -> u64 {
@@ -184,6 +187,22 @@ impl StorageAdapter for AiDbEngine {
         .await
     }
 
+    async fn visit_range_dir(
+        &self,
+        start: Vec<u8>,
+        end: Vec<u8>,
+        reverse: bool,
+        mut f: Box<dyn FnMut(Vec<u8>, Vec<u8>) -> Result<bool> + Send>,
+    ) -> Result<()> {
+        self.blocking(move |db| {
+            let iter = db
+                .scan(Some(start.as_slice()), Some(end.as_slice()))
+                .map_err(|e| Error::Storage(e.to_string()))?;
+            visit_owned(iter, reverse, &mut *f)
+        })
+        .await
+    }
+
     async fn visit_range(
         &self,
         start: Vec<u8>,
@@ -274,6 +293,95 @@ impl StorageAdapter for AiDbEngine {
     fn aidb_statistics(&self) -> Option<std::sync::Arc<aidb::Statistics>> {
         Some(self.db.statistics())
     }
+
+    fn sync_kv(&self) -> Option<&dyn SyncKv> {
+        Some(self)
+    }
+}
+
+impl SyncKv for AiDbEngine {
+    fn get_sync(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        self.db.get(key).map_err(|e| Error::Storage(e.to_string()))
+    }
+
+    fn write_sync(&self, ops: Vec<AdapterWriteOp>) -> Result<()> {
+        let mut wb = WriteBatch::new();
+        for op in ops {
+            match op {
+                AdapterWriteOp::Put { key, value } => wb.put(key, value),
+                AdapterWriteOp::Delete { key } => wb.delete(key),
+            }
+        }
+        self.db
+            .write(&wb)
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    fn sync_writes_allowed(&self) -> bool {
+        !self.sync_wal
+    }
+
+    fn visit_range_sync(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        reverse: bool,
+        f: &mut RangeVisitor<'_>,
+    ) -> Result<()> {
+        let mut iter = self
+            .db
+            .scan(Some(start), Some(end))
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        if !reverse {
+            for item in iter {
+                let (key, value) = item.map_err(|e| Error::Storage(e.to_string()))?;
+                if !f(&key, &value)? {
+                    break;
+                }
+            }
+            return Ok(());
+        }
+        iter.seek_to_last();
+        while iter.valid() {
+            let (Some(key), Some(value)) = (iter.key(), iter.value()) else {
+                break;
+            };
+            if !f(key, value)? {
+                break;
+            }
+            iter.prev();
+        }
+        Ok(())
+    }
+}
+
+/// 反向访问需要 `seek_to_last`/`prev` 定位; 正向直接按迭代器顺序回调.
+fn visit_owned(
+    mut iter: DbIterGuard,
+    reverse: bool,
+    f: &mut dyn FnMut(Vec<u8>, Vec<u8>) -> Result<bool>,
+) -> Result<()> {
+    if !reverse {
+        for item in iter {
+            let (key, value) = item.map_err(|e| Error::Storage(e.to_string()))?;
+            if !f(key, value)? {
+                break;
+            }
+        }
+        return Ok(());
+    }
+    iter.seek_to_last();
+    while iter.valid() {
+        let (Some(key), Some(value)) = (iter.key(), iter.value()) else {
+            break;
+        };
+        if !f(key.to_vec(), value.to_vec())? {
+            break;
+        }
+        iter.prev();
+    }
+    Ok(())
 }
 
 #[expect(dead_code)]
