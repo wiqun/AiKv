@@ -48,7 +48,8 @@ use crate::command::router::{self, KeyLock};
 use crate::error::{Error, Result};
 use crate::protocol::RespValue;
 use crate::server::ServerMetrics;
-use crate::storage::KvStorage;
+use crate::storage::types::BatchWriteHandle;
+use crate::storage::{KvStorage, WriteOp};
 
 const DEFAULT_SCRIPT_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_SCRIPT_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
@@ -65,6 +66,13 @@ struct ScriptArgs<'a> {
     script: &'a str,
     keys: &'a [Bytes],
     argv: &'a [Bytes],
+}
+
+struct PreparedScript<'a> {
+    lua: mlua::Lua,
+    declared: Arc<HashSet<Vec<u8>>>,
+    txn: Arc<Mutex<ScriptTransaction>>,
+    args: ScriptArgs<'a>,
 }
 
 pub struct ScriptCommands {
@@ -210,6 +218,34 @@ impl ScriptCommands {
         ))
     }
 
+    fn prepare_script_context<'a>(
+        &self,
+        sha1: &'a str,
+        script: &'a str,
+        keys: &'a [Bytes],
+        argv: &'a [Bytes],
+        db: usize,
+    ) -> Result<PreparedScript<'a>> {
+        let lua = self.acquire_vm()?;
+        let declared = Arc::new(keys.iter().map(|k| k.to_vec()).collect());
+        let txn = Arc::new(Mutex::new(ScriptTransaction::with_in_flight(
+            db,
+            Some(Arc::clone(&self.in_flight)),
+        )));
+        let args = ScriptArgs {
+            sha1,
+            script,
+            keys,
+            argv,
+        };
+        Ok(PreparedScript {
+            lua,
+            declared,
+            txn,
+            args,
+        })
+    }
+
     async fn execute_script(
         &self,
         sha1: &str,
@@ -218,9 +254,9 @@ impl ScriptCommands {
         argv: &[Bytes],
         db: usize,
     ) -> Result<RespValue> {
-        let needs_lock = !keys.is_empty();
+        let prepared = self.prepare_script_context(sha1, script, keys, argv, db)?;
         let key_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_ref()).collect();
-        let _guard = if needs_lock {
+        let _guard = if !keys.is_empty() {
             Some(
                 self.key_lock
                     .lock_keys_sorted_with_timeout(&key_refs, DEFAULT_SCRIPT_LOCK_TIMEOUT)
@@ -230,30 +266,27 @@ impl ScriptCommands {
             None
         };
 
-        let declared = Arc::new(keys.iter().map(|k| k.to_vec()).collect());
-        let txn = Arc::new(Mutex::new(ScriptTransaction::with_in_flight(
-            db,
-            Some(Arc::clone(&self.in_flight)),
-        )));
-        let lua = self.acquire_vm()?;
-
-        let script_args = ScriptArgs {
-            sha1,
-            script,
-            keys,
-            argv,
-        };
         let eval_res = self
-            .eval_lua_func(&lua, &script_args, Arc::clone(&txn), declared)
+            .eval_lua_func(
+                &prepared.lua,
+                &prepared.args,
+                Arc::clone(&prepared.txn),
+                prepared.declared,
+            )
             .await;
-        self.release_vm(lua);
-        let result = eval_res?;
-        let resp = lua_to_resp(result)?;
 
-        let txn =
-            Arc::try_unwrap(txn).map_err(|_| Error::Command("ERR script still running".into()))?;
-        let txn = txn.into_inner();
-        let batch_ops = txn.prepare_batch_ops(self.storage.as_ref()).await?;
+        let (batch_ops, result) = match eval_res {
+            Ok(res) => {
+                let txn = Arc::try_unwrap(prepared.txn)
+                    .map_err(|_| Error::Command("ERR script still running".into()))?
+                    .into_inner();
+                (txn.prepare_batch_ops(self.storage.as_ref()).await?, res)
+            }
+            Err(e) => {
+                self.release_vm(prepared.lua);
+                return Err(e);
+            }
+        };
 
         let seq = self.in_flight.insert_batch(db, &batch_ops);
         let wait_handle = if !batch_ops.is_empty() {
@@ -262,6 +295,22 @@ impl ScriptCommands {
             None
         };
         drop(_guard);
+
+        self.finish_script_execution(prepared.lua, result, wait_handle, db, batch_ops, seq)
+            .await
+    }
+
+    async fn finish_script_execution(
+        &self,
+        lua: mlua::Lua,
+        result: LuaValue,
+        wait_handle: Option<Box<dyn BatchWriteHandle>>,
+        db: usize,
+        batch_ops: Vec<(Vec<u8>, WriteOp)>,
+        seq: u64,
+    ) -> Result<RespValue> {
+        let resp = lua_to_resp(result)?;
+        self.release_vm(lua);
 
         let write_res = if let Some(handle) = wait_handle {
             handle.wait().await
