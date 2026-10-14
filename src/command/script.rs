@@ -30,6 +30,7 @@ mod sandbox;
 mod transaction;
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -67,6 +68,50 @@ struct ScriptArgs<'a> {
     argv: &'a [Bytes],
 }
 
+struct ScriptPerfSampler {
+    samples: AtomicU64,
+    total_lock_us: AtomicU64,
+    total_lua_us: AtomicU64,
+    total_prepare_us: AtomicU64,
+    total_raft_us: AtomicU64,
+    total_overall_us: AtomicU64,
+}
+
+impl ScriptPerfSampler {
+    const fn new() -> Self {
+        Self {
+            samples: AtomicU64::new(0),
+            total_lock_us: AtomicU64::new(0),
+            total_lua_us: AtomicU64::new(0),
+            total_prepare_us: AtomicU64::new(0),
+            total_raft_us: AtomicU64::new(0),
+            total_overall_us: AtomicU64::new(0),
+        }
+    }
+
+    fn record(&self, lock_us: u64, lua_us: u64, prep_us: u64, raft_us: u64, overall_us: u64) {
+        self.total_lock_us.fetch_add(lock_us, Ordering::Relaxed);
+        self.total_lua_us.fetch_add(lua_us, Ordering::Relaxed);
+        self.total_prepare_us.fetch_add(prep_us, Ordering::Relaxed);
+        self.total_raft_us.fetch_add(raft_us, Ordering::Relaxed);
+        self.total_overall_us.fetch_add(overall_us, Ordering::Relaxed);
+        let n = self.samples.fetch_add(1, Ordering::Relaxed) + 1;
+        if n.is_multiple_of(1000) {
+            let lock_avg = self.total_lock_us.load(Ordering::Relaxed) / n;
+            let lua_avg = self.total_lua_us.load(Ordering::Relaxed) / n;
+            let prep_avg = self.total_prepare_us.load(Ordering::Relaxed) / n;
+            let raft_avg = self.total_raft_us.load(Ordering::Relaxed) / n;
+            let overall_avg = self.total_overall_us.load(Ordering::Relaxed) / n;
+            tracing::info!(
+                target: "perf",
+                "[SCRIPT_PERF] samples={} avg_lock_us={} avg_lua_us={} avg_prepare_us={} avg_raft_us={} avg_overall_us={}",
+                n, lock_avg, lua_avg, prep_avg, raft_avg, overall_avg
+            );
+        }
+    }
+}
+
+static PERF_SAMPLER: ScriptPerfSampler = ScriptPerfSampler::new();
 
 pub struct ScriptCommands {
     storage: Arc<dyn KvStorage>,
@@ -219,6 +264,7 @@ impl ScriptCommands {
         argv: &[Bytes],
         db: usize,
     ) -> Result<RespValue> {
+        let t_start = Instant::now();
         let key_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_ref()).collect();
         let _guard = if !keys.is_empty() {
             Some(
@@ -229,6 +275,7 @@ impl ScriptCommands {
         } else {
             None
         };
+        let t_locked = Instant::now();
 
         let declared = Arc::new(keys.iter().map(|k| k.to_vec()).collect());
         let txn = Arc::new(Mutex::new(ScriptTransaction::with_in_flight(
@@ -248,6 +295,7 @@ impl ScriptCommands {
             .await;
         self.release_vm(lua);
         let result = eval_res?;
+        let t_lua_done = Instant::now();
 
         let txn =
             Arc::try_unwrap(txn).map_err(|_| Error::Command("ERR script still running".into()))?;
@@ -261,6 +309,7 @@ impl ScriptCommands {
             None
         };
         drop(_guard);
+        let t_prep_done = Instant::now();
 
         let resp = lua_to_resp(result)?;
         let write_res = if let Some(handle) = wait_handle {
@@ -270,6 +319,15 @@ impl ScriptCommands {
         };
         self.in_flight.remove_batch(db, &batch_ops, seq);
         write_res?;
+        let t_done = Instant::now();
+
+        PERF_SAMPLER.record(
+            t_locked.duration_since(t_start).as_micros() as u64,
+            t_lua_done.duration_since(t_locked).as_micros() as u64,
+            t_prep_done.duration_since(t_lua_done).as_micros() as u64,
+            t_done.duration_since(t_prep_done).as_micros() as u64,
+            t_done.duration_since(t_start).as_micros() as u64,
+        );
 
         Ok(resp)
     }

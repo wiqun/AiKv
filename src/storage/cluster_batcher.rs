@@ -2,6 +2,7 @@
 //! 由 `ClusterDataAdapter` 按 group 懒创建.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -17,6 +18,43 @@ use crate::storage::cluster_adapter::{ClusterDataAdapter, WriteRoute};
 use crate::storage::types::BatchWriteHandle;
 
 const SET_BATCH_MAX_OPS: usize = 512;
+
+struct BatcherPerfSampler {
+    batches: AtomicU64,
+    total_ops: AtomicU64,
+    total_wait_us: AtomicU64,
+    total_propose_us: AtomicU64,
+}
+
+impl BatcherPerfSampler {
+    const fn new() -> Self {
+        Self {
+            batches: AtomicU64::new(0),
+            total_ops: AtomicU64::new(0),
+            total_wait_us: AtomicU64::new(0),
+            total_propose_us: AtomicU64::new(0),
+        }
+    }
+
+    fn record(&self, ops: usize, wait_us: u64, propose_us: u64) {
+        self.total_ops.fetch_add(ops as u64, Ordering::Relaxed);
+        self.total_wait_us.fetch_add(wait_us, Ordering::Relaxed);
+        self.total_propose_us.fetch_add(propose_us, Ordering::Relaxed);
+        let n = self.batches.fetch_add(1, Ordering::Relaxed) + 1;
+        if n.is_multiple_of(100) {
+            let ops_avg = self.total_ops.load(Ordering::Relaxed) / n;
+            let wait_avg = self.total_wait_us.load(Ordering::Relaxed) / n;
+            let prop_avg = self.total_propose_us.load(Ordering::Relaxed) / n;
+            tracing::info!(
+                target: "perf",
+                "[BATCHER_PERF] batches={} avg_ops={} avg_wait_us={} avg_propose_us={}",
+                n, ops_avg, wait_avg, prop_avg
+            );
+        }
+    }
+}
+
+static BATCHER_PERF: BatcherPerfSampler = BatcherPerfSampler::new();
 
 pub(super) struct GroupSetBatcher {
     tx: mpsc::Sender<WriteBatchItem>,
@@ -413,15 +451,8 @@ async fn dispatch_batch(
 
     let propose_us = t_propose.elapsed().as_micros();
     let total_us = t_start.elapsed().as_micros();
-    tracing::debug!(
-        target: "perf",
-        gid = gid,
-        op_count = item_count,
-        wait_us = total_us.saturating_sub(propose_us),
-        propose_us,
-        total_us,
-        "batcher_batch_done"
-    );
+    let wait_us = total_us.saturating_sub(propose_us);
+    BATCHER_PERF.record(item_count, wait_us as u64, propose_us as u64);
 
     match result {
         Ok(()) => {
