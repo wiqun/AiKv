@@ -72,19 +72,20 @@ fn validate_keys(declared: &HashSet<Vec<u8>>, cmd: &str, args: &[Bytes]) -> Resu
         if idx >= args.len() {
             continue;
         }
-        let k = key(&args[idx]);
-        if declared.contains(&k) {
+        let k = args[idx].as_ref();
+        if declared.contains(k) {
             continue;
         }
-        let k_tag = extract_hash_tag(&k);
-        let has_matching_tag = if k_tag != k.as_slice() {
+        let k_tag = extract_hash_tag(k);
+        let has_matching_tag = if k_tag != k {
             declared.iter().any(|d| extract_hash_tag(d) == k_tag)
         } else {
             false
         };
         if !has_matching_tag {
             return Err(Error::Command(format!(
-                "ERR Script attempted to access undeclared key '{k:?}'"
+                "ERR Script attempted to access undeclared key '{:?}'",
+                String::from_utf8_lossy(k)
             )));
         }
     }

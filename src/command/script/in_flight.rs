@@ -62,9 +62,22 @@ impl InFlightBuffer {
     }
 
     /// 持久化完成后立即移出在途缓冲, 交由底层状态机提供最新数据.
+    #[allow(dead_code)]
     pub fn remove_batch(&self, db: usize, ops: &[(Vec<u8>, WriteOp)], seq: u64) {
         let mut map = self.map.write();
         for (k, _) in ops {
+            let enc_key = AiDbEngine::encode_key(db, k);
+            if let Some((_, s)) = map.get(&enc_key) {
+                if *s == seq {
+                    map.remove(&enc_key);
+                }
+            }
+        }
+    }
+
+    pub fn remove_batch_keys(&self, db: usize, keys: &[Vec<u8>], seq: u64) {
+        let mut map = self.map.write();
+        for k in keys {
             let enc_key = AiDbEngine::encode_key(db, k);
             if let Some((_, s)) = map.get(&enc_key) {
                 if *s == seq {

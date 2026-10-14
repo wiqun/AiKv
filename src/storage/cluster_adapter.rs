@@ -26,12 +26,11 @@ use parking_lot::Mutex;
 use aidb::cluster::router::key_to_slot;
 use aidb::cluster::{
     MigOp, Request, Response, ShardedStorage, SlotMigrationState, SlotStatus, ThinWriteBatch,
-    ThinWriteOp,
 };
 use aidb::error::ClusterError as AidbClusterError;
 use aidb::Checkpoint;
 
-use super::cluster_batcher::{submit_write_op, submit_write_ops, GroupSetBatcher};
+use super::cluster_batcher::{submit_write_op, GroupSetBatcher};
 use crate::cluster::router::{migration_phase_for_slot, MigrationRoutePhase, TRYAGAIN_MIGRATION};
 use crate::cluster::state::{ClusterStateManager, CLUSTER_STATE_MGR};
 use crate::error::{Error, Result};

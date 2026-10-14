@@ -300,11 +300,15 @@ impl ScriptCommands {
         let txn =
             Arc::try_unwrap(txn).map_err(|_| Error::Command("ERR script still running".into()))?;
         let txn = txn.into_inner();
-        let batch_ops = txn.prepare_batch_ops(self.storage.as_ref()).await?;
+        let batch_ops = txn.prepare_batch_ops_owned(self.storage.as_ref()).await?;
 
-        let seq = self.in_flight.insert_batch(db, &batch_ops);
+        let (seq, keys) = {
+            let keys: Vec<Vec<u8>> = batch_ops.iter().map(|(k, _)| k.clone()).collect();
+            let seq = self.in_flight.insert_batch(db, &batch_ops);
+            (seq, keys)
+        };
         let wait_handle = if !batch_ops.is_empty() {
-            Some(self.storage.enqueue_batch(db, batch_ops.clone()).await?)
+            Some(self.storage.enqueue_batch(db, batch_ops).await?)
         } else {
             None
         };
@@ -317,7 +321,7 @@ impl ScriptCommands {
         } else {
             Ok(())
         };
-        self.in_flight.remove_batch(db, &batch_ops, seq);
+        self.in_flight.remove_batch_keys(db, &keys, seq);
         write_res?;
         let t_done = Instant::now();
 

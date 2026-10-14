@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use tokio::sync::{mpsc, oneshot};
 
@@ -521,6 +521,7 @@ pub(super) fn plan_reverse_dedup(items: Vec<PlannedOp>) -> (ThinWriteBatch, Vec<
 }
 
 /// 实际提交的 op 在 `Response::Ok` 后 ack true. 被 reverse-dedup 丢掉的中间 op ack false.
+#[allow(dead_code)]
 pub(super) fn map_ack_included(effect_indices: &[Option<usize>]) -> Vec<bool> {
     effect_indices.iter().map(|opt| opt.is_some()).collect()
 }

@@ -401,6 +401,48 @@ impl ScriptTransaction {
         Ok(batch_ops)
     }
 
+    pub async fn prepare_batch_ops_owned(
+        mut self,
+        storage: &dyn KvStorage,
+    ) -> Result<Vec<(Vec<u8>, WriteOp)>> {
+        let write_buffer = std::mem::take(&mut self.write_buffer);
+        let mut batch_ops: Vec<(Vec<u8>, WriteOp)> =
+            Vec::with_capacity(write_buffer.len() + self.expire_at.len());
+
+        for (key, op) in write_buffer {
+            match op {
+                ExtendedBatchOp::Delete => {
+                    self.expire_at.remove(&key);
+                    batch_ops.push((key, WriteOp::Delete));
+                }
+                ExtendedBatchOp::SetString(value) => {
+                    let exp = self.resolve_expires_at(storage, &key).await?;
+                    self.expire_at.remove(&key);
+                    let stored = StoredValue {
+                        value: ValueType::String(value),
+                        expires_at: exp,
+                    };
+                    batch_ops.push((key, WriteOp::PutStored(stored)));
+                }
+                _ => {
+                    let exp = self.resolve_expires_at(storage, &key).await?;
+                    self.expire_at.remove(&key);
+                    let mut stored = op_into_stored(op)?;
+                    stored.expires_at = exp;
+                    batch_ops.push((key, WriteOp::PutStored(stored)));
+                }
+            }
+        }
+
+        for (key, exp) in self.expire_at {
+            if let Some(mut stored) = storage.get_typed(self.db_index, &key).await? {
+                stored.expires_at = exp;
+                batch_ops.push((key, WriteOp::PutStored(stored)));
+            }
+        }
+        Ok(batch_ops)
+    }
+
     #[allow(dead_code)]
     pub async fn commit(self, storage: &dyn KvStorage) -> Result<()> {
         let batch_ops = self.prepare_batch_ops(storage).await?;
@@ -408,6 +450,20 @@ impl ScriptTransaction {
             storage.write_batch(self.db_index, batch_ops).await?;
         }
         Ok(())
+    }
+}
+
+fn op_into_stored(op: ExtendedBatchOp) -> Result<StoredValue> {
+    match op {
+        ExtendedBatchOp::SetString(v) => Ok(StoredValue::string(v)),
+        ExtendedBatchOp::SetList(list) => Ok(StoredValue::new_list(list)),
+        ExtendedBatchOp::SetHash(hash) => Ok(StoredValue {
+            value: ValueType::Hash(hash),
+            expires_at: None,
+        }),
+        ExtendedBatchOp::SetSet(set) => Ok(StoredValue::new_set(set)),
+        ExtendedBatchOp::SetZSet(zset) => Ok(StoredValue::new_zset(zset)),
+        ExtendedBatchOp::Delete => Err(Error::Command("ERR internal delete op".into())),
     }
 }
 
