@@ -838,6 +838,7 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SpanCapture {
     }
 }
 
+#[allow(clippy::type_complexity)]
 fn info_capture() -> (
     SpanCapture,
     std::sync::Arc<std::sync::Mutex<Vec<String>>>,

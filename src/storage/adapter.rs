@@ -36,8 +36,9 @@ use crate::error::{Error, Result};
 use crate::storage::memory::glob_match;
 use crate::storage::observation::{PointReadCounter, StorageObservation};
 use crate::storage::types::{
-    now_ms, ExpiresCounters, KeyspaceStats, KvStorage, ScanResult, StorageEngineKind, StoredValue,
-    ValueType, WriteOp, DB_COUNT, TTL_NO_EXPIRY, WRONGTYPE,
+    now_ms, BatchWriteHandle, ExpiresCounters, ImmediateWriteHandle, KeyspaceStats, KvStorage,
+    ScanResult, StorageEngineKind, StoredValue, ValueType, WriteOp, DB_COUNT, TTL_NO_EXPIRY,
+    WRONGTYPE,
 };
 use crate::storage::watch_registry::WatchRegistry;
 use crate::storage::watch_version::{
@@ -87,6 +88,10 @@ pub trait StorageAdapter: Send + Sync {
     async fn delete(&self, key: Vec<u8>) -> Result<bool>;
     async fn exists(&self, key: Vec<u8>) -> Result<bool>;
     async fn write_batch(&self, batch: Vec<AdapterWriteOp>) -> Result<()>;
+    async fn enqueue_batch(&self, batch: Vec<AdapterWriteOp>) -> Result<Box<dyn BatchWriteHandle>> {
+        self.write_batch(batch).await?;
+        Ok(Box::new(ImmediateWriteHandle))
+    }
     async fn delete_range(&self, start: Vec<u8>, end: Vec<u8>) -> Result<()>;
     async fn len(&self) -> Result<usize>;
     async fn estimate_entry_count(&self) -> Result<u64> {
@@ -393,6 +398,49 @@ impl KvStorageAdapter {
         self.expires.reset_db(db);
         Ok(())
     }
+
+    async fn prepare_adapter_batch(
+        &self,
+        db: usize,
+        ops: Vec<(Vec<u8>, WriteOp)>,
+    ) -> Result<Vec<AdapterWriteOp>> {
+        self.check_db(db)?;
+        let mut batch = Vec::with_capacity(ops.len());
+        let mut touched: Vec<Vec<u8>> = Vec::with_capacity(ops.len());
+        for (key, op) in ops {
+            let encoded = Self::encode(db, &key);
+            touched.push(encoded.clone());
+            match op {
+                WriteOp::Put(value) => {
+                    let stored = StoredValue::string(value);
+                    let bytes = Self::serialize(&stored)?;
+                    batch.push(AdapterWriteOp::Put {
+                        key: encoded,
+                        value: bytes,
+                    });
+                }
+                WriteOp::PutStored(stored) => {
+                    let bytes = Self::serialize(&stored)?;
+                    batch.push(AdapterWriteOp::Put {
+                        key: encoded,
+                        value: bytes,
+                    });
+                }
+                WriteOp::Delete => {
+                    batch.push(AdapterWriteOp::Delete { key: encoded });
+                }
+            }
+        }
+        for encoded in &touched {
+            let Some(user_key) = Self::decode_user_key(encoded) else {
+                continue;
+            };
+            if let Some((mk, mv)) = self.next_watch_meta_put(db, &user_key).await? {
+                batch.push(AdapterWriteOp::Put { key: mk, value: mv });
+            }
+        }
+        Ok(batch)
+    }
 }
 
 #[async_trait]
@@ -483,38 +531,18 @@ impl KvStorage for KvStorageAdapter {
     }
 
     async fn write_batch(&self, db: usize, ops: Vec<(Vec<u8>, WriteOp)>) -> Result<()> {
-        self.check_db(db)?;
-        let mut batch = Vec::with_capacity(ops.len());
-        let mut touched: Vec<Vec<u8>> = Vec::with_capacity(ops.len());
-        for (key, op) in ops {
-            let encoded = Self::encode(db, &key);
-            touched.push(encoded.clone());
-            match op {
-                WriteOp::Put(value) => {
-                    let stored = StoredValue::string(value);
-                    let bytes = Self::serialize(&stored)?;
-                    batch.push(AdapterWriteOp::Put {
-                        key: encoded,
-                        value: bytes,
-                    });
-                }
-                WriteOp::Delete => {
-                    batch.push(AdapterWriteOp::Delete { key: encoded });
-                }
-            }
-        }
-        for encoded in &touched {
-            let Some(user_key) = Self::decode_user_key(encoded) else {
-                continue;
-            };
-            if let Some((mk, mv)) = self.next_watch_meta_put(db, &user_key).await? {
-                batch.push(AdapterWriteOp::Put { key: mk, value: mv });
-            }
-        }
-        if let Err(e) = self.storage.apply_writes(batch).await {
-            return Err(e);
-        }
+        let batch = self.prepare_adapter_batch(db, ops).await?;
+        self.storage.write_batch(batch).await?;
         Ok(())
+    }
+
+    async fn enqueue_batch(
+        &self,
+        db: usize,
+        ops: Vec<(Vec<u8>, WriteOp)>,
+    ) -> Result<Box<dyn BatchWriteHandle>> {
+        let batch = self.prepare_adapter_batch(db, ops).await?;
+        self.storage.enqueue_batch(batch).await
     }
 
     async fn keys(&self, db: usize, pattern: &[u8]) -> Result<Vec<Vec<u8>>> {

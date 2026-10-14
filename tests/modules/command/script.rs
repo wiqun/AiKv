@@ -224,6 +224,28 @@ async fn test_evalsha_loaded() {
 }
 
 #[tokio::test]
+async fn test_eval_caches_script_for_evalsha() {
+    let r = router();
+    let mut db = 0;
+    let eval_resp = r
+        .execute("EVAL", &[b("return 'cached_by_eval'"), b("0")], &mut db)
+        .await
+        .unwrap();
+    assert_eq!(eval_resp, RespValue::BulkString(Some(b("cached_by_eval"))));
+
+    use sha1::{Digest, Sha1};
+    let mut hasher = Sha1::new();
+    hasher.update(b"return 'cached_by_eval'");
+    let sha = format!("{:x}", hasher.finalize());
+
+    let resp = r
+        .execute("EVALSHA", &[Bytes::from(sha), b("0")], &mut db)
+        .await
+        .unwrap();
+    assert_eq!(resp, RespValue::BulkString(Some(b("cached_by_eval"))));
+}
+
+#[tokio::test]
 async fn test_evalsha_not_found() {
     let r = router();
     let mut db = 0;
@@ -850,4 +872,32 @@ async fn test_script_json_read_own_writes() {
         resp,
         RespValue::BulkString(Some(Bytes::from_static(br#"{"a":2}"#)))
     );
+}
+
+#[tokio::test]
+async fn test_script_hash_tag_dynamic_keys_and_new_commands() {
+    let r = router();
+    let mut db = 0;
+    let script = r#"
+        local tag_prefix = KEYS[1]
+        local zkey = tag_prefix .. ':zset'
+        local hkey = tag_prefix .. ':hash'
+        redis.call('ZADD', zkey, 10, 'm10', 20, 'm20', 30, 'm30')
+        local rev = redis.call('ZREVRANGE', zkey, 0, 1)
+        local range_score = redis.call('ZRANGEBYSCORE', zkey, 15, 35)
+        local rev_score = redis.call('ZREVRANGEBYSCORE', zkey, 25, 5, 'LIMIT', 0, 1)
+        redis.call('HSETNX', hkey, 'f1', 'v1')
+        local nx2 = redis.call('HSETNX', hkey, 'f1', 'v2')
+        return {rev, range_score, rev_score, nx2}
+    "#;
+    let resp = r
+        .execute("EVAL", &[b(script), b("1"), b("prefix:{user1}")], &mut db)
+        .await
+        .unwrap();
+    if let RespValue::Array(Some(arr)) = resp {
+        assert_eq!(arr.len(), 4);
+        assert_eq!(arr[3], RespValue::Integer(0));
+    } else {
+        panic!("expected array response");
+    }
 }

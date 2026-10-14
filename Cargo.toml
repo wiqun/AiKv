@@ -39,6 +39,7 @@ compression = ["aidb/compression"]
 tokio       = { version = "1", features = ["full"] }
 tokio-util  = { version = "0.7", features = ["rt"] }
 async-trait = "0.1"
+futures-util = "0.3"
 
 # Core primitives
 parking_lot = "0.12"
@@ -99,3 +100,6 @@ debug         = 1   # line tables for eBPF/Pyroscope flame graphs (不 strip)
 
 [lints.clippy]
 all = "warn"
+
+[patch."https://github.com/wiqun/AiDb.git"]
+aidb = { path = "../aidb" }

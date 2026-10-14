@@ -1086,7 +1086,7 @@ mod tests {
     fn test_server_metrics_threads_and_context_switches_cache() {
         let metrics = ServerMetrics::default();
         // 1. 验证启动初期兜底直读与回填（在 Linux 环境下大于 0）
-        let (threads, vol, nonvol) = metrics.get_threads_and_context_switches();
+        let (_threads, _vol, _nonvol) = metrics.get_threads_and_context_switches();
         #[cfg(target_os = "linux")]
         {
             assert!(threads > 0, "threads should be > 0 on linux");

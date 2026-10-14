@@ -12,7 +12,9 @@ use aidb::error::ClusterError as AidbClusterError;
 
 use crate::cluster::state::ClusterStateManager;
 use crate::error::{Error, Result};
-use crate::storage::cluster_adapter::ClusterDataAdapter;
+use crate::storage::adapter::{AdapterWriteOp, StorageAdapter};
+use crate::storage::cluster_adapter::{ClusterDataAdapter, WriteRoute};
+use crate::storage::types::BatchWriteHandle;
 
 const SET_BATCH_MAX_OPS: usize = 512;
 /// 凑批等待上限. 1ms 平衡吞吐与延迟: 集群 50c 负载下 items 到达快, 等 1ms 足矣.
@@ -41,9 +43,6 @@ struct AckMap {
     effect_index: Option<usize>,
 }
 
-const MIN_BATCH_TARGET: usize = 16;
-const MAX_MICRO_WAIT_US: u64 = 50;
-
 pub(super) fn get_or_spawn_set_batcher(
     batchers: &parking_lot::Mutex<HashMap<u64, Arc<GroupSetBatcher>>>,
     mgr: Arc<ClusterStateManager>,
@@ -70,6 +69,7 @@ pub(super) async fn submit_write_ops(
     mgr: Arc<ClusterStateManager>,
     gid: u64,
     ops: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+    check_delete_existed: bool,
 ) -> Result<Vec<bool>> {
     enum Slot {
         Ready(bool),
@@ -82,7 +82,7 @@ pub(super) async fn submit_write_ops(
 
     let mut prepared: Vec<(Vec<u8>, Option<Vec<u8>>, bool)> = Vec::with_capacity(ops.len());
     for (key, value) in ops {
-        if value.is_none() {
+        if check_delete_existed && value.is_none() {
             let existed = mgr
                 .multi_raft
                 .get_local(gid, &key)
@@ -158,12 +158,171 @@ pub(super) async fn submit_write_op(
     key: Vec<u8>,
     value: Option<Vec<u8>>,
 ) -> Result<bool> {
-    let mut flags = submit_write_ops(batchers, eager_flush, mgr, gid, vec![(key, value)]).await?;
+    let mut flags =
+        submit_write_ops(batchers, eager_flush, mgr, gid, vec![(key, value)], true).await?;
     flags.pop().ok_or_else(|| {
         Error::Cluster(crate::error::ClusterError::Aidb(
             AidbClusterError::Internal("submit_write_ops returned no flags".into()),
         ))
     })
+}
+
+pub struct ClusterBatchSlots {
+    slots: Vec<oneshot::Receiver<std::result::Result<bool, String>>>,
+}
+
+impl ClusterBatchSlots {
+    pub async fn wait(self) -> Result<()> {
+        for wait in self.slots {
+            wait.await
+                .map_err(|_| {
+                    Error::Cluster(crate::error::ClusterError::Aidb(
+                        AidbClusterError::Internal(
+                            "data group write batcher dropped response".into(),
+                        ),
+                    ))
+                })?
+                .map_err(|e| {
+                    Error::Cluster(crate::error::ClusterError::Aidb(
+                        AidbClusterError::Internal(e),
+                    ))
+                })?;
+        }
+        Ok(())
+    }
+}
+
+pub struct ClusterBatchWaitHandle {
+    slots: Vec<ClusterBatchSlots>,
+    by_mig: Vec<(Arc<ClusterStateManager>, u64, u64, ThinWriteBatch)>,
+    fallback: Vec<AdapterWriteOp>,
+    local: Arc<dyn StorageAdapter>,
+}
+
+#[async_trait::async_trait]
+impl BatchWriteHandle for ClusterBatchWaitHandle {
+    async fn wait(self: Box<Self>) -> Result<()> {
+        for slot in self.slots {
+            slot.wait().await?;
+        }
+        for (mgr, gid, epoch, ops) in self.by_mig {
+            let resp = ClusterDataAdapter::propose_group_with_retry(
+                &mgr,
+                gid,
+                Request::MigrationWrite { epoch, ops },
+            )
+            .await?;
+            ClusterDataAdapter::check_response(resp)?;
+        }
+        if !self.fallback.is_empty() {
+            self.local.write_batch(self.fallback).await?;
+        }
+        Ok(())
+    }
+}
+
+pub(super) async fn enqueue_cluster_batch(
+    set_batchers: &parking_lot::Mutex<HashMap<u64, Arc<GroupSetBatcher>>>,
+    eager_flush: usize,
+    local: Arc<dyn StorageAdapter>,
+    ops: Vec<AdapterWriteOp>,
+) -> Result<Box<dyn BatchWriteHandle>> {
+    if ops.is_empty() {
+        return Ok(Box::new(crate::storage::types::ImmediateWriteHandle));
+    }
+    let (by_gid, by_mig, fallback) = partition_cluster_batch_ops(ops)?;
+
+    let mut slots = Vec::with_capacity(by_gid.len());
+    for (gid, (mgr, items)) in by_gid {
+        let slot = enqueue_write_ops(set_batchers, eager_flush, mgr, gid, items).await?;
+        slots.push(slot);
+    }
+
+    let mut mig_batches = Vec::with_capacity(by_mig.len());
+    for (gid, (mgr, epoch, items)) in by_mig {
+        let mut tb = ThinWriteBatch::new();
+        for (key, value) in items {
+            match value {
+                Some(v) => tb.put(key, v),
+                None => tb.delete(key),
+            }
+        }
+        mig_batches.push((mgr, gid, epoch, tb));
+    }
+
+    Ok(Box::new(ClusterBatchWaitHandle {
+        slots,
+        by_mig: mig_batches,
+        fallback,
+        local,
+    }))
+}
+
+type GidBatches = HashMap<u64, (Arc<ClusterStateManager>, Vec<(Vec<u8>, Option<Vec<u8>>)>)>;
+type MigBatches = HashMap<u64, (Arc<ClusterStateManager>, u64, Vec<(Vec<u8>, Option<Vec<u8>>)>)>;
+
+fn partition_cluster_batch_ops(
+    ops: Vec<AdapterWriteOp>,
+) -> Result<(GidBatches, MigBatches, Vec<AdapterWriteOp>)> {
+    let mut by_gid: GidBatches = HashMap::new();
+    let mut by_mig: MigBatches = HashMap::new();
+    let mut fallback = Vec::new();
+
+    for op in ops {
+        let key_ref = match &op {
+            AdapterWriteOp::Put { key, .. } | AdapterWriteOp::Delete { key } => key.as_slice(),
+        };
+        match ClusterDataAdapter::route_write(key_ref)? {
+            Some((mgr, WriteRoute::Plain(gid))) => {
+                let tuple = match op {
+                    AdapterWriteOp::Put { key, value } => (key, Some(value)),
+                    AdapterWriteOp::Delete { key } => (key, None),
+                };
+                by_gid.entry(gid).or_insert_with(|| (mgr, Vec::new())).1.push(tuple);
+            }
+            Some((mgr, WriteRoute::Migration { gid, epoch, .. })) => {
+                let tuple = match op {
+                    AdapterWriteOp::Put { key, value } => (key, Some(value)),
+                    AdapterWriteOp::Delete { key } => (key, None),
+                };
+                by_mig
+                    .entry(gid)
+                    .or_insert_with(|| (mgr, epoch, Vec::new()))
+                    .2
+                    .push(tuple);
+            }
+            _ => fallback.push(op),
+        }
+    }
+    Ok((by_gid, by_mig, fallback))
+}
+
+pub(super) async fn enqueue_write_ops(
+    batchers: &parking_lot::Mutex<HashMap<u64, Arc<GroupSetBatcher>>>,
+    eager_flush: usize,
+    mgr: Arc<ClusterStateManager>,
+    gid: u64,
+    ops: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+) -> Result<ClusterBatchSlots> {
+    if ops.is_empty() {
+        return Ok(ClusterBatchSlots { slots: Vec::new() });
+    }
+    let batcher = get_or_spawn_set_batcher(batchers, mgr, gid, eager_flush);
+    let mut slots = Vec::with_capacity(ops.len());
+    for (key, value) in ops {
+        let (ack, wait) = oneshot::channel();
+        let item = match value {
+            Some(v) => WriteBatchItem::Put { key, value: v, ack },
+            None => WriteBatchItem::Delete { key, ack },
+        };
+        batcher.tx.send(item).await.map_err(|_| {
+            Error::Cluster(crate::error::ClusterError::Aidb(
+                AidbClusterError::Internal("data group write batcher stopped".into()),
+            ))
+        })?;
+        slots.push(wait);
+    }
+    Ok(ClusterBatchSlots { slots })
 }
 
 pub(super) async fn run_set_batcher(
@@ -178,24 +337,12 @@ pub(super) async fn run_set_batcher(
         let mut items = Vec::with_capacity(SET_BATCH_MAX_OPS);
         items.push(first);
 
-        // 第一阶段:快速非阻塞拉取
+        // 快速非阻塞拉取当前 channel 中积攒的全部操作
         while items.len() < SET_BATCH_MAX_OPS {
             match rx.try_recv() {
                 Ok(item) => items.push(item),
                 Err(mpsc::error::TryRecvError::Empty) => break,
                 Err(mpsc::error::TryRecvError::Disconnected) => break,
-            }
-        }
-
-        // 第二阶段:防单打微退避 (仅在 items 数量小于 MIN_BATCH_TARGET 时触发 50us 避震)
-        if items.len() < MIN_BATCH_TARGET {
-            tokio::time::sleep(Duration::from_micros(MAX_MICRO_WAIT_US)).await;
-            while items.len() < SET_BATCH_MAX_OPS {
-                match rx.try_recv() {
-                    Ok(item) => items.push(item),
-                    Err(mpsc::error::TryRecvError::Empty) => break,
-                    Err(mpsc::error::TryRecvError::Disconnected) => break,
-                }
             }
         }
 

@@ -60,6 +60,7 @@ dependencies = [
  "crc32fast",
  "criterion",
  "dashmap",
+ "futures-util",
  "http-body-util",
  "hyper",
  "hyper-util",

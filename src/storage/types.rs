@@ -57,9 +57,10 @@ pub struct ScanResult {
 }
 
 /// 批量写入操作 (命令层; 与底层 LSM WriteOp 独立)
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum WriteOp {
     Put(Vec<u8>),
+    PutStored(StoredValue),
     Delete,
 }
 
@@ -265,6 +266,14 @@ pub trait KvStorage: Send + Sync {
     async fn mget(&self, db: usize, keys: &[Vec<u8>]) -> Result<Vec<Option<Vec<u8>>>>;
     async fn mset(&self, db: usize, pairs: &[(Vec<u8>, Vec<u8>)]) -> Result<()>;
     async fn write_batch(&self, db: usize, ops: Vec<(Vec<u8>, WriteOp)>) -> Result<()>;
+    async fn enqueue_batch(
+        &self,
+        db: usize,
+        ops: Vec<(Vec<u8>, WriteOp)>,
+    ) -> Result<Box<dyn BatchWriteHandle>> {
+        self.write_batch(db, ops).await?;
+        Ok(Box::new(ImmediateWriteHandle))
+    }
 
     async fn keys(&self, db: usize, pattern: &[u8]) -> Result<Vec<Vec<u8>>>;
     async fn scan(
@@ -405,6 +414,23 @@ pub trait KvStorage: Send + Sync {
         _f: Box<dyn FnMut(Vec<u8>, Vec<u8>) -> Result<()> + Send>,
     ) -> Result<()> {
         Err(Error::Storage("raw subkey access not supported".into()))
+    }
+}
+
+/// 批量写入在途等待 handle: 支持将写操作排入底层凑批队列后立即释放外层排他锁,
+/// 后续在锁外 await 批量落盘与复制结果.
+#[async_trait::async_trait]
+pub trait BatchWriteHandle: Send + Sync {
+    async fn wait(self: Box<Self>) -> Result<()>;
+}
+
+/// 默认立即完成的批量写入 handle (用于无异步凑批队列的存储实现).
+pub struct ImmediateWriteHandle;
+
+#[async_trait::async_trait]
+impl BatchWriteHandle for ImmediateWriteHandle {
+    async fn wait(self: Box<Self>) -> Result<()> {
+        Ok(())
     }
 }
 

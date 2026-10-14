@@ -24,12 +24,50 @@ pub(super) async fn exec_get(
     }
 }
 
-pub(super) fn exec_set(txn: &mut ScriptTransaction, args: &[Bytes]) -> Result<RespValue> {
+use crate::command::string::{parse_set_options, SetCondition};
+
+pub(super) async fn exec_set(
+    storage: &dyn KvStorage,
+    txn: &mut ScriptTransaction,
+    args: &[Bytes],
+) -> Result<RespValue> {
     if args.len() < 2 {
         return Err(wrong_count("SET"));
     }
-    txn.set_string(key(&args[0]), args[1].to_vec());
-    Ok(RespValue::SimpleString("OK".into()))
+    let opts = parse_set_options(args)?;
+    let old_value = if opts.return_old
+        || matches!(opts.condition, SetCondition::Nx | SetCondition::Xx)
+    {
+        txn.get(storage, &args[0]).await?
+    } else {
+        None
+    };
+
+    if opts.condition == SetCondition::Nx && old_value.is_some() {
+        return Ok(if opts.return_old {
+            old_value.map(router::bulk).unwrap_or(router::nil_bulk())
+        } else {
+            router::nil_bulk()
+        });
+    }
+
+    if opts.condition == SetCondition::Xx && old_value.is_none() {
+        return Ok(router::nil_bulk());
+    }
+
+    txn.set_string(key(&args[0]), opts.value);
+    if let Some(exp) = opts.expire_at {
+        txn.set_expire_at(key(&args[0]), Some(exp));
+    }
+
+    if opts.return_old {
+        match old_value {
+            Some(v) => Ok(router::bulk(v)),
+            None => Ok(router::nil_bulk()),
+        }
+    } else {
+        Ok(RespValue::SimpleString("OK".into()))
+    }
 }
 
 pub(super) async fn exec_del(

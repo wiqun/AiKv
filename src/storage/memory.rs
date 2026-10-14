@@ -270,6 +270,7 @@ impl KvStorage for MemoryEngine {
         for (key, op) in ops {
             match op {
                 WriteOp::Put(value) => self.set(db, &key, &value).await?,
+                WriteOp::PutStored(stored) => self.set_typed(db, &key, stored).await?,
                 WriteOp::Delete => {
                     self.delete(db, &key).await?;
                 }

@@ -150,7 +150,7 @@ pub fn collect_export_snapshot(
 }
 
 fn append_process(
-    mut snapshot: &mut ExportSnapshot,
+    snapshot: &mut ExportSnapshot,
     metrics: &crate::server::metrics::ServerMetrics,
     keys_estimate: u64,
     expires: &[(usize, u64)],
@@ -161,49 +161,49 @@ fn append_process(
         value: metrics.connected_clients() as f64,
     });
     push_counter(
-        &mut snapshot,
+        snapshot,
         "aikv_connections_rejected_total",
         vec![],
         metrics.rejected_connections(),
     );
     push_counter(
-        &mut snapshot,
+        snapshot,
         "aikv_net_input_bytes_total",
         vec![],
         metrics.net_input_bytes(),
     );
     push_counter(
-        &mut snapshot,
+        snapshot,
         "aikv_net_output_bytes_total",
         vec![],
         metrics.net_output_bytes(),
     );
     push_counter(
-        &mut snapshot,
+        snapshot,
         "aikv_scan_entries_total",
         vec![],
         metrics.scan_entries(),
     );
     push_counter(
-        &mut snapshot,
+        snapshot,
         "aikv_expired_keys_total",
         vec![],
         metrics.expired_keys(),
     );
     push_counter(
-        &mut snapshot,
+        snapshot,
         "aikv_slowlog_total",
         vec![],
         metrics.slowlog_commands_count(),
     );
     push_counter(
-        &mut snapshot,
+        snapshot,
         "aikv_point_reads_total",
         vec![("result".into(), "hit".into())],
         metrics.point_read_count(true),
     );
     push_counter(
-        &mut snapshot,
+        snapshot,
         "aikv_point_reads_total",
         vec![("result".into(), "miss".into())],
         metrics.point_read_count(false),
@@ -232,7 +232,7 @@ fn append_process(
     }
     for (reason, count) in metrics.connection_close_rows() {
         push_counter(
-            &mut snapshot,
+            snapshot,
             "aikv_connection_closes_total",
             vec![("reason".into(), reason)],
             count,
@@ -240,7 +240,7 @@ fn append_process(
     }
     for (errno, count) in metrics.accept_error_rows() {
         push_counter(
-            &mut snapshot,
+            snapshot,
             "aikv_accept_errors_total",
             vec![("errno".into(), errno)],
             count,
@@ -249,12 +249,12 @@ fn append_process(
 }
 
 fn append_commands(
-    mut snapshot: &mut ExportSnapshot,
+    snapshot: &mut ExportSnapshot,
     metrics: &crate::server::metrics::ServerMetrics,
 ) {
     for (command, ok, err) in metrics.command_counter_rows() {
         push_counter(
-            &mut snapshot,
+            snapshot,
             "aikv_commands_total",
             vec![
                 ("command".into(), command.clone()),
@@ -263,7 +263,7 @@ fn append_commands(
             ok,
         );
         push_counter(
-            &mut snapshot,
+            snapshot,
             "aikv_commands_total",
             vec![
                 ("command".into(), command),

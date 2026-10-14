@@ -60,6 +60,7 @@ use crate::server::config::ServerSharedState;
 
 mod atom;
 mod monitor;
+mod pipeline;
 mod protocol;
 #[cfg(test)]
 mod tests;
@@ -150,7 +151,7 @@ impl Connection {
 
     async fn run(&mut self) -> Result<()> {
         let config = Arc::clone(&self.state.connection_config);
-        let mut buf = vec![0u8; 16384];
+        let mut buf = vec![0u8; 65536];
         let conn_start = Instant::now();
 
         loop {
@@ -258,34 +259,10 @@ impl Connection {
             self.parser.feed(&buf[..n]);
 
             loop {
-                match self.parse_frame().await {
-                    Ok(Some(value)) => {
-                        let is_immediate_flush = should_flush_immediately(&value);
-                        // 阻塞命令 await 前必须先刷出同批已排队响应 (Redis 语义)
-                        if is_blocking_command(&value) {
-                            self.flush_responses().await?;
-                        }
-                        if let Err(e) = self.process_value(value).await {
-                            // best-effort: 同批已入队响应尽量先写出; 保留原错误, 忽略 flush 失败
-                            let _ = self.flush_responses().await;
-                            return Err(e);
-                        }
-                        self.last_active = Instant::now();
-                        if is_immediate_flush || self.quit {
-                            self.flush_responses().await?;
-                            if self.quit {
-                                break;
-                            }
-                        }
-                        if self.mode == ConnectionMode::Monitor {
-                            self.flush_responses().await?;
-                            self.run_monitor(&mut buf).await?;
-                            return Ok(());
-                        }
-                    }
-                    Ok(None) => break,
+                match self.process_next_batch(&mut buf).await {
+                    Ok(true) => continue,
+                    Ok(false) => break,
                     Err(e) if is_fatal_protocol(&e) => {
-                        // best-effort: 保留致命协议错误, 忽略 flush 自身 IO 失败
                         let _ = self.flush_responses().await;
                         return Err(e);
                     }
@@ -295,6 +272,72 @@ impl Connection {
                 }
             }
             self.flush_responses().await?;
+        }
+        Ok(())
+    }
+
+    async fn process_next_batch(&mut self, buf: &mut [u8]) -> Result<bool> {
+        let first = match self.parse_frame().await {
+            Ok(Some(v)) => v,
+            Ok(None) => return Ok(false),
+            Err(e) => return Err(e),
+        };
+
+        let is_immediate = should_flush_immediately(&first);
+        let is_blocking = is_blocking_command(&first);
+        if is_immediate || is_blocking {
+            self.process_single_frame(first, buf).await?;
+            return Ok(true);
+        }
+
+        let mut batch = vec![first];
+        while batch.len() < 128 {
+            match self.parse_frame().await {
+                Ok(Some(value)) => {
+                    let is_imm = should_flush_immediately(&value);
+                    let is_blk = is_blocking_command(&value);
+                    batch.push(value);
+                    if is_imm || is_blk {
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => return Err(e),
+            }
+        }
+
+        if batch.len() == 1 {
+            self.process_single_frame(batch.pop().unwrap(), buf).await?;
+        } else {
+            if let Err(e) = self.process_pipeline_batch(batch).await {
+                let _ = self.flush_responses().await;
+                return Err(e);
+            }
+            self.last_active = Instant::now();
+            if self.quit {
+                self.flush_responses().await?;
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    async fn process_single_frame(&mut self, value: RespValue, buf: &mut [u8]) -> Result<()> {
+        let is_immediate_flush = should_flush_immediately(&value);
+        if is_blocking_command(&value) {
+            self.flush_responses().await?;
+        }
+        if let Err(e) = self.process_value(value).await {
+            let _ = self.flush_responses().await;
+            return Err(e);
+        }
+        self.last_active = Instant::now();
+        if is_immediate_flush || self.quit {
+            self.flush_responses().await?;
+        }
+        if self.mode == ConnectionMode::Monitor {
+            self.flush_responses().await?;
+            self.run_monitor(buf).await?;
         }
         Ok(())
     }
@@ -460,7 +503,7 @@ impl Connection {
             .await
     }
 
-    async fn finish_immediate_command(
+    pub(super) async fn finish_immediate_command(
         &mut self,
         cmd: &str,
         _args: &[Bytes],
@@ -595,7 +638,7 @@ impl Connection {
     }
 }
 
-fn should_track_observability(cmd: &str) -> bool {
+pub(super) fn should_track_observability(cmd: &str) -> bool {
     !matches!(
         cmd,
         "SLOWLOG" | "MONITOR" | "PING" | "ECHO" | "HELLO" | "QUIT"
@@ -689,7 +732,7 @@ fn hello_map(client_id: usize, proto: ProtocolVersion) -> RespValue {
     }
 }
 
-fn extract_bulk(value: &RespValue) -> Option<Bytes> {
+pub(super) fn extract_bulk(value: &RespValue) -> Option<Bytes> {
     match value {
         RespValue::BulkString(Some(b)) => Some(b.clone()),
         RespValue::BulkString(None) => Some(Bytes::new()),
@@ -697,7 +740,7 @@ fn extract_bulk(value: &RespValue) -> Option<Bytes> {
     }
 }
 
-fn should_flush_immediately(frame: &RespValue) -> bool {
+pub(super) fn should_flush_immediately(frame: &RespValue) -> bool {
     let Some(cmd) = frame_command_bytes(frame) else {
         return false;
     };
@@ -707,7 +750,7 @@ fn should_flush_immediately(frame: &RespValue) -> bool {
     )
 }
 
-fn is_blocking_command(frame: &RespValue) -> bool {
+pub(super) fn is_blocking_command(frame: &RespValue) -> bool {
     let Some(cmd) = frame_command_bytes(frame) else {
         return false;
     };

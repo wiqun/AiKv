@@ -1,6 +1,5 @@
-# syntax=docker/dockerfile:1
 # Multi-stage build: compile aikv with the sibling local AiDb checkout.
-FROM rust:1.98-bookworm AS builder
+FROM --platform=linux/amd64 rust:1.98-bookworm AS builder
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -26,7 +25,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release --features cluster,monitoring,compression \
     && cp /src/aikv/target/release/aikv /usr/local/bin/aikv
 
-FROM debian:bookworm-slim AS runtime
+FROM --platform=linux/amd64 debian:bookworm-slim AS runtime
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \

@@ -37,7 +37,7 @@ use crate::cluster::state::{ClusterStateManager, CLUSTER_STATE_MGR};
 use crate::error::{Error, Result};
 use crate::storage::adapter::{AdapterWriteOp, StorageAdapter};
 use crate::storage::aidb::AiDbEngine;
-use crate::storage::types::StorageEngineKind;
+use crate::storage::types::{BatchWriteHandle, StorageEngineKind};
 
 const GROUP_READY_MAX_ATTEMPTS: u32 = 20;
 const GROUP_READY_RETRY_DELAY: Duration = Duration::from_millis(250);
@@ -58,7 +58,7 @@ enum ReadRoute {
 /// F-056-A1 写路由结果: `Plain` 为老路径 (`Request::Put`/`Delete`/`WriteBatch`);
 /// `Migration` 为 Copying (Prepare/Migrating) 期写, 必须走
 /// `Request::MigrationWrite` 记录 tombstone (关闭"不存在则跳过 propose"短路).
-enum WriteRoute {
+pub(super) enum WriteRoute {
     Plain(u64),
     Migration {
         gid: u64,
@@ -265,7 +265,7 @@ impl ClusterDataAdapter {
     /// 写路径: IMPORTING 时优先写入本节点目标 group.
     /// 返回 `Err(TRYAGAIN)` 当 Frozen/Ready 写冻结, 或 Copying 期 epoch 缺失;
     /// `Ok(None)` 表示无本地 group.
-    fn route_write(key: &[u8]) -> Result<Option<(Arc<ClusterStateManager>, WriteRoute)>> {
+    pub(super) fn route_write(key: &[u8]) -> Result<Option<(Arc<ClusterStateManager>, WriteRoute)>> {
         let Some(mgr) = CLUSTER_STATE_MGR.get().cloned() else {
             return Ok(None);
         };
@@ -495,83 +495,7 @@ impl StorageAdapter for ClusterDataAdapter {
     }
 
     async fn apply_writes(&self, ops: Vec<AdapterWriteOp>) -> Result<()> {
-        if ops.is_empty() {
-            return Ok(());
-        }
-        let mut by_gid: HashMap<u64, (Arc<ClusterStateManager>, Vec<(Vec<u8>, Option<Vec<u8>>)>)> =
-            HashMap::new();
-        let mut by_mig: HashMap<
-            u64,
-            (
-                Arc<ClusterStateManager>,
-                u64,
-                Vec<(Vec<u8>, Option<Vec<u8>>)>,
-            ),
-        > = HashMap::new();
-        let mut fallback: Vec<AdapterWriteOp> = Vec::new();
-
-        for op in ops {
-            let key_ref = match &op {
-                AdapterWriteOp::Put { key, .. } | AdapterWriteOp::Delete { key } => key.as_slice(),
-            };
-            match Self::route_write(key_ref)? {
-                Some((mgr, WriteRoute::Plain(gid))) => {
-                    let tuple = match op {
-                        AdapterWriteOp::Put { key, value } => (key, Some(value)),
-                        AdapterWriteOp::Delete { key } => (key, None),
-                    };
-                    by_gid
-                        .entry(gid)
-                        .or_insert_with(|| (mgr, Vec::new()))
-                        .1
-                        .push(tuple);
-                }
-                Some((mgr, WriteRoute::Migration { gid, epoch, .. })) => {
-                    let tuple = match op {
-                        AdapterWriteOp::Put { key, value } => (key, Some(value)),
-                        AdapterWriteOp::Delete { key } => (key, None),
-                    };
-                    by_mig
-                        .entry(gid)
-                        .or_insert_with(|| (mgr, epoch, Vec::new()))
-                        .2
-                        .push(tuple);
-                }
-                _ => fallback.push(op),
-            }
-        }
-
-        for (gid, (mgr, items)) in by_gid {
-            let batch: Vec<_> = items.into_iter().map(|(k, v)| (k, v)).collect();
-            submit_write_ops(&self.set_batchers, self.eager_flush, mgr, gid, batch).await?;
-        }
-
-        for (gid, (mgr, epoch, items)) in by_mig {
-            let mut tb = ThinWriteBatch::new();
-            for (key, value) in &items {
-                match value {
-                    Some(v) => tb.put(key.clone(), v.clone()),
-                    None => tb.delete(key.clone()),
-                }
-            }
-            let resp = Self::propose_group_with_retry(
-                &mgr,
-                gid,
-                Request::MigrationWrite { epoch, ops: tb },
-            )
-            .await?;
-            Self::check_response(resp)?;
-        }
-
-        for op in fallback {
-            match op {
-                AdapterWriteOp::Put { key, value } => self.set(key, value).await?,
-                AdapterWriteOp::Delete { key } => {
-                    self.delete(key).await?;
-                }
-            }
-        }
-        Ok(())
+        self.enqueue_batch(ops).await?.wait().await
     }
 
     async fn delete(&self, key: Vec<u8>) -> Result<bool> {
@@ -635,57 +559,17 @@ impl StorageAdapter for ClusterDataAdapter {
     }
 
     async fn write_batch(&self, batch: Vec<AdapterWriteOp>) -> Result<()> {
-        // 按 group 分组后逐组提交, 避免跨 group 的单次提案.
-        // F-056-A1: Copying 期写额外按 (gid, epoch) 分组走 MigrationWrite.
-        // inserted/deleted 一律来自 propose 后 WriteStats (禁止 propose 前 exists).
-        let mut plain_by_group: HashMap<u64, (Arc<ClusterStateManager>, ThinWriteBatch)> =
-            HashMap::new();
-        let mut migration_by_group: HashMap<u64, (Arc<ClusterStateManager>, u64, ThinWriteBatch)> =
-            HashMap::new();
-        let mut local_ops: Vec<AdapterWriteOp> = Vec::new();
-        for op in batch {
-            let key = match &op {
-                AdapterWriteOp::Put { key, .. } => key.as_slice(),
-                AdapterWriteOp::Delete { key } => key.as_slice(),
-            };
-            match Self::route_write(key)? {
-                Some((mgr, WriteRoute::Migration { gid, epoch, .. })) => {
-                    let entry = migration_by_group
-                        .entry(gid)
-                        .or_insert_with(|| (mgr, epoch, ThinWriteBatch::new()));
-                    match op {
-                        AdapterWriteOp::Put { key, value } => entry.2.put(key, value),
-                        AdapterWriteOp::Delete { key } => entry.2.delete(key),
-                    }
-                }
-                Some((mgr, WriteRoute::Plain(gid))) => {
-                    let entry = plain_by_group
-                        .entry(gid)
-                        .or_insert_with(|| (mgr, ThinWriteBatch::new()));
-                    match op {
-                        AdapterWriteOp::Put { key, value } => entry.1.put(key, value),
-                        AdapterWriteOp::Delete { key } => entry.1.delete(key),
-                    }
-                }
-                None if Self::should_use_local_engine(key) => local_ops.push(op),
-                None => return Err(Self::data_group_not_ready_err()),
-            }
-        }
+        self.apply_writes(batch).await
+    }
 
-        for (gid, (mgr, tb)) in plain_by_group {
-            let resp = Self::propose_group_with_retry(&mgr, gid, Request::WriteBatch(tb)).await?;
-            Self::check_response(resp)?;
-        }
-        for (gid, (mgr, epoch, ops)) in migration_by_group {
-            let resp =
-                Self::propose_group_with_retry(&mgr, gid, Request::MigrationWrite { epoch, ops })
-                    .await?;
-            Self::check_response(resp)?;
-        }
-        if !local_ops.is_empty() {
-            self.local.write_batch(local_ops).await?;
-        }
-        Ok(())
+    async fn enqueue_batch(&self, batch: Vec<AdapterWriteOp>) -> Result<Box<dyn BatchWriteHandle>> {
+        super::cluster_batcher::enqueue_cluster_batch(
+            &self.set_batchers,
+            self.eager_flush,
+            self.local.clone(),
+            batch,
+        )
+        .await
     }
 
     async fn for_each_prefix(

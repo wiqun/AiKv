@@ -99,12 +99,12 @@ cmd_build() {
         mkdir -p "$ctx/aikv" "$ctx/aidb"
         copy_context_tree "$AIKV_ROOT" "$ctx/aikv"
         copy_context_tree "$WORKSPACE_ROOT/aidb" "$ctx/aidb"
-        docker build -f "$ctx/aikv/deploy/Dockerfile.local" -t "$image" "$ctx"
+        docker build --platform "${DOCKER_DEFAULT_PLATFORM:-linux/amd64}" -f "$ctx/aikv/deploy/Dockerfile.local" -t "$image" "$ctx"
         trap - EXIT
         cleanup_local_context
     else
         printf '正在基于 GitHub 主分支构建镜像 %s...\n' "$image"
-        docker build -f "$AIKV_ROOT/deploy/Dockerfile" -t "$image" "$AIKV_ROOT"
+        docker build --platform "${DOCKER_DEFAULT_PLATFORM:-linux/amd64}" -f "$AIKV_ROOT/deploy/Dockerfile" -t "$image" "$AIKV_ROOT"
     fi
     printf '镜像构建成功: %s\n' "$image"
 }

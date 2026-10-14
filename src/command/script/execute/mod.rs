@@ -44,7 +44,7 @@ mod zset;
 
 use self::hash::{
     exec_hdel, exec_hexists, exec_hget, exec_hgetall, exec_hincrby, exec_hlen, exec_hmget,
-    exec_hset,
+    exec_hset, exec_hsetnx,
 };
 use self::list::{exec_lindex, exec_llen, exec_lpop, exec_lpush, exec_lrange};
 use self::set::{exec_sadd, exec_scard, exec_sismember, exec_smembers, exec_srem, exec_sscan};
@@ -52,7 +52,12 @@ use self::string::{
     exec_append, exec_decrby, exec_del, exec_exists, exec_get, exec_incr, exec_incrby,
     exec_incrbyfloat, exec_set, exec_strlen,
 };
-use self::zset::{exec_zadd, exec_zcard, exec_zrange, exec_zrank, exec_zrem, exec_zscore};
+use self::zset::{
+    exec_zadd, exec_zcard, exec_zrange, exec_zrangebyscore, exec_zrank, exec_zrem,
+    exec_zrevrange, exec_zrevrangebyscore, exec_zscore,
+};
+
+use crate::storage::watch_version::extract_hash_tag;
 
 pub(super) fn wrong_count(cmd: &str) -> Error {
     router::wrong_args(cmd, "")
@@ -68,7 +73,16 @@ fn validate_keys(declared: &HashSet<Vec<u8>>, cmd: &str, args: &[Bytes]) -> Resu
             continue;
         }
         let k = key(&args[idx]);
-        if !declared.contains(&k) {
+        if declared.contains(&k) {
+            continue;
+        }
+        let k_tag = extract_hash_tag(&k);
+        let has_matching_tag = if k_tag != k.as_slice() {
+            declared.iter().any(|d| extract_hash_tag(d) == k_tag)
+        } else {
+            false
+        };
+        if !has_matching_tag {
             return Err(Error::Command(format!(
                 "ERR Script attempted to access undeclared key '{k:?}'"
             )));
@@ -80,7 +94,7 @@ fn validate_keys(declared: &HashSet<Vec<u8>>, cmd: &str, args: &[Bytes]) -> Resu
 fn command_key_indices(cmd: &str, argc: usize) -> Vec<usize> {
     match cmd {
         "DEL" | "EXISTS" => (0..argc).collect(),
-        "HMGET" | "HDEL" | "HSET" | "HMSET" | "HINCRBY" | "HEXISTS" => {
+        "HMGET" | "HDEL" | "HSET" | "HMSET" | "HINCRBY" | "HEXISTS" | "HSETNX" => {
             if argc > 0 {
                 vec![0]
             } else {
@@ -116,7 +130,8 @@ fn command_key_indices(cmd: &str, argc: usize) -> Vec<usize> {
                 vec![]
             }
         }
-        "ZADD" | "ZREM" | "ZSCORE" | "ZRANK" | "ZRANGE" | "ZCARD" => {
+        "ZADD" | "ZREM" | "ZSCORE" | "ZRANK" | "ZRANGE" | "ZREVRANGE" | "ZRANGEBYSCORE"
+        | "ZREVRANGEBYSCORE" | "ZCARD" => {
             if argc > 0 {
                 vec![0]
             } else {
@@ -214,7 +229,7 @@ async fn dispatch(
 ) -> Result<RespValue> {
     match cmd {
         "GET" => exec_get(storage, txn, args).await,
-        "SET" => exec_set(txn, args),
+        "SET" => exec_set(storage, txn, args).await,
         "DEL" => exec_del(storage, txn, args).await,
         "EXISTS" => exec_exists(storage, txn, args).await,
         "INCR" => exec_incr(storage, txn, args, 1).await,
@@ -226,6 +241,7 @@ async fn dispatch(
         "STRLEN" => exec_strlen(storage, txn, args).await,
         "HGET" => exec_hget(storage, txn, args).await,
         "HSET" | "HMSET" => exec_hset(storage, txn, args).await,
+        "HSETNX" => exec_hsetnx(storage, txn, args).await,
         "HDEL" => exec_hdel(storage, txn, args).await,
         "HGETALL" => exec_hgetall(storage, txn, args).await,
         "HMGET" => exec_hmget(storage, txn, args).await,
@@ -250,7 +266,11 @@ async fn dispatch(
         "ZSCORE" => exec_zscore(storage, txn, args).await,
         "ZRANK" => exec_zrank(storage, txn, args).await,
         "ZRANGE" => exec_zrange(storage, txn, args).await,
+        "ZREVRANGE" => exec_zrevrange(storage, txn, args).await,
+        "ZRANGEBYSCORE" => exec_zrangebyscore(storage, txn, args).await,
+        "ZREVRANGEBYSCORE" => exec_zrevrangebyscore(storage, txn, args).await,
         "ZCARD" => exec_zcard(storage, txn, args).await,
+        "TTL" => exec_ttl(storage, txn, args).await,
         "EXPIRE" => exec_expire(storage, txn, args).await,
         "JSON.GET" => json_exec::exec_json_get(storage, txn, args).await,
         "JSON.MGET" => json_exec::exec_json_mget(storage, txn, args).await,
@@ -266,6 +286,27 @@ async fn dispatch(
             "ERR Command not supported in scripts: {cmd}"
         ))),
     }
+}
+
+async fn exec_ttl(
+    storage: &dyn KvStorage,
+    txn: &ScriptTransaction,
+    args: &[Bytes],
+) -> Result<RespValue> {
+    if args.len() != 1 {
+        return Err(wrong_count("TTL"));
+    }
+    let k = &args[0];
+    if !txn.exists(storage, k).await? {
+        return Ok(router::integer(-2));
+    }
+    let ttl_res = storage.ttl(txn.db_index, k).await?;
+    let res = match ttl_res {
+        None => -2,
+        Some(crate::storage::TTL_NO_EXPIRY) => -1,
+        Some(ms) => (ms / 1000).max(0),
+    };
+    Ok(router::integer(res))
 }
 
 async fn exec_expire(
