@@ -84,7 +84,7 @@ pub(super) async fn submit_write_ops(
 
     let mut prepared: Vec<(Vec<u8>, Option<Vec<u8>>, bool)> = Vec::with_capacity(ops.len());
     for (key, value) in ops {
-        if check_delete_existed && value.is_none() {
+        if value.is_none() && check_delete_existed {
             let existed = mgr
                 .multi_raft
                 .get_local(gid, &key)
@@ -447,6 +447,20 @@ async fn dispatch_batch(
 /// (Put 或 Delete). 产出 `ThinWriteBatch` 与每个**时间序** item 对应的 `effects`
 /// 下标 (`None` = 被丢掉的中间 op → ack false).
 pub(super) fn plan_reverse_dedup(items: Vec<PlannedOp>) -> (ThinWriteBatch, Vec<Option<usize>>) {
+    if items.len() <= 1 {
+        let mut tb = ThinWriteBatch::new();
+        let indices = if let Some(item) = items.into_iter().next() {
+            match item {
+                PlannedOp::Put { key, value } => tb.put(key, value),
+                PlannedOp::Delete { key } => tb.delete(key),
+            }
+            vec![Some(0)]
+        } else {
+            Vec::new()
+        };
+        return (tb, indices);
+    }
+
     let mut tb = ThinWriteBatch::new();
     let mut indices_rev = Vec::with_capacity(items.len());
     let mut seen: HashSet<Vec<u8>> = HashSet::new();
