@@ -34,6 +34,7 @@ async fn test_info_threads_and_storage_recovery_fields() {
             read_timeout: None,
             idle_timeout: None,
             max_clients: 0,
+            script_worker_threads: 2,
         },
         storage,
         0,

@@ -3,7 +3,10 @@ use bytes::Bytes;
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::helpers::{assert_err_contains, assert_int, assert_nil, b, router, router_with_shared};
+use super::helpers::{
+    assert_err_contains, assert_int, assert_nil, b, router, router_with_script_workers,
+    router_with_shared,
+};
 use aikv::command::KeyLock;
 
 #[tokio::test]
@@ -94,6 +97,41 @@ async fn test_script_timeout() {
         .await
         .unwrap_err();
     assert_err_contains(err, "Script timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_same_key_incr_serialized_on_one_script_thread() {
+    let r = Arc::new(router_with_script_workers(1));
+    let script = "return redis.call('INCR', KEYS[1])";
+    let first = {
+        let r = Arc::clone(&r);
+        tokio::spawn(async move {
+            r.execute("EVAL", &[b(script), b("1"), b("k")], &mut 0)
+                .await
+                .unwrap()
+        })
+    };
+    let second = {
+        let r = Arc::clone(&r);
+        tokio::spawn(async move {
+            r.execute("EVAL", &[b(script), b("1"), b("k")], &mut 0)
+                .await
+                .unwrap()
+        })
+    };
+    let mut values = vec![
+        integer_of(first.await.unwrap()),
+        integer_of(second.await.unwrap()),
+    ];
+    values.sort();
+    assert_eq!(values, vec![1, 2]);
+}
+
+fn integer_of(resp: RespValue) -> i64 {
+    match resp {
+        RespValue::Integer(n) => n,
+        other => panic!("expected integer, got {other:?}"),
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

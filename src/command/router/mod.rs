@@ -108,6 +108,15 @@ impl CommandRouter {
         self
     }
 
+    pub fn with_script_worker_threads(mut self, threads: usize) -> Self {
+        self.script = script::ScriptCommands::with_worker_threads(
+            Arc::clone(&self.storage),
+            Arc::clone(&self.key_lock),
+            threads,
+        );
+        self
+    }
+
     pub fn new_with_shared(storage: Arc<dyn KvStorage>, shared: Arc<ServerSharedState>) -> Self {
         let key_lock = Arc::new(KeyLock::new(KEY_LOCK_BUCKETS));
         Self {
@@ -135,6 +144,7 @@ impl CommandRouter {
                 storage.clone(),
                 key_lock.clone(),
                 shared.metrics.clone(),
+                shared.connection_config.script_worker_threads,
             ),
             database: database::DatabaseCommands::new(storage.clone()),
             key_cmds: key::KeyCommands::new(storage.clone(), key_lock.clone()),

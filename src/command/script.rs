@@ -80,6 +80,7 @@ struct ScriptPerfSampler {
     total_prepare_us: AtomicU64,
     total_raft_us: AtomicU64,
     total_overall_us: AtomicU64,
+    total_lock_hold_us: AtomicU64,
 }
 
 impl ScriptPerfSampler {
@@ -91,16 +92,27 @@ impl ScriptPerfSampler {
             total_prepare_us: AtomicU64::new(0),
             total_raft_us: AtomicU64::new(0),
             total_overall_us: AtomicU64::new(0),
+            total_lock_hold_us: AtomicU64::new(0),
         }
     }
 
-    fn record(&self, lock_us: u64, lua_us: u64, prep_us: u64, raft_us: u64, overall_us: u64) {
+    fn record(
+        &self,
+        lock_us: u64,
+        lua_us: u64,
+        prep_us: u64,
+        raft_us: u64,
+        overall_us: u64,
+        lock_hold_us: u64,
+    ) {
         self.total_lock_us.fetch_add(lock_us, Ordering::Relaxed);
         self.total_lua_us.fetch_add(lua_us, Ordering::Relaxed);
         self.total_prepare_us.fetch_add(prep_us, Ordering::Relaxed);
         self.total_raft_us.fetch_add(raft_us, Ordering::Relaxed);
         self.total_overall_us
             .fetch_add(overall_us, Ordering::Relaxed);
+        self.total_lock_hold_us
+            .fetch_add(lock_hold_us, Ordering::Relaxed);
         let n = self.samples.fetch_add(1, Ordering::Relaxed) + 1;
         if n.is_multiple_of(1000) {
             let lock_avg = self.total_lock_us.load(Ordering::Relaxed) / n;
@@ -108,10 +120,11 @@ impl ScriptPerfSampler {
             let prep_avg = self.total_prepare_us.load(Ordering::Relaxed) / n;
             let raft_avg = self.total_raft_us.load(Ordering::Relaxed) / n;
             let overall_avg = self.total_overall_us.load(Ordering::Relaxed) / n;
+            let hold_avg = self.total_lock_hold_us.load(Ordering::Relaxed) / n;
             tracing::info!(
                 target: "perf",
-                "[SCRIPT_PERF] samples={} avg_lock_us={} avg_lua_us={} avg_prepare_us={} avg_raft_us={} avg_overall_us={}",
-                n, lock_avg, lua_avg, prep_avg, raft_avg, overall_avg
+                "[SCRIPT_PERF] samples={} avg_lock_us={} avg_lua_us={} avg_prepare_us={} avg_raft_us={} avg_overall_us={} avg_lock_hold_us={}",
+                n, lock_avg, lua_avg, prep_avg, raft_avg, overall_avg, hold_avg
             );
         }
     }
@@ -228,6 +241,7 @@ pub struct ScriptCommands {
     metrics: Option<Arc<ServerMetrics>>,
     vm_pool: parking_lot::Mutex<Vec<mlua::Lua>>,
     in_flight: Arc<InFlightBuffer>,
+    pool: pool::ScriptWorkerPool,
 }
 
 impl ScriptCommands {
@@ -237,6 +251,18 @@ impl ScriptCommands {
     }
 
     pub fn new(storage: Arc<dyn KvStorage>, key_lock: Arc<KeyLock>) -> Self {
+        Self::with_worker_threads(
+            storage,
+            key_lock,
+            crate::config::settings::default_script_worker_threads(),
+        )
+    }
+
+    pub fn with_worker_threads(
+        storage: Arc<dyn KvStorage>,
+        key_lock: Arc<KeyLock>,
+        threads: usize,
+    ) -> Self {
         Self {
             storage,
             key_lock,
@@ -246,6 +272,7 @@ impl ScriptCommands {
             metrics: None,
             vm_pool: parking_lot::Mutex::new(Vec::new()),
             in_flight: Arc::new(InFlightBuffer::new()),
+            pool: pool::ScriptWorkerPool::new(threads),
         }
     }
 
@@ -253,17 +280,11 @@ impl ScriptCommands {
         storage: Arc<dyn KvStorage>,
         key_lock: Arc<KeyLock>,
         metrics: Arc<ServerMetrics>,
+        threads: usize,
     ) -> Self {
-        Self {
-            storage,
-            key_lock,
-            cache: ScriptCache::default(),
-            script_timeout: DEFAULT_SCRIPT_TIMEOUT,
-            script_memory_limit: DEFAULT_MEMORY_LIMIT,
-            metrics: Some(metrics),
-            vm_pool: parking_lot::Mutex::new(Vec::new()),
-            in_flight: Arc::new(InFlightBuffer::new()),
-        }
+        let mut commands = Self::with_worker_threads(storage, key_lock, threads);
+        commands.metrics = Some(metrics);
+        commands
     }
 
     fn acquire_vm(&self) -> Result<mlua::Lua> {
@@ -395,10 +416,10 @@ impl ScriptCommands {
             .await?;
         self.release_vm(drive.lua);
         let body = drive.result?;
-        let t_done = self
+        let (commit_done, unlocked) = self
             .finish_pending_commit(body.pending, db, seg_id, slot_idx, _guard)
             .await?;
-        let t_done = t_done.unwrap_or(body.t_local_done);
+        let t_done = commit_done.unwrap_or(body.t_local_done);
 
         PERF_SAMPLER.record(
             t_locked.duration_since(t_start).as_micros() as u64,
@@ -406,6 +427,7 @@ impl ScriptCommands {
             body.t_prep_done.duration_since(body.t_lua_done).as_micros() as u64,
             t_done.duration_since(body.t_prep_done).as_micros() as u64,
             t_done.duration_since(t_start).as_micros() as u64,
+            unlocked.duration_since(t_locked).as_micros() as u64,
         );
         lua_to_resp(body.value)
     }
@@ -436,9 +458,9 @@ impl ScriptCommands {
             slot_idx,
         };
         if !drive::script_runs_off_worker() {
-            return Ok(job.run().await);
+            return Ok(job.run());
         }
-        drive::run_on_blocking_thread(job).await
+        self.pool.run(move || job.run()).await
     }
 
     async fn finish_pending_commit<G>(
@@ -448,29 +470,38 @@ impl ScriptCommands {
         seg_id: usize,
         slot_idx: usize,
         guard: G,
-    ) -> Result<Option<Instant>> {
+    ) -> Result<(Option<Instant>, Instant)> {
         let Some(batch_ops) = pending else {
             drop(guard);
-            return Ok(None);
+            return Ok((None, Instant::now()));
         };
         if batch_ops.is_empty() {
             SEG_TRACKER.on_enqueued(slot_idx);
             drop(guard);
+            let unlocked = Instant::now();
             SEG_TRACKER.on_committed(seg_id, slot_idx);
-            return Ok(Some(Instant::now()));
+            return Ok((Some(unlocked), unlocked));
         }
-        let (seq, encoded) = self.in_flight.insert_batch(db, &batch_ops);
-        let handle = self.storage.enqueue_batch(db, batch_ops).await?;
+        let inserted = self.in_flight.insert_batch(db, &batch_ops);
+        let handle = match self.storage.enqueue_batch(db, batch_ops).await {
+            Ok(handle) => handle,
+            Err(err) => {
+                drive::rollback_inserted(&self.in_flight, Some(inserted));
+                drop(guard);
+                return Err(err);
+            }
+        };
         SEG_TRACKER.on_enqueued(slot_idx);
         drop(guard);
+        let unlocked = Instant::now();
         let write_res = handle.wait().await;
-        self.in_flight.remove_encoded(&encoded, seq);
+        self.in_flight.remove_encoded(&inserted.1, inserted.0);
         SEG_TRACKER.on_committed(seg_id, slot_idx);
         write_res?;
-        Ok(Some(Instant::now()))
+        Ok((Some(Instant::now()), unlocked))
     }
 
-    async fn eval_lua_func(
+    fn eval_lua_func(
         lua: &mlua::Lua,
         timeout: Duration,
         args: &ScriptArgs<'_>,

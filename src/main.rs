@@ -610,6 +610,7 @@ async fn main() {
     let tcp_port = settings.bind.port();
     let connection_config = ConnectionConfig {
         max_clients: settings.max_clients,
+        script_worker_threads: settings.script_worker_threads,
         ..Default::default()
     };
     let state = ServerSharedState::new_with_backup_dir(

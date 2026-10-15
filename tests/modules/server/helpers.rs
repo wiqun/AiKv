@@ -17,6 +17,7 @@ pub async fn start_server() -> (std::net::SocketAddr, tokio::task::JoinHandle<()
             read_timeout: None,
             idle_timeout: None,
             max_clients: 0,
+            script_worker_threads: 2,
         },
         storage,
         0,

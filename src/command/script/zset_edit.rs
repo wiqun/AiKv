@@ -320,13 +320,12 @@ mod tests {
         inflight.insert_batch(0, &ops);
         let txn = ScriptTransaction::with_in_flight(0, Some(Arc::new(inflight)));
         let (removed_visible, added_visible) = txn
-            .with_zset(storage.as_ref(), b"z", |zset| {
+            .with_zset(storage.script_io(), b"z", |zset| {
                 Ok((
                     zset.contains_key(b"m00".as_ref()),
                     zset.get(b"m99".as_ref()).copied() == Some(7.0),
                 ))
             })
-            .await
             .unwrap()
             .unwrap();
         assert!(

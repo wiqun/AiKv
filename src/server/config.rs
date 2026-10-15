@@ -24,6 +24,8 @@ pub struct ConnectionConfig {
     pub idle_timeout: Option<std::time::Duration>,
     /// 最大并发连接数; 0 表示不限制.
     pub max_clients: usize,
+    /// `EVAL` / `EVALSHA` 专用线程数.
+    pub script_worker_threads: usize,
 }
 
 impl Default for ConnectionConfig {
@@ -32,6 +34,7 @@ impl Default for ConnectionConfig {
             read_timeout: Some(std::time::Duration::from_secs(60)),
             idle_timeout: Some(std::time::Duration::from_secs(300)),
             max_clients: 10_000,
+            script_worker_threads: crate::config::settings::default_script_worker_threads(),
         }
     }
 }

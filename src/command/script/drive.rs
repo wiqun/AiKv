@@ -43,7 +43,7 @@ pub(super) struct ScriptJob {
 }
 
 impl ScriptJob {
-    pub(super) async fn run(self) -> ScriptDrive {
+    pub(super) fn run(self) -> ScriptDrive {
         drive_script_body(
             self.lua,
             self.storage,
@@ -58,18 +58,7 @@ impl ScriptJob {
             self.seg_id,
             self.slot_idx,
         )
-        .await
     }
-}
-
-pub(super) async fn run_on_blocking_thread(job: ScriptJob) -> Result<ScriptDrive> {
-    let handle = tokio::runtime::Handle::current();
-    tokio::task::spawn_blocking(move || {
-        let _direct = crate::storage::direct::DirectStorageIo::enter();
-        handle.block_on(job.run())
-    })
-    .await
-    .map_err(|err| Error::Command(format!("ERR script thread failed: {err}")))
 }
 
 pub(super) fn script_runs_off_worker() -> bool {
@@ -77,7 +66,7 @@ pub(super) fn script_runs_off_worker() -> bool {
         .is_ok_and(|handle| handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
 }
 
-async fn drive_script_body(
+fn drive_script_body(
     lua: mlua::Lua,
     storage: Arc<dyn KvStorage>,
     in_flight: Arc<InFlightBuffer>,
@@ -93,15 +82,13 @@ async fn drive_script_body(
 ) -> ScriptDrive {
     let prepared = prepare_script(
         &lua, &storage, &in_flight, timeout, db, &sha1, &script, &keys, &argv,
-    )
-    .await;
+    );
     let (value, t_lua_done, t_prep_done, batch_ops) = match prepared {
         Ok(parts) => parts,
         Err(err) => return failed_drive(lua, err),
     };
     let pending = if local_commit {
-        if let Err(err) =
-            commit_local_batch(&storage, &in_flight, db, batch_ops, seg_id, slot_idx).await
+        if let Err(err) = commit_local_batch(&storage, &in_flight, db, batch_ops, seg_id, slot_idx)
         {
             return failed_drive(lua, err);
         }
@@ -121,7 +108,7 @@ async fn drive_script_body(
     }
 }
 
-async fn prepare_script(
+fn prepare_script(
     lua: &mlua::Lua,
     storage: &Arc<dyn KvStorage>,
     in_flight: &Arc<InFlightBuffer>,
@@ -140,7 +127,7 @@ async fn prepare_script(
         keys,
         argv,
     };
-    let (value, txn) = ScriptCommands::eval_lua_func(lua, timeout, &args, txn, declared).await?;
+    let (value, txn) = ScriptCommands::eval_lua_func(lua, timeout, &args, txn, declared)?;
     let t_lua_done = Instant::now();
     let batch_ops = txn.prepare_batch_ops_owned(storage.script_io())?;
     Ok((value, t_lua_done, Instant::now(), batch_ops))
@@ -153,7 +140,7 @@ fn failed_drive(lua: mlua::Lua, err: Error) -> ScriptDrive {
     }
 }
 
-async fn commit_local_batch(
+fn commit_local_batch(
     storage: &Arc<dyn KvStorage>,
     in_flight: &InFlightBuffer,
     db: usize,
@@ -167,10 +154,35 @@ async fn commit_local_batch(
         return Ok(());
     }
     let (seq, encoded) = in_flight.insert_batch(db, &batch_ops);
-    let handle = storage.enqueue_batch(db, batch_ops).await?;
-    SEG_TRACKER.on_enqueued(slot_idx);
-    let write_res = handle.wait().await;
+    if let Err(err) = storage.script_io().write_batch(db, batch_ops) {
+        rollback_inserted(in_flight, Some((seq, encoded)));
+        return Err(err);
+    }
     in_flight.remove_encoded(&encoded, seq);
+    SEG_TRACKER.on_enqueued(slot_idx);
     SEG_TRACKER.on_committed(seg_id, slot_idx);
-    write_res
+    Ok(())
+}
+
+pub(super) fn rollback_inserted(in_flight: &InFlightBuffer, inserted: Option<(u64, Vec<Vec<u8>>)>) {
+    if let Some((seq, keys)) = inserted {
+        in_flight.remove_encoded(&keys, seq);
+    }
+}
+
+#[cfg(test)]
+mod rollback_tests {
+    use super::rollback_inserted;
+    use crate::command::script::in_flight::InFlightBuffer;
+    use crate::storage::WriteOp;
+
+    #[test]
+    fn rollback_inserted_removes_only_that_batch() {
+        let buffer = InFlightBuffer::new();
+        let ops = vec![(b"k".to_vec(), WriteOp::Put(b"v".to_vec()))];
+        let (seq, keys) = buffer.insert_batch(0, &ops);
+        assert!(buffer.get(0, b"k").is_some());
+        rollback_inserted(&buffer, Some((seq, keys)));
+        assert!(buffer.get(0, b"k").is_none());
+    }
 }
