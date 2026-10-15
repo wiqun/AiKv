@@ -54,6 +54,11 @@ impl Settings {
                 self.server.max_clients = Some(n);
             }
         }
+        if let Some(v) = nonempty(&map, "AIKV_SCRIPT_WORKER_THREADS") {
+            if let Ok(n) = v.parse::<usize>() {
+                self.server.script_worker_threads = Some(n);
+            }
+        }
 
         if let Some(v) = nonempty(&map, "AIKV_ENGINE") {
             if let Some(kind) = parse_engine_kind(v) {
@@ -230,6 +235,16 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn merge_env_script_worker_threads() {
+        let mut settings = Settings::default();
+        let vars = HashMap::from([("AIKV_SCRIPT_WORKER_THREADS".to_string(), "3".to_string())]);
+        settings.merge_env(vars);
+        let mut warnings = Vec::new();
+        let resolved = settings.into_resolved(&mut warnings).expect("resolve");
+        assert_eq!(resolved.script_worker_threads, 3);
+    }
+
     fn merge_env_bind_overrides() {
         let mut settings = Settings::default();
         let vars = HashMap::from([("AIKV_BIND".to_string(), "192.168.1.1:6380".to_string())]);

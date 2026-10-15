@@ -29,6 +29,8 @@ pub struct Settings {
 pub struct ServerSettings {
     pub bind: Option<SocketAddr>,
     pub max_clients: Option<usize>,
+    /// `EVAL` / `EVALSHA` 专用线程数. `None` 表示用默认夹取.
+    pub script_worker_threads: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -82,6 +84,7 @@ pub struct ClusterSettings {
 pub struct ResolvedSettings {
     pub bind: SocketAddr,
     pub max_clients: usize,
+    pub script_worker_threads: usize,
     pub engine: EngineKind,
     pub data_dir: Option<PathBuf>,
     pub sync_wal: bool,
@@ -219,6 +222,15 @@ impl Serialize for AnnounceMode {
 
 const DEFAULT_BIND: &str = "127.0.0.1:6379";
 const DEFAULT_MAX_CLIENTS: usize = 10000;
+const SCRIPT_WORKER_THREADS_FALLBACK: usize = 8;
+
+/// 未配置 `script_worker_threads` 时的线程数: 机器并行度夹到 2..=16, 探测失败为 8.
+pub fn default_script_worker_threads() -> usize {
+    match std::thread::available_parallelism() {
+        Ok(n) => n.get().clamp(2, 16),
+        Err(_) => SCRIPT_WORKER_THREADS_FALLBACK,
+    }
+}
 const DEFAULT_METRICS_ADDR: &str = "127.0.0.1";
 const DEFAULT_METRICS_PORT: u16 = 9191;
 const DEFAULT_METRICS_EXPORT_INTERVAL_SECS: u64 = 15;
@@ -267,6 +279,9 @@ impl Settings {
         }
         if let Some(v) = other.max_clients {
             self.server.max_clients = Some(v);
+        }
+        if let Some(v) = other.script_worker_threads {
+            self.server.script_worker_threads = Some(v);
         }
     }
 
@@ -385,6 +400,17 @@ impl Settings {
             .bind
             .unwrap_or_else(|| DEFAULT_BIND.parse().expect("valid default bind"));
         let max_clients = self.server.max_clients.unwrap_or(DEFAULT_MAX_CLIENTS);
+        let script_worker_threads = match self.server.script_worker_threads {
+            None => default_script_worker_threads(),
+            Some(0) => {
+                return Err(ConfigError::Field {
+                    layer: "server",
+                    field: "script_worker_threads",
+                    message: "must be >= 1".to_string(),
+                });
+            }
+            Some(n) => n,
+        };
         let engine = self.engine.kind.unwrap_or(EngineKind::Memory);
         if engine == EngineKind::Memory {
             warnings.push(ConfigWarning::MemoryEngineProductionHint);
@@ -440,6 +466,7 @@ impl Settings {
         Ok(ResolvedSettings {
             bind,
             max_clients,
+            script_worker_threads,
             engine,
             data_dir,
             sync_wal,
@@ -609,6 +636,7 @@ struct ResolvedSettingsToml<'a> {
 struct ResolvedServerToml<'a> {
     bind: &'a SocketAddr,
     max_clients: usize,
+    script_worker_threads: usize,
 }
 
 #[derive(Serialize)]
@@ -628,6 +656,7 @@ pub fn print_resolved_config(settings: &ResolvedSettings) -> Result<String, toml
         server: ResolvedServerToml {
             bind: &settings.bind,
             max_clients: settings.max_clients,
+            script_worker_threads: settings.script_worker_threads,
         },
         engine: ResolvedEngineToml {
             kind: settings.engine,
@@ -677,5 +706,34 @@ mod tests {
         {
             assert!(s.cluster.is_none());
         }
+    }
+
+    fn resolve(settings: Settings) -> ResolvedSettings {
+        let mut warnings = Vec::new();
+        settings.into_resolved(&mut warnings).expect("resolve")
+    }
+
+    #[test]
+    fn script_worker_threads_default_is_clamped() {
+        let n = resolve(Settings::default()).script_worker_threads;
+        assert_eq!(n, default_script_worker_threads());
+        assert!((2..=16).contains(&n));
+    }
+
+    #[test]
+    fn script_worker_threads_explicit_four() {
+        let mut settings = Settings::default();
+        settings.server.script_worker_threads = Some(4);
+        assert_eq!(resolve(settings).script_worker_threads, 4);
+    }
+
+    #[test]
+    fn script_worker_threads_zero_is_rejected() {
+        let mut settings = Settings::default();
+        settings.server.script_worker_threads = Some(0);
+        let mut warnings = Vec::new();
+        let err = settings.into_resolved(&mut warnings).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("script_worker_threads"), "{text}");
     }
 }

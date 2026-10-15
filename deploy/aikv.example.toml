@@ -6,6 +6,8 @@
 # 未认证 RESP 默认仅监听 loopback; 跨信任边界需使用 proxy/firewall/service mesh.
 bind = "127.0.0.1:6379"
 max_clients = 10000
+# EVAL / EVALSHA 专用线程数. 省略时取机器并行度, 夹到 2..=16; 探测失败为 8.
+# script_worker_threads = 8
 
 [engine]
 kind = "aidb"
