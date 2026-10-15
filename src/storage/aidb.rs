@@ -194,6 +194,24 @@ impl StorageAdapter for AiDbEngine {
         .await
     }
 
+    async fn last_in_range(
+        &self,
+        start: Vec<u8>,
+        end: Vec<u8>,
+    ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        self.blocking(move |db| {
+            let mut iter = db
+                .scan(Some(start.as_slice()), Some(end.as_slice()))
+                .map_err(|e| Error::Storage(e.to_string()))?;
+            iter.seek_to_last();
+            match (iter.key(), iter.value()) {
+                (Some(key), Some(value)) => Ok(Some((key.to_vec(), value.to_vec()))),
+                _ => Ok(None),
+            }
+        })
+        .await
+    }
+
     async fn len(&self) -> Result<usize> {
         Ok(self.estimate_entry_count().await? as usize)
     }

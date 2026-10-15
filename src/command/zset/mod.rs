@@ -7,9 +7,8 @@
 //! # 存储表示
 //!
 //! ```text
-//! ValueType::ZSet(BTreeMap<Vec<u8>, f64>)
-//!   member → score (f64); BTreeMap 按 member 字节序排列
-//!   经 get_typed / set_typed 整体读写; 无独立 score 索引
+//! 小集合: ValueType::ZSet(BTreeMap<Vec<u8>, f64>), 整包读写
+//! 大集合: CollectionHeader + member subkey + score 索引 subkey
 //! ```
 //!
 //! # 关键点
@@ -39,9 +38,10 @@ use crate::protocol::RespValue;
 use crate::server::config::TransactionGate;
 use crate::server::ServerMetrics;
 use crate::storage::memory::glob_match;
-use crate::storage::{KvStorage, StoredValue, ValueType};
+use crate::storage::KvStorage;
 
 pub(crate) mod helpers;
+mod persist;
 
 use self::helpers::{
     aggregate_score, apply_limit, array_of_bulk, bytes_to_str, eq_ignore_case, format_score,
@@ -92,18 +92,11 @@ impl ZSetCommands {
         }
         let key = &args[0];
         let _lock = self.key_lock.lock(key).await;
-        let mut stored = self.load_or_create_zset(db, key).await?;
-        let zset = stored.as_zset_mut()?;
-        let mut count = 0i64;
+        let mut pairs = Vec::with_capacity(args[1..].len() / 2);
         for chunk in args[1..].chunks(2) {
-            let score = parse_score(&chunk[0])?;
-            let member = chunk[1].to_vec();
-            if !zset.contains_key(&member) {
-                count += 1;
-            }
-            zset.insert(member, score);
+            pairs.push((parse_score(&chunk[0])?, chunk[1].to_vec()));
         }
-        self.storage.rewrite_stored(db, key, stored).await?;
+        let count = persist::add_members(self.storage.as_ref(), db, key, &pairs).await?;
         BlockingRegistry::global().notify(key, RespValue::SimpleString("OK".into()));
         Ok(router::integer(count))
     }
@@ -112,21 +105,8 @@ impl ZSetCommands {
         router::require_min_args("ZREM", args, 2)?;
         let key = &args[0];
         let _lock = self.key_lock.lock(key).await;
-        let Some(mut stored) = self.storage.get_typed(db, key).await? else {
-            return Ok(router::integer(0));
-        };
-        let zset = stored.as_zset_mut()?;
-        let mut count = 0i64;
-        for member in &args[1..] {
-            if zset.remove(member.as_ref()).is_some() {
-                count += 1;
-            }
-        }
-        if zset.is_empty() {
-            self.storage.delete(db, key).await?;
-        } else {
-            self.storage.rewrite_stored(db, key, stored).await?;
-        }
+        let members: Vec<Vec<u8>> = args[1..].iter().map(|member| member.to_vec()).collect();
+        let count = persist::remove_members(self.storage.as_ref(), db, key, &members).await?;
         Ok(router::integer(count))
     }
 
@@ -273,8 +253,13 @@ impl ZSetCommands {
 
     pub async fn zcard(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_args("ZCARD", args, 1)?;
-        let zset = self.load_zset(db, &args[0]).await?;
-        Ok(router::integer(zset.map(|z| z.len() as i64).unwrap_or(0)))
+        let Some(stored) = self.storage.get_typed(db, &args[0]).await? else {
+            return Ok(router::integer(0));
+        };
+        if let Some(count) = persist::header_count(&stored.value) {
+            return Ok(router::integer(count as i64));
+        }
+        Ok(router::integer(stored.as_zset()?.len() as i64))
     }
 
     pub async fn zcount(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
@@ -298,11 +283,9 @@ impl ZSetCommands {
         let member = args[2].to_vec();
         let key = &args[0];
         let _lock = self.key_lock.lock(key).await;
-        let mut stored = self.load_or_create_zset(db, key).await?;
-        let zset = stored.as_zset_mut()?;
-        let new_score = zset.get(&member).copied().unwrap_or(0.0) + increment;
-        zset.insert(member, new_score);
-        self.storage.rewrite_stored(db, key, stored).await?;
+        let current = persist::member_score(self.storage.as_ref(), db, key, &member).await?;
+        let new_score = current.unwrap_or(0.0) + increment;
+        persist::add_members(self.storage.as_ref(), db, key, &[(new_score, member)]).await?;
         Ok(router::bulk(format_score(new_score).into_bytes()))
     }
 
@@ -355,9 +338,13 @@ impl ZSetCommands {
         max: bool,
     ) -> Result<RespValue> {
         let _lock = self.key_lock.lock(key).await;
-        let Some(mut stored) = self.storage.get_typed(db, key).await? else {
+        let Some(stored) = self.storage.get_typed(db, key).await? else {
             return Ok(RespValue::Array(Some(vec![])));
         };
+        if persist::header_count(&stored.value).is_some() {
+            return self.pop_header(db, key, count, max).await;
+        }
+        let mut stored = stored;
         let zset = stored.as_zset_mut()?;
         let sorted = sorted_by_score(zset, max);
         let n = count.min(sorted.len());
@@ -449,21 +436,31 @@ impl ZSetCommands {
         Ok(router::integer(count))
     }
 
-    async fn load_zset(&self, db: usize, key: &[u8]) -> Result<Option<BTreeMap<Vec<u8>, f64>>> {
-        let Some(stored) = self.storage.get_typed(db, key).await? else {
-            return Ok(None);
+    async fn pop_header(
+        &self,
+        db: usize,
+        key: &Bytes,
+        count: usize,
+        max: bool,
+    ) -> Result<RespValue> {
+        let Some(zset) = persist::load_map(self.storage.as_ref(), db, key).await? else {
+            return Ok(RespValue::Array(Some(vec![])));
         };
-        Ok(Some(stored.as_zset()?.clone()))
+        let sorted = sorted_by_score(&zset, max);
+        let n = count.min(sorted.len());
+        let mut items = Vec::with_capacity(n * 2);
+        let mut victims = Vec::with_capacity(n);
+        for (member, score) in sorted.into_iter().take(n) {
+            items.push(router::bulk(member.clone()));
+            items.push(router::bulk(format_score(score).into_bytes()));
+            victims.push(member);
+        }
+        persist::remove_members(self.storage.as_ref(), db, key, &victims).await?;
+        Ok(RespValue::Array(Some(items)))
     }
 
-    async fn load_or_create_zset(&self, db: usize, key: &[u8]) -> Result<StoredValue> {
-        match self.storage.get_typed(db, key).await? {
-            None => Ok(StoredValue::new_zset(BTreeMap::new())),
-            Some(stored) => match stored.value {
-                ValueType::ZSet(_) => Ok(stored),
-                _ => Err(router::wrongtype()),
-            },
-        }
+    async fn load_zset(&self, db: usize, key: &[u8]) -> Result<Option<BTreeMap<Vec<u8>, f64>>> {
+        persist::load_map(self.storage.as_ref(), db, key).await
     }
 
     pub async fn zinter(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {

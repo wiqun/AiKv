@@ -15,6 +15,7 @@ pub mod ttl_filter;
 pub mod types;
 pub mod watch_registry;
 pub mod watch_version;
+pub mod zset_subkey;
 
 pub use adapter::{AdapterWriteOp, KvStorageAdapter, StorageAdapter};
 pub use aidb::AiDbEngine;

@@ -62,6 +62,10 @@ pub enum WriteOp {
     Put(Vec<u8>),
     PutStored(StoredValue),
     Delete,
+    /// 配对 key 已是 engine key, 值为原始字节, 不再套 `StoredValue`.
+    PutEngine { value: Vec<u8> },
+    /// 配对 key 已是 engine key.
+    DeleteEngine,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -85,6 +89,7 @@ pub enum ValueType {
 pub enum CollectionKind {
     Hash = 1,
     Set = 2,
+    ZSet = 3,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -119,6 +124,7 @@ impl StoredValue {
             ValueType::CollectionHeader { kind, .. } => match kind {
                 CollectionKind::Hash => "hash",
                 CollectionKind::Set => "set",
+                CollectionKind::ZSet => "zset",
             },
         }
     }
@@ -402,6 +408,11 @@ pub trait KvStorage: Send + Sync {
 
     /// 绕过 StoredValue 编解码, 直接删除 subkey.
     async fn raw_subkey_delete(&self, _db: usize, _encoded_key: Vec<u8>) -> Result<bool> {
+        Err(Error::Storage("raw subkey access not supported".into()))
+    }
+
+    /// 前缀下字典序最大的原始 KV. 大 ZSET 的 `ZREVRANGE 0 0` 用它读最高分.
+    async fn raw_prefix_last(&self, _prefix: Vec<u8>) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
         Err(Error::Storage("raw subkey access not supported".into()))
     }
 

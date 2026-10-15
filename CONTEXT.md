@@ -24,6 +24,8 @@
 
 **ValueType**: Redis 数据类型的枚举 (String, List, Set, ZSet, Hash 等).
 
+**大 ZSet**: 成员数不超过 64 时仍是一整块 `ValueType::ZSet`. 超过后用户 key 只留 `CollectionHeader`, 每个 member 和按 score 排序的索引各写一条 subkey. 一次 `ZADD` 提交变动的 member, 旧 score 索引, 新 score 索引和 header 计数. 脚本范围读取先叠加上一笔尚未提交的 member subkey: 在途删除不再出现, 在途写入可见, 当前脚本自己的增量盖过这层. `MemoryEngine` 不拆 subkey.
+
 **ExpiresCounters**: 各逻辑 DB 的进程内 TTL 写入计数. 成功写入 `expires_at = Some` 时加 1, 包括没有读过旧值的覆盖写. 这次调用已经看到旧 TTL, 或惰性过期删掉带 TTL 的值时饱和减. compaction 不改它. 重启从 0 开始, 不扫库补存量.
 
 **estimate_entry_count**: 引擎条目估值, 等于已打开 SSTable 的 `num_entries` 与 MemTable `entry_count` 之和. 集群实现把本地各 group 的估值相加, 不扫描. `MemoryEngine` 没有 SST, 估值是全部逻辑 DB 上未过期用户 key 之和.

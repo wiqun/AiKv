@@ -25,6 +25,7 @@
 
 ### Performance
 
+- 成员数超过 64 的 ZSet 拆成 header, member subkey 和 score 索引, 不再整包重写. 脚本范围读取叠加上一笔尚未提交的 member 变更. 大 ZSet 的 `ZSCORE` 按 member 点查.
 - SET/DEL 热路径: 仅当本节点有 WATCH 时才写 watch meta, 并与用户写同一次 Raft propose; meta 使用相同 hash tag 同 slot (`#83`).
 
 ### Fixed

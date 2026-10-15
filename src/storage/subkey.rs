@@ -13,6 +13,10 @@
 //!
 //! Set member subkey: {encoded_user_key}\x01S{member_len:2B}{member}
 //!                     值: 空 (仅 key 存在性表示 member)
+//!
+//! ZSet member subkey: {encoded_user_key}\x01Z{member_len:2B}{member}
+//!                     值: score 的 f64 小端字节
+//! ZSet score index:   {encoded_user_key}\x01Y{sortable_score:8B}{member}
 //! ```
 //!
 //! `\x01` 用于分隔 user key 和 subkey 部分.
@@ -109,7 +113,7 @@ pub fn extract_user_key_from_subkey(encoded_key: &[u8]) -> Option<Vec<u8>> {
     }
     let tag = encoded_key[sep_pos + 1];
     match tag {
-        HASH_TAG | SET_TAG => Some(encoded_key[..sep_pos].to_vec()),
+        HASH_TAG | SET_TAG | b'Z' | b'Y' => Some(encoded_key[..sep_pos].to_vec()),
         _ => None,
     }
 }

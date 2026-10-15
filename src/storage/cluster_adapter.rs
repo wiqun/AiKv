@@ -223,11 +223,12 @@ impl ClusterDataAdapter {
         }
     }
 
-    /// 剥离子键后缀 (`\x01H{...}` 或 `\x01S{...}`), 返回路由用的纯 user_key.
+    /// 剥离子键后缀 (`\x01H|S|Z|Y...`), 返回路由用的纯 user_key.
     /// Subkey 的 slot 必须与父 key 一致, 否则集群模式下会路由到错误的 group.
     fn strip_subkey_suffix(user_key: &[u8]) -> &[u8] {
         if let Some(pos) = user_key.iter().position(|&b| b == 0x01) {
-            if pos + 1 < user_key.len() && (user_key[pos + 1] == b'H' || user_key[pos + 1] == b'S')
+            if pos + 1 < user_key.len()
+                && matches!(user_key[pos + 1], b'H' | b'S' | b'Z' | b'Y')
             {
                 return &user_key[..pos];
             }
@@ -578,22 +579,39 @@ impl StorageAdapter for ClusterDataAdapter {
     ) -> Result<()> {
         match CLUSTER_STATE_MGR.get() {
             Some(mgr) => {
+                let end = AiDbEngine::prefix_end(&prefix);
                 for gid in mgr.multi_raft.local_group_ids() {
                     let pairs = mgr
                         .multi_raft
-                        .scan_local_pairs(gid)
+                        .scan_local_pairs_in_range(gid, prefix.clone(), end.clone())
                         .await
                         .map_err(Self::map_err)?;
                     for (k, v) in pairs {
-                        if k.starts_with(&prefix) {
-                            f(k, v)?;
-                        }
+                        f(k, v)?;
                     }
                 }
                 Ok(())
             }
             None => self.local.for_each_prefix(prefix, f).await,
         }
+    }
+
+    async fn last_in_range(
+        &self,
+        start: Vec<u8>,
+        end: Vec<u8>,
+    ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        let Some(mgr) = CLUSTER_STATE_MGR.get().cloned() else {
+            return self.local.last_in_range(start, end).await;
+        };
+        if let Some((_, ReadRoute::Single(gid))) = Self::route_read(&start)? {
+            return mgr
+                .multi_raft
+                .last_local_user_pair(gid, start, end)
+                .await
+                .map_err(Self::map_err);
+        }
+        self.local.last_in_range(start, end).await
     }
 
     async fn delete_range(&self, start: Vec<u8>, end: Vec<u8>) -> Result<()> {

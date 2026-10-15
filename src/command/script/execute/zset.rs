@@ -21,6 +21,9 @@ pub(super) async fn exec_zadd(
         return Err(wrong_count("ZADD"));
     }
     let k = key(&args[0]);
+    if txn.uses_subkey_zset(storage, &k).await? {
+        return txn.subkey_zadd(storage, args).await;
+    }
     let mut added = 0i64;
     let zset = match txn.ensure_zset_mut(storage, &k).await? {
         Some(z) => z,
@@ -47,6 +50,9 @@ pub(super) async fn exec_zrem(
         return Err(wrong_count("ZREM"));
     }
     let k = key(&args[0]);
+    if txn.uses_subkey_zset(storage, &k).await? {
+        return txn.subkey_zrem(storage, args).await;
+    }
     let mut count = 0i64;
     let should_delete = if let Some(zset) = txn.ensure_zset_mut(storage, &k).await? {
         for m in &args[1..] {
@@ -72,8 +78,14 @@ pub(super) async fn exec_zscore(
     if args.len() != 2 {
         return Err(wrong_count("ZSCORE"));
     }
+    let key = key(&args[0]);
+    if txn.uses_subkey_zset(storage, &key).await? {
+        return Ok(score_bulk(
+            txn.point_member_score(storage, &key, &args[1]).await?,
+        ));
+    }
     let res = txn
-        .with_zset(storage, &args[0], |zset| {
+        .with_zset(storage, &key, |zset| {
             Ok(match zset.get(args[1].as_ref()) {
                 Some(s) => router::bulk(s.to_string().into_bytes()),
                 None => RespValue::Null,
@@ -81,6 +93,13 @@ pub(super) async fn exec_zscore(
         })
         .await?;
     Ok(res.unwrap_or(RespValue::Null))
+}
+
+fn score_bulk(score: Option<f64>) -> RespValue {
+    match score {
+        Some(score) => router::bulk(score.to_string().into_bytes()),
+        None => RespValue::Null,
+    }
 }
 
 pub(super) async fn exec_zrank(
@@ -117,6 +136,8 @@ use crate::command::zset::helpers::{
     bytes_to_str, eq_ignore_case, members_to_resp, normalize_range, parse_limit_args,
     parse_score_bound, score_in_range, sorted_by_score, ScoreBound,
 };
+use crate::storage::zset_subkey::{self, score_index_entry, score_prefix};
+use crate::storage::AiDbEngine;
 
 pub(super) async fn exec_zrange(
     storage: &dyn KvStorage,
@@ -149,6 +170,11 @@ async fn range_by_index(
     let start = parse_i64_arg(&args[1], "start")?;
     let stop = parse_i64_arg(&args[2], "stop")?;
     let with_scores = args.iter().any(|a| eq_ignore_case(a, b"WITHSCORES"));
+    if reverse && start == 0 && stop == 0 {
+        if let Some(resp) = revrange_top(storage, txn, &args[0], with_scores).await? {
+            return Ok(resp);
+        }
+    }
     let res = txn
         .with_zset(storage, &args[0], |zset| {
             let sorted = sorted_by_score(zset, reverse);
@@ -238,6 +264,51 @@ async fn range_by_score(
     Ok(res.unwrap_or_else(|| RespValue::Array(Some(Vec::new()))))
 }
 
+async fn revrange_top(
+    storage: &dyn KvStorage,
+    txn: &ScriptTransaction,
+    key: &[u8],
+    with_scores: bool,
+) -> Result<Option<RespValue>> {
+    if txn.zset_delta_count(key).is_some() {
+        return Ok(None);
+    }
+    let stored = txn.get_value(storage, key).await?;
+    if stored.as_ref().and_then(zset_subkey::is_zset_header).is_none() {
+        return Ok(None);
+    }
+    let encoded = AiDbEngine::encode_key(txn.db_index, key);
+    let prefix = score_prefix(&encoded);
+    let members = zset_subkey::member_prefix(&encoded);
+    if txn.in_flight.as_ref().is_some_and(|buf| {
+        buf.has_delete_with_prefix(&prefix) || buf.has_delete_with_prefix(&members)
+    }) {
+        return Ok(None);
+    }
+    let inflight = txn
+        .in_flight
+        .as_ref()
+        .and_then(|buf| buf.last_key_with_prefix(&prefix));
+    let stored_last = match storage.raw_prefix_last(prefix.clone()).await {
+        Ok(pair) => pair.map(|(engine_key, _)| engine_key),
+        Err(_) => return Ok(None),
+    };
+    let best = match (inflight, stored_last) {
+        (Some(left), Some(right)) if left > right => Some(left),
+        (Some(_), Some(right)) => Some(right),
+        (Some(left), None) => Some(left),
+        (None, Some(right)) => Some(right),
+        (None, None) => None,
+    };
+    let Some(best) = best else {
+        return Ok(Some(RespValue::Array(Some(Vec::new()))));
+    };
+    let Some((member, score)) = score_index_entry(&prefix, &best) else {
+        return Ok(None);
+    };
+    Ok(Some(members_to_resp(&[(member, score)], with_scores)))
+}
+
 fn filter_and_slice_zset(
     zset: &BTreeMap<Vec<u8>, f64>,
     min: &ScoreBound,
@@ -290,6 +361,13 @@ pub(super) async fn exec_zcard(
 ) -> Result<RespValue> {
     if args.len() != 1 {
         return Err(wrong_count("ZCARD"));
+    }
+    if let Some(count) = txn.zset_delta_count(&args[0]) {
+        return Ok(router::integer(count as i64));
+    }
+    let stored = txn.get_value(storage, &args[0]).await?;
+    if let Some(count) = stored.as_ref().and_then(crate::storage::zset_subkey::is_zset_header) {
+        return Ok(router::integer(count as i64));
     }
     let len = txn
         .with_zset(storage, &args[0], |zset| Ok(zset.len() as i64))

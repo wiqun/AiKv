@@ -112,4 +112,5 @@ pub struct StoredValue {
 - **Hash**:
   - 元数据: `{db}:{key}` -> `StoredValue { type: Hash, data: field_count }`
   - 字段数据: `{db}:{key}\x00f\x00{field}` -> `StoredValue { type: String, data: field_val }`
-- **List / Set / ZSet**: 类似 Hash, 使用专有子前缀分隔符进行编码.
+- **List / Set**: 类似 Hash, 使用专有子前缀分隔符进行编码.
+- **ZSet**: 成员数不超过 64 时仍是整包 `ValueType::ZSet`. 超过后用户 key 只留 `CollectionHeader`, member 与 score 索引各写一条 subkey. 脚本范围读取要看见尚未提交的 member 变更. `MemoryEngine` 不拆.

@@ -274,6 +274,9 @@ impl KvStorage for MemoryEngine {
                 WriteOp::Delete => {
                     self.delete(db, &key).await?;
                 }
+                WriteOp::PutEngine { .. } | WriteOp::DeleteEngine => {
+                    return Err(Error::Storage("raw subkey access not supported".into()));
+                }
             }
         }
         Ok(())
