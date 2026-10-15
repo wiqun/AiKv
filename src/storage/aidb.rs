@@ -1,5 +1,6 @@
 //! AiDb 存储引擎适配器: 把同步 `aidb::DB` 包装为 async `StorageAdapter`.
-//! 所有 DB 操作经 `spawn_blocking` (LSM 写盘 / 扫描不阻塞 tokio runtime).
+//! 普通请求的 DB 操作经 `spawn_blocking`, 避免 LSM 写盘或扫描堵住 tokio worker.
+//! 脚本线程已由 `DirectStorageIo` 标记时, 调用在该线程上直接执行.
 //!
 //! # 持久化模式
 //!
@@ -92,6 +93,9 @@ impl AiDbEngine {
         T: Send + 'static,
     {
         let db = Arc::clone(&self.db);
+        if crate::storage::direct::storage_io_is_direct() {
+            return f(db);
+        }
         task::spawn_blocking(move || f(db))
             .await
             .map_err(|e| Error::Storage(e.to_string()))?
@@ -100,6 +104,56 @@ impl AiDbEngine {
 
 #[async_trait]
 impl StorageAdapter for AiDbEngine {
+    fn get_sync(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>> {
+        self.db.get(&key).map_err(|e| Error::Storage(e.to_string()))
+    }
+
+    fn write_batch_sync(&self, batch: Vec<AdapterWriteOp>) -> Result<()> {
+        let mut wb = aidb::WriteBatch::new();
+        for op in batch {
+            match op {
+                AdapterWriteOp::Put { key, value } => wb.put(key, value),
+                AdapterWriteOp::Delete { key } => wb.delete(key),
+            }
+        }
+        self.db
+            .write(&wb)
+            .map_err(|e| Error::Storage(e.to_string()))
+    }
+
+    fn last_in_range_sync(
+        &self,
+        start: Vec<u8>,
+        end: Vec<u8>,
+    ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        let mut iter = self
+            .db
+            .scan(Some(start.as_slice()), Some(end.as_slice()))
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        iter.seek_to_last();
+        match (iter.key(), iter.value()) {
+            (Some(key), Some(value)) => Ok(Some((key.to_vec(), value.to_vec()))),
+            _ => Ok(None),
+        }
+    }
+
+    fn for_each_prefix_sync(
+        &self,
+        prefix: Vec<u8>,
+        mut f: Box<dyn FnMut(Vec<u8>, Vec<u8>) -> Result<()> + Send>,
+    ) -> Result<()> {
+        let end = Self::prefix_end(&prefix);
+        let iter = self
+            .db
+            .scan(Some(prefix.as_slice()), end.as_deref())
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        for item in iter {
+            let (key, value) = item.map_err(|e| Error::Storage(e.to_string()))?;
+            f(key, value)?;
+        }
+        Ok(())
+    }
+
     async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>> {
         self.blocking(move |db| db.get(&key).map_err(|e| Error::Storage(e.to_string())))
             .await

@@ -7,9 +7,11 @@ pub mod aidb_options;
 pub mod cluster_adapter;
 #[cfg(feature = "cluster")]
 mod cluster_batcher;
+pub(crate) mod direct;
 pub mod dump;
 pub mod memory;
 pub mod observation;
+pub mod script_io;
 pub mod subkey;
 pub mod ttl_filter;
 pub mod types;
@@ -25,6 +27,7 @@ pub use aidb_options::{
 pub use dump::{decode as dump_decode, encode as dump_encode, DUMP_VERSION};
 pub use memory::MemoryEngine;
 pub use observation::StorageObservation;
+pub use script_io::ScriptIo;
 pub use types::{
     is_wrongtype, now_ms, CollectionKind, KeyspaceStats, KvStorage, ScanResult, StorageEngineKind,
     StoredValue, ValueType, WriteOp, TTL_NO_EXPIRY, WRONGTYPE,

@@ -88,6 +88,30 @@ pub trait StorageAdapter: Send + Sync {
     async fn delete(&self, key: Vec<u8>) -> Result<bool>;
     async fn exists(&self, key: Vec<u8>) -> Result<bool>;
     async fn write_batch(&self, batch: Vec<AdapterWriteOp>) -> Result<()>;
+    fn get_sync(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>> {
+        let _ = key;
+        Err(Error::Storage("sync get not supported".into()))
+    }
+    fn write_batch_sync(&self, batch: Vec<AdapterWriteOp>) -> Result<()> {
+        let _ = batch;
+        Err(Error::Storage("sync write_batch not supported".into()))
+    }
+    fn last_in_range_sync(
+        &self,
+        start: Vec<u8>,
+        end: Vec<u8>,
+    ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        let _ = (start, end);
+        Err(Error::Storage("sync last_in_range not supported".into()))
+    }
+    fn for_each_prefix_sync(
+        &self,
+        prefix: Vec<u8>,
+        mut f: Box<dyn FnMut(Vec<u8>, Vec<u8>) -> Result<()> + Send>,
+    ) -> Result<()> {
+        let _ = (prefix, f);
+        Err(Error::Storage("sync for_each_prefix not supported".into()))
+    }
     async fn enqueue_batch(&self, batch: Vec<AdapterWriteOp>) -> Result<Box<dyn BatchWriteHandle>> {
         self.write_batch(batch).await?;
         Ok(Box::new(ImmediateWriteHandle))
@@ -176,6 +200,11 @@ pub trait StorageAdapter: Send + Sync {
 
     fn engine_kind(&self) -> StorageEngineKind {
         StorageEngineKind::Memory
+    }
+
+    /// 脚本提交是否只写本地引擎. 集群实现要等 Raft, 必须留在脚本线程外面.
+    fn local_script_commit(&self) -> bool {
+        true
     }
 
     /// 近似进程内热数据内存 (字节); 仅持久化引擎实现.
@@ -915,6 +944,10 @@ impl KvStorage for KvStorageAdapter {
         self.storage.engine_kind()
     }
 
+    fn local_script_commit(&self) -> bool {
+        self.storage.local_script_commit()
+    }
+
     async fn flush_engine(&self) -> Result<()> {
         self.storage.flush().await
     }
@@ -941,6 +974,15 @@ impl KvStorage for KvStorageAdapter {
         self.storage.last_in_range(prefix, end).await
     }
 
+    async fn raw_range_last(
+        &self,
+        start: Vec<u8>,
+        end: Vec<u8>,
+    ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        self.check_db(0)?;
+        self.storage.last_in_range(start, end).await
+    }
+
     async fn raw_subkey_get(&self, db: usize, encoded_key: Vec<u8>) -> Result<Option<Vec<u8>>> {
         self.check_db(db)?;
         self.storage.get(encoded_key).await
@@ -965,6 +1007,99 @@ impl KvStorage for KvStorageAdapter {
     ) -> Result<()> {
         self.check_db(db)?;
         self.storage.for_each_prefix(prefix, f).await
+    }
+
+    fn script_io(&self) -> &dyn crate::storage::script_io::ScriptIo {
+        self
+    }
+}
+
+impl crate::storage::script_io::ScriptIo for KvStorageAdapter {
+    fn engine_kind(&self) -> StorageEngineKind {
+        self.storage.engine_kind()
+    }
+
+    fn get_typed(&self, db: usize, key: &[u8]) -> Result<Option<StoredValue>> {
+        let Some(raw) = self.storage.get_sync(Self::encode(db, key))? else {
+            return Ok(None);
+        };
+        let stored = Self::deserialize(&raw)?;
+        if stored.is_expired() {
+            return Ok(None);
+        }
+        Ok(Some(stored))
+    }
+
+    fn ttl(&self, db: usize, key: &[u8]) -> Result<Option<i64>> {
+        let Some(stored) = crate::storage::script_io::ScriptIo::get_typed(self, db, key)? else {
+            return Ok(None);
+        };
+        match stored.expires_at {
+            None => Ok(Some(TTL_NO_EXPIRY)),
+            Some(expires_at) => {
+                let now = now_ms();
+                if now >= expires_at {
+                    Ok(None)
+                } else {
+                    Ok(Some((expires_at - now) as i64))
+                }
+            }
+        }
+    }
+
+    fn write_batch(&self, db: usize, ops: Vec<(Vec<u8>, WriteOp)>) -> Result<()> {
+        let mut batch = Vec::with_capacity(ops.len());
+        for (key, op) in ops {
+            match op {
+                WriteOp::Put(value) => {
+                    let stored = StoredValue::string(value);
+                    batch.push(AdapterWriteOp::Put {
+                        key: Self::encode(db, &key),
+                        value: Self::serialize(&stored)?,
+                    });
+                }
+                WriteOp::PutStored(stored) => {
+                    batch.push(AdapterWriteOp::Put {
+                        key: Self::encode(db, &key),
+                        value: Self::serialize(&stored)?,
+                    });
+                }
+                WriteOp::Delete => {
+                    batch.push(AdapterWriteOp::Delete {
+                        key: Self::encode(db, &key),
+                    });
+                }
+                WriteOp::PutEngine { value } => {
+                    batch.push(AdapterWriteOp::Put { key, value });
+                }
+                WriteOp::DeleteEngine => {
+                    batch.push(AdapterWriteOp::Delete { key });
+                }
+            }
+        }
+        self.storage.write_batch_sync(batch)
+    }
+
+    fn raw_prefix_last(&self, prefix: Vec<u8>) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        let mut end = prefix.clone();
+        if let Some(last) = end.last_mut() {
+            *last = last.saturating_add(1);
+        }
+        self.storage.last_in_range_sync(prefix, end)
+    }
+
+    fn raw_range_last(&self, start: Vec<u8>, end: Vec<u8>) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        self.storage.last_in_range_sync(start, end)
+    }
+
+    fn raw_subkey_for_each(
+        &self,
+        db: usize,
+        prefix: Vec<u8>,
+        f: Box<dyn FnMut(Vec<u8>, Vec<u8>) -> Result<()> + Send>,
+    ) -> Result<()> {
+        self.check_db(db)?;
+        self.storage.for_each_prefix_sync(prefix, f)
     }
 }
 

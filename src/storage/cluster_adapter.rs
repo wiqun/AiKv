@@ -227,9 +227,7 @@ impl ClusterDataAdapter {
     /// Subkey 的 slot 必须与父 key 一致, 否则集群模式下会路由到错误的 group.
     fn strip_subkey_suffix(user_key: &[u8]) -> &[u8] {
         if let Some(pos) = user_key.iter().position(|&b| b == 0x01) {
-            if pos + 1 < user_key.len()
-                && matches!(user_key[pos + 1], b'H' | b'S' | b'Z' | b'Y')
-            {
+            if pos + 1 < user_key.len() && matches!(user_key[pos + 1], b'H' | b'S' | b'Z' | b'Y') {
                 return &user_key[..pos];
             }
         }
@@ -265,7 +263,9 @@ impl ClusterDataAdapter {
     /// 写路径: IMPORTING 时优先写入本节点目标 group.
     /// 返回 `Err(TRYAGAIN)` 当 Frozen/Ready 写冻结, 或 Copying 期 epoch 缺失;
     /// `Ok(None)` 表示无本地 group.
-    pub(super) fn route_write(key: &[u8]) -> Result<Option<(Arc<ClusterStateManager>, WriteRoute)>> {
+    pub(super) fn route_write(
+        key: &[u8],
+    ) -> Result<Option<(Arc<ClusterStateManager>, WriteRoute)>> {
         let Some(mgr) = CLUSTER_STATE_MGR.get().cloned() else {
             return Ok(None);
         };
@@ -443,6 +443,56 @@ fn flush_group_storages(storages: &HashMap<u64, ShardedStorage>) -> Result<()> {
 
 #[async_trait]
 impl StorageAdapter for ClusterDataAdapter {
+    fn get_sync(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>> {
+        match Self::route_read(&key)? {
+            Some((mgr, ReadRoute::Single(gid))) => mgr
+                .multi_raft
+                .get_local_sync(gid, &key)
+                .map_err(Self::map_err),
+            Some(_) => self.local.get_sync(key),
+            None if Self::should_use_local_engine(&key) => self.local.get_sync(key),
+            None => Err(Self::data_group_not_ready_err()),
+        }
+    }
+
+    fn last_in_range_sync(
+        &self,
+        start: Vec<u8>,
+        end: Vec<u8>,
+    ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        let Some(mgr) = CLUSTER_STATE_MGR.get().cloned() else {
+            return self.local.last_in_range_sync(start, end);
+        };
+        if let Some((_, ReadRoute::Single(gid))) = Self::route_read(&start)? {
+            return mgr
+                .multi_raft
+                .last_local_user_pair_sync(gid, &start, &end)
+                .map_err(Self::map_err);
+        }
+        self.local.last_in_range_sync(start, end)
+    }
+
+    fn for_each_prefix_sync(
+        &self,
+        prefix: Vec<u8>,
+        mut f: Box<dyn FnMut(Vec<u8>, Vec<u8>) -> Result<()> + Send>,
+    ) -> Result<()> {
+        let Some(mgr) = CLUSTER_STATE_MGR.get().cloned() else {
+            return self.local.for_each_prefix_sync(prefix, f);
+        };
+        let end = AiDbEngine::prefix_end(&prefix);
+        for gid in mgr.multi_raft.local_group_ids() {
+            let pairs = mgr
+                .multi_raft
+                .scan_local_pairs_in_range_sync(gid, &prefix, end.as_deref())
+                .map_err(Self::map_err)?;
+            for (key, value) in pairs {
+                f(key, value)?;
+            }
+        }
+        Ok(())
+    }
+
     async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>> {
         match Self::route_read(&key)? {
             Some((mgr, ReadRoute::Single(gid))) => {
@@ -722,6 +772,10 @@ impl StorageAdapter for ClusterDataAdapter {
 
     fn engine_kind(&self) -> StorageEngineKind {
         self.local.engine_kind()
+    }
+
+    fn local_script_commit(&self) -> bool {
+        false
     }
 
     fn approximate_memory_bytes(&self) -> Option<u64> {

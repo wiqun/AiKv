@@ -23,8 +23,8 @@ use rand::seq::SliceRandom;
 use crate::error::{Error, Result};
 use crate::storage::observation::{PointReadCounter, StorageObservation};
 use crate::storage::types::{
-    compute_avg_ttl_ms, now_ms, ExpiresCounters, KeyspaceStats, KvStorage, ScanResult, StoredValue,
-    ValueType, WriteOp, TTL_NO_EXPIRY, WRONGTYPE,
+    compute_avg_ttl_ms, now_ms, ExpiresCounters, KeyspaceStats, KvStorage, ScanResult,
+    StorageEngineKind, StoredValue, ValueType, WriteOp, TTL_NO_EXPIRY, WRONGTYPE,
 };
 use crate::storage::watch_registry::WatchRegistry;
 use crate::storage::watch_version::{
@@ -185,6 +185,76 @@ fn glob_match_impl(pattern: &[u8], text: &[u8], pi: usize, ti: usize) -> bool {
     false
 }
 
+impl MemoryEngine {
+    fn delete_sync(&self, db: usize, key: &[u8]) -> Result<bool> {
+        self.check_db(db)?;
+        let mut map = self.databases[db].write();
+        if Self::remove_expired(&mut map, key) {
+            self.expires.on_ttl_clear(db);
+        }
+        let removed = map.remove(key);
+        if let Some(stored) = &removed {
+            if stored.expires_at.is_some() {
+                self.expires.on_ttl_clear(db);
+            }
+        }
+        let deleted = removed.is_some();
+        if deleted && !is_watch_meta_user_key(key) {
+            self.bump_watch_version_map(&mut map, db, key);
+        }
+        Ok(deleted)
+    }
+    fn ttl_sync(&self, db: usize, key: &[u8]) -> Result<Option<i64>> {
+        self.check_db(db)?;
+        let map = self.databases[db].read();
+        let Some(stored) = map.get(key) else {
+            return Ok(None);
+        };
+        if stored.is_expired() {
+            drop(map);
+            let mut map = self.databases[db].write();
+            self.evict_expired_at_key(db, &mut map, key);
+            return Ok(None);
+        }
+        match stored.expires_at {
+            None => Ok(Some(TTL_NO_EXPIRY)),
+            Some(expires_at) => {
+                let now = now_ms();
+                if now >= expires_at {
+                    drop(map);
+                    let mut map = self.databases[db].write();
+                    self.evict_expired_at_key(db, &mut map, key);
+                    Ok(None)
+                } else {
+                    Ok(Some((expires_at - now) as i64))
+                }
+            }
+        }
+    }
+    fn get_typed_sync(&self, db: usize, key: &[u8]) -> Result<Option<StoredValue>> {
+        let result = self.get_entry_read(db, key);
+        if let Ok(value) = &result {
+            if let Some(counter) = self.point_reads.get() {
+                counter.note(value.is_some());
+            }
+        }
+        result
+    }
+    fn insert_stored(&self, db: usize, key: &[u8], value: StoredValue) -> Result<()> {
+        self.check_db(db)?;
+        let wrote_ttl = value.expires_at.is_some();
+        let mut map = self.databases[db].write();
+        map.insert(key.to_vec(), value);
+        if wrote_ttl {
+            self.expires.on_ttl_write(db);
+        }
+        if !is_watch_meta_user_key(key) {
+            self.bump_watch_version_map(&mut map, db, key);
+        }
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl KvStorage for MemoryEngine {
     async fn get(&self, db: usize, key: &[u8]) -> Result<Option<Vec<u8>>> {
@@ -222,22 +292,7 @@ impl KvStorage for MemoryEngine {
     }
 
     async fn delete(&self, db: usize, key: &[u8]) -> Result<bool> {
-        self.check_db(db)?;
-        let mut map = self.databases[db].write();
-        if Self::remove_expired(&mut map, key) {
-            self.expires.on_ttl_clear(db);
-        }
-        let removed = map.remove(key);
-        if let Some(stored) = &removed {
-            if stored.expires_at.is_some() {
-                self.expires.on_ttl_clear(db);
-            }
-        }
-        let deleted = removed.is_some();
-        if deleted && !is_watch_meta_user_key(key) {
-            self.bump_watch_version_map(&mut map, db, key);
-        }
-        Ok(deleted)
+        self.delete_sync(db, key)
     }
 
     async fn exists(&self, db: usize, key: &[u8]) -> Result<bool> {
@@ -482,31 +537,7 @@ impl KvStorage for MemoryEngine {
     }
 
     async fn ttl(&self, db: usize, key: &[u8]) -> Result<Option<i64>> {
-        self.check_db(db)?;
-        let map = self.databases[db].read();
-        let Some(stored) = map.get(key) else {
-            return Ok(None);
-        };
-        if stored.is_expired() {
-            drop(map);
-            let mut map = self.databases[db].write();
-            self.evict_expired_at_key(db, &mut map, key);
-            return Ok(None);
-        }
-        match stored.expires_at {
-            None => Ok(Some(TTL_NO_EXPIRY)),
-            Some(expires_at) => {
-                let now = now_ms();
-                if now >= expires_at {
-                    drop(map);
-                    let mut map = self.databases[db].write();
-                    self.evict_expired_at_key(db, &mut map, key);
-                    Ok(None)
-                } else {
-                    Ok(Some((expires_at - now) as i64))
-                }
-            }
-        }
+        self.ttl_sync(db, key)
     }
 
     async fn persist(&self, db: usize, key: &[u8]) -> Result<bool> {
@@ -545,13 +576,11 @@ impl KvStorage for MemoryEngine {
     }
 
     async fn get_typed(&self, db: usize, key: &[u8]) -> Result<Option<StoredValue>> {
-        let result = self.get_entry_read(db, key);
-        if let Ok(value) = &result {
-            if let Some(counter) = self.point_reads.get() {
-                counter.note(value.is_some());
-            }
-        }
-        result
+        self.get_typed_sync(db, key)
+    }
+
+    fn script_io(&self) -> &dyn crate::storage::script_io::ScriptIo {
+        self
     }
 
     fn set_point_read_counter(&self, counter: Arc<PointReadCounter>) {
@@ -559,17 +588,7 @@ impl KvStorage for MemoryEngine {
     }
 
     async fn set_typed(&self, db: usize, key: &[u8], value: StoredValue) -> Result<()> {
-        self.check_db(db)?;
-        let wrote_ttl = value.expires_at.is_some();
-        let mut map = self.databases[db].write();
-        map.insert(key.to_vec(), value);
-        if wrote_ttl {
-            self.expires.on_ttl_write(db);
-        }
-        if !is_watch_meta_user_key(key) {
-            self.bump_watch_version_map(&mut map, db, key);
-        }
-        Ok(())
+        self.insert_stored(db, key, value)
     }
 
     async fn get_watch_version(&self, db: usize, key: &[u8]) -> Result<u64> {
@@ -664,6 +683,55 @@ impl KvStorage for MemoryEngine {
             }
         }
         Ok(total)
+    }
+}
+
+impl crate::storage::script_io::ScriptIo for MemoryEngine {
+    fn engine_kind(&self) -> StorageEngineKind {
+        StorageEngineKind::Memory
+    }
+
+    fn get_typed(&self, db: usize, key: &[u8]) -> Result<Option<StoredValue>> {
+        self.get_typed_sync(db, key)
+    }
+
+    fn ttl(&self, db: usize, key: &[u8]) -> Result<Option<i64>> {
+        self.ttl_sync(db, key)
+    }
+
+    fn write_batch(&self, db: usize, ops: Vec<(Vec<u8>, WriteOp)>) -> Result<()> {
+        for (key, op) in ops {
+            match op {
+                WriteOp::Put(value) => {
+                    self.insert_stored(db, &key, StoredValue::string(value))?;
+                }
+                WriteOp::PutStored(stored) => self.insert_stored(db, &key, stored)?,
+                WriteOp::Delete => {
+                    self.delete_sync(db, &key)?;
+                }
+                WriteOp::PutEngine { .. } | WriteOp::DeleteEngine => {
+                    return Err(Error::Storage("raw subkey access not supported".into()));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn raw_prefix_last(&self, _prefix: Vec<u8>) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        Err(Error::Storage("raw subkey access not supported".into()))
+    }
+
+    fn raw_range_last(&self, _start: Vec<u8>, _end: Vec<u8>) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        Err(Error::Storage("raw subkey access not supported".into()))
+    }
+
+    fn raw_subkey_for_each(
+        &self,
+        _db: usize,
+        _prefix: Vec<u8>,
+        _f: Box<dyn FnMut(Vec<u8>, Vec<u8>) -> Result<()> + Send>,
+    ) -> Result<()> {
+        Err(Error::Storage("raw subkey access not supported".into()))
     }
 }
 

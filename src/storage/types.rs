@@ -63,7 +63,9 @@ pub enum WriteOp {
     PutStored(StoredValue),
     Delete,
     /// 配对 key 已是 engine key, 值为原始字节, 不再套 `StoredValue`.
-    PutEngine { value: Vec<u8> },
+    PutEngine {
+        value: Vec<u8>,
+    },
     /// 配对 key 已是 engine key.
     DeleteEngine,
 }
@@ -354,6 +356,14 @@ pub trait KvStorage: Send + Sync {
         StorageEngineKind::Memory
     }
 
+    /// 脚本提交是否只写本地引擎. 集群实现要等 Raft, 必须留在脚本线程外面.
+    fn local_script_commit(&self) -> bool {
+        true
+    }
+
+    /// 脚本线程上的同步存储. 实现必须不调用 `spawn_blocking`.
+    fn script_io(&self) -> &dyn crate::storage::script_io::ScriptIo;
+
     async fn flush_engine(&self) -> Result<()> {
         Ok(())
     }
@@ -413,6 +423,15 @@ pub trait KvStorage: Send + Sync {
 
     /// 前缀下字典序最大的原始 KV. 大 ZSET 的 `ZREVRANGE 0 0` 用它读最高分.
     async fn raw_prefix_last(&self, _prefix: Vec<u8>) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        Err(Error::Storage("raw subkey access not supported".into()))
+    }
+
+    /// 半开区间 `[start, end)` 内字典序最大的原始 KV. 大 ZSET 的 `ZREVRANGEBYSCORE ... LIMIT 0 1` 用它定位单条.
+    async fn raw_range_last(
+        &self,
+        _start: Vec<u8>,
+        _end: Vec<u8>,
+    ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
         Err(Error::Storage("raw subkey access not supported".into()))
     }
 
