@@ -49,4 +49,53 @@ mod tests {
             other => panic!("unexpected {other:?}"),
         }
     }
+
+    #[test]
+    fn aidb_script_delete_removes_zset_subkeys() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = crate::storage::AiDbEngine::open_with_options(
+            dir.path(),
+            crate::storage::testing_db_options(),
+        )
+        .unwrap();
+        let adapter = crate::storage::KvStorageAdapter::new(engine);
+        let io = adapter.script_io();
+        let header = crate::storage::zset_subkey::header(1, None);
+        io.write_batch(0, vec![(b"z".to_vec(), WriteOp::PutStored(header))])
+            .unwrap();
+        let encoded = crate::storage::AiDbEngine::encode_key(0, b"z");
+        let score_key = crate::storage::zset_subkey::score_key(&encoded, 1.0, b"m");
+        io.write_batch(
+            0,
+            vec![(
+                score_key.clone(),
+                WriteOp::PutEngine {
+                    value: crate::storage::zset_subkey::encode_score(1.0),
+                },
+            )],
+        )
+        .unwrap();
+        io.write_batch(0, vec![(b"z".to_vec(), WriteOp::Delete)])
+            .unwrap();
+        assert!(io.raw_subkey_get(0, score_key).unwrap().is_none());
+    }
+
+    #[test]
+    fn aidb_script_get_deletes_expired_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = crate::storage::AiDbEngine::open_with_options(
+            dir.path(),
+            crate::storage::testing_db_options(),
+        )
+        .unwrap();
+        let adapter = crate::storage::KvStorageAdapter::new(engine);
+        let io = adapter.script_io();
+        let mut stored = StoredValue::string(b"old".to_vec());
+        stored.expires_at = Some(1);
+        io.write_batch(0, vec![(b"k".to_vec(), WriteOp::PutStored(stored))])
+            .unwrap();
+        assert!(io.get_typed(0, b"k").unwrap().is_none());
+        let encoded = crate::storage::AiDbEngine::encode_key(0, b"k");
+        assert!(io.raw_subkey_get(0, encoded).unwrap().is_none());
+    }
 }

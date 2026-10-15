@@ -512,6 +512,131 @@ impl KvStorageAdapter {
         Ok(batch)
     }
 
+    fn prepare_adapter_batch_sync(
+        &self,
+        db: usize,
+        ops: Vec<(Vec<u8>, WriteOp)>,
+    ) -> Result<Vec<AdapterWriteOp>> {
+        self.check_db(db)?;
+        let mut batch = Vec::with_capacity(ops.len());
+        let mut touched: Vec<Vec<u8>> = Vec::with_capacity(ops.len());
+        for (key, op) in ops {
+            match op {
+                WriteOp::PutEngine { value } => {
+                    batch.push(AdapterWriteOp::Put { key, value });
+                }
+                WriteOp::DeleteEngine => {
+                    batch.push(AdapterWriteOp::Delete { key });
+                }
+                WriteOp::Put(value) => {
+                    let encoded = Self::encode(db, &key);
+                    touched.push(encoded.clone());
+                    let stored = StoredValue::string(value);
+                    batch.push(AdapterWriteOp::Put {
+                        key: encoded,
+                        value: Self::serialize(&stored)?,
+                    });
+                }
+                WriteOp::PutStored(stored) => {
+                    let encoded = Self::encode(db, &key);
+                    touched.push(encoded.clone());
+                    batch.push(AdapterWriteOp::Put {
+                        key: encoded,
+                        value: Self::serialize(&stored)?,
+                    });
+                }
+                WriteOp::Delete => {
+                    let encoded = Self::encode(db, &key);
+                    touched.push(encoded.clone());
+                    if self.is_zset_header_key_sync(db, &key)? {
+                        self.push_zset_subkey_deletes_sync(db, &key, &mut batch)?;
+                    }
+                    batch.push(AdapterWriteOp::Delete { key: encoded });
+                }
+            }
+        }
+        for encoded in &touched {
+            let Some(user_key) = Self::decode_user_key(encoded) else {
+                continue;
+            };
+            if let Some((mk, mv)) = self.next_watch_meta_put_sync(db, &user_key)? {
+                batch.push(AdapterWriteOp::Put { key: mk, value: mv });
+            }
+        }
+        Ok(batch)
+    }
+
+    fn is_zset_header_key_sync(&self, db: usize, key: &[u8]) -> Result<bool> {
+        let stored = crate::storage::script_io::ScriptIo::get_typed(self, db, key)?;
+        Ok(stored
+            .as_ref()
+            .and_then(crate::storage::zset_subkey::is_zset_header)
+            .is_some())
+    }
+
+    fn push_zset_subkey_deletes_sync(
+        &self,
+        db: usize,
+        user_key: &[u8],
+        batch: &mut Vec<AdapterWriteOp>,
+    ) -> Result<()> {
+        let encoded = Self::encode(db, user_key);
+        self.push_prefix_deletes_sync(crate::storage::zset_subkey::member_prefix(&encoded), batch)?;
+        self.push_prefix_deletes_sync(crate::storage::zset_subkey::score_prefix(&encoded), batch)
+    }
+
+    fn push_prefix_deletes_sync(
+        &self,
+        prefix: Vec<u8>,
+        batch: &mut Vec<AdapterWriteOp>,
+    ) -> Result<()> {
+        let keys = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let keys_c = std::sync::Arc::clone(&keys);
+        self.storage.for_each_prefix_sync(
+            prefix,
+            Box::new(move |key, _| {
+                keys_c.lock().expect("prefix deletes").push(key);
+                Ok(())
+            }),
+        )?;
+        let keys = std::sync::Arc::try_unwrap(keys)
+            .unwrap_or_else(|_| unreachable!("prefix delete keys still shared"))
+            .into_inner()
+            .expect("prefix deletes");
+        for key in keys {
+            batch.push(AdapterWriteOp::Delete { key });
+        }
+        Ok(())
+    }
+
+    fn read_watch_version_sync(&self, db: usize, user_key: &[u8]) -> Result<u64> {
+        if is_watch_meta_user_key(user_key) {
+            return Ok(0);
+        }
+        let meta = meta_user_key(user_key);
+        match self.storage.get_sync(Self::encode(db, &meta))? {
+            Some(bytes) => Ok(decode_version(&bytes)),
+            None => Ok(0),
+        }
+    }
+
+    fn next_watch_meta_put_sync(
+        &self,
+        db: usize,
+        user_key: &[u8],
+    ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        if is_watch_meta_user_key(user_key) || !self.watchers.is_watched(db, user_key) {
+            return Ok(None);
+        }
+        let next = self
+            .read_watch_version_sync(db, user_key)?
+            .saturating_add(1);
+        Ok(Some((
+            Self::encode(db, &meta_user_key(user_key)),
+            encode_version(next).to_vec(),
+        )))
+    }
+
     async fn is_zset_header_key(&self, db: usize, key: &[u8]) -> Result<bool> {
         let stored = self.get_typed(db, key).await?;
         Ok(stored
@@ -1025,6 +1150,18 @@ impl crate::storage::script_io::ScriptIo for KvStorageAdapter {
         };
         let stored = Self::deserialize(&raw)?;
         if stored.is_expired() {
+            if let Some(obs) = &self.observation {
+                obs.record_expired_key();
+            }
+            let encoded = Self::encode(db, key);
+            if self.storage.allow_lazy_expire_delete(&encoded)
+                && self
+                    .storage
+                    .write_batch_sync(vec![AdapterWriteOp::Delete { key: encoded }])
+                    .is_ok()
+            {
+                self.expires.on_ttl_clear(db);
+            }
             return Ok(None);
         }
         Ok(Some(stored))
@@ -1048,35 +1185,7 @@ impl crate::storage::script_io::ScriptIo for KvStorageAdapter {
     }
 
     fn write_batch(&self, db: usize, ops: Vec<(Vec<u8>, WriteOp)>) -> Result<()> {
-        let mut batch = Vec::with_capacity(ops.len());
-        for (key, op) in ops {
-            match op {
-                WriteOp::Put(value) => {
-                    let stored = StoredValue::string(value);
-                    batch.push(AdapterWriteOp::Put {
-                        key: Self::encode(db, &key),
-                        value: Self::serialize(&stored)?,
-                    });
-                }
-                WriteOp::PutStored(stored) => {
-                    batch.push(AdapterWriteOp::Put {
-                        key: Self::encode(db, &key),
-                        value: Self::serialize(&stored)?,
-                    });
-                }
-                WriteOp::Delete => {
-                    batch.push(AdapterWriteOp::Delete {
-                        key: Self::encode(db, &key),
-                    });
-                }
-                WriteOp::PutEngine { value } => {
-                    batch.push(AdapterWriteOp::Put { key, value });
-                }
-                WriteOp::DeleteEngine => {
-                    batch.push(AdapterWriteOp::Delete { key });
-                }
-            }
-        }
+        let batch = self.prepare_adapter_batch_sync(db, ops)?;
         self.storage.write_batch_sync(batch)
     }
 

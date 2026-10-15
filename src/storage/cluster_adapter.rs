@@ -449,7 +449,7 @@ impl StorageAdapter for ClusterDataAdapter {
                 .multi_raft
                 .get_local_sync(gid, &key)
                 .map_err(Self::map_err),
-            Some(_) => self.local.get_sync(key),
+            Some(_) => Err(Error::Command(TRYAGAIN_MIGRATION.into())),
             None if Self::should_use_local_engine(&key) => self.local.get_sync(key),
             None => Err(Self::data_group_not_ready_err()),
         }
@@ -463,13 +463,14 @@ impl StorageAdapter for ClusterDataAdapter {
         let Some(mgr) = CLUSTER_STATE_MGR.get().cloned() else {
             return self.local.last_in_range_sync(start, end);
         };
-        if let Some((_, ReadRoute::Single(gid))) = Self::route_read(&start)? {
-            return mgr
+        match Self::route_read(&start)? {
+            Some((_, ReadRoute::Single(gid))) => mgr
                 .multi_raft
                 .last_local_user_pair_sync(gid, &start, &end)
-                .map_err(Self::map_err);
+                .map_err(Self::map_err),
+            Some(_) => Err(Error::Command(TRYAGAIN_MIGRATION.into())),
+            None => self.local.last_in_range_sync(start, end),
         }
-        self.local.last_in_range_sync(start, end)
     }
 
     fn for_each_prefix_sync(
