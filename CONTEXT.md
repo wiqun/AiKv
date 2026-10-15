@@ -12,6 +12,8 @@
 
 **ClusterRouter**: 在集群模式下, 根据 key 的 CRC16 哈希计算 slot, 将请求路由到正确的节点或返回 MOVED 错误.
 
+**脚本线程池**: 只执行 `EVAL` / `EVALSHA` 的线程池, 与 tokio worker 和 tokio 阻塞线程池分开.
+
 ## 存储层
 
 **KvStorage**: 存储抽象接口, 统一内存和持久化两种后端.

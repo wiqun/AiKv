@@ -26,6 +26,7 @@ mod convert;
 mod execute;
 pub(crate) mod in_flight;
 pub(crate) mod json_exec;
+mod pool;
 mod sandbox;
 mod transaction;
 mod zset_edit;
