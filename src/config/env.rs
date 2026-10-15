@@ -235,7 +235,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn merge_env_script_worker_threads() {
         let mut settings = Settings::default();
         let vars = HashMap::from([("AIKV_SCRIPT_WORKER_THREADS".to_string(), "3".to_string())]);
@@ -245,6 +244,7 @@ mod tests {
         assert_eq!(resolved.script_worker_threads, 3);
     }
 
+    #[test]
     fn merge_env_bind_overrides() {
         let mut settings = Settings::default();
         let vars = HashMap::from([("AIKV_BIND".to_string(), "192.168.1.1:6380".to_string())]);
