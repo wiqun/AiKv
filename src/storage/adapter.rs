@@ -1092,6 +1092,11 @@ impl crate::storage::script_io::ScriptIo for KvStorageAdapter {
         self.storage.last_in_range_sync(start, end)
     }
 
+    fn raw_subkey_get(&self, db: usize, encoded_key: Vec<u8>) -> Result<Option<Vec<u8>>> {
+        self.check_db(db)?;
+        self.storage.get_sync(encoded_key)
+    }
+
     fn raw_subkey_for_each(
         &self,
         db: usize,

@@ -11,8 +11,9 @@
 //!   ├─ new_sandbox_lua: StdLib = TABLE|STRING|MATH|UTF8; 封印 load/require/rawget/rawset…
 //!   ├─ set_memory_limit (128MB) + 指令 hook 超时 (默认 5s)
 //!   ├─ populate_keys_argv (全局 KEYS/ARGV) + install_redis_api (redis.call/pcall)
-//!   ├─ eval_async → lua_to_resp
-//!   └─ txn.commit: 脚本内写操作单次落盘
+//!   ├─ eval: 多线程运行时整段脚本在同一条阻塞线程上执行, 存储调用不再逐次换线程
+//!   ├─ 单机写入也在这条线程上完成; 集群的 Raft 确认留在线程外, 在途缓冲保持可见
+//!   └─ lua_to_resp
 //! ```
 //!
 //! # Invariant
@@ -23,6 +24,7 @@
 
 mod cache;
 mod convert;
+mod drive;
 mod execute;
 pub(crate) mod in_flight;
 pub(crate) mod json_exec;
@@ -31,8 +33,8 @@ mod sandbox;
 mod transaction;
 mod zset_edit;
 
-use std::collections::HashSet;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::cell::RefCell;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -43,7 +45,7 @@ use tokio::sync::Mutex;
 
 use self::cache::ScriptCache;
 use self::convert::lua_to_resp;
-use self::execute::redis_call_async;
+use self::execute::{redis_call, DeclaredKeys};
 use self::in_flight::InFlightBuffer;
 use self::sandbox::new_sandbox_lua;
 use self::transaction::ScriptTransaction;
@@ -51,7 +53,8 @@ use crate::command::router::{self, KeyLock};
 use crate::error::{Error, Result};
 use crate::protocol::RespValue;
 use crate::server::ServerMetrics;
-use crate::storage::KvStorage;
+use crate::storage::ScriptIo;
+use crate::storage::{KvStorage, WriteOp};
 
 const DEFAULT_SCRIPT_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_SCRIPT_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
@@ -59,8 +62,8 @@ const DEFAULT_MEMORY_LIMIT: usize = 128 * 1024 * 1024;
 const MAX_IDLE_VMS: usize = 64;
 
 struct ScriptExecutionContext {
-    txn: Arc<Mutex<ScriptTransaction>>,
-    declared: Arc<HashSet<Vec<u8>>>,
+    txn: RefCell<ScriptTransaction>,
+    declared: Arc<DeclaredKeys>,
 }
 
 struct ScriptArgs<'a> {
@@ -96,7 +99,8 @@ impl ScriptPerfSampler {
         self.total_lua_us.fetch_add(lua_us, Ordering::Relaxed);
         self.total_prepare_us.fetch_add(prep_us, Ordering::Relaxed);
         self.total_raft_us.fetch_add(raft_us, Ordering::Relaxed);
-        self.total_overall_us.fetch_add(overall_us, Ordering::Relaxed);
+        self.total_overall_us
+            .fetch_add(overall_us, Ordering::Relaxed);
         let n = self.samples.fetch_add(1, Ordering::Relaxed) + 1;
         if n.is_multiple_of(1000) {
             let lock_avg = self.total_lock_us.load(Ordering::Relaxed) / n;
@@ -115,6 +119,106 @@ impl ScriptPerfSampler {
 
 static PERF_SAMPLER: ScriptPerfSampler = ScriptPerfSampler::new();
 
+struct Seg50Slot {
+    first_start: parking_lot::Mutex<Option<Instant>>,
+    first_enq: parking_lot::Mutex<Option<Instant>>,
+    last_enq: parking_lot::Mutex<Option<Instant>>,
+    last_commit: parking_lot::Mutex<Option<Instant>>,
+    enq_count: AtomicUsize,
+    commit_count: AtomicUsize,
+}
+
+impl Seg50Slot {
+    const fn new() -> Self {
+        Self {
+            first_start: parking_lot::Mutex::new(None),
+            first_enq: parking_lot::Mutex::new(None),
+            last_enq: parking_lot::Mutex::new(None),
+            last_commit: parking_lot::Mutex::new(None),
+            enq_count: AtomicUsize::new(0),
+            commit_count: AtomicUsize::new(0),
+        }
+    }
+
+    fn reset(&self) {
+        *self.first_start.lock() = None;
+        *self.first_enq.lock() = None;
+        *self.last_enq.lock() = None;
+        *self.last_commit.lock() = None;
+        self.enq_count.store(0, Ordering::Relaxed);
+        self.commit_count.store(0, Ordering::Relaxed);
+    }
+}
+
+struct Seg50Tracker {
+    req_counter: AtomicUsize,
+    slots: [Seg50Slot; 64],
+}
+
+impl Seg50Tracker {
+    const fn new() -> Self {
+        Self {
+            req_counter: AtomicUsize::new(0),
+            slots: [const { Seg50Slot::new() }; 64],
+        }
+    }
+
+    fn on_start(&self) -> (usize, usize) {
+        let req_id = self.req_counter.fetch_add(1, Ordering::Relaxed);
+        let seg_id = req_id / 50;
+        let slot_idx = seg_id % 64;
+        let slot = &self.slots[slot_idx];
+        if req_id.is_multiple_of(50) {
+            slot.reset();
+            *slot.first_start.lock() = Some(Instant::now());
+        }
+        (seg_id, slot_idx)
+    }
+
+    fn on_enqueued(&self, slot_idx: usize) {
+        let slot = &self.slots[slot_idx];
+        let idx = slot.enq_count.fetch_add(1, Ordering::SeqCst);
+        let now = Instant::now();
+        if idx == 0 {
+            *slot.first_enq.lock() = Some(now);
+        } else if idx == 49 {
+            *slot.last_enq.lock() = Some(now);
+        }
+    }
+
+    fn on_committed(&self, seg_id: usize, slot_idx: usize) {
+        let slot = &self.slots[slot_idx];
+        *slot.last_commit.lock() = Some(Instant::now());
+        let idx = slot.commit_count.fetch_add(1, Ordering::SeqCst);
+        if idx == 49 {
+            self.report_seg(seg_id, slot);
+        }
+    }
+
+    fn report_seg(&self, seg_id: usize, slot: &Seg50Slot) {
+        let t_commit = slot.last_commit.lock().unwrap_or_else(Instant::now);
+        let t_start = *slot.first_start.lock();
+        let t_first = *slot.first_enq.lock();
+        let t_last = *slot.last_enq.lock();
+
+        if let (Some(t_first), Some(t_last)) = (t_first, t_last) {
+            let enq_span_ms = t_last.duration_since(t_first).as_secs_f64() * 1000.0;
+            let tail_ms = t_commit.duration_since(t_last).as_secs_f64() * 1000.0;
+            let total_ms = match t_start {
+                Some(ts) => t_commit.duration_since(ts).as_secs_f64() * 1000.0,
+                None => t_commit.duration_since(t_first).as_secs_f64() * 1000.0,
+            };
+            tracing::info!(
+                target: "perf",
+                "[SEG50_TIMING] seg={} enq_span_ms={:.2} tail_commit_ms={:.2} total_seg_ms={:.2}",
+                seg_id, enq_span_ms, tail_ms, total_ms
+            );
+        }
+    }
+}
+
+static SEG_TRACKER: Seg50Tracker = Seg50Tracker::new();
+
 pub struct ScriptCommands {
     storage: Arc<dyn KvStorage>,
     key_lock: Arc<KeyLock>,
@@ -127,6 +231,11 @@ pub struct ScriptCommands {
 }
 
 impl ScriptCommands {
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.script_timeout = timeout;
+        self
+    }
+
     pub fn new(storage: Arc<dyn KvStorage>, key_lock: Arc<KeyLock>) -> Self {
         Self {
             storage,
@@ -266,6 +375,7 @@ impl ScriptCommands {
         argv: &[Bytes],
         db: usize,
     ) -> Result<RespValue> {
+        let (seg_id, slot_idx) = SEG_TRACKER.on_start();
         let t_start = Instant::now();
         let key_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_ref()).collect();
         let _guard = if !keys.is_empty() {
@@ -279,70 +389,95 @@ impl ScriptCommands {
         };
         let t_locked = Instant::now();
 
-        let declared = Arc::new(keys.iter().map(|k| k.to_vec()).collect());
-        let txn = Arc::new(Mutex::new(ScriptTransaction::with_in_flight(
-            db,
-            Some(Arc::clone(&self.in_flight)),
-        )));
         let lua = self.acquire_vm()?;
-
-        let script_args = ScriptArgs {
-            sha1,
-            script,
-            keys,
-            argv,
-        };
-        let eval_res = self
-            .eval_lua_func(&lua, &script_args, Arc::clone(&txn), declared)
-            .await;
-        self.release_vm(lua);
-        let result = eval_res?;
-        let t_lua_done = Instant::now();
-
-        let txn =
-            Arc::try_unwrap(txn).map_err(|_| Error::Command("ERR script still running".into()))?;
-        let txn = txn.into_inner();
-        let batch_ops = txn.prepare_batch_ops_owned(self.storage.as_ref()).await?;
-
-        let (seq, keys) = self.in_flight.insert_batch(db, &batch_ops);
-        let wait_handle = if !batch_ops.is_empty() {
-            Some(self.storage.enqueue_batch(db, batch_ops).await?)
-        } else {
-            None
-        };
-        drop(_guard);
-        let t_prep_done = Instant::now();
-
-        let resp = lua_to_resp(result)?;
-        let write_res = if let Some(handle) = wait_handle {
-            handle.wait().await
-        } else {
-            Ok(())
-        };
-        self.in_flight.remove_encoded(&keys, seq);
-        write_res?;
-        let t_done = Instant::now();
+        let drive = self
+            .drive_script(lua, db, sha1, script, keys, argv, seg_id, slot_idx)
+            .await?;
+        self.release_vm(drive.lua);
+        let body = drive.result?;
+        let t_done = self
+            .finish_pending_commit(body.pending, db, seg_id, slot_idx, _guard)
+            .await?;
+        let t_done = t_done.unwrap_or(body.t_local_done);
 
         PERF_SAMPLER.record(
             t_locked.duration_since(t_start).as_micros() as u64,
-            t_lua_done.duration_since(t_locked).as_micros() as u64,
-            t_prep_done.duration_since(t_lua_done).as_micros() as u64,
-            t_done.duration_since(t_prep_done).as_micros() as u64,
+            body.t_lua_done.duration_since(t_locked).as_micros() as u64,
+            body.t_prep_done.duration_since(body.t_lua_done).as_micros() as u64,
+            t_done.duration_since(body.t_prep_done).as_micros() as u64,
             t_done.duration_since(t_start).as_micros() as u64,
         );
+        lua_to_resp(body.value)
+    }
 
-        Ok(resp)
+    async fn drive_script(
+        &self,
+        lua: mlua::Lua,
+        db: usize,
+        sha1: &str,
+        script: &str,
+        keys: &[Bytes],
+        argv: &[Bytes],
+        seg_id: usize,
+        slot_idx: usize,
+    ) -> Result<drive::ScriptDrive> {
+        let job = drive::ScriptJob {
+            lua,
+            storage: Arc::clone(&self.storage),
+            in_flight: Arc::clone(&self.in_flight),
+            timeout: self.script_timeout,
+            db,
+            sha1: sha1.to_string(),
+            script: script.to_string(),
+            keys: keys.to_vec(),
+            argv: argv.to_vec(),
+            local_commit: self.storage.local_script_commit(),
+            seg_id,
+            slot_idx,
+        };
+        if !drive::script_runs_off_worker() {
+            return Ok(job.run().await);
+        }
+        drive::run_on_blocking_thread(job).await
+    }
+
+    async fn finish_pending_commit<G>(
+        &self,
+        pending: Option<Vec<(Vec<u8>, WriteOp)>>,
+        db: usize,
+        seg_id: usize,
+        slot_idx: usize,
+        guard: G,
+    ) -> Result<Option<Instant>> {
+        let Some(batch_ops) = pending else {
+            drop(guard);
+            return Ok(None);
+        };
+        if batch_ops.is_empty() {
+            SEG_TRACKER.on_enqueued(slot_idx);
+            drop(guard);
+            SEG_TRACKER.on_committed(seg_id, slot_idx);
+            return Ok(Some(Instant::now()));
+        }
+        let (seq, encoded) = self.in_flight.insert_batch(db, &batch_ops);
+        let handle = self.storage.enqueue_batch(db, batch_ops).await?;
+        SEG_TRACKER.on_enqueued(slot_idx);
+        drop(guard);
+        let write_res = handle.wait().await;
+        self.in_flight.remove_encoded(&encoded, seq);
+        SEG_TRACKER.on_committed(seg_id, slot_idx);
+        write_res?;
+        Ok(Some(Instant::now()))
     }
 
     async fn eval_lua_func(
-        &self,
         lua: &mlua::Lua,
+        timeout: Duration,
         args: &ScriptArgs<'_>,
-        txn: Arc<Mutex<ScriptTransaction>>,
-        declared: Arc<HashSet<Vec<u8>>>,
-    ) -> Result<LuaValue> {
+        txn: ScriptTransaction,
+        declared: Arc<DeclaredKeys>,
+    ) -> Result<(LuaValue, ScriptTransaction)> {
         let started = Instant::now();
-        let timeout = self.script_timeout;
         lua.set_hook(
             HookTriggers::new().every_nth_instruction(10_000),
             move |_lua, _debug| {
@@ -370,16 +505,57 @@ impl ScriptCommands {
         };
 
         populate_keys_argv(lua, args.keys, args.argv)?;
-        lua.set_app_data(ScriptExecutionContext { txn, declared });
+        lua.set_app_data(ScriptExecutionContext {
+            txn: RefCell::new(txn),
+            declared,
+        });
 
-        let eval_result: mlua::Result<LuaValue> = func.call_async(()).await;
+        let eval_result: mlua::Result<LuaValue> = func.call(());
 
         lua.remove_hook();
-        let _ = lua.remove_app_data::<ScriptExecutionContext>();
+        let ctx = lua.remove_app_data::<ScriptExecutionContext>();
         let _ = clear_keys_argv(lua);
+        let txn = ctx
+            .ok_or_else(|| Error::Command("ERR missing script execution context".into()))?
+            .txn
+            .into_inner();
 
-        eval_result.map_err(|e| Error::Command(format!("ERR Error running script: {e}")))
+        eval_result
+            .map(|value| (value, txn))
+            .map_err(|e| Error::Command(format!("ERR Error running script: {e}")))
     }
+}
+
+fn lua_redis_entry(
+    lua: &mlua::Lua,
+    storage: Arc<dyn KvStorage>,
+    throw_error: bool,
+) -> Result<mlua::Function> {
+    lua.create_function(move |lua, args: MultiValue| {
+        let declared = {
+            let ctx = lua
+                .app_data_ref::<ScriptExecutionContext>()
+                .ok_or_else(|| {
+                    mlua::Error::RuntimeError("ERR missing script execution context".into())
+                })?;
+            Arc::clone(&ctx.declared)
+        };
+        let mut ctx = lua
+            .app_data_mut::<ScriptExecutionContext>()
+            .ok_or_else(|| {
+                mlua::Error::RuntimeError("ERR missing script execution context".into())
+            })?;
+        let mut txn = ctx.txn.borrow_mut();
+        redis_call(
+            lua,
+            storage.script_io(),
+            &mut txn,
+            declared.as_ref(),
+            args,
+            throw_error,
+        )
+    })
+    .map_err(|e| Error::Command(format!("ERR {e}")))
 }
 
 fn create_sandbox_vm(storage: Arc<dyn KvStorage>, memory_limit: usize) -> Result<mlua::Lua> {
@@ -418,7 +594,7 @@ fn parse_keys_argv(args: &[Bytes]) -> Result<(Vec<Bytes>, Vec<Bytes>)> {
 fn populate_keys_argv(lua: &mlua::Lua, keys: &[Bytes], argv: &[Bytes]) -> Result<()> {
     let globals = lua.globals();
     let keys_table = lua
-        .create_table()
+        .create_table_with_capacity(keys.len(), 0)
         .map_err(|e| Error::Command(format!("ERR {e}")))?;
     for (i, k) in keys.iter().enumerate() {
         let s = lua
@@ -433,7 +609,7 @@ fn populate_keys_argv(lua: &mlua::Lua, keys: &[Bytes], argv: &[Bytes]) -> Result
         .map_err(|e| Error::Command(format!("ERR {e}")))?;
 
     let argv_table = lua
-        .create_table()
+        .create_table_with_capacity(argv.len(), 0)
         .map_err(|e| Error::Command(format!("ERR {e}")))?;
     for (i, a) in argv.iter().enumerate() {
         let s = lua
@@ -454,55 +630,8 @@ fn install_redis_api(lua: &mlua::Lua, storage: Arc<dyn KvStorage>) -> Result<()>
         .create_table()
         .map_err(|e| Error::Command(format!("ERR {e}")))?;
 
-    let storage_call = storage.clone();
-    let call_fn = lua
-        .create_async_function(move |lua, args: MultiValue| {
-            let storage = storage_call.clone();
-            async move {
-                let (txn, declared) = {
-                    let ctx = lua.app_data_ref::<ScriptExecutionContext>().ok_or_else(|| {
-                        mlua::Error::RuntimeError("ERR missing script execution context".into())
-                    })?;
-                    (Arc::clone(&ctx.txn), Arc::clone(&ctx.declared))
-                };
-                let mut guard = txn.lock().await;
-                redis_call_async(
-                    &lua,
-                    storage.as_ref(),
-                    &mut guard,
-                    declared.as_ref(),
-                    args,
-                    true,
-                )
-                .await
-            }
-        })
-        .map_err(|e| Error::Command(format!("ERR {e}")))?;
-
-    let storage_pcall = storage;
-    let pcall_fn = lua
-        .create_async_function(move |lua, args: MultiValue| {
-            let storage = storage_pcall.clone();
-            async move {
-                let (txn, declared) = {
-                    let ctx = lua.app_data_ref::<ScriptExecutionContext>().ok_or_else(|| {
-                        mlua::Error::RuntimeError("ERR missing script execution context".into())
-                    })?;
-                    (Arc::clone(&ctx.txn), Arc::clone(&ctx.declared))
-                };
-                let mut guard = txn.lock().await;
-                redis_call_async(
-                    &lua,
-                    storage.as_ref(),
-                    &mut guard,
-                    declared.as_ref(),
-                    args,
-                    false,
-                )
-                .await
-            }
-        })
-        .map_err(|e| Error::Command(format!("ERR {e}")))?;
+    let call_fn = lua_redis_entry(lua, Arc::clone(&storage), true)?;
+    let pcall_fn = lua_redis_entry(lua, storage, false)?;
 
     let error_reply = lua
         .create_function(|lua, msg: mlua::String| {

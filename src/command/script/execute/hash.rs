@@ -8,31 +8,29 @@ use crate::command::router;
 use crate::command::script::transaction::{parse_i64_arg, ScriptTransaction};
 use crate::error::Result;
 use crate::protocol::RespValue;
-use crate::storage::KvStorage;
+use crate::storage::ScriptIo;
 
 use super::{key, wrong_count};
 
-pub(super) async fn exec_hget(
-    storage: &dyn KvStorage,
+pub(super) fn exec_hget(
+    storage: &dyn ScriptIo,
     txn: &ScriptTransaction,
     args: &[Bytes],
 ) -> Result<RespValue> {
     if args.len() != 2 {
         return Err(wrong_count("HGET"));
     }
-    let res = txn
-        .with_hash(storage, &args[0], |hash| {
-            Ok(match hash.get(args[1].as_ref()) {
-                Some(v) => router::bulk(v.clone()),
-                None => RespValue::Null,
-            })
+    let res = txn.with_hash(storage, &args[0], |hash| {
+        Ok(match hash.get(args[1].as_ref()) {
+            Some(v) => router::bulk(v.clone()),
+            None => RespValue::Null,
         })
-        .await?;
+    })?;
     Ok(res.unwrap_or(RespValue::Null))
 }
 
-pub(super) async fn exec_hset(
-    storage: &dyn KvStorage,
+pub(super) fn exec_hset(
+    storage: &dyn ScriptIo,
     txn: &mut ScriptTransaction,
     args: &[Bytes],
 ) -> Result<RespValue> {
@@ -41,11 +39,11 @@ pub(super) async fn exec_hset(
     }
     let k = key(&args[0]);
     let mut added = 0i64;
-    let hash = match txn.ensure_hash_mut(storage, &k).await? {
+    let hash = match txn.ensure_hash_mut(storage, &k)? {
         Some(h) => h,
         None => {
             txn.set_hash(k.clone(), HashMap::new());
-            txn.ensure_hash_mut(storage, &k).await?.unwrap()
+            txn.ensure_hash_mut(storage, &k)?.unwrap()
         }
     };
     for i in (1..args.len()).step_by(2) {
@@ -63,8 +61,8 @@ pub(super) async fn exec_hset(
     }
 }
 
-pub(super) async fn exec_hsetnx(
-    storage: &dyn KvStorage,
+pub(super) fn exec_hsetnx(
+    storage: &dyn ScriptIo,
     txn: &mut ScriptTransaction,
     args: &[Bytes],
 ) -> Result<RespValue> {
@@ -72,11 +70,11 @@ pub(super) async fn exec_hsetnx(
         return Err(wrong_count("HSETNX"));
     }
     let k = key(&args[0]);
-    let hash = match txn.ensure_hash_mut(storage, &k).await? {
+    let hash = match txn.ensure_hash_mut(storage, &k)? {
         Some(h) => h,
         None => {
             txn.set_hash(k.clone(), HashMap::new());
-            txn.ensure_hash_mut(storage, &k).await?.unwrap()
+            txn.ensure_hash_mut(storage, &k)?.unwrap()
         }
     };
     if hash.contains_key(args[1].as_ref()) {
@@ -86,8 +84,8 @@ pub(super) async fn exec_hsetnx(
     Ok(router::integer(1))
 }
 
-pub(super) async fn exec_hdel(
-    storage: &dyn KvStorage,
+pub(super) fn exec_hdel(
+    storage: &dyn ScriptIo,
     txn: &mut ScriptTransaction,
     args: &[Bytes],
 ) -> Result<RespValue> {
@@ -96,7 +94,7 @@ pub(super) async fn exec_hdel(
     }
     let k = key(&args[0]);
     let mut count = 0i64;
-    let should_delete = if let Some(hash) = txn.ensure_hash_mut(storage, &k).await? {
+    let should_delete = if let Some(hash) = txn.ensure_hash_mut(storage, &k)? {
         for f in &args[1..] {
             if hash.remove(f.as_ref()).is_some() {
                 count += 1;
@@ -112,29 +110,27 @@ pub(super) async fn exec_hdel(
     Ok(router::integer(count))
 }
 
-pub(super) async fn exec_hgetall(
-    storage: &dyn KvStorage,
+pub(super) fn exec_hgetall(
+    storage: &dyn ScriptIo,
     txn: &ScriptTransaction,
     args: &[Bytes],
 ) -> Result<RespValue> {
     if args.len() != 1 {
         return Err(wrong_count("HGETALL"));
     }
-    let res = txn
-        .with_hash(storage, &args[0], |hash| {
-            let mut out = Vec::with_capacity(hash.len() * 2);
-            for (f, v) in hash {
-                out.push(router::bulk(f.clone()));
-                out.push(router::bulk(v.clone()));
-            }
-            Ok(RespValue::Array(Some(out)))
-        })
-        .await?;
+    let res = txn.with_hash(storage, &args[0], |hash| {
+        let mut out = Vec::with_capacity(hash.len() * 2);
+        for (f, v) in hash {
+            out.push(router::bulk(f.clone()));
+            out.push(router::bulk(v.clone()));
+        }
+        Ok(RespValue::Array(Some(out)))
+    })?;
     Ok(res.unwrap_or_else(|| RespValue::Array(Some(Vec::new()))))
 }
 
-pub(super) async fn exec_hmget(
-    storage: &dyn KvStorage,
+pub(super) fn exec_hmget(
+    storage: &dyn ScriptIo,
     txn: &ScriptTransaction,
     args: &[Bytes],
 ) -> Result<RespValue> {
@@ -142,25 +138,21 @@ pub(super) async fn exec_hmget(
         return Err(wrong_count("HMGET"));
     }
     let fields = &args[1..];
-    let res = txn
-        .with_hash(storage, &args[0], |hash| {
-            let mut out = Vec::with_capacity(fields.len());
-            for f in fields {
-                out.push(match hash.get(f.as_ref()) {
-                    Some(v) => router::bulk(v.clone()),
-                    None => RespValue::Null,
-                });
-            }
-            Ok(RespValue::Array(Some(out)))
-        })
-        .await?;
-    Ok(res.unwrap_or_else(|| {
-        RespValue::Array(Some(vec![RespValue::Null; fields.len()]))
-    }))
+    let res = txn.with_hash(storage, &args[0], |hash| {
+        let mut out = Vec::with_capacity(fields.len());
+        for f in fields {
+            out.push(match hash.get(f.as_ref()) {
+                Some(v) => router::bulk(v.clone()),
+                None => RespValue::Null,
+            });
+        }
+        Ok(RespValue::Array(Some(out)))
+    })?;
+    Ok(res.unwrap_or_else(|| RespValue::Array(Some(vec![RespValue::Null; fields.len()]))))
 }
 
-pub(super) async fn exec_hincrby(
-    storage: &dyn KvStorage,
+pub(super) fn exec_hincrby(
+    storage: &dyn ScriptIo,
     txn: &mut ScriptTransaction,
     args: &[Bytes],
 ) -> Result<RespValue> {
@@ -169,11 +161,11 @@ pub(super) async fn exec_hincrby(
     }
     let k = key(&args[0]);
     let inc = parse_i64_arg(&args[2], "increment")?;
-    let hash = match txn.ensure_hash_mut(storage, &k).await? {
+    let hash = match txn.ensure_hash_mut(storage, &k)? {
         Some(h) => h,
         None => {
             txn.set_hash(k.clone(), HashMap::new());
-            txn.ensure_hash_mut(storage, &k).await?.unwrap()
+            txn.ensure_hash_mut(storage, &k)?.unwrap()
         }
     };
     let cur = hash
@@ -186,34 +178,30 @@ pub(super) async fn exec_hincrby(
     Ok(router::integer(new_val))
 }
 
-pub(super) async fn exec_hexists(
-    storage: &dyn KvStorage,
+pub(super) fn exec_hexists(
+    storage: &dyn ScriptIo,
     txn: &ScriptTransaction,
     args: &[Bytes],
 ) -> Result<RespValue> {
     if args.len() != 2 {
         return Err(wrong_count("HEXISTS"));
     }
-    let res = txn
-        .with_hash(storage, &args[0], |hash| {
-            Ok(hash.contains_key(args[1].as_ref()))
-        })
-        .await?;
+    let res = txn.with_hash(storage, &args[0], |hash| {
+        Ok(hash.contains_key(args[1].as_ref()))
+    })?;
     let exists = res.unwrap_or(false);
     Ok(router::integer(i64::from(exists)))
 }
 
-pub(super) async fn exec_hlen(
-    storage: &dyn KvStorage,
+pub(super) fn exec_hlen(
+    storage: &dyn ScriptIo,
     txn: &ScriptTransaction,
     args: &[Bytes],
 ) -> Result<RespValue> {
     if args.len() != 1 {
         return Err(wrong_count("HLEN"));
     }
-    let res = txn
-        .with_hash(storage, &args[0], |hash| Ok(hash.len() as i64))
-        .await?;
+    let res = txn.with_hash(storage, &args[0], |hash| Ok(hash.len() as i64))?;
     let len = res.unwrap_or(0);
     Ok(router::integer(len))
 }

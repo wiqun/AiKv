@@ -725,6 +725,10 @@ impl crate::storage::script_io::ScriptIo for MemoryEngine {
         Err(Error::Storage("raw subkey access not supported".into()))
     }
 
+    fn raw_subkey_get(&self, _db: usize, _encoded_key: Vec<u8>) -> Result<Option<Vec<u8>>> {
+        Err(Error::Storage("raw subkey access not supported".into()))
+    }
+
     fn raw_subkey_for_each(
         &self,
         _db: usize,

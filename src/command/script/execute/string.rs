@@ -6,19 +6,19 @@ use crate::command::router;
 use crate::command::script::transaction::{parse_f64_arg, parse_i64_arg, ScriptTransaction};
 use crate::error::Result;
 use crate::protocol::RespValue;
-use crate::storage::KvStorage;
+use crate::storage::ScriptIo;
 
 use super::{key, wrong_count};
 
-pub(super) async fn exec_get(
-    storage: &dyn KvStorage,
+pub(super) fn exec_get(
+    storage: &dyn ScriptIo,
     txn: &ScriptTransaction,
     args: &[Bytes],
 ) -> Result<RespValue> {
     if args.len() != 1 {
         return Err(wrong_count("GET"));
     }
-    match txn.get(storage, &args[0]).await? {
+    match txn.get(storage, &args[0])? {
         Some(v) => Ok(router::bulk(v)),
         None => Ok(RespValue::Null),
     }
@@ -26,8 +26,8 @@ pub(super) async fn exec_get(
 
 use crate::command::string::{parse_set_options, SetCondition};
 
-pub(super) async fn exec_set(
-    storage: &dyn KvStorage,
+pub(super) fn exec_set(
+    storage: &dyn ScriptIo,
     txn: &mut ScriptTransaction,
     args: &[Bytes],
 ) -> Result<RespValue> {
@@ -35,13 +35,12 @@ pub(super) async fn exec_set(
         return Err(wrong_count("SET"));
     }
     let opts = parse_set_options(args)?;
-    let old_value = if opts.return_old
-        || matches!(opts.condition, SetCondition::Nx | SetCondition::Xx)
-    {
-        txn.get(storage, &args[0]).await?
-    } else {
-        None
-    };
+    let old_value =
+        if opts.return_old || matches!(opts.condition, SetCondition::Nx | SetCondition::Xx) {
+            txn.get(storage, &args[0])?
+        } else {
+            None
+        };
 
     if opts.condition == SetCondition::Nx && old_value.is_some() {
         return Ok(if opts.return_old {
@@ -70,8 +69,8 @@ pub(super) async fn exec_set(
     }
 }
 
-pub(super) async fn exec_del(
-    storage: &dyn KvStorage,
+pub(super) fn exec_del(
+    storage: &dyn ScriptIo,
     txn: &mut ScriptTransaction,
     args: &[Bytes],
 ) -> Result<RespValue> {
@@ -80,7 +79,7 @@ pub(super) async fn exec_del(
     }
     let mut count = 0i64;
     for arg in args {
-        if txn.exists(storage, arg).await? {
+        if txn.exists(storage, arg)? {
             txn.delete(key(arg));
             count += 1;
         }
@@ -88,8 +87,8 @@ pub(super) async fn exec_del(
     Ok(router::integer(count))
 }
 
-pub(super) async fn exec_exists(
-    storage: &dyn KvStorage,
+pub(super) fn exec_exists(
+    storage: &dyn ScriptIo,
     txn: &ScriptTransaction,
     args: &[Bytes],
 ) -> Result<RespValue> {
@@ -98,15 +97,15 @@ pub(super) async fn exec_exists(
     }
     let mut count = 0i64;
     for arg in args {
-        if txn.exists(storage, arg).await? {
+        if txn.exists(storage, arg)? {
             count += 1;
         }
     }
     Ok(router::integer(count))
 }
 
-pub(super) async fn exec_incr(
-    storage: &dyn KvStorage,
+pub(super) fn exec_incr(
+    storage: &dyn ScriptIo,
     txn: &mut ScriptTransaction,
     args: &[Bytes],
     delta: i64,
@@ -114,7 +113,7 @@ pub(super) async fn exec_incr(
     if args.len() != 1 {
         return Err(wrong_count("INCR"));
     }
-    let current = match txn.get(storage, &args[0]).await? {
+    let current = match txn.get(storage, &args[0])? {
         Some(v) => parse_i64_arg(&Bytes::from(v), "value")?,
         None => 0,
     };
@@ -123,8 +122,8 @@ pub(super) async fn exec_incr(
     Ok(router::integer(new_val))
 }
 
-pub(super) async fn exec_incrby(
-    storage: &dyn KvStorage,
+pub(super) fn exec_incrby(
+    storage: &dyn ScriptIo,
     txn: &mut ScriptTransaction,
     args: &[Bytes],
 ) -> Result<RespValue> {
@@ -132,11 +131,11 @@ pub(super) async fn exec_incrby(
         return Err(wrong_count("INCRBY"));
     }
     let inc = parse_i64_arg(&args[1], "increment")?;
-    exec_incr(storage, txn, &[args[0].clone()], inc).await
+    exec_incr(storage, txn, &[args[0].clone()], inc)
 }
 
-pub(super) async fn exec_decrby(
-    storage: &dyn KvStorage,
+pub(super) fn exec_decrby(
+    storage: &dyn ScriptIo,
     txn: &mut ScriptTransaction,
     args: &[Bytes],
 ) -> Result<RespValue> {
@@ -144,11 +143,11 @@ pub(super) async fn exec_decrby(
         return Err(wrong_count("DECRBY"));
     }
     let dec = parse_i64_arg(&args[1], "decrement")?;
-    exec_incr(storage, txn, &[args[0].clone()], -dec).await
+    exec_incr(storage, txn, &[args[0].clone()], -dec)
 }
 
-pub(super) async fn exec_incrbyfloat(
-    storage: &dyn KvStorage,
+pub(super) fn exec_incrbyfloat(
+    storage: &dyn ScriptIo,
     txn: &mut ScriptTransaction,
     args: &[Bytes],
 ) -> Result<RespValue> {
@@ -156,7 +155,7 @@ pub(super) async fn exec_incrbyfloat(
         return Err(wrong_count("INCRBYFLOAT"));
     }
     let inc = parse_f64_arg(&args[1], "increment")?;
-    let current = match txn.get(storage, &args[0]).await? {
+    let current = match txn.get(storage, &args[0])? {
         Some(v) => parse_f64_arg(&Bytes::from(v), "value")?,
         None => 0.0,
     };
@@ -166,33 +165,29 @@ pub(super) async fn exec_incrbyfloat(
     Ok(router::bulk(s.into_bytes()))
 }
 
-pub(super) async fn exec_append(
-    storage: &dyn KvStorage,
+pub(super) fn exec_append(
+    storage: &dyn ScriptIo,
     txn: &mut ScriptTransaction,
     args: &[Bytes],
 ) -> Result<RespValue> {
     if args.len() != 2 {
         return Err(wrong_count("APPEND"));
     }
-    let mut cur = txn.get(storage, &args[0]).await?.unwrap_or_default();
+    let mut cur = txn.get(storage, &args[0])?.unwrap_or_default();
     cur.extend_from_slice(&args[1]);
     let len = cur.len() as i64;
     txn.set_string(key(&args[0]), cur);
     Ok(router::integer(len))
 }
 
-pub(super) async fn exec_strlen(
-    storage: &dyn KvStorage,
+pub(super) fn exec_strlen(
+    storage: &dyn ScriptIo,
     txn: &ScriptTransaction,
     args: &[Bytes],
 ) -> Result<RespValue> {
     if args.len() != 1 {
         return Err(wrong_count("STRLEN"));
     }
-    let len = txn
-        .get(storage, &args[0])
-        .await?
-        .map(|v| v.len())
-        .unwrap_or(0) as i64;
+    let len = txn.get(storage, &args[0])?.map(|v| v.len()).unwrap_or(0) as i64;
     Ok(router::integer(len))
 }

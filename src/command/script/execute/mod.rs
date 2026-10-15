@@ -1,4 +1,4 @@
-//! Lua 脚本内 `redis.call` / `redis.pcall` 的异步执行: 参数转换 → KEYS 声明校验 →
+//! `redis.call` / `redis.pcall` 在脚本线程上同步执行, 存储走 `ScriptIo`.
 //! 按命令名 dispatch 到各域 exec_* → 写操作进 `ScriptTransaction` 缓冲, 读操作优先读缓冲.
 //!
 //! 子模块: `string` / `hash` / `list` / `set` / `zset` (各域 `exec_*`); JSON 仍转发 `json_exec`.
@@ -34,7 +34,7 @@ use crate::command::script::json_exec;
 use crate::command::script::transaction::{expire_seconds_to_at, parse_i64_arg, ScriptTransaction};
 use crate::error::{Error, Result};
 use crate::protocol::RespValue;
-use crate::storage::KvStorage;
+use crate::storage::ScriptIo;
 
 mod hash;
 mod list;
@@ -53,8 +53,8 @@ use self::string::{
     exec_incrbyfloat, exec_set, exec_strlen,
 };
 use self::zset::{
-    exec_zadd, exec_zcard, exec_zrange, exec_zrangebyscore, exec_zrank, exec_zrem,
-    exec_zrevrange, exec_zrevrangebyscore, exec_zscore,
+    exec_zadd, exec_zcard, exec_zrange, exec_zrangebyscore, exec_zrank, exec_zrem, exec_zrevrange,
+    exec_zrevrangebyscore, exec_zscore,
 };
 
 use crate::storage::watch_version::extract_hash_tag;
@@ -67,103 +67,89 @@ pub(super) fn key(b: &Bytes) -> Vec<u8> {
     b.to_vec()
 }
 
-fn validate_keys(declared: &HashSet<Vec<u8>>, cmd: &str, args: &[Bytes]) -> Result<()> {
-    for idx in command_key_indices(cmd, args.len()) {
-        if idx >= args.len() {
-            continue;
+#[derive(Debug, Clone)]
+pub struct DeclaredKeys {
+    exact: HashSet<Vec<u8>>,
+    tags: HashSet<Vec<u8>>,
+}
+
+impl DeclaredKeys {
+    pub fn new(keys: &[Bytes]) -> Self {
+        let mut exact = HashSet::with_capacity(keys.len());
+        let mut tags = HashSet::with_capacity(keys.len());
+        for k in keys {
+            exact.insert(k.to_vec());
+            let tag = extract_hash_tag(k);
+            if tag != k.as_ref() {
+                tags.insert(tag.to_vec());
+            }
         }
-        let k = args[idx].as_ref();
-        if declared.contains(k) {
-            continue;
+        Self { exact, tags }
+    }
+
+    pub fn is_declared(&self, k: &[u8]) -> bool {
+        if self.exact.contains(k) {
+            return true;
         }
-        let k_tag = extract_hash_tag(k);
-        let has_matching_tag = if k_tag != k {
-            declared.iter().any(|d| extract_hash_tag(d) == k_tag)
-        } else {
-            false
-        };
-        if !has_matching_tag {
-            return Err(Error::Command(format!(
-                "ERR Script attempted to access undeclared key '{:?}'",
-                String::from_utf8_lossy(k)
-            )));
+        if !self.tags.is_empty() {
+            let tag = extract_hash_tag(k);
+            if tag != k && self.tags.contains(tag) {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+fn validate_keys(declared: &DeclaredKeys, cmd: &str, args: &[Bytes]) -> Result<()> {
+    match cmd {
+        "DEL" | "EXISTS" => {
+            for a in args {
+                check_key(declared, a.as_ref())?;
+            }
+        }
+        "JSON.MGET" => {
+            for a in args.iter().take(args.len().saturating_sub(1)) {
+                check_key(declared, a.as_ref())?;
+            }
+        }
+        _ => {
+            if let Some(first) = args.first() {
+                check_key(declared, first.as_ref())?;
+            }
         }
     }
     Ok(())
 }
 
-fn command_key_indices(cmd: &str, argc: usize) -> Vec<usize> {
-    match cmd {
-        "DEL" | "EXISTS" => (0..argc).collect(),
-        "HMGET" | "HDEL" | "HSET" | "HMSET" | "HINCRBY" | "HEXISTS" | "HSETNX" => {
-            if argc > 0 {
-                vec![0]
-            } else {
-                vec![]
-            }
-        }
-        "LPUSH" | "RPUSH" | "LPOP" | "RPOP" | "LLEN" | "LRANGE" | "LINDEX" => {
-            if argc > 0 {
-                vec![0]
-            } else {
-                vec![]
-            }
-        }
-        "SADD" | "SREM" | "SMEMBERS" | "SISMEMBER" | "SCARD" | "SSCAN" => {
-            if argc > 0 {
-                vec![0]
-            } else {
-                vec![]
-            }
-        }
-        "JSON.MGET" => {
-            if argc >= 2 {
-                (0..argc - 1).collect()
-            } else {
-                vec![]
-            }
-        }
-        "JSON.SET" | "JSON.GET" | "JSON.DEL" | "JSON.TYPE" | "JSON.STRLEN" | "JSON.ARRAPPEND"
-        | "JSON.NUMINCRBY" | "JSON.OBJLEN" | "JSON.ARRLEN" => {
-            if argc > 0 {
-                vec![0]
-            } else {
-                vec![]
-            }
-        }
-        "ZADD" | "ZREM" | "ZSCORE" | "ZRANK" | "ZRANGE" | "ZREVRANGE" | "ZRANGEBYSCORE"
-        | "ZREVRANGEBYSCORE" | "ZCARD" => {
-            if argc > 0 {
-                vec![0]
-            } else {
-                vec![]
-            }
-        }
-        _ => {
-            if argc > 0 {
-                vec![0]
-            } else {
-                vec![]
-            }
-        }
+fn check_key(declared: &DeclaredKeys, k: &[u8]) -> Result<()> {
+    if declared.is_declared(k) {
+        Ok(())
+    } else {
+        Err(Error::Command(format!(
+            "ERR Script attempted to access undeclared key '{:?}'",
+            String::from_utf8_lossy(k)
+        )))
     }
 }
 
-pub async fn redis_call_async(
+pub fn redis_call(
     lua: &mlua::Lua,
-    storage: &dyn KvStorage,
+    storage: &dyn ScriptIo,
     txn: &mut ScriptTransaction,
-    declared: &HashSet<Vec<u8>>,
+    declared: &DeclaredKeys,
     args: mlua::MultiValue,
     throw_error: bool,
 ) -> mlua::Result<mlua::Value> {
-    let mut cmd_args: Vec<Bytes> = Vec::new();
+    let mut cmd_args: Vec<Bytes> = Vec::with_capacity(args.len());
     for arg in args {
         match arg {
-            mlua::Value::String(s) => cmd_args.push(Bytes::from(s.as_bytes().to_vec())),
+            mlua::Value::String(s) => cmd_args.push(Bytes::copy_from_slice(s.as_bytes().as_ref())),
             mlua::Value::Integer(i) => cmd_args.push(Bytes::from(i.to_string())),
             mlua::Value::Number(n) => cmd_args.push(Bytes::from(n.to_string())),
-            mlua::Value::Boolean(b) => cmd_args.push(Bytes::from(if b { "1" } else { "0" })),
+            mlua::Value::Boolean(b) => {
+                cmd_args.push(Bytes::from_static(if b { b"1" } else { b"0" }))
+            }
             _ => {
                 if throw_error {
                     return Err(mlua::Error::RuntimeError(
@@ -184,25 +170,36 @@ pub async fn redis_call_async(
         return Ok(mlua::Value::Nil);
     }
 
-    let command = String::from_utf8_lossy(&cmd_args[0]).to_ascii_uppercase();
+    let mut cmd_buf = [0u8; 32];
+    let cmd_raw = cmd_args[0].as_ref();
+    let cmd_owned;
+    let command = if cmd_raw.len() <= 32 {
+        for (i, &b) in cmd_raw.iter().enumerate() {
+            cmd_buf[i] = b.to_ascii_uppercase();
+        }
+        std::str::from_utf8(&cmd_buf[..cmd_raw.len()]).unwrap_or("")
+    } else {
+        cmd_owned = String::from_utf8_lossy(cmd_raw).to_ascii_uppercase();
+        cmd_owned.as_str()
+    };
     let command_args = &cmd_args[1..];
 
-    if let Err(e) = validate_keys(declared, &command, command_args) {
+    if let Err(e) = validate_keys(declared, command, command_args) {
         if throw_error {
             return Err(mlua::Error::RuntimeError(e.to_string()));
         }
         return pcall_error_table(lua, &e.to_string());
     }
 
-    async fn run(
+    fn run(
         lua: &mlua::Lua,
-        storage: &dyn KvStorage,
+        storage: &dyn ScriptIo,
         txn: &mut ScriptTransaction,
         command: &str,
         command_args: &[Bytes],
         throw_error: bool,
     ) -> mlua::Result<mlua::Value> {
-        let result = dispatch(storage, txn, command, command_args).await;
+        let result = dispatch(storage, txn, command, command_args);
         match result {
             Ok(resp) => resp_to_lua(lua, resp),
             Err(e) => {
@@ -219,89 +216,85 @@ pub async fn redis_call_async(
         }
     }
 
-    run(lua, storage, txn, &command, command_args, throw_error).await
+    run(lua, storage, txn, command, command_args, throw_error)
 }
 
-async fn dispatch(
-    storage: &dyn KvStorage,
+fn dispatch(
+    storage: &dyn ScriptIo,
     txn: &mut ScriptTransaction,
     cmd: &str,
     args: &[Bytes],
 ) -> Result<RespValue> {
     match cmd {
-        "GET" => exec_get(storage, txn, args).await,
-        "SET" => exec_set(storage, txn, args).await,
-        "DEL" => exec_del(storage, txn, args).await,
-        "EXISTS" => exec_exists(storage, txn, args).await,
-        "INCR" => exec_incr(storage, txn, args, 1).await,
-        "DECR" => exec_incr(storage, txn, args, -1).await,
-        "INCRBY" => exec_incrby(storage, txn, args).await,
-        "DECRBY" => exec_decrby(storage, txn, args).await,
-        "INCRBYFLOAT" => exec_incrbyfloat(storage, txn, args).await,
-        "APPEND" => exec_append(storage, txn, args).await,
-        "STRLEN" => exec_strlen(storage, txn, args).await,
-        "HGET" => exec_hget(storage, txn, args).await,
-        "HSET" | "HMSET" => exec_hset(storage, txn, args).await,
-        "HSETNX" => exec_hsetnx(storage, txn, args).await,
-        "HDEL" => exec_hdel(storage, txn, args).await,
-        "HGETALL" => exec_hgetall(storage, txn, args).await,
-        "HMGET" => exec_hmget(storage, txn, args).await,
-        "HINCRBY" => exec_hincrby(storage, txn, args).await,
-        "HEXISTS" => exec_hexists(storage, txn, args).await,
-        "HLEN" => exec_hlen(storage, txn, args).await,
-        "LPUSH" => exec_lpush(storage, txn, args, true).await,
-        "RPUSH" => exec_lpush(storage, txn, args, false).await,
-        "LPOP" => exec_lpop(storage, txn, args, true).await,
-        "RPOP" => exec_lpop(storage, txn, args, false).await,
-        "LLEN" => exec_llen(storage, txn, args).await,
-        "LRANGE" => exec_lrange(storage, txn, args).await,
-        "LINDEX" => exec_lindex(storage, txn, args).await,
-        "SADD" => exec_sadd(storage, txn, args).await,
-        "SREM" => exec_srem(storage, txn, args).await,
-        "SMEMBERS" => exec_smembers(storage, txn, args).await,
-        "SISMEMBER" => exec_sismember(storage, txn, args).await,
-        "SCARD" => exec_scard(storage, txn, args).await,
-        "SSCAN" => exec_sscan(storage, txn, args).await,
-        "ZADD" => exec_zadd(storage, txn, args).await,
-        "ZREM" => exec_zrem(storage, txn, args).await,
-        "ZSCORE" => exec_zscore(storage, txn, args).await,
-        "ZRANK" => exec_zrank(storage, txn, args).await,
-        "ZRANGE" => exec_zrange(storage, txn, args).await,
-        "ZREVRANGE" => exec_zrevrange(storage, txn, args).await,
-        "ZRANGEBYSCORE" => exec_zrangebyscore(storage, txn, args).await,
-        "ZREVRANGEBYSCORE" => exec_zrevrangebyscore(storage, txn, args).await,
-        "ZCARD" => exec_zcard(storage, txn, args).await,
-        "TTL" => exec_ttl(storage, txn, args).await,
-        "EXPIRE" => exec_expire(storage, txn, args).await,
-        "JSON.GET" => json_exec::exec_json_get(storage, txn, args).await,
-        "JSON.MGET" => json_exec::exec_json_mget(storage, txn, args).await,
-        "JSON.SET" => json_exec::exec_json_set(storage, txn, args).await,
-        "JSON.DEL" => json_exec::exec_json_del(storage, txn, args).await,
-        "JSON.TYPE" => json_exec::exec_json_type(storage, txn, args).await,
-        "JSON.STRLEN" => json_exec::exec_json_strlen(storage, txn, args).await,
-        "JSON.ARRLEN" => json_exec::exec_json_arrlen(storage, txn, args).await,
-        "JSON.OBJLEN" => json_exec::exec_json_objlen(storage, txn, args).await,
-        "JSON.NUMINCRBY" => json_exec::exec_json_numincrby(storage, txn, args).await,
-        "JSON.ARRAPPEND" => json_exec::exec_json_arrappend(storage, txn, args).await,
+        "GET" => exec_get(storage, txn, args),
+        "SET" => exec_set(storage, txn, args),
+        "DEL" => exec_del(storage, txn, args),
+        "EXISTS" => exec_exists(storage, txn, args),
+        "INCR" => exec_incr(storage, txn, args, 1),
+        "DECR" => exec_incr(storage, txn, args, -1),
+        "INCRBY" => exec_incrby(storage, txn, args),
+        "DECRBY" => exec_decrby(storage, txn, args),
+        "INCRBYFLOAT" => exec_incrbyfloat(storage, txn, args),
+        "APPEND" => exec_append(storage, txn, args),
+        "STRLEN" => exec_strlen(storage, txn, args),
+        "HGET" => exec_hget(storage, txn, args),
+        "HSET" | "HMSET" => exec_hset(storage, txn, args),
+        "HSETNX" => exec_hsetnx(storage, txn, args),
+        "HDEL" => exec_hdel(storage, txn, args),
+        "HGETALL" => exec_hgetall(storage, txn, args),
+        "HMGET" => exec_hmget(storage, txn, args),
+        "HINCRBY" => exec_hincrby(storage, txn, args),
+        "HEXISTS" => exec_hexists(storage, txn, args),
+        "HLEN" => exec_hlen(storage, txn, args),
+        "LPUSH" => exec_lpush(storage, txn, args, true),
+        "RPUSH" => exec_lpush(storage, txn, args, false),
+        "LPOP" => exec_lpop(storage, txn, args, true),
+        "RPOP" => exec_lpop(storage, txn, args, false),
+        "LLEN" => exec_llen(storage, txn, args),
+        "LRANGE" => exec_lrange(storage, txn, args),
+        "LINDEX" => exec_lindex(storage, txn, args),
+        "SADD" => exec_sadd(storage, txn, args),
+        "SREM" => exec_srem(storage, txn, args),
+        "SMEMBERS" => exec_smembers(storage, txn, args),
+        "SISMEMBER" => exec_sismember(storage, txn, args),
+        "SCARD" => exec_scard(storage, txn, args),
+        "SSCAN" => exec_sscan(storage, txn, args),
+        "ZADD" => exec_zadd(storage, txn, args),
+        "ZREM" => exec_zrem(storage, txn, args),
+        "ZSCORE" => exec_zscore(storage, txn, args),
+        "ZRANK" => exec_zrank(storage, txn, args),
+        "ZRANGE" => exec_zrange(storage, txn, args),
+        "ZREVRANGE" => exec_zrevrange(storage, txn, args),
+        "ZRANGEBYSCORE" => exec_zrangebyscore(storage, txn, args),
+        "ZREVRANGEBYSCORE" => exec_zrevrangebyscore(storage, txn, args),
+        "ZCARD" => exec_zcard(storage, txn, args),
+        "TTL" => exec_ttl(storage, txn, args),
+        "EXPIRE" => exec_expire(storage, txn, args),
+        "JSON.GET" => json_exec::exec_json_get(storage, txn, args),
+        "JSON.MGET" => json_exec::exec_json_mget(storage, txn, args),
+        "JSON.SET" => json_exec::exec_json_set(storage, txn, args),
+        "JSON.DEL" => json_exec::exec_json_del(storage, txn, args),
+        "JSON.TYPE" => json_exec::exec_json_type(storage, txn, args),
+        "JSON.STRLEN" => json_exec::exec_json_strlen(storage, txn, args),
+        "JSON.ARRLEN" => json_exec::exec_json_arrlen(storage, txn, args),
+        "JSON.OBJLEN" => json_exec::exec_json_objlen(storage, txn, args),
+        "JSON.NUMINCRBY" => json_exec::exec_json_numincrby(storage, txn, args),
+        "JSON.ARRAPPEND" => json_exec::exec_json_arrappend(storage, txn, args),
         _ => Err(Error::Command(format!(
             "ERR Command not supported in scripts: {cmd}"
         ))),
     }
 }
 
-async fn exec_ttl(
-    storage: &dyn KvStorage,
-    txn: &ScriptTransaction,
-    args: &[Bytes],
-) -> Result<RespValue> {
+fn exec_ttl(storage: &dyn ScriptIo, txn: &ScriptTransaction, args: &[Bytes]) -> Result<RespValue> {
     if args.len() != 1 {
         return Err(wrong_count("TTL"));
     }
     let k = &args[0];
-    if !txn.exists(storage, k).await? {
+    if !txn.exists(storage, k)? {
         return Ok(router::integer(-2));
     }
-    let ttl_res = storage.ttl(txn.db_index, k).await?;
+    let ttl_res = storage.ttl(txn.db_index, k)?;
     let res = match ttl_res {
         None => -2,
         Some(crate::storage::TTL_NO_EXPIRY) => -1,
@@ -310,8 +303,8 @@ async fn exec_ttl(
     Ok(router::integer(res))
 }
 
-async fn exec_expire(
-    storage: &dyn KvStorage,
+fn exec_expire(
+    storage: &dyn ScriptIo,
     txn: &mut ScriptTransaction,
     args: &[Bytes],
 ) -> Result<RespValue> {
@@ -319,7 +312,7 @@ async fn exec_expire(
         return Err(wrong_count("EXPIRE"));
     }
     let seconds = parse_i64_arg(&args[1], "seconds")?;
-    if !txn.exists(storage, &args[0]).await? {
+    if !txn.exists(storage, &args[0])? {
         return Ok(router::integer(0));
     }
     if seconds <= 0 {

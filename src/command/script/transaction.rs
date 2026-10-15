@@ -7,7 +7,7 @@ use parking_lot::Mutex;
 use crate::error::{Error, Result};
 use crate::storage::subkey;
 use crate::storage::{
-    now_ms, zset_subkey, AiDbEngine, CollectionKind, KvStorage, StorageEngineKind, StoredValue,
+    now_ms, zset_subkey, AiDbEngine, CollectionKind, ScriptIo, StorageEngineKind, StoredValue,
     ValueType, WriteOp, WRONGTYPE,
 };
 
@@ -71,34 +71,49 @@ impl ScriptTransaction {
 
     pub fn set_string(&mut self, key: Vec<u8>, value: Vec<u8>) {
         self.read_cache.lock().remove(&key);
-        self.orig_expires_at.lock().entry(key.clone()).or_insert(None);
+        self.orig_expires_at
+            .lock()
+            .entry(key.clone())
+            .or_insert(None);
         self.write_buffer
             .insert(key, ExtendedBatchOp::SetString(value));
     }
 
     pub fn set_list(&mut self, key: Vec<u8>, list: VecDeque<Vec<u8>>) {
         self.read_cache.lock().remove(&key);
-        self.orig_expires_at.lock().entry(key.clone()).or_insert(None);
+        self.orig_expires_at
+            .lock()
+            .entry(key.clone())
+            .or_insert(None);
         self.write_buffer
             .insert(key, ExtendedBatchOp::SetList(list));
     }
 
     pub fn set_hash(&mut self, key: Vec<u8>, hash: HashMap<Vec<u8>, Vec<u8>>) {
         self.read_cache.lock().remove(&key);
-        self.orig_expires_at.lock().entry(key.clone()).or_insert(None);
+        self.orig_expires_at
+            .lock()
+            .entry(key.clone())
+            .or_insert(None);
         self.write_buffer
             .insert(key, ExtendedBatchOp::SetHash(hash));
     }
 
     pub fn set_set(&mut self, key: Vec<u8>, set: HashSet<Vec<u8>>) {
         self.read_cache.lock().remove(&key);
-        self.orig_expires_at.lock().entry(key.clone()).or_insert(None);
+        self.orig_expires_at
+            .lock()
+            .entry(key.clone())
+            .or_insert(None);
         self.write_buffer.insert(key, ExtendedBatchOp::SetSet(set));
     }
 
     pub fn set_zset(&mut self, key: Vec<u8>, zset: BTreeMap<Vec<u8>, f64>) {
         self.read_cache.lock().remove(&key);
-        self.orig_expires_at.lock().entry(key.clone()).or_insert(None);
+        self.orig_expires_at
+            .lock()
+            .entry(key.clone())
+            .or_insert(None);
         self.write_buffer
             .insert(key, ExtendedBatchOp::SetZSet(zset));
     }
@@ -112,7 +127,7 @@ impl ScriptTransaction {
         self.expire_at.insert(key, expires_at);
     }
 
-    pub async fn get(&self, storage: &dyn KvStorage, key: &[u8]) -> Result<Option<Vec<u8>>> {
+    pub fn get(&self, storage: &dyn ScriptIo, key: &[u8]) -> Result<Option<Vec<u8>>> {
         if let Some(op) = self.write_buffer.get(key) {
             return match op {
                 ExtendedBatchOp::SetString(v) => Ok(Some(v.clone())),
@@ -120,7 +135,7 @@ impl ScriptTransaction {
                 _ => Err(Error::Command(WRONGTYPE.into())),
             };
         }
-        let stored = self.get_value(storage, key).await?;
+        let stored = self.get_value(storage, key)?;
         match stored {
             Some(s) => match s.value {
                 ValueType::String(v) => Ok(Some(v)),
@@ -130,11 +145,7 @@ impl ScriptTransaction {
         }
     }
 
-    pub async fn get_value(
-        &self,
-        storage: &dyn KvStorage,
-        key: &[u8],
-    ) -> Result<Option<StoredValue>> {
+    pub fn get_value(&self, storage: &dyn ScriptIo, key: &[u8]) -> Result<Option<StoredValue>> {
         if let Some(op) = self.write_buffer.get(key) {
             return match op {
                 ExtendedBatchOp::Delete => Ok(None),
@@ -149,13 +160,14 @@ impl ScriptTransaction {
                 self.read_cache
                     .lock()
                     .insert(key.to_vec(), in_flight_res.clone());
-                self.orig_expires_at
-                    .lock()
-                    .insert(key.to_vec(), in_flight_res.as_ref().and_then(|s| s.expires_at));
+                self.orig_expires_at.lock().insert(
+                    key.to_vec(),
+                    in_flight_res.as_ref().and_then(|s| s.expires_at),
+                );
                 return Ok(in_flight_res);
             }
         }
-        let Some(stored) = storage.get_typed(self.db_index, key).await? else {
+        let Some(stored) = storage.get_typed(self.db_index, key)? else {
             self.read_cache.lock().insert(key.to_vec(), None);
             self.orig_expires_at.lock().insert(key.to_vec(), None);
             return Ok(None);
@@ -173,20 +185,18 @@ impl ScriptTransaction {
                 let prefix = subkey::hash_subkey_prefix(&encoded);
                 let map = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
                 let map_c = map.clone();
-                storage
-                    .raw_subkey_for_each(
-                        self.db_index,
-                        prefix,
-                        Box::new(move |enc, raw| {
-                            if let Some((kind, field)) = subkey::decode_subkey(&enc) {
-                                if kind == CollectionKind::Hash {
-                                    map_c.lock().unwrap().insert(field, raw);
-                                }
+                storage.raw_subkey_for_each(
+                    self.db_index,
+                    prefix,
+                    Box::new(move |enc, raw| {
+                        if let Some((kind, field)) = subkey::decode_subkey(&enc) {
+                            if kind == CollectionKind::Hash {
+                                map_c.lock().unwrap().insert(field, raw);
                             }
-                            Ok(())
-                        }),
-                    )
-                    .await?;
+                        }
+                        Ok(())
+                    }),
+                )?;
                 StoredValue {
                     value: ValueType::Hash(
                         std::sync::Arc::try_unwrap(map)
@@ -205,20 +215,18 @@ impl ScriptTransaction {
                 let prefix = subkey::set_subkey_prefix(&encoded);
                 let set_h = std::sync::Arc::new(std::sync::Mutex::new(HashSet::new()));
                 let set_c = set_h.clone();
-                storage
-                    .raw_subkey_for_each(
-                        self.db_index,
-                        prefix,
-                        Box::new(move |enc, _raw| {
-                            if let Some((kind, member)) = subkey::decode_subkey(&enc) {
-                                if kind == CollectionKind::Set {
-                                    set_c.lock().unwrap().insert(member);
-                                }
+                storage.raw_subkey_for_each(
+                    self.db_index,
+                    prefix,
+                    Box::new(move |enc, _raw| {
+                        if let Some((kind, member)) = subkey::decode_subkey(&enc) {
+                            if kind == CollectionKind::Set {
+                                set_c.lock().unwrap().insert(member);
                             }
-                            Ok(())
-                        }),
-                    )
-                    .await?;
+                        }
+                        Ok(())
+                    }),
+                )?;
                 StoredValue {
                     value: ValueType::Set(
                         std::sync::Arc::try_unwrap(set_h)
@@ -231,27 +239,29 @@ impl ScriptTransaction {
             }
             _ => stored,
         };
-        self.read_cache.lock().insert(key.to_vec(), Some(expanded.clone()));
+        self.read_cache
+            .lock()
+            .insert(key.to_vec(), Some(expanded.clone()));
         Ok(Some(expanded))
     }
 
-    pub async fn exists(&self, storage: &dyn KvStorage, key: &[u8]) -> Result<bool> {
+    pub fn exists(&self, storage: &dyn ScriptIo, key: &[u8]) -> Result<bool> {
         if let Some(op) = self.write_buffer.get(key) {
             return Ok(!matches!(op, ExtendedBatchOp::Delete));
         }
         if let Some(cached) = self.read_cache.lock().get(key) {
             return Ok(cached.is_some());
         }
-        Ok(self.get_value(storage, key).await?.is_some())
+        Ok(self.get_value(storage, key)?.is_some())
     }
 
-    pub async fn ensure_zset_mut(
+    pub fn ensure_zset_mut(
         &mut self,
-        storage: &dyn KvStorage,
+        storage: &dyn ScriptIo,
         key: &[u8],
     ) -> Result<Option<&mut BTreeMap<Vec<u8>, f64>>> {
         if !self.write_buffer.contains_key(key) {
-            let loaded = self.get_value(storage, key).await?;
+            let loaded = self.get_value(storage, key)?;
             if let Some(stored) = loaded {
                 let zset = stored.as_zset()?.clone();
                 self.write_buffer
@@ -267,17 +277,12 @@ impl ScriptTransaction {
         }
     }
 
-    pub async fn with_zset<F, R>(
-        &self,
-        storage: &dyn KvStorage,
-        key: &[u8],
-        f: F,
-    ) -> Result<Option<R>>
+    pub fn with_zset<F, R>(&self, storage: &dyn ScriptIo, key: &[u8], f: F) -> Result<Option<R>>
     where
         F: FnOnce(&BTreeMap<Vec<u8>, f64>) -> Result<R>,
     {
         if self.zset_deltas.contains_key(key) {
-            let map = self.materialize_zset_delta(storage, key).await?;
+            let map = self.materialize_zset_delta(storage, key)?;
             return f(&map).map(Some);
         }
         if let Some(op) = self.write_buffer.get(key) {
@@ -287,24 +292,24 @@ impl ScriptTransaction {
                 _ => Err(Error::Command(WRONGTYPE.into())),
             };
         }
-        let stored = self.get_value(storage, key).await?;
+        let stored = self.get_value(storage, key)?;
         match stored {
             None => Ok(None),
             Some(stored) if zset_subkey::is_zset_header(&stored).is_some() => {
-                let map = self.visible_subkey_members(storage, key).await?;
+                let map = self.visible_subkey_members(storage, key)?;
                 f(&map).map(Some)
             }
             Some(stored) => f(stored.as_zset()?).map(Some),
         }
     }
 
-    pub async fn ensure_hash_mut(
+    pub fn ensure_hash_mut(
         &mut self,
-        storage: &dyn KvStorage,
+        storage: &dyn ScriptIo,
         key: &[u8],
     ) -> Result<Option<&mut HashMap<Vec<u8>, Vec<u8>>>> {
         if !self.write_buffer.contains_key(key) {
-            let loaded = self.get_value(storage, key).await?;
+            let loaded = self.get_value(storage, key)?;
             if let Some(stored) = loaded {
                 let hash = stored.as_hash()?.clone();
                 self.write_buffer
@@ -320,12 +325,7 @@ impl ScriptTransaction {
         }
     }
 
-    pub async fn with_hash<F, R>(
-        &self,
-        storage: &dyn KvStorage,
-        key: &[u8],
-        f: F,
-    ) -> Result<Option<R>>
+    pub fn with_hash<F, R>(&self, storage: &dyn ScriptIo, key: &[u8], f: F) -> Result<Option<R>>
     where
         F: FnOnce(&HashMap<Vec<u8>, Vec<u8>>) -> Result<R>,
     {
@@ -345,7 +345,7 @@ impl ScriptTransaction {
                 None => Ok(None),
             };
         }
-        let stored = self.get_value(storage, key).await?;
+        let stored = self.get_value(storage, key)?;
         match stored {
             Some(stored) => match stored.as_hash() {
                 Ok(hash) => f(hash).map(Some),
@@ -355,9 +355,9 @@ impl ScriptTransaction {
         }
     }
 
-    pub(crate) async fn resolve_expires_at(
+    pub(crate) fn resolve_expires_at(
         &self,
-        storage: &dyn KvStorage,
+        storage: &dyn ScriptIo,
         key: &[u8],
     ) -> Result<Option<u64>> {
         if let Some(exp) = self.expire_at.get(key) {
@@ -375,14 +375,13 @@ impl ScriptTransaction {
             }
         }
         let exp = storage
-            .get_typed(self.db_index, key)
-            .await?
+            .get_typed(self.db_index, key)?
             .and_then(|s| s.expires_at);
         self.orig_expires_at.lock().insert(key.to_vec(), exp);
         Ok(exp)
     }
 
-    pub async fn prepare_batch_ops(&self, storage: &dyn KvStorage) -> Result<Vec<(Vec<u8>, WriteOp)>> {
+    pub fn prepare_batch_ops(&self, storage: &dyn ScriptIo) -> Result<Vec<(Vec<u8>, WriteOp)>> {
         let mut keys: HashSet<Vec<u8>> = self.write_buffer.keys().cloned().collect();
         keys.extend(self.expire_at.keys().cloned());
 
@@ -395,7 +394,7 @@ impl ScriptTransaction {
                         batch_ops.push((key, WriteOp::Delete));
                     }
                     ExtendedBatchOp::SetString(value) => {
-                        let exp = self.resolve_expires_at(storage, &key).await?;
+                        let exp = self.resolve_expires_at(storage, &key)?;
                         let stored = StoredValue {
                             value: ValueType::String(value.clone()),
                             expires_at: exp,
@@ -403,7 +402,7 @@ impl ScriptTransaction {
                         batch_ops.push((key, WriteOp::PutStored(stored)));
                     }
                     ExtendedBatchOp::SetZSet(zset) => {
-                        let exp = self.resolve_expires_at(storage, &key).await?;
+                        let exp = self.resolve_expires_at(storage, &key)?;
                         batch_ops.extend(zset_subkey::commit_inline(
                             self.db_index,
                             key,
@@ -413,39 +412,38 @@ impl ScriptTransaction {
                         ));
                     }
                     _ => {
-                        let exp = self.resolve_expires_at(storage, &key).await?;
+                        let exp = self.resolve_expires_at(storage, &key)?;
                         let mut stored = op_to_stored(op)?;
                         stored.expires_at = exp;
                         batch_ops.push((key, WriteOp::PutStored(stored)));
                     }
                 }
             } else if let Some(exp) = self.expire_at.get(&key) {
-                if let Some(mut stored) = storage.get_typed(self.db_index, &key).await? {
+                if let Some(mut stored) = storage.get_typed(self.db_index, &key)? {
                     stored.expires_at = *exp;
                     batch_ops.push((key, WriteOp::PutStored(stored)));
                 }
             }
         }
-        self.append_zset_deltas(storage, &mut batch_ops).await?;
+        self.append_zset_deltas(storage, &mut batch_ops)?;
         Ok(batch_ops)
     }
 
-    pub async fn prepare_batch_ops_owned(
+    pub fn prepare_batch_ops_owned(
         mut self,
-        storage: &dyn KvStorage,
+        storage: &dyn ScriptIo,
     ) -> Result<Vec<(Vec<u8>, WriteOp)>> {
         let write_buffer = std::mem::take(&mut self.write_buffer);
         let mut batch_ops: Vec<(Vec<u8>, WriteOp)> =
             Vec::with_capacity(write_buffer.len() + self.expire_at.len());
-        self.append_owned_writes(storage, write_buffer, &mut batch_ops)
-            .await?;
-        self.append_zset_deltas(storage, &mut batch_ops).await?;
+        self.append_owned_writes(storage, write_buffer, &mut batch_ops)?;
+        self.append_zset_deltas(storage, &mut batch_ops)?;
         let expire_at = std::mem::take(&mut self.expire_at);
         for (key, exp) in expire_at {
             if self.zset_deltas.contains_key(&key) {
                 continue;
             }
-            if let Some(mut stored) = storage.get_typed(self.db_index, &key).await? {
+            if let Some(mut stored) = storage.get_typed(self.db_index, &key)? {
                 stored.expires_at = exp;
                 batch_ops.push((key, WriteOp::PutStored(stored)));
             }
@@ -453,9 +451,9 @@ impl ScriptTransaction {
         Ok(batch_ops)
     }
 
-    async fn append_owned_writes(
+    fn append_owned_writes(
         &mut self,
-        storage: &dyn KvStorage,
+        storage: &dyn ScriptIo,
         write_buffer: HashMap<Vec<u8>, ExtendedBatchOp>,
         batch_ops: &mut Vec<(Vec<u8>, WriteOp)>,
     ) -> Result<()> {
@@ -466,7 +464,7 @@ impl ScriptTransaction {
                     batch_ops.push((key, WriteOp::Delete));
                 }
                 ExtendedBatchOp::SetString(value) => {
-                    let exp = self.resolve_expires_at(storage, &key).await?;
+                    let exp = self.resolve_expires_at(storage, &key)?;
                     self.expire_at.remove(&key);
                     batch_ops.push((
                         key,
@@ -477,15 +475,19 @@ impl ScriptTransaction {
                     ));
                 }
                 ExtendedBatchOp::SetZSet(zset) => {
-                    let exp = self.resolve_expires_at(storage, &key).await?;
+                    let exp = self.resolve_expires_at(storage, &key)?;
                     self.expire_at.remove(&key);
                     let subkeys = storage.engine_kind() == StorageEngineKind::AiDb;
                     batch_ops.extend(zset_subkey::commit_inline(
-                        self.db_index, key, &zset, exp, subkeys,
+                        self.db_index,
+                        key,
+                        &zset,
+                        exp,
+                        subkeys,
                     ));
                 }
                 _ => {
-                    let exp = self.resolve_expires_at(storage, &key).await?;
+                    let exp = self.resolve_expires_at(storage, &key)?;
                     self.expire_at.remove(&key);
                     let mut stored = op_into_stored(op)?;
                     stored.expires_at = exp;
@@ -497,10 +499,10 @@ impl ScriptTransaction {
     }
 
     #[allow(dead_code)]
-    pub async fn commit(self, storage: &dyn KvStorage) -> Result<()> {
-        let batch_ops = self.prepare_batch_ops(storage).await?;
+    pub fn commit(self, storage: &dyn ScriptIo) -> Result<()> {
+        let batch_ops = self.prepare_batch_ops(storage)?;
         if !batch_ops.is_empty() {
-            storage.write_batch(self.db_index, batch_ops).await?;
+            storage.write_batch(self.db_index, batch_ops)?;
         }
         Ok(())
     }

@@ -17,15 +17,15 @@ use crate::storage::{AiDbEngine, KvStorage, WriteOp};
 use super::in_flight::InFlightBuffer;
 
 impl ScriptTransaction {
-    pub(crate) async fn uses_subkey_zset(
+    pub(crate) fn uses_subkey_zset(
         &self,
-        storage: &dyn KvStorage,
+        storage: &dyn crate::storage::ScriptIo,
         key: &[u8],
     ) -> Result<bool> {
         if self.zset_deltas.contains_key(key) {
             return Ok(true);
         }
-        let stored = self.get_value(storage, key).await?;
+        let stored = self.get_value(storage, key)?;
         Ok(stored
             .as_ref()
             .and_then(zset_subkey::is_zset_header)
@@ -36,18 +36,18 @@ impl ScriptTransaction {
         self.zset_deltas.get(key).map(|delta| delta.count)
     }
 
-    pub(crate) async fn subkey_zadd(
+    pub(crate) fn subkey_zadd(
         &mut self,
-        storage: &dyn KvStorage,
+        storage: &dyn crate::storage::ScriptIo,
         args: &[Bytes],
     ) -> Result<RespValue> {
         let key = &args[0];
-        self.ensure_zset_delta(storage, key).await?;
+        self.ensure_zset_delta(storage, key)?;
         let mut added = 0i64;
         for i in (1..args.len()).step_by(2) {
             let score = parse_f64_arg(&args[i], "score")?;
             let member = args[i + 1].as_ref();
-            let current = self.current_member_score(storage, key, member).await?;
+            let current = self.current_member_score(storage, key, member)?;
             if current.is_none() {
                 added += 1;
             }
@@ -56,18 +56,16 @@ impl ScriptTransaction {
         Ok(router::integer(added))
     }
 
-    pub(crate) async fn subkey_zrem(
+    pub(crate) fn subkey_zrem(
         &mut self,
-        storage: &dyn KvStorage,
+        storage: &dyn crate::storage::ScriptIo,
         args: &[Bytes],
     ) -> Result<RespValue> {
         let key = &args[0];
-        self.ensure_zset_delta(storage, key).await?;
+        self.ensure_zset_delta(storage, key)?;
         let mut removed = 0i64;
         for member in &args[1..] {
-            let current = self
-                .current_member_score(storage, key, member.as_ref())
-                .await?;
+            let current = self.current_member_score(storage, key, member.as_ref())?;
             if current.is_none() {
                 continue;
             }
@@ -77,12 +75,12 @@ impl ScriptTransaction {
         Ok(router::integer(removed))
     }
 
-    pub(crate) async fn materialize_zset_delta(
+    pub(crate) fn materialize_zset_delta(
         &self,
-        storage: &dyn KvStorage,
+        storage: &dyn crate::storage::ScriptIo,
         key: &[u8],
     ) -> Result<BTreeMap<Vec<u8>, f64>> {
-        let mut map = self.visible_subkey_members(storage, key).await?;
+        let mut map = self.visible_subkey_members(storage, key)?;
         let delta = &self.zset_deltas[key];
         for (member, change) in &delta.members {
             match change.after {
@@ -97,36 +95,40 @@ impl ScriptTransaction {
         Ok(map)
     }
 
-    pub(crate) async fn append_zset_deltas(
+    pub(crate) fn append_zset_deltas(
         &self,
-        storage: &dyn KvStorage,
+        storage: &dyn crate::storage::ScriptIo,
         ops: &mut Vec<(Vec<u8>, WriteOp)>,
     ) -> Result<()> {
         for (key, delta) in &self.zset_deltas {
-            let expires_at = self.resolve_expires_at(storage, key).await?;
+            let expires_at = self.resolve_expires_at(storage, key)?;
             push_delta(self.db_index, key, delta, expires_at, ops);
         }
         Ok(())
     }
 
-    pub(crate) async fn visible_subkey_members(
+    pub(crate) fn visible_subkey_members(
         &self,
-        storage: &dyn KvStorage,
+        storage: &dyn crate::storage::ScriptIo,
         key: &[u8],
     ) -> Result<BTreeMap<Vec<u8>, f64>> {
         let _pin = self.in_flight.as_ref().map(|buf| buf.pin_reads());
-        let mut map = zset_subkey::load_members(storage, self.db_index, key).await?;
+        let mut map = zset_subkey::load_members_sync(storage, self.db_index, key)?;
         if let Some(buffer) = &self.in_flight {
             overlay_inflight_members(&mut map, buffer, self.db_index, key);
         }
         Ok(map)
     }
 
-    async fn ensure_zset_delta(&mut self, storage: &dyn KvStorage, key: &[u8]) -> Result<()> {
+    fn ensure_zset_delta(
+        &mut self,
+        storage: &dyn crate::storage::ScriptIo,
+        key: &[u8],
+    ) -> Result<()> {
         if self.zset_deltas.contains_key(key) {
             return Ok(());
         }
-        let stored = self.get_value(storage, key).await?;
+        let stored = self.get_value(storage, key)?;
         let count = match stored {
             Some(stored) => zset_subkey::is_zset_header(&stored).unwrap_or(0),
             None => 0,
@@ -141,9 +143,9 @@ impl ScriptTransaction {
         Ok(())
     }
 
-    pub(crate) async fn point_member_score(
+    pub(crate) fn point_member_score(
         &self,
-        storage: &dyn KvStorage,
+        storage: &dyn crate::storage::ScriptIo,
         key: &[u8],
         member: &[u8],
     ) -> Result<Option<f64>> {
@@ -154,26 +156,25 @@ impl ScriptTransaction {
         {
             return Ok(change.after);
         }
-        point_score(
-            self.in_flight.as_ref(),
-            storage,
-            self.db_index,
-            key,
-            member,
-        )
-        .await
+        point_score(self.in_flight.as_ref(), storage, self.db_index, key, member)
     }
 
-    async fn current_member_score(
+    fn current_member_score(
         &self,
-        storage: &dyn KvStorage,
+        storage: &dyn crate::storage::ScriptIo,
         key: &[u8],
         member: &[u8],
     ) -> Result<Option<f64>> {
-        self.point_member_score(storage, key, member).await
+        self.point_member_score(storage, key, member)
     }
 
-    fn record_member(&mut self, key: &[u8], member: &[u8], current: Option<f64>, after: Option<f64>) {
+    fn record_member(
+        &mut self,
+        key: &[u8],
+        member: &[u8],
+        current: Option<f64>,
+        after: Option<f64>,
+    ) {
         let delta = self.zset_deltas.get_mut(key).expect("zset delta");
         if delta.members.contains_key(member) {
             let was_present = delta.members[member].after.is_some();
@@ -253,9 +254,9 @@ fn push_delta(
     }
 }
 
-async fn point_score(
+fn point_score(
     in_flight: Option<&Arc<InFlightBuffer>>,
-    storage: &dyn KvStorage,
+    storage: &dyn crate::storage::ScriptIo,
     db: usize,
     key: &[u8],
     member: &[u8],
@@ -267,7 +268,7 @@ async fn point_score(
             return Ok(raw.as_deref().and_then(zset_subkey::decode_score));
         }
     }
-    zset_subkey::read_member_score(storage, db, key, member).await
+    zset_subkey::read_member_score_sync(storage, db, key, member)
 }
 
 #[cfg(test)]
@@ -277,8 +278,8 @@ mod tests {
     use bytes::Bytes;
     use tempfile::TempDir;
 
-    use crate::command::CommandRouter;
     use crate::command::script::transaction::ScriptTransaction;
+    use crate::command::CommandRouter;
     use crate::storage::zset_subkey::{self, header};
     use crate::storage::{AiDbEngine, KvStorage, KvStorageAdapter, WriteOp};
 
@@ -332,7 +333,10 @@ mod tests {
             !removed_visible,
             "in-flight ZREM still visible to the next range read"
         );
-        assert!(added_visible, "in-flight member put is missing from the range read");
+        assert!(
+            added_visible,
+            "in-flight member put is missing from the range read"
+        );
     }
 
     #[tokio::test]

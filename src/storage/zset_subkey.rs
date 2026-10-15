@@ -228,6 +228,48 @@ pub async fn load_members(
         .expect("zset members"))
 }
 
+pub fn load_members_sync(
+    storage: &dyn crate::storage::ScriptIo,
+    db: usize,
+    user_key: &[u8],
+) -> Result<BTreeMap<Vec<u8>, f64>> {
+    #[cfg(test)]
+    LOAD_MEMBERS_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let encoded = AiDbEngine::encode_key(db, user_key);
+    let prefix = member_prefix(&encoded);
+    let prefix_len = prefix.len();
+    let map = Arc::new(Mutex::new(BTreeMap::new()));
+    let map_c = Arc::clone(&map);
+    storage.raw_subkey_for_each(
+        db,
+        prefix,
+        Box::new(move |enc, raw| {
+            let Some(member) = member_from_encoded(&enc, prefix_len) else {
+                return Ok(());
+            };
+            if let Some(score) = decode_score(&raw) {
+                map_c.lock().expect("zset members").insert(member, score);
+            }
+            Ok(())
+        }),
+    )?;
+    Ok(Arc::try_unwrap(map)
+        .unwrap_or_else(|_| unreachable!("member map still shared"))
+        .into_inner()
+        .expect("zset members"))
+}
+
+pub fn read_member_score_sync(
+    storage: &dyn crate::storage::ScriptIo,
+    db: usize,
+    user_key: &[u8],
+    member: &[u8],
+) -> Result<Option<f64>> {
+    let encoded = AiDbEngine::encode_key(db, user_key);
+    let raw = storage.raw_subkey_get(db, member_key(&encoded, member))?;
+    Ok(raw.as_deref().and_then(decode_score))
+}
+
 pub(crate) fn member_from_encoded(enc: &[u8], prefix_len: usize) -> Option<Vec<u8>> {
     if enc.len() < prefix_len + 2 {
         return None;
@@ -241,7 +283,12 @@ pub(crate) fn member_from_encoded(enc: &[u8], prefix_len: usize) -> Option<Vec<u
     Some(enc[start..end].to_vec())
 }
 
-fn push_member_put(ops: &mut Vec<(Vec<u8>, WriteOp)>, encoded_user: &[u8], member: &[u8], score: f64) {
+fn push_member_put(
+    ops: &mut Vec<(Vec<u8>, WriteOp)>,
+    encoded_user: &[u8],
+    member: &[u8],
+    score: f64,
+) {
     let member_engine = member_key(encoded_user, member);
     ops.push((
         member_engine,

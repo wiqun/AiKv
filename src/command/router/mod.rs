@@ -103,6 +103,11 @@ impl CommandRouter {
         }
     }
 
+    pub fn with_script_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.script = self.script.with_timeout(timeout);
+        self
+    }
+
     pub fn new_with_shared(storage: Arc<dyn KvStorage>, shared: Arc<ServerSharedState>) -> Self {
         let key_lock = Arc::new(KeyLock::new(KEY_LOCK_BUCKETS));
         Self {
