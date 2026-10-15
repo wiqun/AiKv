@@ -20,11 +20,13 @@ pub(super) struct ScriptBody {
     pub(super) t_lua_done: Instant,
     pub(super) t_prep_done: Instant,
     pub(super) t_local_done: Instant,
+    pub(super) io: crate::storage::script_io::ScriptIoStats,
 }
 
 pub(super) struct ScriptDrive {
     pub(super) lua: mlua::Lua,
     pub(super) result: Result<ScriptBody>,
+    pub(super) io: crate::storage::script_io::ScriptIoStats,
 }
 
 pub(super) struct ScriptJob {
@@ -96,6 +98,7 @@ fn drive_script_body(
     } else {
         Some(batch_ops)
     };
+    let io = crate::storage::script_io::take_script_io_stats();
     ScriptDrive {
         lua,
         result: Ok(ScriptBody {
@@ -104,7 +107,9 @@ fn drive_script_body(
             t_lua_done,
             t_prep_done,
             t_local_done: Instant::now(),
+            io,
         }),
+        io,
     }
 }
 
@@ -134,9 +139,11 @@ fn prepare_script(
 }
 
 fn failed_drive(lua: mlua::Lua, err: Error) -> ScriptDrive {
+    let io = crate::storage::script_io::take_script_io_stats();
     ScriptDrive {
         lua,
         result: Err(err),
+        io,
     }
 }
 

@@ -692,50 +692,85 @@ impl crate::storage::script_io::ScriptIo for MemoryEngine {
     }
 
     fn get_typed(&self, db: usize, key: &[u8]) -> Result<Option<StoredValue>> {
-        self.get_typed_sync(db, key)
+        crate::storage::script_io::time_script_io(
+            crate::storage::script_io::ScriptIoOp::Get,
+            || self.get_typed_sync(db, key),
+        )
     }
 
     fn ttl(&self, db: usize, key: &[u8]) -> Result<Option<i64>> {
-        self.ttl_sync(db, key)
+        crate::storage::script_io::time_script_io(
+            crate::storage::script_io::ScriptIoOp::Get,
+            || self.ttl_sync(db, key),
+        )
     }
 
     fn write_batch(&self, db: usize, ops: Vec<(Vec<u8>, WriteOp)>) -> Result<()> {
-        for (key, op) in ops {
-            match op {
-                WriteOp::Put(value) => {
-                    self.insert_stored(db, &key, StoredValue::string(value))?;
+        crate::storage::script_io::time_script_io(
+            crate::storage::script_io::ScriptIoOp::Write,
+            || {
+                for (key, op) in ops {
+                    match op {
+                        WriteOp::Put(value) => {
+                            self.insert_stored(db, &key, StoredValue::string(value))?;
+                        }
+                        WriteOp::PutStored(stored) => self.insert_stored(db, &key, stored)?,
+                        WriteOp::Delete => {
+                            self.delete_sync(db, &key)?;
+                        }
+                        WriteOp::PutEngine { .. } | WriteOp::DeleteEngine => {
+                            return Err(Error::Storage("raw subkey access not supported".into()));
+                        }
+                    }
                 }
-                WriteOp::PutStored(stored) => self.insert_stored(db, &key, stored)?,
-                WriteOp::Delete => {
-                    self.delete_sync(db, &key)?;
-                }
-                WriteOp::PutEngine { .. } | WriteOp::DeleteEngine => {
-                    return Err(Error::Storage("raw subkey access not supported".into()));
-                }
-            }
-        }
-        Ok(())
+                Ok(())
+            },
+        )
     }
 
-    fn raw_prefix_last(&self, _prefix: Vec<u8>) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
-        Err(Error::Storage("raw subkey access not supported".into()))
+    fn raw_prefix_last(&self, prefix: Vec<u8>) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        crate::storage::script_io::time_script_io(
+            crate::storage::script_io::ScriptIoOp::Prefix,
+            || {
+                let _ = prefix;
+                Err(Error::Storage("raw subkey access not supported".into()))
+            },
+        )
     }
 
-    fn raw_range_last(&self, _start: Vec<u8>, _end: Vec<u8>) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
-        Err(Error::Storage("raw subkey access not supported".into()))
+    fn raw_range_last(&self, start: Vec<u8>, end: Vec<u8>) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        crate::storage::script_io::time_script_io(
+            crate::storage::script_io::ScriptIoOp::Range,
+            || {
+                let _ = (start, end);
+                Err(Error::Storage("raw subkey access not supported".into()))
+            },
+        )
     }
 
-    fn raw_subkey_get(&self, _db: usize, _encoded_key: Vec<u8>) -> Result<Option<Vec<u8>>> {
-        Err(Error::Storage("raw subkey access not supported".into()))
+    fn raw_subkey_get(&self, db: usize, encoded_key: Vec<u8>) -> Result<Option<Vec<u8>>> {
+        crate::storage::script_io::time_script_io(
+            crate::storage::script_io::ScriptIoOp::Get,
+            || {
+                let _ = (db, encoded_key);
+                Err(Error::Storage("raw subkey access not supported".into()))
+            },
+        )
     }
 
     fn raw_subkey_for_each(
         &self,
-        _db: usize,
-        _prefix: Vec<u8>,
-        _f: Box<dyn FnMut(Vec<u8>, Vec<u8>) -> Result<()> + Send>,
+        db: usize,
+        prefix: Vec<u8>,
+        f: Box<dyn FnMut(Vec<u8>, Vec<u8>) -> Result<()> + Send>,
     ) -> Result<()> {
-        Err(Error::Storage("raw subkey access not supported".into()))
+        crate::storage::script_io::time_script_io(
+            crate::storage::script_io::ScriptIoOp::Scan,
+            || {
+                let _ = (db, prefix, f);
+                Err(Error::Storage("raw subkey access not supported".into()))
+            },
+        )
     }
 }
 

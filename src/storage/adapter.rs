@@ -637,6 +637,54 @@ impl KvStorageAdapter {
         )))
     }
 
+    fn load_typed_for_script(&self, db: usize, key: &[u8]) -> Result<Option<StoredValue>> {
+        let Some(raw) = self.storage.get_sync(Self::encode(db, key))? else {
+            return Ok(None);
+        };
+        let stored = Self::deserialize(&raw)?;
+        if stored.is_expired() {
+            if let Some(obs) = &self.observation {
+                obs.record_expired_key();
+            }
+            let encoded = Self::encode(db, key);
+            if self.storage.allow_lazy_expire_delete(&encoded)
+                && self
+                    .storage
+                    .write_batch_sync(vec![AdapterWriteOp::Delete { key: encoded }])
+                    .is_ok()
+            {
+                self.expires.on_ttl_clear(db);
+            }
+            return Ok(None);
+        }
+        Ok(Some(stored))
+    }
+
+    fn ttl_for_script(&self, db: usize, key: &[u8]) -> Result<Option<i64>> {
+        let Some(stored) = self.load_typed_for_script(db, key)? else {
+            return Ok(None);
+        };
+        match stored.expires_at {
+            None => Ok(Some(TTL_NO_EXPIRY)),
+            Some(expires_at) => {
+                let now = now_ms();
+                if now >= expires_at {
+                    Ok(None)
+                } else {
+                    Ok(Some((expires_at - now) as i64))
+                }
+            }
+        }
+    }
+
+    fn prefix_last_for_script(&self, prefix: Vec<u8>) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        let mut end = prefix.clone();
+        if let Some(last) = end.last_mut() {
+            *last = last.saturating_add(1);
+        }
+        self.storage.last_in_range_sync(prefix, end)
+    }
+
     async fn is_zset_header_key(&self, db: usize, key: &[u8]) -> Result<bool> {
         let stored = self.get_typed(db, key).await?;
         Ok(stored
@@ -1145,65 +1193,51 @@ impl crate::storage::script_io::ScriptIo for KvStorageAdapter {
     }
 
     fn get_typed(&self, db: usize, key: &[u8]) -> Result<Option<StoredValue>> {
-        let Some(raw) = self.storage.get_sync(Self::encode(db, key))? else {
-            return Ok(None);
-        };
-        let stored = Self::deserialize(&raw)?;
-        if stored.is_expired() {
-            if let Some(obs) = &self.observation {
-                obs.record_expired_key();
-            }
-            let encoded = Self::encode(db, key);
-            if self.storage.allow_lazy_expire_delete(&encoded)
-                && self
-                    .storage
-                    .write_batch_sync(vec![AdapterWriteOp::Delete { key: encoded }])
-                    .is_ok()
-            {
-                self.expires.on_ttl_clear(db);
-            }
-            return Ok(None);
-        }
-        Ok(Some(stored))
+        crate::storage::script_io::time_script_io(
+            crate::storage::script_io::ScriptIoOp::Get,
+            || self.load_typed_for_script(db, key),
+        )
     }
 
     fn ttl(&self, db: usize, key: &[u8]) -> Result<Option<i64>> {
-        let Some(stored) = crate::storage::script_io::ScriptIo::get_typed(self, db, key)? else {
-            return Ok(None);
-        };
-        match stored.expires_at {
-            None => Ok(Some(TTL_NO_EXPIRY)),
-            Some(expires_at) => {
-                let now = now_ms();
-                if now >= expires_at {
-                    Ok(None)
-                } else {
-                    Ok(Some((expires_at - now) as i64))
-                }
-            }
-        }
+        crate::storage::script_io::time_script_io(
+            crate::storage::script_io::ScriptIoOp::Get,
+            || self.ttl_for_script(db, key),
+        )
     }
 
     fn write_batch(&self, db: usize, ops: Vec<(Vec<u8>, WriteOp)>) -> Result<()> {
-        let batch = self.prepare_adapter_batch_sync(db, ops)?;
-        self.storage.write_batch_sync(batch)
+        crate::storage::script_io::time_script_io(
+            crate::storage::script_io::ScriptIoOp::Write,
+            || {
+                let batch = self.prepare_adapter_batch_sync(db, ops)?;
+                self.storage.write_batch_sync(batch)
+            },
+        )
     }
 
     fn raw_prefix_last(&self, prefix: Vec<u8>) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
-        let mut end = prefix.clone();
-        if let Some(last) = end.last_mut() {
-            *last = last.saturating_add(1);
-        }
-        self.storage.last_in_range_sync(prefix, end)
+        crate::storage::script_io::time_script_io(
+            crate::storage::script_io::ScriptIoOp::Prefix,
+            || self.prefix_last_for_script(prefix),
+        )
     }
 
     fn raw_range_last(&self, start: Vec<u8>, end: Vec<u8>) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
-        self.storage.last_in_range_sync(start, end)
+        crate::storage::script_io::time_script_io(
+            crate::storage::script_io::ScriptIoOp::Range,
+            || self.storage.last_in_range_sync(start, end),
+        )
     }
 
     fn raw_subkey_get(&self, db: usize, encoded_key: Vec<u8>) -> Result<Option<Vec<u8>>> {
-        self.check_db(db)?;
-        self.storage.get_sync(encoded_key)
+        crate::storage::script_io::time_script_io(
+            crate::storage::script_io::ScriptIoOp::Get,
+            || {
+                self.check_db(db)?;
+                self.storage.get_sync(encoded_key)
+            },
+        )
     }
 
     fn raw_subkey_for_each(
@@ -1212,8 +1246,13 @@ impl crate::storage::script_io::ScriptIo for KvStorageAdapter {
         prefix: Vec<u8>,
         f: Box<dyn FnMut(Vec<u8>, Vec<u8>) -> Result<()> + Send>,
     ) -> Result<()> {
-        self.check_db(db)?;
-        self.storage.for_each_prefix_sync(prefix, f)
+        crate::storage::script_io::time_script_io(
+            crate::storage::script_io::ScriptIoOp::Scan,
+            || {
+                self.check_db(db)?;
+                self.storage.for_each_prefix_sync(prefix, f)
+            },
+        )
     }
 }
 

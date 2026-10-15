@@ -132,6 +132,51 @@ impl ScriptPerfSampler {
 
 static PERF_SAMPLER: ScriptPerfSampler = ScriptPerfSampler::new();
 
+struct ScriptIoSampler {
+    samples: AtomicU64,
+    get_us: AtomicU64,
+    range_us: AtomicU64,
+    prefix_us: AtomicU64,
+    scan_us: AtomicU64,
+    write_us: AtomicU64,
+}
+
+impl ScriptIoSampler {
+    const fn new() -> Self {
+        Self {
+            samples: AtomicU64::new(0),
+            get_us: AtomicU64::new(0),
+            range_us: AtomicU64::new(0),
+            prefix_us: AtomicU64::new(0),
+            scan_us: AtomicU64::new(0),
+            write_us: AtomicU64::new(0),
+        }
+    }
+
+    fn record(&self, stats: crate::storage::script_io::ScriptIoStats) {
+        self.get_us.fetch_add(stats.get_us, Ordering::Relaxed);
+        self.range_us.fetch_add(stats.range_us, Ordering::Relaxed);
+        self.prefix_us.fetch_add(stats.prefix_us, Ordering::Relaxed);
+        self.scan_us.fetch_add(stats.scan_us, Ordering::Relaxed);
+        self.write_us.fetch_add(stats.write_us, Ordering::Relaxed);
+        let n = self.samples.fetch_add(1, Ordering::Relaxed) + 1;
+        if n.is_multiple_of(1000) {
+            tracing::info!(
+                target: "perf",
+                "[SCRIPT_IO_PERF] samples={} avg_get_us={} avg_range_us={} avg_prefix_us={} avg_scan_us={} avg_write_us={}",
+                n,
+                self.get_us.load(Ordering::Relaxed) / n,
+                self.range_us.load(Ordering::Relaxed) / n,
+                self.prefix_us.load(Ordering::Relaxed) / n,
+                self.scan_us.load(Ordering::Relaxed) / n,
+                self.write_us.load(Ordering::Relaxed) / n
+            );
+        }
+    }
+}
+
+static IO_SAMPLER: ScriptIoSampler = ScriptIoSampler::new();
+
 struct Seg50Slot {
     first_start: parking_lot::Mutex<Option<Instant>>,
     first_enq: parking_lot::Mutex<Option<Instant>>,
@@ -415,6 +460,7 @@ impl ScriptCommands {
             .drive_script(lua, db, sha1, script, keys, argv, seg_id, slot_idx)
             .await?;
         self.release_vm(drive.lua);
+        IO_SAMPLER.record(drive.io);
         let body = drive.result?;
         let (commit_done, unlocked) = self
             .finish_pending_commit(body.pending, db, seg_id, slot_idx, _guard)
