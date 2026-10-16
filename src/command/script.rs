@@ -23,11 +23,13 @@
 //! - 超时与内存上限由 mlua hook 与 memory limit 强制; SCRIPT KILL 恒 NOTBUSY (stub).
 
 mod cache;
+mod call_stats;
 mod convert;
 mod drive;
 mod execute;
 pub(crate) mod in_flight;
 pub(crate) mod json_exec;
+mod phase_stats;
 mod pool;
 mod sandbox;
 mod transaction;
@@ -461,6 +463,17 @@ impl ScriptCommands {
             .await?;
         self.release_vm(drive.lua);
         IO_SAMPLER.record(drive.io);
+        call_stats::record_script_calls(drive.calls);
+        let prepare_us = drive.result.as_ref().map_or(0, |body| {
+            phase_stats::micros_between(body.t_lua_done, body.t_prep_done)
+        });
+        phase_stats::record_script_phase(phase_stats::ScriptPhaseStats {
+            hop_us: phase_stats::micros_between(t_locked, drive.t_entered),
+            setup_us: drive.setup_us,
+            gap_us: phase_stats::gap_us(drive.call_wall_us, drive.calls),
+            teardown_us: drive.teardown_us,
+            prepare_us,
+        });
         let body = drive.result?;
         let (commit_done, unlocked) = self
             .finish_pending_commit(body.pending, db, seg_id, slot_idx, _guard)
@@ -554,53 +567,74 @@ impl ScriptCommands {
         txn: ScriptTransaction,
         declared: Arc<DeclaredKeys>,
     ) -> Result<(LuaValue, ScriptTransaction)> {
-        let started = Instant::now();
-        lua.set_hook(
-            HookTriggers::new().every_nth_instruction(10_000),
-            move |_lua, _debug| {
-                if started.elapsed() >= timeout {
-                    return Err(mlua::Error::RuntimeError("Script timed out".to_string()));
-                }
-                Ok(VmState::Continue)
-            },
-        );
-
-        let func_name = format!("__aikv_script_{}", args.sha1);
-        let globals = lua.globals();
-        let func: mlua::Function = match globals.get(func_name.as_str()) {
-            Ok(f) => f,
-            Err(_) => {
-                let f: mlua::Function = lua
-                    .load(args.script)
-                    .into_function()
-                    .map_err(|e| Error::Command(format!("ERR Error compiling script: {e}")))?;
-                globals
-                    .set(func_name.as_str(), f.clone())
-                    .map_err(|e| Error::Command(format!("ERR Error saving script: {e}")))?;
-                f
-            }
-        };
-
-        populate_keys_argv(lua, args.keys, args.argv)?;
-        lua.set_app_data(ScriptExecutionContext {
-            txn: RefCell::new(txn),
-            declared,
-        });
-
+        let t_setup = Instant::now();
+        let func = prepare_lua_call(lua, timeout, args, txn, declared)?;
+        let t_call = Instant::now();
         let eval_result: mlua::Result<LuaValue> = func.call(());
-
-        lua.remove_hook();
-        let ctx = lua.remove_app_data::<ScriptExecutionContext>();
-        let _ = clear_keys_argv(lua);
-        let txn = ctx
-            .ok_or_else(|| Error::Command("ERR missing script execution context".into()))?
-            .txn
-            .into_inner();
-
+        let t_back = Instant::now();
+        let txn = finish_lua_call(lua)?;
+        let t_done = Instant::now();
+        phase_stats::store_eval_span(
+            phase_stats::micros_between(t_setup, t_call),
+            phase_stats::micros_between(t_call, t_back),
+            phase_stats::micros_between(t_back, t_done),
+        );
         eval_result
             .map(|value| (value, txn))
             .map_err(|e| Error::Command(format!("ERR Error running script: {e}")))
     }
+}
+
+fn prepare_lua_call(
+    lua: &mlua::Lua,
+    timeout: Duration,
+    args: &ScriptArgs<'_>,
+    txn: ScriptTransaction,
+    declared: Arc<DeclaredKeys>,
+) -> Result<mlua::Function> {
+    let started = Instant::now();
+    lua.set_hook(
+        HookTriggers::new().every_nth_instruction(10_000),
+        move |_lua, _debug| {
+            if started.elapsed() >= timeout {
+                return Err(mlua::Error::RuntimeError("Script timed out".to_string()));
+            }
+            Ok(VmState::Continue)
+        },
+    );
+
+    let func_name = format!("__aikv_script_{}", args.sha1);
+    let globals = lua.globals();
+    let func: mlua::Function = match globals.get(func_name.as_str()) {
+        Ok(f) => f,
+        Err(_) => {
+            let f: mlua::Function = lua
+                .load(args.script)
+                .into_function()
+                .map_err(|e| Error::Command(format!("ERR Error compiling script: {e}")))?;
+            globals
+                .set(func_name.as_str(), f.clone())
+                .map_err(|e| Error::Command(format!("ERR Error saving script: {e}")))?;
+            f
+        }
+    };
+
+    populate_keys_argv(lua, args.keys, args.argv)?;
+    lua.set_app_data(ScriptExecutionContext {
+        txn: RefCell::new(txn),
+        declared,
+    });
+    Ok(func)
+}
+
+fn finish_lua_call(lua: &mlua::Lua) -> Result<ScriptTransaction> {
+    lua.remove_hook();
+    let ctx = lua.remove_app_data::<ScriptExecutionContext>();
+    let _ = clear_keys_argv(lua);
+    Ok(ctx
+        .ok_or_else(|| Error::Command("ERR missing script execution context".into()))?
+        .txn
+        .into_inner())
 }
 
 fn lua_redis_entry(

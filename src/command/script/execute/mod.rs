@@ -141,7 +141,31 @@ pub fn redis_call(
     args: mlua::MultiValue,
     throw_error: bool,
 ) -> mlua::Result<mlua::Value> {
-    let mut cmd_args: Vec<Bytes> = Vec::with_capacity(args.len());
+    let mut prep = super::call_stats::CallTimer::start(super::call_stats::ScriptCallOp::Prep);
+    let Some(cmd_args) = lua_args_to_bytes(args, throw_error)? else {
+        return Ok(mlua::Value::Nil);
+    };
+    let mut cmd_buf = [0u8; 32];
+    let mut cmd_owned = String::new();
+    let command = ascii_command(cmd_args[0].as_ref(), &mut cmd_buf, &mut cmd_owned);
+    let command_args = &cmd_args[1..];
+    if let Err(e) = validate_keys(declared, command, command_args) {
+        if throw_error {
+            return Err(mlua::Error::RuntimeError(e.to_string()));
+        }
+        return pcall_error_table(lua, &e.to_string());
+    }
+    prep.finish();
+    let family = super::call_stats::script_call_family(command);
+    let _timed = super::call_stats::CallTimer::start(family);
+    reply_call(lua, storage, txn, command, command_args, throw_error)
+}
+
+fn lua_args_to_bytes(
+    args: mlua::MultiValue,
+    throw_error: bool,
+) -> mlua::Result<Option<Vec<Bytes>>> {
+    let mut cmd_args = Vec::with_capacity(args.len());
     for arg in args {
         match arg {
             mlua::Value::String(s) => cmd_args.push(Bytes::copy_from_slice(s.as_bytes().as_ref())),
@@ -156,67 +180,54 @@ pub fn redis_call(
                         "Invalid argument type".to_string(),
                     ));
                 }
-                return Ok(mlua::Value::Nil);
+                return Ok(None);
             }
         }
     }
-
     if cmd_args.is_empty() {
         if throw_error {
             return Err(mlua::Error::RuntimeError(
                 "No command specified".to_string(),
             ));
         }
-        return Ok(mlua::Value::Nil);
+        return Ok(None);
     }
+    Ok(Some(cmd_args))
+}
 
-    let mut cmd_buf = [0u8; 32];
-    let cmd_raw = cmd_args[0].as_ref();
-    let cmd_owned;
-    let command = if cmd_raw.len() <= 32 {
-        for (i, &b) in cmd_raw.iter().enumerate() {
-            cmd_buf[i] = b.to_ascii_uppercase();
+fn ascii_command<'a>(raw: &[u8], buf: &'a mut [u8; 32], owned: &'a mut String) -> &'a str {
+    if raw.len() <= 32 {
+        for (i, &b) in raw.iter().enumerate() {
+            buf[i] = b.to_ascii_uppercase();
         }
-        std::str::from_utf8(&cmd_buf[..cmd_raw.len()]).unwrap_or("")
-    } else {
-        cmd_owned = String::from_utf8_lossy(cmd_raw).to_ascii_uppercase();
-        cmd_owned.as_str()
-    };
-    let command_args = &cmd_args[1..];
-
-    if let Err(e) = validate_keys(declared, command, command_args) {
-        if throw_error {
-            return Err(mlua::Error::RuntimeError(e.to_string()));
-        }
-        return pcall_error_table(lua, &e.to_string());
+        return std::str::from_utf8(&buf[..raw.len()]).unwrap_or("");
     }
+    *owned = String::from_utf8_lossy(raw).to_ascii_uppercase();
+    owned.as_str()
+}
 
-    fn run(
-        lua: &mlua::Lua,
-        storage: &dyn ScriptIo,
-        txn: &mut ScriptTransaction,
-        command: &str,
-        command_args: &[Bytes],
-        throw_error: bool,
-    ) -> mlua::Result<mlua::Value> {
-        let result = dispatch(storage, txn, command, command_args);
-        match result {
-            Ok(resp) => resp_to_lua(lua, resp),
-            Err(e) => {
-                let msg = match &e {
-                    Error::Command(s) => s.clone(),
-                    _ => e.to_string(),
-                };
-                if throw_error {
-                    Err(mlua::Error::RuntimeError(msg))
-                } else {
-                    pcall_error_table(lua, &msg)
-                }
+fn reply_call(
+    lua: &mlua::Lua,
+    storage: &dyn ScriptIo,
+    txn: &mut ScriptTransaction,
+    command: &str,
+    command_args: &[Bytes],
+    throw_error: bool,
+) -> mlua::Result<mlua::Value> {
+    match dispatch(storage, txn, command, command_args) {
+        Ok(resp) => resp_to_lua(lua, resp),
+        Err(e) => {
+            let msg = match &e {
+                Error::Command(s) => s.clone(),
+                _ => e.to_string(),
+            };
+            if throw_error {
+                Err(mlua::Error::RuntimeError(msg))
+            } else {
+                pcall_error_table(lua, &msg)
             }
         }
     }
-
-    run(lua, storage, txn, command, command_args, throw_error)
 }
 
 fn dispatch(

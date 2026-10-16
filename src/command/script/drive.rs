@@ -27,6 +27,11 @@ pub(super) struct ScriptDrive {
     pub(super) lua: mlua::Lua,
     pub(super) result: Result<ScriptBody>,
     pub(super) io: crate::storage::script_io::ScriptIoStats,
+    pub(super) calls: super::call_stats::ScriptCallStats,
+    pub(super) t_entered: Instant,
+    pub(super) setup_us: u64,
+    pub(super) call_wall_us: u64,
+    pub(super) teardown_us: u64,
 }
 
 pub(super) struct ScriptJob {
@@ -82,24 +87,29 @@ fn drive_script_body(
     seg_id: usize,
     slot_idx: usize,
 ) -> ScriptDrive {
+    let t_entered = Instant::now();
     crate::storage::script_io::begin_script_io_sample();
+    super::call_stats::begin_script_call_sample();
+    super::phase_stats::begin_eval_span();
     let prepared = prepare_script(
         &lua, &storage, &in_flight, timeout, db, &sha1, &script, &keys, &argv,
     );
     let (value, t_lua_done, t_prep_done, batch_ops) = match prepared {
         Ok(parts) => parts,
-        Err(err) => return failed_drive(lua, err),
+        Err(err) => return failed_drive(lua, err, t_entered),
     };
     let pending = if local_commit {
         if let Err(err) = commit_local_batch(&storage, &in_flight, db, batch_ops, seg_id, slot_idx)
         {
-            return failed_drive(lua, err);
+            return failed_drive(lua, err, t_entered);
         }
         None
     } else {
         Some(batch_ops)
     };
     let io = crate::storage::script_io::take_script_io_stats();
+    let calls = super::call_stats::take_script_call_stats();
+    let (setup_us, call_wall_us, teardown_us) = super::phase_stats::take_eval_span();
     ScriptDrive {
         lua,
         result: Ok(ScriptBody {
@@ -111,6 +121,11 @@ fn drive_script_body(
             io,
         }),
         io,
+        calls,
+        t_entered,
+        setup_us,
+        call_wall_us,
+        teardown_us,
     }
 }
 
@@ -139,12 +154,19 @@ fn prepare_script(
     Ok((value, t_lua_done, Instant::now(), batch_ops))
 }
 
-fn failed_drive(lua: mlua::Lua, err: Error) -> ScriptDrive {
+fn failed_drive(lua: mlua::Lua, err: Error, t_entered: Instant) -> ScriptDrive {
     let io = crate::storage::script_io::take_script_io_stats();
+    let calls = super::call_stats::take_script_call_stats();
+    let (setup_us, call_wall_us, teardown_us) = super::phase_stats::take_eval_span();
     ScriptDrive {
         lua,
         result: Err(err),
         io,
+        calls,
+        t_entered,
+        setup_us,
+        call_wall_us,
+        teardown_us,
     }
 }
 
