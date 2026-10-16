@@ -45,6 +45,7 @@ description: AiKv 扩展 Redis 命令 — JSON/JSONPath 引擎、Lua EVAL/SCRIPT
 - **Lua 沙箱与原子事务提交 (`ScriptTransaction`)**:
   - 采用 `mlua` 运行独立 Lua 5.4 虚拟机, 裁剪 `os`, `io`, `debug` 等不安全库;
   - `EVAL` 执行前必须提取所有参数 Key, 并调用 `KeyLock::lock_keys_sorted_with_timeout(keys, 30s)` 获取锁;
+  - 多线程运行时上, 脚本体在脚本线程池执行, `redis.call` 同步走 `ScriptIo`. 集群写入先进入在途缓冲再放开 key 锁, 入队在锁外, Raft 确认仍在其后.
   - `redis.call` 写操作收集在 `ScriptTransaction` 的 `WriteBatch` 中, 脚本成功时原子提交, 抛出异常或超时时丢弃修改实现回滚.
 - **`BlockingRegistry` 唤醒机制**:
   - 当客户端执行 `BLPOP`, `BRPOP`, `BZPOPMIN` 等命令且目标 Key 为空时, 将连接注册至 `BlockingRegistry` 对应 Key 的等待通道中, 挂起当前 Task;

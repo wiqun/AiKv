@@ -49,7 +49,7 @@ description: AiKv 全量 OTel 指标总表 (仅当前已存在指标). 查 aikv_
 | `aikv_lua_scripts_total` | Counter | 1 | — (基数 1) | `lua_execution_count` 差分<br>`mod.rs:228-232,649` | Lua 脚本执行次数 | Lua 执行速率:<br>`rate(aikv_lua_scripts_total[1m])` |
 | `aikv_lua_execution_duration_seconds` | Histogram | s | — (基数 1) | 单次 observation = 15 s 窗口内**累计**时长 (`delta_us / 1e6`)<br>`mod.rs:233-237,654` | **非单次执行耗时分布, 桶语义为 15 s 窗口内总耗时** | Lua 耗时趋势参考 (勿用于计算单次 P99) |
 | `aikv_json_commands_total` | Counter | 1 | `aikv_command_name(~20)`<br>基数约 20 | `JSON.*` 子命令计数派生 (大写)<br>`mod.rs:238-242,555-567` | JSON 模块子命令计数 | JSON 命令用量与分布:<br>`sum by (aikv_command_name) (rate(aikv_json_commands_total[1m]))` |
-| `aikv_db_keys` | Gauge | 1 | `aikv_db_index(16: 0~15)`<br>基数 16 | `storage.db_key_counts()` 15 s 轮询<br>`mod.rs:146-150,290` | 精确 DBSIZE (**key 个数, 非字节**) | 逻辑数据规模 / SA 分母素材:<br>`sum(aikv_db_keys)` |
+| `aikv_db_keys` | Gauge | 1 | `aikv_db_index(16: 0~15)`<br>基数 16 | `storage.db_key_counts()` 15 s 轮询<br>`mod.rs:146-150,290` | 各逻辑 DB 的 `len()`, 引擎条目估值, 含尚未惰性清理的过期 key, 不是精确用户 key 数 | 逻辑数据规模 / SA 分母素材:<br>`sum(aikv_db_keys)` |
 | `aikv_used_memory_bytes` | Gauge | By | — (基数 1) | `storage.memory_usage_bytes()` 轮询 → Observable 回调<br>`mod.rs:687`; `sync_stats_gauges:475` | memtable/cache 近似 | 数据集内存占用规模 (MB):<br>`aikv_used_memory_bytes / 1024 / 1024` |
 | `aikv_used_memory_peak_bytes` | Gauge | By | — (基数 1) | 同上<br>`mod.rs:696` | 历史峰值 | 内存峰值观测:<br>`aikv_used_memory_peak_bytes` |
 | `aikv_instantaneous_ops_per_sec` | Gauge | {request}/s | — (基数 1) | 15 s 滑动窗口采样 → Observable 回调<br>`mod.rs:705` | 15 s 窗口计算, 短跑压测容易失真 | 瞬时 QPS 参考 (平稳运行时直读) |
