@@ -201,6 +201,23 @@ async fn test_tcp_pipeline() {
 }
 
 #[tokio::test]
+async fn test_tcp_pipeline_larger_than_one_read() {
+    let (addr, _handle) = start_server().await;
+    let mut stream = connect(addr).await;
+    let ping = b"*1\r\n$4\r\nPING\r\n";
+    let count = 5000;
+    let mut payload = Vec::with_capacity(count * ping.len());
+    for _ in 0..count {
+        payload.extend_from_slice(ping);
+    }
+    assert!(payload.len() > 65536);
+    stream.write_all(&payload).await.unwrap();
+    let mut resp = vec![0u8; count * b"+PONG\r\n".len()];
+    stream.read_exact(&mut resp).await.unwrap();
+    assert_eq!(resp, b"+PONG\r\n".repeat(count));
+}
+
+#[tokio::test]
 async fn test_tcp_concurrent_connections() {
     let (addr, _handle) = start_server().await;
     let mut handles = Vec::new();

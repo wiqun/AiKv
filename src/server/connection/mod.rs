@@ -259,6 +259,7 @@ impl Connection {
             }
 
             self.parser.feed(&buf[..n]);
+            let drained = self.drain_ready(&mut buf)?;
 
             loop {
                 match self.process_next_batch(&mut buf).await {
@@ -274,6 +275,10 @@ impl Connection {
                 }
             }
             self.flush_responses().await?;
+            if let Some(reason) = self::pipeline::close_reason(drained) {
+                self.state.metrics.note_connection_close(reason);
+                break;
+            }
         }
         Ok(())
     }
