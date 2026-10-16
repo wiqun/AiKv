@@ -516,7 +516,7 @@ fn init_logging(settings: &ResolvedSettings) {
                         .flatten_event(false)
                         .with_current_span(true)
                         .with_span_list(true)
-                        .with_writer(std::io::stdout)
+                        .with_writer(std::io::stderr)
                         .with_filter(EnvFilter::new(log_level))
                         .boxed(),
                 )
@@ -525,7 +525,7 @@ fn init_logging(settings: &ResolvedSettings) {
                     fmt::layer()
                         .compact()
                         .with_target(true)
-                        .with_writer(std::io::stdout)
+                        .with_writer(std::io::stderr)
                         .with_filter(EnvFilter::new(log_level))
                         .boxed(),
                 )
@@ -543,7 +543,7 @@ fn init_logging(settings: &ResolvedSettings) {
                 .flatten_event(false)
                 .with_current_span(true)
                 .with_span_list(true)
-                .with_writer(std::io::stdout)
+                .with_writer(std::io::stderr)
                 .with_filter(EnvFilter::new(log_level))
                 .boxed(),
         )
@@ -552,7 +552,7 @@ fn init_logging(settings: &ResolvedSettings) {
             fmt::layer()
                 .compact()
                 .with_target(true)
-                .with_writer(std::io::stdout)
+                .with_writer(std::io::stderr)
                 .with_filter(EnvFilter::new(log_level))
                 .boxed(),
         )
