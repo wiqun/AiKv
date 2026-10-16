@@ -362,10 +362,7 @@ async fn info_keyspace_reports_estimate_and_expires() {
             .await
             .unwrap(),
     );
-    assert!(
-        info_has_keyspace_contract(&text),
-        "keyspace text: {text}"
-    );
+    assert!(info_has_keyspace_contract(&text), "keyspace text: {text}");
 
     let sample = shared
         .storage

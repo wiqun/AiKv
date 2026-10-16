@@ -40,6 +40,7 @@ description: AiKv Server 运行时与连接管理 — TCP Listener、Connection 
 - **并发连接门控 (`max_clients`)**:
   - `ServerSharedState` 维护活跃连接数计数器;
   - 当活跃连接数达到 `--max-clients` 上限时, `listener.accept()` 立即主动关闭新连接 (`drop(stream)`), 防止连接耗尽引发系统级崩溃.
+- **TCP_NODELAY**: accept 成功后对该连接调用 `set_nodelay(true)`. 设置失败只记警告, 连接继续.
 - **CommandRouter 延迟初始化**: `ServerSharedState::router()` 通过 `OnceLock` 在首次需要时惰性构建 `CommandRouter`.
 
 ---

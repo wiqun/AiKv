@@ -1,6 +1,6 @@
 //! Lua 脚本命令入口: EVAL / EVALSHA / SCRIPT (LOAD/EXISTS/FLUSH/KILL).
 //!
-//! 先按 KEYS 拿 key 锁, 再在脚本线程上同步执行. 单机写入在该线程完成.
+//! 先按 KEYS 拿 key 锁, 再在调用任务上同步执行. 单机写入在该任务完成.
 //! 集群先把写放进在途缓冲再放开 key 锁, 入队在锁外按 key 排队, Raft 确认仍在其后.
 //! 脚本内写进 `ScriptTransaction`, 成功才一次提交. EVAL 不写入 SCRIPT 缓存.
 

@@ -110,7 +110,7 @@ MultiRaft 端口依次为 `26379`, `26380`, `26381`, `27379`, `27380`, `27381`.
 | `server.max_clients` | `AIKV_MAX_CLIENTS` | `--max-clients` |
 | `server.script_worker_threads` | `AIKV_SCRIPT_WORKER_THREADS` | (仅 env/TOML) |
 
-未配置 `server.script_worker_threads` 时, 取 `available_parallelism` 并夹到 2..=16; 探测失败为 8. 显式 `0` 使配置加载失败. 大于等于 1 的显式值不再夹取.
+未配置 `server.script_worker_threads` 时, 取 `available_parallelism` 并夹到 2..=16; 探测失败为 8. 显式 `0` 使配置加载失败. 大于等于 1 的显式值不再夹取. 当前 `EVAL` / `EVALSHA` 在调用任务上执行, 不使用这些线程.
 | `engine.kind` | `AIKV_ENGINE` | `--engine` |
 | `engine.data_dir` | `AIKV_DATA_DIR` | `--data-dir` |
 | `engine.sync_wal` | `AIKV_SYNC_WAL` | `--sync-wal` |

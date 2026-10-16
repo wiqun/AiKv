@@ -12,7 +12,7 @@
 
 **ClusterRouter**: 在集群模式下, 根据 key 的 CRC16 哈希计算 slot, 将请求路由到正确的节点或返回 MOVED 错误.
 
-**脚本线程池**: 只执行 `EVAL` / `EVALSHA` 的线程池, 与 tokio worker 和 tokio 阻塞线程池分开.
+**脚本线程池**: `script_worker_threads` 创建的线程池, 与 tokio worker 和 tokio 阻塞线程池分开. 当前 `EVAL` / `EVALSHA` 在调用它的 tokio 任务上同步执行, 不进入这个池.
 
 ## 存储层
 

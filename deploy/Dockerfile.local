@@ -19,10 +19,12 @@ RUN mkdir -p /usr/local/cargo \
         'aidb = { path = "/src/aidb" }' \
         > /usr/local/cargo/config.toml
 
+# 镜像自带 rustc 1.98. rust-toolchain.toml 的 stable 会再下载更新的编译器, 构建机拉包失败时整次构建作废.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/src/aikv/target \
-    cargo build --release --features cluster,monitoring,compression \
+    rm -f rust-toolchain.toml \
+    && cargo build --release --features cluster,monitoring,compression \
     && cp /src/aikv/target/release/aikv /usr/local/bin/aikv
 
 FROM --platform=linux/amd64 debian:bookworm-slim AS runtime

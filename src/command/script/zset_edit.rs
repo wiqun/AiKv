@@ -236,7 +236,7 @@ fn push_delta(
     } else {
         ops.push((
             key.to_vec(),
-            WriteOp::PutStored(zset_subkey::header(delta.count, expires_at)),
+            WriteOp::put_stored(zset_subkey::header(delta.count, expires_at)),
         ));
     }
     for (member, change) in &delta.members {
@@ -309,13 +309,8 @@ mod tests {
 
         let mut ops = zset_subkey::member_change_ops(0, b"z", b"m00", Some(100.0), None);
         let added = zset_subkey::member_key(&AiDbEngine::encode_key(0, b"z"), b"m99");
-        ops.push((
-            added,
-            WriteOp::PutEngine {
-                value: zset_subkey::encode_score(7.0),
-            },
-        ));
-        ops.push((b"z".to_vec(), WriteOp::PutStored(header(64, None))));
+        ops.push((added, WriteOp::put_engine(zset_subkey::encode_score(7.0))));
+        ops.push((b"z".to_vec(), WriteOp::put_stored(header(64, None))));
         let inflight = InFlightBuffer::new();
         inflight.insert_batch(0, &ops);
         let txn = ScriptTransaction::with_in_flight(0, Some(Arc::new(inflight)));

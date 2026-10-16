@@ -467,7 +467,10 @@ impl KvStorageAdapter {
         for (key, op) in ops {
             match op {
                 WriteOp::PutEngine { value } => {
-                    batch.push(AdapterWriteOp::Put { key, value });
+                    batch.push(AdapterWriteOp::Put {
+                        key,
+                        value: (*value).clone(),
+                    });
                 }
                 WriteOp::DeleteEngine => {
                     batch.push(AdapterWriteOp::Delete { key });
@@ -475,7 +478,7 @@ impl KvStorageAdapter {
                 WriteOp::Put(value) => {
                     let encoded = Self::encode(db, &key);
                     touched.push(encoded.clone());
-                    let stored = StoredValue::string(value);
+                    let stored = StoredValue::string((*value).clone());
                     let bytes = Self::serialize(&stored)?;
                     batch.push(AdapterWriteOp::Put {
                         key: encoded,
@@ -523,7 +526,10 @@ impl KvStorageAdapter {
         for (key, op) in ops {
             match op {
                 WriteOp::PutEngine { value } => {
-                    batch.push(AdapterWriteOp::Put { key, value });
+                    batch.push(AdapterWriteOp::Put {
+                        key,
+                        value: (*value).clone(),
+                    });
                 }
                 WriteOp::DeleteEngine => {
                     batch.push(AdapterWriteOp::Delete { key });
@@ -531,7 +537,7 @@ impl KvStorageAdapter {
                 WriteOp::Put(value) => {
                     let encoded = Self::encode(db, &key);
                     touched.push(encoded.clone());
-                    let stored = StoredValue::string(value);
+                    let stored = StoredValue::string((*value).clone());
                     batch.push(AdapterWriteOp::Put {
                         key: encoded,
                         value: Self::serialize(&stored)?,
@@ -821,7 +827,7 @@ impl KvStorage for KvStorageAdapter {
     async fn mset(&self, db: usize, pairs: &[(Vec<u8>, Vec<u8>)]) -> Result<()> {
         let mut ops = Vec::with_capacity(pairs.len());
         for (key, value) in pairs {
-            ops.push((key.clone(), WriteOp::Put(value.clone())));
+            ops.push((key.clone(), WriteOp::put(value.clone())));
         }
         self.write_batch(db, ops).await
     }

@@ -324,8 +324,8 @@ impl KvStorage for MemoryEngine {
     async fn write_batch(&self, db: usize, ops: Vec<(Vec<u8>, WriteOp)>) -> Result<()> {
         for (key, op) in ops {
             match op {
-                WriteOp::Put(value) => self.set(db, &key, &value).await?,
-                WriteOp::PutStored(stored) => self.set_typed(db, &key, stored).await?,
+                WriteOp::Put(value) => self.set(db, &key, value.as_slice()).await?,
+                WriteOp::PutStored(stored) => self.set_typed(db, &key, (*stored).clone()).await?,
                 WriteOp::Delete => {
                     self.delete(db, &key).await?;
                 }
@@ -712,9 +712,11 @@ impl crate::storage::script_io::ScriptIo for MemoryEngine {
                 for (key, op) in ops {
                     match op {
                         WriteOp::Put(value) => {
-                            self.insert_stored(db, &key, StoredValue::string(value))?;
+                            self.insert_stored(db, &key, StoredValue::string((*value).clone()))?;
                         }
-                        WriteOp::PutStored(stored) => self.insert_stored(db, &key, stored)?,
+                        WriteOp::PutStored(stored) => {
+                            self.insert_stored(db, &key, (*stored).clone())?
+                        }
                         WriteOp::Delete => {
                             self.delete_sync(db, &key)?;
                         }

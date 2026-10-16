@@ -60,7 +60,7 @@ use crate::server::config::ServerSharedState;
 
 mod atom;
 mod monitor;
-mod pipeline;
+pub(crate) mod pipeline;
 mod protocol;
 #[cfg(test)]
 mod tests;
@@ -115,6 +115,7 @@ pub struct Connection {
     cluster_state: crate::cluster::connection::ClusterConnectionState,
     /// 原子事务状态 (ATOM.MULTI / EXEC / DISCARD / WATCH)
     tx_state: TransactionState,
+    pending_timing: Option<self::pipeline::PendingBatchTiming>,
 }
 
 impl Connection {
@@ -138,6 +139,7 @@ impl Connection {
             #[cfg(feature = "cluster")]
             cluster_state: crate::cluster::connection::ClusterConnectionState::new(),
             tx_state: TransactionState::new(),
+            pending_timing: None,
         };
         tracing::debug!(remote = %remote, client_id, "kv.connection.open");
         let _ = conn.run().await;
@@ -306,7 +308,10 @@ impl Connection {
             }
         }
 
-        if batch.len() == 1 {
+        let batch_len = batch.len();
+        self::pipeline::record_batch_len(batch_len);
+
+        if batch_len == 1 {
             self.process_single_frame(batch.pop().unwrap(), buf).await?;
         } else {
             if let Err(e) = self.process_pipeline_batch(batch).await {
@@ -345,6 +350,9 @@ impl Connection {
     async fn read_buf(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let n = self.stream.read(buf).await?;
         if n > 0 {
+            if let Some(timing) = self.pending_timing.take() {
+                timing.report_read_next(n);
+            }
             self.state.metrics().on_net_input_bytes(n as u64);
             tracing::debug!(bytes = n, "kv.read.complete");
         }

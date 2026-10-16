@@ -91,7 +91,7 @@ async fn add_to_header(
     let (mut ops, added, count) = header_add_ops(storage, db, key, base, pairs).await?;
     ops.push((
         key.to_vec(),
-        WriteOp::PutStored(zset_subkey::header(count, stored.expires_at)),
+        WriteOp::put_stored(zset_subkey::header(count, stored.expires_at)),
     ));
     storage.write_batch(db, ops).await?;
     Ok(added)
@@ -174,7 +174,7 @@ fn push_header_or_delete(
     }
     ops.push((
         key.to_vec(),
-        WriteOp::PutStored(zset_subkey::header(count, expires_at)),
+        WriteOp::put_stored(zset_subkey::header(count, expires_at)),
     ));
 }
 
@@ -185,7 +185,8 @@ async fn store_map(
     map: BTreeMap<Vec<u8>, f64>,
     expires_at: Option<u64>,
 ) -> Result<()> {
-    if storage.engine_kind() != StorageEngineKind::AiDb || map.len() <= zset_subkey::ZSET_MAX_INLINE {
+    if storage.engine_kind() != StorageEngineKind::AiDb || map.len() <= zset_subkey::ZSET_MAX_INLINE
+    {
         let mut stored = crate::storage::StoredValue::new_zset(map);
         stored.expires_at = expires_at;
         return storage.rewrite_stored(db, key, stored).await;

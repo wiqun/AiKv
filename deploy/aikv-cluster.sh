@@ -336,11 +336,10 @@ replicate_if_needed() {
 add_slots_if_needed() {
     local port="$1"
     local expected_slots="$2"
-    local start="$3"
-    local end="$4"
+    shift 2
     local nodes line slots response
     local slot_args=()
-    local slot
+    local start end slot
 
     nodes="$(cluster_nodes)"
     line="$(node_line "$nodes" "$port")"
@@ -353,9 +352,15 @@ add_slots_if_needed() {
     [[ -z "$slots" ]] ||
         die "端口 $port 上的 slot 分配冲突: $slots"
 
-    for (( slot = start; slot <= end; slot++ )); do
-        slot_args+=("$slot")
+    while (( $# >= 2 )); do
+        start="$1"
+        end="$2"
+        shift 2
+        for (( slot = start; slot <= end; slot++ )); do
+            slot_args+=("$slot")
+        done
     done
+
     response="$(redis_command "$port" CLUSTER ADDSLOTS "${slot_args[@]}")"
     [[ "$response" == "OK" ]] ||
         die "在端口 $port 执行 CLUSTER ADDSLOTS 失败, 返回: $response"
@@ -530,8 +535,8 @@ cmd_up() {
     replicate_if_needed "$nodes" 7380 "$node4_id"
     replicate_if_needed "$nodes" 7381 "$node4_id"
 
-    add_slots_if_needed 6379 "0-8191" 0 8191
-    add_slots_if_needed 7379 "8192-16383" 8192 16383
+    add_slots_if_needed 6379 "0-4095 8192-12287" 0 4095 8192 12287
+    add_slots_if_needed 7379 "4096-8191 12288-16383" 4096 8191 12288 16383
 
     add_replica_if_needed 6379 6380 "$node1_id"
     add_replica_if_needed 6379 6381 "$node1_id"

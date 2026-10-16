@@ -1,4 +1,4 @@
-//! `redis.call` / `redis.pcall` 在脚本线程上同步执行, 存储走 `ScriptIo`.
+//! `redis.call` / `redis.pcall` 在调用任务上同步执行, 存储走 `ScriptIo`.
 //! 按命令名 dispatch 到各域 exec_* → 写操作进 `ScriptTransaction` 缓冲, 读操作优先读缓冲.
 //!
 //! 子模块: `string` / `hash` / `list` / `set` / `zset` (各域 `exec_*`); JSON 仍转发 `json_exec`.

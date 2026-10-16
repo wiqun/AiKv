@@ -131,7 +131,7 @@ pub fn replace_ops(
     let mut ops = Vec::with_capacity(1 + map.len() * 2);
     ops.push((
         user_key.to_vec(),
-        WriteOp::PutStored(header(map.len() as u32, expires_at)),
+        WriteOp::put_stored(header(map.len() as u32, expires_at)),
     ));
     for (member, score) in map {
         push_member_put(&mut ops, &encoded, member, *score);
@@ -175,7 +175,7 @@ pub fn commit_inline(
     }
     let mut stored = StoredValue::new_zset(zset.clone());
     stored.expires_at = expires_at;
-    vec![(key, WriteOp::PutStored(stored))]
+    vec![(key, WriteOp::put_stored(stored))]
 }
 
 pub async fn read_member_score(
@@ -293,11 +293,11 @@ fn push_member_put(
     ops.push((
         member_engine,
         WriteOp::PutEngine {
-            value: encode_score(score),
+            value: Arc::new(encode_score(score)),
         },
     ));
     let score_engine = score_key(encoded_user, score, member);
-    ops.push((score_engine, WriteOp::PutEngine { value: Vec::new() }));
+    ops.push((score_engine, WriteOp::put_engine(Vec::new())));
 }
 
 #[cfg(test)]

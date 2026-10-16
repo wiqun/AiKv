@@ -370,21 +370,15 @@ async fn test_latency_histogram() {
     let (router, shared) = router_with_shared();
     let mut db = 0;
 
-    shared.metrics.on_command_done(
-        aikv::command::canonical_command("GET"),
-        true,
-        10,
-    );
-    shared.metrics.on_command_done(
-        aikv::command::canonical_command("GET"),
-        true,
-        100,
-    );
-    shared.metrics.on_command_done(
-        aikv::command::canonical_command("SET"),
-        true,
-        50,
-    );
+    shared
+        .metrics
+        .on_command_done(aikv::command::canonical_command("GET"), true, 10);
+    shared
+        .metrics
+        .on_command_done(aikv::command::canonical_command("GET"), true, 100);
+    shared
+        .metrics
+        .on_command_done(aikv::command::canonical_command("SET"), true, 50);
 
     let resp = router
         .execute("LATENCY", &[b("HISTOGRAM")], &mut db)
@@ -425,16 +419,12 @@ async fn test_latency_reset() {
     let (router, shared) = router_with_shared();
     let mut db = 0;
 
-    shared.metrics.on_command_done(
-        aikv::command::canonical_command("GET"),
-        true,
-        10,
-    );
-    shared.metrics.on_command_done(
-        aikv::command::canonical_command("SET"),
-        true,
-        20,
-    );
+    shared
+        .metrics
+        .on_command_done(aikv::command::canonical_command("GET"), true, 10);
+    shared
+        .metrics
+        .on_command_done(aikv::command::canonical_command("SET"), true, 20);
 
     let resp = router
         .execute("LATENCY", &[b("RESET")], &mut db)

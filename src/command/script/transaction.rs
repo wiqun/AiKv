@@ -399,7 +399,7 @@ impl ScriptTransaction {
                             value: ValueType::String(value.clone()),
                             expires_at: exp,
                         };
-                        batch_ops.push((key, WriteOp::PutStored(stored)));
+                        batch_ops.push((key, WriteOp::put_stored(stored)));
                     }
                     ExtendedBatchOp::SetZSet(zset) => {
                         let exp = self.resolve_expires_at(storage, &key)?;
@@ -415,13 +415,13 @@ impl ScriptTransaction {
                         let exp = self.resolve_expires_at(storage, &key)?;
                         let mut stored = op_to_stored(op)?;
                         stored.expires_at = exp;
-                        batch_ops.push((key, WriteOp::PutStored(stored)));
+                        batch_ops.push((key, WriteOp::put_stored(stored)));
                     }
                 }
             } else if let Some(exp) = self.expire_at.get(&key) {
                 if let Some(mut stored) = storage.get_typed(self.db_index, &key)? {
                     stored.expires_at = *exp;
-                    batch_ops.push((key, WriteOp::PutStored(stored)));
+                    batch_ops.push((key, WriteOp::put_stored(stored)));
                 }
             }
         }
@@ -445,7 +445,7 @@ impl ScriptTransaction {
             }
             if let Some(mut stored) = storage.get_typed(self.db_index, &key)? {
                 stored.expires_at = exp;
-                batch_ops.push((key, WriteOp::PutStored(stored)));
+                batch_ops.push((key, WriteOp::put_stored(stored)));
             }
         }
         Ok(batch_ops)
@@ -468,7 +468,7 @@ impl ScriptTransaction {
                     self.expire_at.remove(&key);
                     batch_ops.push((
                         key,
-                        WriteOp::PutStored(StoredValue {
+                        WriteOp::put_stored(StoredValue {
                             value: ValueType::String(value),
                             expires_at: exp,
                         }),
@@ -491,7 +491,7 @@ impl ScriptTransaction {
                     self.expire_at.remove(&key);
                     let mut stored = op_into_stored(op)?;
                     stored.expires_at = exp;
-                    batch_ops.push((key, WriteOp::PutStored(stored)));
+                    batch_ops.push((key, WriteOp::put_stored(stored)));
                 }
             }
         }

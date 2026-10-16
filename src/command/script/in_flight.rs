@@ -1,9 +1,9 @@
 //! 事务在途可见性内存缓冲: 解决 Raft 提交异步期 Lua 读旧快照与锁争用问题.
 
+use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use parking_lot::{Mutex, RwLock};
 
 use crate::storage::aidb::AiDbEngine;
 use crate::storage::types::StoredValue;
@@ -11,9 +11,10 @@ use crate::storage::WriteOp;
 
 #[derive(Clone)]
 pub enum InFlightValue {
-    Present(StoredValue),
+    String(Arc<Vec<u8>>),
+    Stored(Arc<crate::storage::types::StoredValue>),
     /// member / score 索引的原始字节, key 已经是 engine key.
-    Raw(Vec<u8>),
+    Raw(Arc<Vec<u8>>),
     Deleted,
 }
 
@@ -83,7 +84,8 @@ impl InFlightBuffer {
         let map = self.map.read();
         let (v, _) = map.get(&enc_key)?;
         match v {
-            InFlightValue::Present(stored) => Some(Some(stored.clone())),
+            InFlightValue::String(bytes) => Some(Some(StoredValue::string((**bytes).clone()))),
+            InFlightValue::Stored(stored) => Some(Some((**stored).clone())),
             InFlightValue::Deleted => Some(None),
             InFlightValue::Raw(_) => None,
         }
@@ -112,6 +114,24 @@ impl InFlightBuffer {
         best
     }
 
+    /// 半开区间 `[start, end)` 内字典序最大的在途写入 key.
+    pub fn last_key_in_range(&self, start: &[u8], end: &[u8]) -> Option<Vec<u8>> {
+        let map = self.map.read();
+        let mut best: Option<Vec<u8>> = None;
+        for (key, (value, _)) in map.iter() {
+            if key.as_slice() < start
+                || key.as_slice() >= end
+                || matches!(value, InFlightValue::Deleted)
+            {
+                continue;
+            }
+            if best.as_ref().is_none_or(|current| key > current) {
+                best = Some(key.clone());
+            }
+        }
+        best
+    }
+
     /// 前缀下的原始写入. `None` 表示在途删除.
     pub fn prefix_raw_updates(&self, prefix: &[u8]) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
         let map = self.map.read();
@@ -119,8 +139,8 @@ impl InFlightBuffer {
             .filter(|(key, _)| key.starts_with(prefix))
             .filter_map(|(key, (value, _))| match value {
                 InFlightValue::Deleted => Some((key.clone(), None)),
-                InFlightValue::Raw(bytes) => Some((key.clone(), Some(bytes.clone()))),
-                InFlightValue::Present(_) => None,
+                InFlightValue::Raw(bytes) => Some((key.clone(), Some((**bytes).clone()))),
+                InFlightValue::String(_) | InFlightValue::Stored(_) => None,
             })
             .collect()
     }
@@ -130,9 +150,9 @@ impl InFlightBuffer {
         let map = self.map.read();
         let (value, _) = map.get(engine_key)?;
         match value {
-            InFlightValue::Raw(bytes) => Some(Some(bytes.clone())),
+            InFlightValue::Raw(bytes) => Some(Some((**bytes).clone())),
             InFlightValue::Deleted => Some(None),
-            InFlightValue::Present(_) => None,
+            InFlightValue::String(_) | InFlightValue::Stored(_) => None,
         }
     }
 
@@ -145,9 +165,9 @@ impl InFlightBuffer {
         for (k, op) in ops {
             let enc_key = engine_key(db, k, op);
             let val = match op {
-                WriteOp::Put(raw) => InFlightValue::Present(StoredValue::string(raw.clone())),
-                WriteOp::PutStored(stored) => InFlightValue::Present(stored.clone()),
-                WriteOp::PutEngine { value } => InFlightValue::Raw(value.clone()),
+                WriteOp::Put(raw) => InFlightValue::String(Arc::clone(raw)),
+                WriteOp::PutStored(stored) => InFlightValue::Stored(Arc::clone(stored)),
+                WriteOp::PutEngine { value } => InFlightValue::Raw(Arc::clone(value)),
                 WriteOp::Delete | WriteOp::DeleteEngine => InFlightValue::Deleted,
             };
             encoded_keys.push(enc_key.clone());
@@ -225,7 +245,10 @@ mod tests {
         let (seq, keys) = buf.insert_batch(0, &[(key.clone(), WriteOp::DeleteEngine)]);
         let pin = buf.pin_reads();
         buf.remove_encoded(&keys, seq);
-        assert!(buf.get_raw(&key).is_some(), "scan still needs the in-flight delete");
+        assert!(
+            buf.get_raw(&key).is_some(),
+            "scan still needs the in-flight delete"
+        );
         drop(pin);
         assert!(buf.get_raw(&key).is_none());
     }

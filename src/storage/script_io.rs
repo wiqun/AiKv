@@ -131,7 +131,7 @@ mod tests {
     fn memory_script_io_roundtrip() {
         let engine = MemoryEngine::new(4);
         let io = engine.script_io();
-        io.write_batch(0, vec![(b"k".to_vec(), WriteOp::Put(b"v".to_vec()))])
+        io.write_batch(0, vec![(b"k".to_vec(), WriteOp::put(b"v".to_vec()))])
             .unwrap();
         let stored = io.get_typed(0, b"k").unwrap().expect("value");
         match stored.value {
@@ -163,7 +163,7 @@ mod tests {
         let adapter = crate::storage::KvStorageAdapter::new(engine);
         let io = adapter.script_io();
         let header = crate::storage::zset_subkey::header(1, None);
-        io.write_batch(0, vec![(b"z".to_vec(), WriteOp::PutStored(header))])
+        io.write_batch(0, vec![(b"z".to_vec(), WriteOp::put_stored(header))])
             .unwrap();
         let encoded = crate::storage::AiDbEngine::encode_key(0, b"z");
         let score_key = crate::storage::zset_subkey::score_key(&encoded, 1.0, b"m");
@@ -171,9 +171,7 @@ mod tests {
             0,
             vec![(
                 score_key.clone(),
-                WriteOp::PutEngine {
-                    value: crate::storage::zset_subkey::encode_score(1.0),
-                },
+                WriteOp::put_engine(crate::storage::zset_subkey::encode_score(1.0)),
             )],
         )
         .unwrap();
@@ -194,7 +192,7 @@ mod tests {
         let io = adapter.script_io();
         let mut stored = StoredValue::string(b"old".to_vec());
         stored.expires_at = Some(1);
-        io.write_batch(0, vec![(b"k".to_vec(), WriteOp::PutStored(stored))])
+        io.write_batch(0, vec![(b"k".to_vec(), WriteOp::put_stored(stored))])
             .unwrap();
         assert!(io.get_typed(0, b"k").unwrap().is_none());
         let encoded = crate::storage::AiDbEngine::encode_key(0, b"k");
@@ -206,7 +204,7 @@ mod tests {
         let _ = take_script_io_stats();
         let engine = MemoryEngine::new(4);
         let io = engine.script_io();
-        io.write_batch(0, vec![(b"k".to_vec(), WriteOp::Put(b"v".to_vec()))])
+        io.write_batch(0, vec![(b"k".to_vec(), WriteOp::put(b"v".to_vec()))])
             .unwrap();
         io.get_typed(0, b"k").unwrap();
         let stats = take_script_io_stats();

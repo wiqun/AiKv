@@ -42,6 +42,9 @@ impl Server {
                         return Err(err.into());
                     }
                 };
+                if let Err(err) = stream.set_nodelay(true) {
+                    tracing::warn!(%remote, error = %err, "tcp nodelay failed");
+                }
                 tracing::debug!(%remote, "kv.accept");
                 let state = Arc::clone(&state);
                 if !state.try_register_connection() {

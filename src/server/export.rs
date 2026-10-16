@@ -248,10 +248,7 @@ fn append_process(
     }
 }
 
-fn append_commands(
-    snapshot: &mut ExportSnapshot,
-    metrics: &crate::server::metrics::ServerMetrics,
-) {
+fn append_commands(snapshot: &mut ExportSnapshot, metrics: &crate::server::metrics::ServerMetrics) {
     for (command, ok, err) in metrics.command_counter_rows() {
         push_counter(
             snapshot,

@@ -2,11 +2,11 @@
 
 pub mod config;
 pub mod connection;
+pub mod export;
 pub mod info;
 pub mod latency;
 pub mod listener;
 pub mod metrics;
-pub mod export;
 pub mod slowlog;
 
 #[cfg(feature = "monitoring")]

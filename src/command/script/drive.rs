@@ -69,8 +69,7 @@ impl ScriptJob {
 }
 
 pub(super) fn script_runs_off_worker() -> bool {
-    tokio::runtime::Handle::try_current()
-        .is_ok_and(|handle| handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
+    false
 }
 
 fn drive_script_body(
@@ -209,7 +208,7 @@ mod rollback_tests {
     #[test]
     fn rollback_inserted_removes_only_that_batch() {
         let buffer = InFlightBuffer::new();
-        let ops = vec![(b"k".to_vec(), WriteOp::Put(b"v".to_vec()))];
+        let ops = vec![(b"k".to_vec(), WriteOp::put(b"v".to_vec()))];
         let (seq, keys) = buffer.insert_batch(0, &ops);
         assert!(buffer.get(0, b"k").is_some());
         rollback_inserted(&buffer, Some((seq, keys)));

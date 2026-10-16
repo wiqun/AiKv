@@ -57,17 +57,33 @@ pub struct ScanResult {
 }
 
 /// 批量写入操作 (命令层; 与底层 LSM WriteOp 独立)
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum WriteOp {
-    Put(Vec<u8>),
-    PutStored(StoredValue),
+    Put(Arc<Vec<u8>>),
+    PutStored(Arc<StoredValue>),
     Delete,
     /// 配对 key 已是 engine key, 值为原始字节, 不再套 `StoredValue`.
     PutEngine {
-        value: Vec<u8>,
+        value: Arc<Vec<u8>>,
     },
     /// 配对 key 已是 engine key.
     DeleteEngine,
+}
+
+impl WriteOp {
+    pub fn put(bytes: Vec<u8>) -> Self {
+        WriteOp::Put(Arc::new(bytes))
+    }
+
+    pub fn put_stored(stored: StoredValue) -> Self {
+        WriteOp::PutStored(Arc::new(stored))
+    }
+
+    pub fn put_engine(value: Vec<u8>) -> Self {
+        WriteOp::PutEngine {
+            value: Arc::new(value),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

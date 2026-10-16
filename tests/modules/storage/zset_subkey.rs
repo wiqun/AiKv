@@ -4,9 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use aikv::command::CommandRouter;
 use aikv::protocol::RespValue;
-use aikv::storage::{
-    AiDbEngine, CollectionKind, KvStorage, KvStorageAdapter, ValueType,
-};
+use aikv::storage::{AiDbEngine, CollectionKind, KvStorage, KvStorageAdapter, ValueType};
 use bytes::Bytes;
 use tempfile::TempDir;
 
@@ -84,7 +82,13 @@ async fn large_zset_splits_and_keeps_score_order() {
     zadd(&router, "1000", "m64").await;
     let indexed = score_index_members(storage.as_ref()).await;
     assert_eq!(indexed.len(), 65, "old score index entry still present");
-    assert_eq!(indexed.iter().filter(|member| member.as_slice() == b"m64").count(), 1);
+    assert_eq!(
+        indexed
+            .iter()
+            .filter(|member| member.as_slice() == b"m64")
+            .count(),
+        1
+    );
     let lowest = members(
         router
             .execute("ZRANGE", &[bulk(b"z"), bulk(b"0"), bulk(b"0")], &mut db)
@@ -109,10 +113,7 @@ async fn large_zset_splits_and_keeps_score_order() {
     );
 
     assert_int(
-        router
-            .execute("DEL", &[bulk(b"z")], &mut db)
-            .await
-            .unwrap(),
+        router.execute("DEL", &[bulk(b"z")], &mut db).await.unwrap(),
         1,
     );
     for i in 0..65 {
@@ -150,11 +151,7 @@ async fn script_zadd_on_large_zset_appends_one_member() {
         b"redis.call('ZADD', KEYS[1], '1000', 'extra'); return redis.call('ZCARD', KEYS[1])",
     );
     let resp = router
-        .execute(
-            "EVAL",
-            &[script, bulk(b"1"), bulk(b"z")],
-            &mut db,
-        )
+        .execute("EVAL", &[script, bulk(b"1"), bulk(b"z")], &mut db)
         .await
         .unwrap();
     assert_int(resp, 66);
@@ -170,7 +167,14 @@ async fn script_zadd_on_large_zset_appends_one_member() {
         router
             .execute(
                 "ZREVRANGEBYSCORE",
-                &[bulk(b"z"), bulk(b"+inf"), bulk(b"-inf"), bulk(b"LIMIT"), bulk(b"0"), bulk(b"1")],
+                &[
+                    bulk(b"z"),
+                    bulk(b"+inf"),
+                    bulk(b"-inf"),
+                    bulk(b"LIMIT"),
+                    bulk(b"0"),
+                    bulk(b"1"),
+                ],
                 &mut db,
             )
             .await
@@ -185,7 +189,65 @@ async fn script_zadd_on_large_zset_appends_one_member() {
     assert_eq!(members(top_resp), vec!["extra".to_string()]);
     let indexed = score_index_members(storage.as_ref()).await;
     assert_eq!(indexed.len(), 66);
-    assert_eq!(indexed.iter().filter(|member| member.as_slice() == b"extra").count(), 1);
+    assert_eq!(
+        indexed
+            .iter()
+            .filter(|member| member.as_slice() == b"extra")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn script_zrevrangebyscore_limit_0_1_on_large_zset_locates_by_score() {
+    let dir = TempDir::new().unwrap();
+    let (router, storage) = router(&dir);
+    for i in 0..70 {
+        zadd(&router, &format!("{i}"), &format!("m{i:02}")).await;
+    }
+    let stored = storage.get_typed(0, b"z").await.unwrap().unwrap();
+    assert!(aikv::storage::zset_subkey::is_zset_header(&stored).is_some());
+
+    let mut db = 0;
+    // 1. 精确上界 (inclusive 50) -> 定位到 m50
+    let script = Bytes::from_static(
+        b"return redis.call('ZREVRANGEBYSCORE', KEYS[1], '50', '0', 'LIMIT', '0', '1')",
+    );
+    let resp = router
+        .execute("EVAL", &[script, bulk(b"1"), bulk(b"z")], &mut db)
+        .await
+        .unwrap();
+    assert_eq!(members(resp), vec!["m50".to_string()]);
+
+    // 2. 开区间上界 ((50) -> 定位到 m49
+    let script_ex = Bytes::from_static(
+        b"return redis.call('ZREVRANGEBYSCORE', KEYS[1], '(50', '0', 'LIMIT', '0', '1')",
+    );
+    let resp_ex = router
+        .execute("EVAL", &[script_ex, bulk(b"1"), bulk(b"z")], &mut db)
+        .await
+        .unwrap();
+    assert_eq!(members(resp_ex), vec!["m49".to_string()]);
+
+    // 3. 超出范围 (-1) -> 返回空
+    let script_empty = Bytes::from_static(
+        b"return redis.call('ZREVRANGEBYSCORE', KEYS[1], '-1', '-10', 'LIMIT', '0', '1')",
+    );
+    let resp_empty = router
+        .execute("EVAL", &[script_empty, bulk(b"1"), bulk(b"z")], &mut db)
+        .await
+        .unwrap();
+    assert_eq!(members(resp_empty), Vec::<String>::new());
+
+    // 4. 事务内修改后读取触发安全回退
+    let script_delta = Bytes::from_static(
+        b"redis.call('ZADD', KEYS[1], '55.5', 'm_new'); return redis.call('ZREVRANGEBYSCORE', KEYS[1], '55.8', '0', 'LIMIT', '0', '1')",
+    );
+    let resp_delta = router
+        .execute("EVAL", &[script_delta, bulk(b"1"), bulk(b"z")], &mut db)
+        .await
+        .unwrap();
+    assert_eq!(members(resp_delta), vec!["m_new".to_string()]);
 }
 
 async fn score_index_members(storage: &dyn KvStorage) -> Vec<Vec<u8>> {
