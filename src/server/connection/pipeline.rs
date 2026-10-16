@@ -147,50 +147,6 @@ impl Connection {
         self.flush_responses().await?;
         Ok(())
     }
-
-    /// 把内核里已经到达的字节读进解析器, 不等下一次阻塞读.
-    /// 返回值表示读完这批之后连接是否该停.
-    pub(super) fn drain_ready(&mut self, buf: &mut [u8]) -> std::io::Result<ReadyDrain> {
-        let mut extra = 0usize;
-        let stop = loop {
-            if self.parser.buffer_len() >= self.parser.max_buffer_size() {
-                break ReadyDrain::Overflow;
-            }
-            match self.stream.try_read(buf) {
-                Ok(0) => break ReadyDrain::PeerClosed,
-                Ok(n) if self.parser.buffer_len() + n > self.parser.max_buffer_size() => {
-                    break ReadyDrain::Overflow;
-                }
-                Ok(n) => {
-                    self.parser.feed(&buf[..n]);
-                    extra += n;
-                }
-                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                    break ReadyDrain::Open;
-                }
-                Err(err) => return Err(err),
-            }
-        };
-        if extra > 0 {
-            self.state.metrics().on_net_input_bytes(extra as u64);
-        }
-        Ok(stop)
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum ReadyDrain {
-    Open,
-    PeerClosed,
-    Overflow,
-}
-
-pub(super) fn close_reason(drained: ReadyDrain) -> Option<&'static str> {
-    match drained {
-        ReadyDrain::Open => None,
-        ReadyDrain::PeerClosed => Some("client_closed"),
-        ReadyDrain::Overflow => Some("buffer_overflow"),
-    }
 }
 
 type PipelineTaskResult = (

@@ -69,7 +69,8 @@ impl ScriptJob {
 }
 
 pub(super) fn script_runs_off_worker() -> bool {
-    false
+    tokio::runtime::Handle::try_current()
+        .is_ok_and(|handle| handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
 }
 
 fn drive_script_body(

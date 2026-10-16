@@ -17,8 +17,7 @@ use crate::storage::adapter::{AdapterWriteOp, StorageAdapter};
 use crate::storage::cluster_adapter::{ClusterDataAdapter, WriteRoute};
 use crate::storage::types::BatchWriteHandle;
 
-const SET_BATCH_MAX_OPS: usize = 4096;
-const SET_BATCH_MAX_BYTES: usize = 4 * 1024 * 1024;
+const SET_BATCH_MAX_OPS: usize = 512;
 
 struct BatcherPerfSampler {
     batches: AtomicU64,
@@ -438,94 +437,31 @@ pub(super) async fn run_set_batcher(
     mut rx: mpsc::Receiver<WriteBatchItem>,
     _eager_flush: usize,
 ) {
-    let mut held = None;
-    loop {
-        let first = match held.take() {
-            Some(item) => item,
-            None => match rx.recv().await {
-                Some(item) => item,
-                None => break,
-            },
-        };
+    while let Some(first) = rx.recv().await {
         let t_start = Instant::now();
-        let items = collect_batch_items(&mut rx, first, &mut held).await;
+        let items = collect_batch_items(&mut rx, first);
         dispatch_batch(&mgr, gid, items, t_start).await;
     }
 }
 
-async fn collect_batch_items(
+fn collect_batch_items(
     rx: &mut mpsc::Receiver<WriteBatchItem>,
     first: WriteBatchItem,
-    held: &mut Option<WriteBatchItem>,
 ) -> Vec<WriteBatchItem> {
-    let mut items = Vec::new();
-    let mut fill = BatchFill::default();
-    accept_item(&mut items, &mut fill, first);
-    tokio::task::yield_now().await;
-    pull_ready(rx, &mut items, &mut fill, held);
-    items
-}
+    let mut items = Vec::with_capacity(SET_BATCH_MAX_OPS);
+    let mut op_count = item_op_count(&first);
+    items.push(first);
 
-fn pull_ready(
-    rx: &mut mpsc::Receiver<WriteBatchItem>,
-    items: &mut Vec<WriteBatchItem>,
-    fill: &mut BatchFill,
-    held: &mut Option<WriteBatchItem>,
-) {
-    loop {
-        if let Some(item) = held.take() {
-            if !fill.allows_next(item_op_count(&item), item_bytes(&item)) {
-                *held = Some(item);
-                return;
-            }
-            accept_item(items, fill, item);
-            continue;
-        }
+    while items.len() < SET_BATCH_MAX_OPS && op_count < SET_BATCH_MAX_OPS {
         match rx.try_recv() {
             Ok(item) => {
-                if !fill.allows_next(item_op_count(&item), item_bytes(&item)) {
-                    *held = Some(item);
-                    return;
-                }
-                accept_item(items, fill, item);
+                op_count += item_op_count(&item);
+                items.push(item);
             }
-            Err(_) => return,
+            Err(_) => break,
         }
     }
-}
-
-fn accept_item(items: &mut Vec<WriteBatchItem>, fill: &mut BatchFill, item: WriteBatchItem) {
-    fill.ops += item_op_count(&item);
-    fill.bytes += item_bytes(&item);
-    items.push(item);
-}
-
-#[derive(Default)]
-struct BatchFill {
-    ops: usize,
-    bytes: usize,
-}
-
-impl BatchFill {
-    fn allows_next(&self, ops: usize, bytes: usize) -> bool {
-        self.ops == 0
-            || (self.ops + ops <= SET_BATCH_MAX_OPS && self.bytes + bytes <= SET_BATCH_MAX_BYTES)
-    }
-}
-
-fn item_bytes(item: &WriteBatchItem) -> usize {
-    match item {
-        WriteBatchItem::Put { key, value, .. } => key.len() + value.len() + 16,
-        WriteBatchItem::Delete { key, .. } => key.len() + 10,
-        WriteBatchItem::Batch { ops, .. } => ops.iter().map(planned_op_bytes).sum::<usize>() + 16,
-    }
-}
-
-fn planned_op_bytes(op: &PlannedOp) -> usize {
-    match op {
-        PlannedOp::Put { key, value } => key.len() + value.len() + 16,
-        PlannedOp::Delete { key } => key.len() + 10,
-    }
+    items
 }
 
 fn item_op_count(item: &WriteBatchItem) -> usize {
@@ -762,21 +698,5 @@ mod tests {
             other => panic!("expected Put, got {other:?}"),
         }
         assert_eq!(indices, vec![None, Some(0)]);
-    }
-
-    #[test]
-    fn batch_fill_rejects_when_ops_or_bytes_would_exceed() {
-        let empty = BatchFill::default();
-        assert!(empty.allows_next(1, SET_BATCH_MAX_BYTES + 1));
-        let full_ops = BatchFill {
-            ops: SET_BATCH_MAX_OPS,
-            bytes: 0,
-        };
-        assert!(!full_ops.allows_next(1, 1));
-        let full_bytes = BatchFill {
-            ops: 1,
-            bytes: SET_BATCH_MAX_BYTES,
-        };
-        assert!(!full_bytes.allows_next(1, 1));
     }
 }
