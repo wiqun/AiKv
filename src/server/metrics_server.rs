@@ -1,4 +1,4 @@
-//! Metrics HTTP 服务器: 在独立端口暴露 `/health` (生产指标经 OTLP 出口).
+//! Metrics HTTP 服务器: 在独立端口暴露 `/health` 和 `/metrics`.
 //! 仅在 `--features monitoring` 下编译.
 
 use std::convert::Infallible;

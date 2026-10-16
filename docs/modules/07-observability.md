@@ -39,8 +39,9 @@ description: AiKv 可观测性架构 — SlowQueryLog 慢查询、LatencyStats �
   - 业务请求热路径**仅更新** `ServerMetrics` 中的原子计数器 (Atomic / Concurrent Map);
   - `INFO` 命令渲染与 `CLUSTER INFO` 直接读取 `ServerMetrics`;
   - 严禁在热路径上同时向两个指标系统重复加锁写入.
-- **OTel 增量镜像同步 (15s 周期)**:
-  - 后台周期性任务调用 `info_catalog::sync_otel_from_server_metrics()`, 读取 `ServerMetrics` 快照并计算增量 Delta, 随后调用 OTel Counter `add(delta)`;
+- **导出快照 (15s 周期)**:
+  - 后台周期性任务用 `collect_export_snapshot()` 读 `ServerMetrics`, 渲染 `/metrics`, 再用 `push_deltas()` 把计数器差值交给 OTLP.
+  - `info_catalog::sync_otel_from_server_metrics()` 不再由 refresh 调用, 避免和这套快照重复累加.
   - 指标数据相对于内存真源最多滞后 ~15s (符合云原生监控抓取常规间隔).
 - **Span 允许名单**:
   - 只有命令入口 `kv_command`, 且仅在采样率大于 0 且 OTLP 端点非空时创建;
@@ -71,7 +72,7 @@ flowchart TD
     end
 
     subgraph BackgroundSync [后台定时同步 15s 周期]
-        Timer[15s 定时 Tick] --> Sync[info_catalog 增量差分计算]
+        Timer[15s 定时 Tick] --> Sync[导出快照增量差分]
         Sync --> ReadMetrics
         Sync --> OtelPush[OtelMetrics 更新 Instrument]
         OtelPush --> OTLP[OTLP gRPC 导出至 Collector]
