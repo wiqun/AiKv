@@ -67,43 +67,58 @@ pub fn time_script_io<T>(op: ScriptIoOp, f: impl FnOnce() -> T) -> T {
         depth.set(current + 1);
         current > 0
     });
+    let _guard = IoDepthGuard;
     let started = Instant::now();
     let out = f();
-    let us = started.elapsed().as_micros() as u64;
-    DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
     if !nested {
-        STATS.with(|cell| {
-            let mut stats = cell.get();
-            match op {
-                ScriptIoOp::Get => {
-                    stats.get_n += 1;
-                    stats.get_us += us;
-                }
-                ScriptIoOp::Range => {
-                    stats.range_n += 1;
-                    stats.range_us += us;
-                }
-                ScriptIoOp::Prefix => {
-                    stats.prefix_n += 1;
-                    stats.prefix_us += us;
-                }
-                ScriptIoOp::Scan => {
-                    stats.scan_n += 1;
-                    stats.scan_us += us;
-                }
-                ScriptIoOp::Write => {
-                    stats.write_n += 1;
-                    stats.write_us += us;
-                }
-            }
-            cell.set(stats);
-        });
+        record_script_io(op, started.elapsed().as_micros() as u64);
     }
     out
 }
 
+struct IoDepthGuard;
+
+impl Drop for IoDepthGuard {
+    fn drop(&mut self) {
+        DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
+fn record_script_io(op: ScriptIoOp, us: u64) {
+    STATS.with(|cell| {
+        let mut stats = cell.get();
+        match op {
+            ScriptIoOp::Get => {
+                stats.get_n += 1;
+                stats.get_us += us;
+            }
+            ScriptIoOp::Range => {
+                stats.range_n += 1;
+                stats.range_us += us;
+            }
+            ScriptIoOp::Prefix => {
+                stats.prefix_n += 1;
+                stats.prefix_us += us;
+            }
+            ScriptIoOp::Scan => {
+                stats.scan_n += 1;
+                stats.scan_us += us;
+            }
+            ScriptIoOp::Write => {
+                stats.write_n += 1;
+                stats.write_us += us;
+            }
+        }
+        cell.set(stats);
+    });
+}
+
 pub fn take_script_io_stats() -> ScriptIoStats {
     STATS.with(|cell| cell.replace(ScriptIoStats::default()))
+}
+
+pub fn begin_script_io_sample() {
+    let _ = take_script_io_stats();
 }
 
 #[cfg(test)]
@@ -197,5 +212,29 @@ mod tests {
         let stats = take_script_io_stats();
         assert!(stats.write_n >= 1, "{stats:?}");
         assert!(stats.get_n >= 1, "{stats:?}");
+    }
+
+    #[test]
+    fn script_io_depth_resets_after_panic() {
+        let _ = take_script_io_stats();
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            time_script_io(ScriptIoOp::Get, || panic!("script io"));
+        }));
+        assert!(caught.is_err());
+        time_script_io(ScriptIoOp::Write, || ());
+        let stats = take_script_io_stats();
+        assert_eq!(stats.get_n, 0, "{stats:?}");
+        assert_eq!(stats.write_n, 1, "{stats:?}");
+    }
+
+    #[test]
+    fn begin_script_io_sample_drops_leftover() {
+        let _ = take_script_io_stats();
+        time_script_io(ScriptIoOp::Get, || ());
+        begin_script_io_sample();
+        time_script_io(ScriptIoOp::Write, || ());
+        let stats = take_script_io_stats();
+        assert_eq!(stats.get_n, 0, "{stats:?}");
+        assert_eq!(stats.write_n, 1, "{stats:?}");
     }
 }

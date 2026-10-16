@@ -82,6 +82,7 @@ fn drive_script_body(
     seg_id: usize,
     slot_idx: usize,
 ) -> ScriptDrive {
+    crate::storage::script_io::begin_script_io_sample();
     let prepared = prepare_script(
         &lua, &storage, &in_flight, timeout, db, &sha1, &script, &keys, &argv,
     );
