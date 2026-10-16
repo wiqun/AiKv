@@ -12,7 +12,6 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use tracing::instrument;
 
 use crate::command::router::{self, KeyLock};
 use crate::error::{Error, Result};
@@ -25,7 +24,7 @@ pub struct StringCommands {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SetCondition {
+pub(crate) enum SetCondition {
     None,
     Nx,
     Xx,
@@ -36,7 +35,6 @@ impl StringCommands {
         Self { storage, key_lock }
     }
 
-    #[instrument(level = "debug", name = "cmd_string", skip(self, args), fields(cmd.name = "GET"))]
     pub async fn get(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_args("GET", args, 1)?;
         match self.storage.get(db, &args[0]).await? {
@@ -45,7 +43,6 @@ impl StringCommands {
         }
     }
 
-    #[instrument(level = "debug", name = "cmd_string", skip(self, args), fields(cmd.name = "SET"))]
     pub async fn set(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         if args.len() < 2 {
             return Err(router::wrong_args("SET", ""));
@@ -77,16 +74,24 @@ impl StringCommands {
             }
 
             // KEEPTTL: 保留现有过期时间
-            let expire = if opts.keep_ttl {
+            let previous_ttl = if opts.keep_ttl {
                 self.storage
                     .get_typed(db, &opts.key)
                     .await?
                     .and_then(|s| s.expires_at)
             } else {
+                None
+            };
+            let expire = if opts.keep_ttl {
+                previous_ttl
+            } else {
                 opts.expire_at
             };
 
             self.apply_set(db, &opts.key, &opts.value, expire).await?;
+            if previous_ttl.is_some() {
+                self.storage.release_seen_ttl(db).await?;
+            }
 
             return Ok(if opts.return_old {
                 match old_value {
@@ -445,16 +450,16 @@ impl StringCommands {
     }
 }
 
-struct SetOptions {
-    key: Vec<u8>,
-    value: Vec<u8>,
-    expire_at: Option<u64>,
-    condition: SetCondition,
-    return_old: bool,
-    keep_ttl: bool,
+pub(crate) struct SetOptions {
+    pub(crate) key: Vec<u8>,
+    pub(crate) value: Vec<u8>,
+    pub(crate) expire_at: Option<u64>,
+    pub(crate) condition: SetCondition,
+    pub(crate) return_old: bool,
+    pub(crate) keep_ttl: bool,
 }
 
-fn parse_set_options(args: &[Bytes]) -> Result<SetOptions> {
+pub(crate) fn parse_set_options(args: &[Bytes]) -> Result<SetOptions> {
     let key = args[0].to_vec();
     let value = args[1].to_vec();
     let mut expire_at: Option<u64> = None;

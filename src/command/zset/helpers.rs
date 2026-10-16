@@ -9,9 +9,9 @@ use crate::error::{Error, Result};
 use crate::protocol::RespValue;
 
 #[derive(Debug, Clone)]
-pub(super) struct ScoreBound {
-    value: f64,
-    inclusive: bool,
+pub(crate) struct ScoreBound {
+    pub(crate) value: f64,
+    pub(crate) inclusive: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -22,7 +22,7 @@ pub(super) enum LexBound {
 }
 
 /// `LIMIT offset count`; `count < 0` means unlimited (StackExchange.Redis convention).
-pub(super) fn parse_limit_args(
+pub(crate) fn parse_limit_args(
     cmd: &str,
     offset_b: &Bytes,
     count_b: &Bytes,
@@ -40,7 +40,7 @@ pub(super) fn parse_limit_args(
     Ok((offset as usize, count))
 }
 
-pub(super) fn apply_limit<T: Clone>(items: &mut Vec<T>, offset: usize, count: Option<usize>) {
+pub(crate) fn apply_limit<T: Clone>(items: &mut Vec<T>, offset: usize, count: Option<usize>) {
     if offset >= items.len() {
         items.clear();
         return;
@@ -54,7 +54,7 @@ pub(super) fn apply_limit<T: Clone>(items: &mut Vec<T>, offset: usize, count: Op
     }
 }
 
-pub(super) fn sorted_by_score(zset: &BTreeMap<Vec<u8>, f64>, reverse: bool) -> Vec<(Vec<u8>, f64)> {
+pub(crate) fn sorted_by_score(zset: &BTreeMap<Vec<u8>, f64>, reverse: bool) -> Vec<(Vec<u8>, f64)> {
     let mut v: Vec<(Vec<u8>, f64)> = zset.iter().map(|(k, s)| (k.clone(), *s)).collect();
     if reverse {
         v.sort_by(|a, b| {
@@ -72,7 +72,7 @@ pub(super) fn sorted_by_score(zset: &BTreeMap<Vec<u8>, f64>, reverse: bool) -> V
     v
 }
 
-pub(super) fn normalize_range(len: usize, start: i64, stop: i64) -> (usize, usize) {
+pub(crate) fn normalize_range(len: usize, start: i64, stop: i64) -> (usize, usize) {
     let len_i = len as i64;
     let start_idx = if start < 0 {
         (len_i + start).max(0) as usize
@@ -87,7 +87,7 @@ pub(super) fn normalize_range(len: usize, start: i64, stop: i64) -> (usize, usiz
     (start_idx, stop_idx)
 }
 
-pub(super) fn members_to_resp(members: &[(Vec<u8>, f64)], withscores: bool) -> RespValue {
+pub(crate) fn members_to_resp(members: &[(Vec<u8>, f64)], withscores: bool) -> RespValue {
     let mut items = Vec::new();
     for (member, score) in members {
         items.push(router::bulk(member.clone()));
@@ -132,7 +132,7 @@ pub(super) fn parse_score(b: &Bytes) -> Result<f64> {
     Ok(score)
 }
 
-pub(super) fn parse_score_bound(s: &str, _is_min: bool) -> Result<ScoreBound> {
+pub(crate) fn parse_score_bound(s: &str, _is_min: bool) -> Result<ScoreBound> {
     if s == "-inf" {
         return Ok(ScoreBound {
             value: f64::NEG_INFINITY,
@@ -158,7 +158,7 @@ pub(super) fn parse_score_bound(s: &str, _is_min: bool) -> Result<ScoreBound> {
     Ok(ScoreBound { value, inclusive })
 }
 
-pub(super) fn score_in_range(score: f64, min: &ScoreBound, max: &ScoreBound) -> bool {
+pub(crate) fn score_in_range(score: f64, min: &ScoreBound, max: &ScoreBound) -> bool {
     let above = if min.inclusive {
         score >= min.value
     } else {
@@ -215,18 +215,18 @@ pub(super) fn lex_in_range(member: &[u8], min: &LexBound, max: &LexBound) -> boo
     above_min && below_max
 }
 
-pub(super) fn bytes_to_str(b: &Bytes) -> Result<&str> {
+pub(crate) fn bytes_to_str(b: &Bytes) -> Result<&str> {
     std::str::from_utf8(b).map_err(|_| Error::Command("ERR syntax error".into()))
 }
 
-pub(super) fn parse_i64(b: &Bytes) -> Result<i64> {
+pub(crate) fn parse_i64(b: &Bytes) -> Result<i64> {
     let s =
         std::str::from_utf8(b).map_err(|_| Error::Command("ERR value is not an integer".into()))?;
     s.parse::<i64>()
         .map_err(|_| Error::Command("ERR value is not an integer".into()))
 }
 
-pub(super) fn eq_ignore_case(a: &Bytes, b: &[u8]) -> bool {
+pub(crate) fn eq_ignore_case(a: &Bytes, b: &[u8]) -> bool {
     a.len() == b.len()
         && a.iter()
             .zip(b.iter())

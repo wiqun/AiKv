@@ -1,12 +1,17 @@
 //! OTel traces + metrics 初始化 (monitoring feature).
 
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 
 use opentelemetry::global;
 use opentelemetry::KeyValue;
 use opentelemetry_otlp::WithExportConfig;
-use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
+use opentelemetry_sdk::error::OTelSdkResult;
+use opentelemetry_sdk::metrics::data::ResourceMetrics;
+use opentelemetry_sdk::metrics::exporter::PushMetricExporter;
+use opentelemetry_sdk::metrics::reader::MetricReader;
+use opentelemetry_sdk::metrics::Pipeline;
+use opentelemetry_sdk::metrics::{InstrumentKind, ManualReader, SdkMeterProvider, Temporality};
 use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider};
 use opentelemetry_sdk::Resource;
 
@@ -14,6 +19,8 @@ use crate::config::ResolvedObservability;
 
 static TRACER_PROVIDER: OnceLock<SdkTracerProvider> = OnceLock::new();
 static METER_PROVIDER: OnceLock<SdkMeterProvider> = OnceLock::new();
+static EXPORT_READER: OnceLock<Arc<ManualReader>> = OnceLock::new();
+static METRIC_EXPORTER: OnceLock<opentelemetry_otlp::MetricExporter> = OnceLock::new();
 
 /// OTel 初始化参数 (Resource 标签).
 #[derive(Debug, Clone)]
@@ -25,7 +32,7 @@ pub struct OtelInitConfig {
     pub tcp_port: u16,
     pub deployment_environment: Option<String>,
     pub extra_resource_attrs: Vec<KeyValue>,
-    /// Trace 采样率 (0.0-1.0), 由 `AIKV_OTEL_SAMPLE_RATIO` 控制, 默认 1.0.
+    /// Trace 采样率 (0.0-1.0), 由 `AIKV_OTEL_SAMPLE_RATIO` 控制, 默认 0.0.
     pub sample_ratio: f64,
 }
 
@@ -39,16 +46,16 @@ fn resolve_node_id(env_node_id: Option<&str>, cluster_node_id: Option<u64>) -> O
         .or(cluster_node_id)
 }
 
-/// 解析采样率 (0.0-1.0). 非法输入回退 1.0 (保持全采样, 不静默丢 trace).
+/// 解析采样率 (0.0-1.0). 非法输入回退 0.0, 不导出 trace.
 pub fn parse_sample_ratio(raw: &str) -> f64 {
     match raw.trim().parse::<f64>() {
         Ok(r) if r.is_finite() && (0.0..=1.0).contains(&r) => r,
         _ => {
             eprintln!(
-                "warn: invalid AIKV_OTEL_SAMPLE_RATIO value {:?}, falling back to 1.0 (full sampling)",
+                "warn: invalid AIKV_OTEL_SAMPLE_RATIO value {:?}, falling back to 0.0 (no traces)",
                 raw
             );
-            1.0
+            0.0
         }
     }
 }
@@ -148,7 +155,7 @@ pub fn otel_config_from_env(
         .unwrap_or_default();
     let sample_ratio = env_nonempty("AIKV_OTEL_SAMPLE_RATIO")
         .map(|v| parse_sample_ratio(&v))
-        .unwrap_or(1.0);
+        .unwrap_or(0.0);
     Some(OtelInitConfig {
         endpoint,
         service_name,
@@ -175,34 +182,36 @@ pub fn record_trace_ids_on_span(span: &tracing::Span) {
     }
 }
 
-/// 初始化 OTel Tracer + Meter (15s metrics export). 成功返回 true.
+/// 初始化 OTel Tracer + Meter. 指标由导出任务按配置间隔推送, 这里不另起时钟.
 pub fn init_otel(config: &OtelInitConfig) -> bool {
     let resource = build_resource(config);
     let endpoint = config.endpoint.clone();
+    let export_traces =
+        crate::config::should_export_traces(config.sample_ratio, Some(config.endpoint.as_str()));
 
-    let span_exporter = match opentelemetry_otlp::SpanExporter::builder()
-        .with_tonic()
-        .with_endpoint(endpoint.clone())
-        .build()
-    {
-        Ok(exporter) => exporter,
-        Err(e) => {
-            eprintln!("warn: OTel trace exporter build failed: {e}");
-            return false;
-        }
-    };
+    if export_traces {
+        let span_exporter = match opentelemetry_otlp::SpanExporter::builder()
+            .with_tonic()
+            .with_endpoint(endpoint.clone())
+            .build()
+        {
+            Ok(exporter) => exporter,
+            Err(e) => {
+                eprintln!("warn: OTel trace exporter build failed: {e}");
+                return false;
+            }
+        };
 
-    let tracer_provider = SdkTracerProvider::builder()
-        // 默认 ParentBased(AlwaysOn) 会全量导出 span; 经 AIKV_OTEL_SAMPLE_RATIO
-        // 可降采样, 减少 SDK→Collector 传输与 BatchSpanProcessor 开销.
-        .with_sampler(Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(
-            config.sample_ratio,
-        ))))
-        .with_batch_exporter(span_exporter)
-        .with_resource(resource.clone())
-        .build();
-    global::set_tracer_provider(tracer_provider.clone());
-    let _ = TRACER_PROVIDER.set(tracer_provider);
+        let tracer_provider = SdkTracerProvider::builder()
+            .with_sampler(Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(
+                config.sample_ratio,
+            ))))
+            .with_batch_exporter(span_exporter)
+            .with_resource(resource.clone())
+            .build();
+        global::set_tracer_provider(tracer_provider.clone());
+        let _ = TRACER_PROVIDER.set(tracer_provider);
+    }
 
     let metric_exporter = match opentelemetry_otlp::MetricExporter::builder()
         .with_tonic()
@@ -218,23 +227,73 @@ pub fn init_otel(config: &OtelInitConfig) -> bool {
             return false;
         }
     };
+    let _ = METRIC_EXPORTER.set(metric_exporter);
 
-    let reader = PeriodicReader::builder(metric_exporter)
-        .with_interval(Duration::from_secs(15))
-        .build();
+    let reader = Arc::new(ManualReader::builder().build());
+    let _ = EXPORT_READER.set(Arc::clone(&reader));
     let meter_provider = SdkMeterProvider::builder()
-        .with_reader(reader)
+        .with_reader(SharedReader { inner: reader })
         .with_resource(resource)
         .build();
     global::set_meter_provider(meter_provider.clone());
     let _ = METER_PROVIDER.set(meter_provider);
 
     aidb::metrics::init();
-    eprintln!("info: OTel traces+metrics initialized (endpoint={endpoint})");
+    if export_traces {
+        eprintln!("info: OTel traces+metrics initialized (endpoint={endpoint})");
+    } else {
+        eprintln!("info: OTel metrics initialized (endpoint={endpoint})");
+    }
     true
 }
 
-/// 进程退出前 flush traces/metrics (SHUTDOWN 或正常退出).
+/// 导出任务调用: 收集全局 meter 上这一轮的增量并送出, 不另起 15 秒时钟.
+pub async fn flush_otel_metrics() {
+    let (Some(reader), Some(exporter)) = (EXPORT_READER.get(), METRIC_EXPORTER.get()) else {
+        return;
+    };
+    let mut collected = ResourceMetrics::default();
+    if MetricReader::collect(reader.as_ref(), &mut collected).is_err() {
+        return;
+    }
+    let _ = exporter.export(&collected).await;
+}
+
+struct SharedReader {
+    inner: Arc<ManualReader>,
+}
+
+impl std::fmt::Debug for SharedReader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SharedReader")
+    }
+}
+
+impl MetricReader for SharedReader {
+    fn register_pipeline(&self, pipeline: Weak<Pipeline>) {
+        self.inner.register_pipeline(pipeline);
+    }
+
+    fn collect(&self, rm: &mut ResourceMetrics) -> OTelSdkResult {
+        MetricReader::collect(self.inner.as_ref(), rm)
+    }
+
+    fn force_flush(&self) -> OTelSdkResult {
+        self.inner.force_flush()
+    }
+
+    fn shutdown_with_timeout(&self, timeout: Duration) -> OTelSdkResult {
+        self.inner.shutdown_with_timeout(timeout)
+    }
+
+    fn temporality(&self, kind: InstrumentKind) -> Temporality {
+        self.inner.temporality(kind)
+    }
+}
+pub fn tracer_installed() -> bool {
+    TRACER_PROVIDER.get().is_some()
+}
+
 pub fn shutdown_otel() {
     if let Some(tp) = TRACER_PROVIDER.get() {
         let _ = tp.shutdown();
@@ -264,5 +323,31 @@ mod tests {
     #[test]
     fn invalid_env_node_id_falls_back_to_cluster_node_id() {
         assert_eq!(resolve_node_id(Some("not-a-number"), Some(42)), Some(42));
+    }
+
+    #[test]
+    fn sample_zero_does_not_install_tracer() {
+        let config = OtelInitConfig {
+            endpoint: "http://127.0.0.1:4317".to_string(),
+            service_name: "aikv".to_string(),
+            host_label: None,
+            node_id: None,
+            tcp_port: 6379,
+            deployment_environment: None,
+            extra_resource_attrs: Vec::new(),
+            sample_ratio: 0.0,
+        };
+        assert!(!crate::config::should_export_traces(
+            config.sample_ratio,
+            Some(config.endpoint.as_str())
+        ));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let _ = init_otel(&config);
+        });
+        assert!(!tracer_installed());
     }
 }

@@ -19,7 +19,6 @@ use super::parse_int;
 // ---------------------------------------------------------------------------
 // CLUSTER KEYSLOT
 // ---------------------------------------------------------------------------
-#[tracing::instrument(level = "debug", name = "cmd_cluster_keyslot", skip_all)]
 pub fn cluster_keyslot(key: &[u8]) -> Result<String, String> {
     let slot = key_to_slot(key);
     Ok(slot.to_string())
@@ -28,7 +27,6 @@ pub fn cluster_keyslot(key: &[u8]) -> Result<String, String> {
 // ---------------------------------------------------------------------------
 // CLUSTER MYID
 // ---------------------------------------------------------------------------
-#[tracing::instrument(level = "debug", name = "cmd_cluster_myid", skip_all)]
 pub fn cluster_myid() -> Result<String, String> {
     let mgr = CLUSTER_STATE_MGR
         .get()
@@ -113,7 +111,6 @@ where
     "ok"
 }
 
-#[tracing::instrument(level = "debug", name = "cmd_cluster_info", skip_all)]
 pub fn cluster_info() -> Result<String, String> {
     let mgr = CLUSTER_STATE_MGR
         .get()
@@ -199,7 +196,6 @@ pub(crate) fn cluster_node_role_label(
     }
 }
 
-#[tracing::instrument(level = "debug", name = "cmd_cluster_nodes", skip_all)]
 pub fn cluster_nodes() -> Result<String, String> {
     let mgr = CLUSTER_STATE_MGR
         .get()
@@ -382,7 +378,6 @@ fn resolve_endpoint(mgr: &ClusterStateManager, node_id: u64) -> Option<NodeEndpo
     })
 }
 
-#[tracing::instrument(level = "debug", name = "cmd_cluster_slots", skip_all)]
 pub fn cluster_slots() -> Result<Vec<SlotRangeInfo>, String> {
     let mgr = CLUSTER_STATE_MGR
         .get()
@@ -504,7 +499,6 @@ pub fn cluster_slots() -> Result<Vec<SlotRangeInfo>, String> {
 // ---------------------------------------------------------------------------
 // CLUSTER SHARDS (Redis 7.0+)
 // ---------------------------------------------------------------------------
-#[tracing::instrument(level = "debug", name = "cmd_cluster_shards", skip_all)]
 pub fn cluster_shards() -> Result<RespValue, String> {
     let mgr = CLUSTER_STATE_MGR
         .get()
@@ -590,7 +584,6 @@ pub fn cluster_shards() -> Result<RespValue, String> {
 // ---------------------------------------------------------------------------
 // CLUSTER MYSHARDID
 // ---------------------------------------------------------------------------
-#[tracing::instrument(level = "debug", name = "cmd_cluster_myshardid", skip_all)]
 pub fn cluster_myshardid() -> Result<String, String> {
     let mgr = CLUSTER_STATE_MGR
         .get()
@@ -607,7 +600,6 @@ pub fn cluster_myshardid() -> Result<String, String> {
 // ---------------------------------------------------------------------------
 // CLUSTER COUNTKEYSINSLOT
 // ---------------------------------------------------------------------------
-#[tracing::instrument(level = "debug", name = "cmd_cluster_count_keys_in_slot", skip_all)]
 pub async fn cluster_count_keys_in_slot(slot: u16) -> Result<i64, String> {
     let mgr = match CLUSTER_STATE_MGR.get() {
         Some(m) => m,
@@ -629,7 +621,6 @@ pub async fn cluster_count_keys_in_slot(slot: u16) -> Result<i64, String> {
 // ---------------------------------------------------------------------------
 // CLUSTER GETKEYSINSLOT
 // ---------------------------------------------------------------------------
-#[tracing::instrument(level = "debug", name = "cmd_cluster_get_keys_in_slot", skip_all)]
 pub async fn cluster_get_keys_in_slot(slot: u16, count: usize) -> Result<Vec<Vec<u8>>, String> {
     let mgr = match CLUSTER_STATE_MGR.get() {
         Some(m) => m,

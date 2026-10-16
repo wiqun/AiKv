@@ -24,6 +24,8 @@ pub struct ConnectionConfig {
     pub idle_timeout: Option<std::time::Duration>,
     /// 最大并发连接数; 0 表示不限制.
     pub max_clients: usize,
+    /// `EVAL` / `EVALSHA` 专用线程数.
+    pub script_worker_threads: usize,
 }
 
 impl Default for ConnectionConfig {
@@ -32,6 +34,7 @@ impl Default for ConnectionConfig {
             read_timeout: Some(std::time::Duration::from_secs(60)),
             idle_timeout: Some(std::time::Duration::from_secs(300)),
             max_clients: 10_000,
+            script_worker_threads: crate::config::settings::default_script_worker_threads(),
         }
     }
 }
@@ -160,6 +163,9 @@ impl ServerSharedState {
         ])));
         let metrics = {
             let m = ServerMetrics::default();
+            let point_reads = Arc::new(crate::storage::observation::PointReadCounter::default());
+            storage.set_point_read_counter(Arc::clone(&point_reads));
+            m.attach_point_reads(point_reads);
             #[cfg(feature = "monitoring")]
             let m = {
                 let otel = super::otel_metrics::OtelMetrics::init_global(
@@ -293,7 +299,12 @@ impl ServerSharedState {
         let expired = self.storage_observation.drain_expired_keys();
         self.metrics.record_expired_keys(expired);
         #[cfg(feature = "monitoring")]
-        crate::server::info_catalog::sync_otel_from_server_metrics(&self.metrics);
+        {
+            if let Some(otel) = self.metrics.otel_handle() {
+                otel.set_rebuild_counters_duration(self.storage.rebuild_counters_duration_us());
+            }
+            // 命令和字节计数只走导出快照. 这里不再把同一批累计值同步进另一套 OTel 计数器.
+        }
     }
 
     pub fn uptime_secs(&self) -> u64 {

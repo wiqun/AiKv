@@ -29,7 +29,7 @@ description: AiKv 可观测性架构 — SlowQueryLog 慢查询、LatencyStats �
 | [`src/server/otel.rs`](../../src/server/otel.rs) | OpenTelemetry TracerProvider 与 MeterProvider 初始化及资源绑定 | `init_tracer`, `init_meter` |
 | [`src/server/otel_metrics/`](../../src/server/otel_metrics/) | `aikv_*` 全部 OTel Counter, Gauge, Histogram 指标声明与更新 | `OtelMetrics`, `refresh_runtime_metrics` |
 | [`src/server/process_metrics.rs`](../../src/server/process_metrics.rs) | 进程级 CPU 时间、内存 RSS、Peak RSS 与文件描述符采集 | `collect_process_metrics` |
-| [`src/server/metrics_server.rs`](../../src/server/metrics_server.rs) | 独立 HTTP 探活服务 (`/health` 与 `/`, feature = "monitoring") | `MetricsServer::run` |
+| [`src/server/metrics_server.rs`](../../src/server/metrics_server.rs) | 独立 HTTP 服务 (`/health` 与 `/metrics`, feature = "monitoring") | `MetricsServer::run` |
 
 ---
 
@@ -39,15 +39,16 @@ description: AiKv 可观测性架构 — SlowQueryLog 慢查询、LatencyStats �
   - 业务请求热路径**仅更新** `ServerMetrics` 中的原子计数器 (Atomic / Concurrent Map);
   - `INFO` 命令渲染与 `CLUSTER INFO` 直接读取 `ServerMetrics`;
   - 严禁在热路径上同时向两个指标系统重复加锁写入.
-- **OTel 增量镜像同步 (15s 周期)**:
-  - 后台周期性任务调用 `info_catalog::sync_otel_from_server_metrics()`, 读取 `ServerMetrics` 快照并计算增量 Delta, 随后调用 OTel Counter `add(delta)`;
+- **导出快照 (15s 周期)**:
+  - 后台周期性任务用 `collect_export_snapshot()` 读 `ServerMetrics`, 渲染 `/metrics`, 再用 `push_deltas()` 把计数器差值交给 OTLP.
+  - `info_catalog::sync_otel_from_server_metrics()` 不再由 refresh 调用, 避免和这套快照重复累加.
   - 指标数据相对于内存真源最多滞后 ~15s (符合云原生监控抓取常规间隔).
-- **热路径 Debug Span 约束**:
-  - `kv_command`, `cmd_string`, `batcher_batch_done` 等高频请求 Span 必须标注 `level = "debug"`;
-  - 生产环境运行在 `RUST_LOG=info` 时, tracing 静态过滤将开销降至零.
+- **Span 允许名单**:
+  - 只有命令入口 `kv_command`, 且仅在采样率大于 0 且 OTLP 端点非空时创建;
+  - 字段只有命令名, 不含用户 key. 连接打开和关闭是 debug 事件, 不是 span.
 - **端口协议隔离**:
   - Redis RESP 端口 (6379) 与 HTTP 协议不兼容;
-  - `--metrics-addr:--metrics-port` (默认 9191) 仅提供 HTTP `/health` 探活响应 (返回 `200 OK`), **不提供** HTTP `/metrics` 文本抓取;
+  - `--metrics-addr:--metrics-port` (默认 9191) 提供 HTTP `/health` (返回 `200 OK`) 和 `/metrics` (上一轮累计快照的 Prometheus 文本). 导出间隔由 `metrics_export_interval_secs` 控制, 默认 15 秒. 端点为空时不初始化 OTLP, `/metrics` 仍然提供. `MOVED` / `ASK` 记入 `aikv_redirects_total{type}`, gossip tick 不计. 未启用 Raft 时文本没有 `group=`;
   - 生产环境监控统一通过 OTLP gRPC 管道推送给 OpenTelemetry Collector.
 
 ---
@@ -71,7 +72,7 @@ flowchart TD
     end
 
     subgraph BackgroundSync [后台定时同步 15s 周期]
-        Timer[15s 定时 Tick] --> Sync[info_catalog 增量差分计算]
+        Timer[15s 定时 Tick] --> Sync[导出快照增量差分]
         Sync --> ReadMetrics
         Sync --> OtelPush[OtelMetrics 更新 Instrument]
         OtelPush --> OTLP[OTLP gRPC 导出至 Collector]
@@ -94,4 +95,4 @@ flowchart TD
 8. **`Modules`**: 已加载模块列表 (空);
 9. **`Errorstats`**: 详细错误分类统计 (`errorstat_WRONGTYPE`, `errorstat_ERR` 等);
 10. **`Cluster`**: 集群启用标志 (`cluster_enabled: 1`), 集群状态 (`cluster_state: ok/fail`), 槽位分配数;
-11. **`Keyspace`**: 各逻辑数据库 Key 总数与设置 TTL 的 Key 数量 (`db0:keys=100,expires=10,avg_ttl=3600000`).
+11. **`Keyspace`**: 一行引擎条目估值 `keys_estimate`, 以及每个逻辑 DB 的进程内 TTL 计数 `dbN:expires`. 不输出 `keys=` 和 `avg_ttl`.

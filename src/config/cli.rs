@@ -42,6 +42,10 @@ pub struct CliOverrides {
     pub metrics_port: Option<u16>,
     #[arg(long, help = "Metrics HTTP 地址 (default: 127.0.0.1)")]
     pub metrics_addr: Option<String>,
+    #[arg(long, help = "指标导出间隔秒数 (default: 15)")]
+    pub metrics_export_interval_secs: Option<u64>,
+    #[arg(long, help = "日志级别 (default: info)")]
+    pub log_level: Option<String>,
     #[arg(long, help = "最大并发连接 (default: 10000, 0=不限)")]
     pub max_clients: Option<usize>,
     #[cfg(feature = "cluster")]
@@ -113,6 +117,12 @@ impl Settings {
         }
         if let Some(v) = cli.metrics_port {
             self.observability.metrics_port = Some(v);
+        }
+        if let Some(v) = cli.metrics_export_interval_secs {
+            self.observability.metrics_export_interval_secs = Some(v);
+        }
+        if let Some(ref v) = cli.log_level {
+            self.observability.log_level = Some(v.clone());
         }
 
         #[cfg(feature = "cluster")]

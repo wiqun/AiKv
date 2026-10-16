@@ -11,7 +11,7 @@
 - **禁止服务端透明命令转发**: 严格遵循 Redis Cluster 官方规范, 非本地槽位必须向客户端返回 `-MOVED` 或 `-ASK` 重定向错误, 严禁在服务端代客户端透明 TCP 代理转发.
 - **禁止破坏 KeyLock 字典序加锁契约**: 多 Key 命令与 Lua 事务必须严格按 Key 字典序升序排序加锁, 严禁任意无序获取锁引发并发死锁.
 - **禁止绕过 Raft 直接写存储**: 在集群模式下, 分配槽位的写操作必须通过 `ClusterDataAdapter` 进行 Raft 批处理 propose, 严禁绕过共识直接写入底层本地引擎.
-- **禁止热路径高等级 Span**: `kv_command`, `cmd_string` 等请求热路径的 `#[tracing::instrument]` 必须设为 `level = "debug"`, 确保在生产 `RUST_LOG=info` 下零性能损耗.
+- **禁止允许名单以外的 Span**: 只允许命令入口 `kv_command`. 不得再加 `#[instrument]`. 采样关闭时不创建该 span, 字段不含用户 key.
 - **禁止测试并发污染**: 集成测试与集群测试必须带 `--test-threads=1`, 避免端口与数据目录冲突.
 - **禁止随意修改持久化编码格式**: `StoredValue` 编码、Subkey 扁平化规则与 DUMP 内部 postcard 格式变更属于高风险操作, 须提前评估兼容性.
 
@@ -83,7 +83,7 @@ pytest e2e/function/ -v
 | **核心数据结构命令 / KeyLock** | [docs/modules/04-commands-core.md](docs/modules/04-commands-core.md) | String~ZSet 命令实现、`CommandFlags`、`KeyLock` 字典序加锁防死锁、WRONGTYPE 处理 |
 | **JSON / Lua / 阻塞队列 / 运维** | [docs/modules/05-commands-extended.md](docs/modules/05-commands-extended.md) | JSONPath 引擎、Lua 沙箱与 `ScriptTransaction`、`BlockingRegistry` (BLPOP)、SAVE Checkpoint |
 | **Redis Cluster 协议 / Slot 迁移** | [docs/modules/06-cluster.md](docs/modules/06-cluster.md) | CRC16 `{...}` Hash Tag、MOVED/ASK 重定向、CLUSTER 子命令、与 AiDb MetaRaft 拓扑同步 |
-| **可观测性架构 / INFO / Tracing** | [docs/modules/07-observability.md](docs/modules/07-observability.md) | `SlowQueryLog` 环形缓冲、`LatencyStats`、`InfoRenderer` 渲染、OTel 管道与热路径 `debug` span |
+| **可观测性架构 / INFO / Tracing** | [docs/modules/07-observability.md](docs/modules/07-observability.md) | `SlowQueryLog` 环形缓冲、`LatencyStats`、`InfoRenderer` 渲染、OTel 管道与 `kv_command` span |
 | **指标字典 / INFO 8.8 对照表** | [docs/modules/08-observability-reference.md](docs/modules/08-observability-reference.md) | `aikv_*` 全部 OTel 指标名与标签、INFO 8.8 全字段对照表与 Stub 标注 |
 | **配置分层 / TOML / env / CLI 优先级** | [docs/modules/09-config.md](docs/modules/09-config.md) | `src/config/` merge 语义、`ResolvedSettings`、`ConfigWarning`、文件发现与测试 seam |
 | **LSM / Raft 内核排查** | [AiDb AGENTS.md](https://github.com/wiqun/AiDb/blob/main/AGENTS.md) | 涉及底层 LSM 存储、WAL 恢复、Compaction 或 Raft 共识故障时跳转查看 |

@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 
 use aikv::error::{Error, Result};
-use aikv::storage::adapter::{AdapterWriteOp, KvStorageAdapter, StorageAdapter, WriteBatchStats};
+use aikv::storage::adapter::{AdapterWriteOp, KvStorageAdapter, StorageAdapter};
 use aikv::storage::types::{KvStorage, StoredValue};
 
 struct MockAdapter {
@@ -32,9 +32,9 @@ impl StorageAdapter for MockAdapter {
         Ok(self.data.lock().unwrap().get(&key).cloned())
     }
 
-    async fn set(&self, key: Vec<u8>, value: Vec<u8>) -> Result<bool> {
-        let existed = self.data.lock().unwrap().insert(key, value).is_some();
-        Ok(!existed)
+    async fn set(&self, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
+        self.data.lock().unwrap().insert(key, value);
+        Ok(())
     }
 
     async fn delete(&self, key: Vec<u8>) -> Result<bool> {
@@ -49,39 +49,19 @@ impl StorageAdapter for MockAdapter {
         Ok(self.data.lock().unwrap().contains_key(&key))
     }
 
-    async fn write_batch(&self, batch: Vec<AdapterWriteOp>) -> Result<WriteBatchStats> {
+    async fn write_batch(&self, batch: Vec<AdapterWriteOp>) -> Result<()> {
         let mut data = self.data.lock().unwrap();
-        let mut pending: std::collections::HashMap<Vec<u8>, bool> =
-            std::collections::HashMap::new();
-        let mut inserted = 0u64;
-        let mut deleted = 0u64;
         for op in batch {
             match op {
                 AdapterWriteOp::Put { key, value } => {
-                    let existed = match pending.get(&key) {
-                        Some(present) => *present,
-                        None => data.contains_key(&key),
-                    };
-                    pending.insert(key.clone(), true);
                     data.insert(key, value);
-                    if !existed {
-                        inserted += 1;
-                    }
                 }
                 AdapterWriteOp::Delete { key } => {
-                    let existed = match pending.get(&key) {
-                        Some(present) => *present,
-                        None => data.contains_key(&key),
-                    };
-                    pending.insert(key.clone(), false);
                     data.remove(&key);
-                    if existed {
-                        deleted += 1;
-                    }
                 }
             }
         }
-        Ok(WriteBatchStats { inserted, deleted })
+        Ok(())
     }
 
     async fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {

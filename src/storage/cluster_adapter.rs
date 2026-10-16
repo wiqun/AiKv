@@ -26,18 +26,17 @@ use parking_lot::Mutex;
 use aidb::cluster::router::key_to_slot;
 use aidb::cluster::{
     MigOp, Request, Response, ShardedStorage, SlotMigrationState, SlotStatus, ThinWriteBatch,
-    ThinWriteOp,
 };
 use aidb::error::ClusterError as AidbClusterError;
 use aidb::Checkpoint;
 
-use super::cluster_batcher::{submit_write_op, submit_write_ops, GroupSetBatcher};
+use super::cluster_batcher::{submit_write_op, GroupSetBatcher};
 use crate::cluster::router::{migration_phase_for_slot, MigrationRoutePhase, TRYAGAIN_MIGRATION};
 use crate::cluster::state::{ClusterStateManager, CLUSTER_STATE_MGR};
 use crate::error::{Error, Result};
-use crate::storage::adapter::{AdapterWriteOp, StorageAdapter, WriteBatchStats};
+use crate::storage::adapter::{AdapterWriteOp, StorageAdapter};
 use crate::storage::aidb::AiDbEngine;
-use crate::storage::types::StorageEngineKind;
+use crate::storage::types::{BatchWriteHandle, StorageEngineKind};
 
 const GROUP_READY_MAX_ATTEMPTS: u32 = 20;
 const GROUP_READY_RETRY_DELAY: Duration = Duration::from_millis(250);
@@ -58,7 +57,8 @@ enum ReadRoute {
 /// F-056-A1 写路由结果: `Plain` 为老路径 (`Request::Put`/`Delete`/`WriteBatch`);
 /// `Migration` 为 Copying (Prepare/Migrating) 期写, 必须走
 /// `Request::MigrationWrite` 记录 tombstone (关闭"不存在则跳过 propose"短路).
-enum WriteRoute {
+#[derive(Clone, Copy)]
+pub(super) enum WriteRoute {
     Plain(u64),
     Migration {
         gid: u64,
@@ -224,12 +224,11 @@ impl ClusterDataAdapter {
         }
     }
 
-    /// 剥离子键后缀 (`\x01H{...}` 或 `\x01S{...}`), 返回路由用的纯 user_key.
+    /// 剥离子键后缀 (`\x01H|S|Z|Y...`), 返回路由用的纯 user_key.
     /// Subkey 的 slot 必须与父 key 一致, 否则集群模式下会路由到错误的 group.
     fn strip_subkey_suffix(user_key: &[u8]) -> &[u8] {
         if let Some(pos) = user_key.iter().position(|&b| b == 0x01) {
-            if pos + 1 < user_key.len() && (user_key[pos + 1] == b'H' || user_key[pos + 1] == b'S')
-            {
+            if pos + 1 < user_key.len() && matches!(user_key[pos + 1], b'H' | b'S' | b'Z' | b'Y') {
                 return &user_key[..pos];
             }
         }
@@ -262,10 +261,19 @@ impl ClusterDataAdapter {
         })
     }
 
+    /// 写路径用的 slot. 子键与父键相同. 无法解码时返回 `None`.
+    pub(super) fn routing_slot(key: &[u8]) -> Option<u16> {
+        let (_, user_key) = AiDbEngine::decode_key(key)?;
+        let routing_key = Self::strip_subkey_suffix(&user_key);
+        Some(key_to_slot(routing_key))
+    }
+
     /// 写路径: IMPORTING 时优先写入本节点目标 group.
     /// 返回 `Err(TRYAGAIN)` 当 Frozen/Ready 写冻结, 或 Copying 期 epoch 缺失;
     /// `Ok(None)` 表示无本地 group.
-    fn route_write(key: &[u8]) -> Result<Option<(Arc<ClusterStateManager>, WriteRoute)>> {
+    pub(super) fn route_write(
+        key: &[u8],
+    ) -> Result<Option<(Arc<ClusterStateManager>, WriteRoute)>> {
         let Some(mgr) = CLUSTER_STATE_MGR.get().cloned() else {
             return Ok(None);
         };
@@ -319,7 +327,7 @@ impl ClusterDataAdapter {
 
     pub(super) fn check_response(resp: Response) -> Result<()> {
         match resp {
-            Response::Ok | Response::WriteStats { .. } => Ok(()),
+            Response::Ok => Ok(()),
             Response::Error(msg) => Err(Error::Cluster(crate::error::ClusterError::Aidb(
                 AidbClusterError::Internal(msg),
             ))),
@@ -329,54 +337,6 @@ impl ClusterDataAdapter {
                 )),
             ))),
         }
-    }
-
-    /// 解析数据写成功摘要. 仅接受 `WriteStats` (fail-fast; 不把 `Ok` 当成空 effects).
-    pub(super) fn parse_write_stats(resp: Response) -> Result<Vec<bool>> {
-        match resp {
-            Response::WriteStats { effects } => Ok(effects),
-            Response::Error(msg) => Err(Error::Cluster(crate::error::ClusterError::Aidb(
-                AidbClusterError::Internal(msg),
-            ))),
-            other => Err(Error::Cluster(crate::error::ClusterError::Aidb(
-                AidbClusterError::Internal(format!(
-                    "expected WriteStats for data write, got {other:?}"
-                )),
-            ))),
-        }
-    }
-
-    /// 将 `WriteStats.effects` 按 op 种类累计为 inserted / deleted.
-    /// `op_is_put[i] == true` 表示第 i 笔为 Put, 否则为 Delete.
-    fn stats_from_effects(op_is_put: &[bool], effects: &[bool]) -> Result<(u64, u64)> {
-        if op_is_put.len() != effects.len() {
-            return Err(Error::Cluster(crate::error::ClusterError::Aidb(
-                AidbClusterError::Internal(format!(
-                    "WriteStats effects len {} != ops len {}",
-                    effects.len(),
-                    op_is_put.len()
-                )),
-            )));
-        }
-        let mut inserted = 0u64;
-        let mut deleted = 0u64;
-        for (&is_put, &effect) in op_is_put.iter().zip(effects) {
-            if !effect {
-                continue;
-            }
-            if is_put {
-                inserted += 1;
-            } else {
-                deleted += 1;
-            }
-        }
-        Ok((inserted, deleted))
-    }
-
-    fn thin_op_is_put(ops: &[ThinWriteOp]) -> Vec<bool> {
-        ops.iter()
-            .map(|op| matches!(op, ThinWriteOp::Put { .. }))
-            .collect()
     }
 
     fn data_group_not_ready_err() -> Error {
@@ -425,21 +385,33 @@ impl ClusterDataAdapter {
         request: Request,
     ) -> Result<Response> {
         let mut last_err = Self::data_group_not_ready_err();
+        let started = std::time::Instant::now();
+        let note = || {
+            if let Some(metrics) = &mgr.metrics {
+                metrics.note_propose_group(gid, started.elapsed().as_micros() as u64, true);
+            }
+        };
         for attempt in 0..GROUP_READY_MAX_ATTEMPTS {
             match mgr.multi_raft.propose_group(gid, request.clone()).await {
-                Ok(resp) => return Ok(resp),
+                Ok(resp) => {
+                    note();
+                    return Ok(resp);
+                }
                 Err(e) => {
                     last_err = Self::map_err(e);
                     if Self::is_transient_cluster_err(&last_err)
                         && attempt + 1 < GROUP_READY_MAX_ATTEMPTS
                     {
+                        tracing::warn!(gid, attempt, "forward retry");
                         tokio::time::sleep(GROUP_READY_RETRY_DELAY).await;
                         continue;
                     }
+                    note();
                     return Err(last_err);
                 }
             }
         }
+        note();
         Err(last_err)
     }
 }
@@ -479,6 +451,57 @@ fn flush_group_storages(storages: &HashMap<u64, ShardedStorage>) -> Result<()> {
 
 #[async_trait]
 impl StorageAdapter for ClusterDataAdapter {
+    fn get_sync(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>> {
+        match Self::route_read(&key)? {
+            Some((mgr, ReadRoute::Single(gid))) => mgr
+                .multi_raft
+                .get_local_sync(gid, &key)
+                .map_err(Self::map_err),
+            Some(_) => Err(Error::Command(TRYAGAIN_MIGRATION.into())),
+            None if Self::should_use_local_engine(&key) => self.local.get_sync(key),
+            None => Err(Self::data_group_not_ready_err()),
+        }
+    }
+
+    fn last_in_range_sync(
+        &self,
+        start: Vec<u8>,
+        end: Vec<u8>,
+    ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        let Some(mgr) = CLUSTER_STATE_MGR.get().cloned() else {
+            return self.local.last_in_range_sync(start, end);
+        };
+        match Self::route_read(&start)? {
+            Some((_, ReadRoute::Single(gid))) => mgr
+                .multi_raft
+                .last_local_user_pair_sync(gid, &start, &end)
+                .map_err(Self::map_err),
+            Some(_) => Err(Error::Command(TRYAGAIN_MIGRATION.into())),
+            None => self.local.last_in_range_sync(start, end),
+        }
+    }
+
+    fn for_each_prefix_sync(
+        &self,
+        prefix: Vec<u8>,
+        mut f: Box<dyn FnMut(Vec<u8>, Vec<u8>) -> Result<()> + Send>,
+    ) -> Result<()> {
+        let Some(mgr) = CLUSTER_STATE_MGR.get().cloned() else {
+            return self.local.for_each_prefix_sync(prefix, f);
+        };
+        let end = AiDbEngine::prefix_end(&prefix);
+        for gid in mgr.multi_raft.local_group_ids() {
+            let pairs = mgr
+                .multi_raft
+                .scan_local_pairs_in_range_sync(gid, &prefix, end.as_deref())
+                .map_err(Self::map_err)?;
+            for (key, value) in pairs {
+                f(key, value)?;
+            }
+        }
+        Ok(())
+    }
+
     async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>> {
         match Self::route_read(&key)? {
             Some((mgr, ReadRoute::Single(gid))) => {
@@ -500,7 +523,7 @@ impl StorageAdapter for ClusterDataAdapter {
         }
     }
 
-    async fn set(&self, key: Vec<u8>, value: Vec<u8>) -> Result<bool> {
+    async fn set(&self, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
         match Self::route_write(&key)? {
             Some((mgr, WriteRoute::Migration { gid, epoch, .. })) => {
                 let mut ops = ThinWriteBatch::new();
@@ -511,14 +534,7 @@ impl StorageAdapter for ClusterDataAdapter {
                     Request::MigrationWrite { epoch, ops },
                 )
                 .await?;
-                let effects = Self::parse_write_stats(resp)?;
-                effects.first().copied().ok_or_else(|| {
-                    Error::Cluster(crate::error::ClusterError::Aidb(
-                        AidbClusterError::Internal(
-                            "MigrationWrite WriteStats missing effects[0]".into(),
-                        ),
-                    ))
-                })
+                Self::check_response(resp)
             }
             Some((mgr, WriteRoute::Plain(gid))) => {
                 submit_write_op(
@@ -529,105 +545,16 @@ impl StorageAdapter for ClusterDataAdapter {
                     key,
                     Some(value),
                 )
-                .await
+                .await?;
+                Ok(())
             }
             None if Self::should_use_local_engine(&key) => self.local.set(key, value).await,
             None => Err(Self::data_group_not_ready_err()),
         }
     }
 
-    async fn apply_writes(&self, ops: Vec<AdapterWriteOp>) -> Result<Vec<bool>> {
-        if ops.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut results = vec![false; ops.len()];
-        let mut by_gid: HashMap<
-            u64,
-            (
-                Arc<ClusterStateManager>,
-                Vec<(usize, Vec<u8>, Option<Vec<u8>>)>,
-            ),
-        > = HashMap::new();
-        let mut by_mig: HashMap<
-            u64,
-            (
-                Arc<ClusterStateManager>,
-                u64,
-                Vec<(usize, Vec<u8>, Option<Vec<u8>>)>,
-            ),
-        > = HashMap::new();
-        let mut fallback: Vec<(usize, AdapterWriteOp)> = Vec::new();
-
-        for (i, op) in ops.into_iter().enumerate() {
-            let key_ref = match &op {
-                AdapterWriteOp::Put { key, .. } | AdapterWriteOp::Delete { key } => key.as_slice(),
-            };
-            match Self::route_write(key_ref)? {
-                Some((mgr, WriteRoute::Plain(gid))) => {
-                    let tuple = match op {
-                        AdapterWriteOp::Put { key, value } => (i, key, Some(value)),
-                        AdapterWriteOp::Delete { key } => (i, key, None),
-                    };
-                    by_gid
-                        .entry(gid)
-                        .or_insert_with(|| (mgr, Vec::new()))
-                        .1
-                        .push(tuple);
-                }
-                Some((mgr, WriteRoute::Migration { gid, epoch, .. })) => {
-                    let tuple = match op {
-                        AdapterWriteOp::Put { key, value } => (i, key, Some(value)),
-                        AdapterWriteOp::Delete { key } => (i, key, None),
-                    };
-                    by_mig
-                        .entry(gid)
-                        .or_insert_with(|| (mgr, epoch, Vec::new()))
-                        .2
-                        .push(tuple);
-                }
-                _ => fallback.push((i, op)),
-            }
-        }
-
-        for (gid, (mgr, items)) in by_gid {
-            let batch: Vec<_> = items
-                .iter()
-                .map(|(_, k, v)| (k.clone(), v.clone()))
-                .collect();
-            let flags =
-                submit_write_ops(&self.set_batchers, self.eager_flush, mgr, gid, batch).await?;
-            for ((idx, _, _), flag) in items.into_iter().zip(flags) {
-                results[idx] = flag;
-            }
-        }
-
-        for (gid, (mgr, epoch, items)) in by_mig {
-            let mut tb = ThinWriteBatch::new();
-            for (_, key, value) in &items {
-                match value {
-                    Some(v) => tb.put(key.clone(), v.clone()),
-                    None => tb.delete(key.clone()),
-                }
-            }
-            let resp = Self::propose_group_with_retry(
-                &mgr,
-                gid,
-                Request::MigrationWrite { epoch, ops: tb },
-            )
-            .await?;
-            let flags = Self::parse_write_stats(resp)?;
-            for ((idx, _, _), flag) in items.into_iter().zip(flags) {
-                results[idx] = flag;
-            }
-        }
-
-        for (i, op) in fallback {
-            results[i] = match op {
-                AdapterWriteOp::Put { key, value } => self.set(key, value).await?,
-                AdapterWriteOp::Delete { key } => self.delete(key).await?,
-            };
-        }
-        Ok(results)
+    async fn apply_writes(&self, ops: Vec<AdapterWriteOp>) -> Result<()> {
+        self.enqueue_batch(ops).await?.wait().await
     }
 
     async fn delete(&self, key: Vec<u8>) -> Result<bool> {
@@ -690,70 +617,18 @@ impl StorageAdapter for ClusterDataAdapter {
         }
     }
 
-    async fn write_batch(&self, batch: Vec<AdapterWriteOp>) -> Result<WriteBatchStats> {
-        // 按 group 分组后逐组提交, 避免跨 group 的单次提案.
-        // F-056-A1: Copying 期写额外按 (gid, epoch) 分组走 MigrationWrite.
-        // inserted/deleted 一律来自 propose 后 WriteStats (禁止 propose 前 exists).
-        let mut plain_by_group: HashMap<u64, (Arc<ClusterStateManager>, ThinWriteBatch)> =
-            HashMap::new();
-        let mut migration_by_group: HashMap<u64, (Arc<ClusterStateManager>, u64, ThinWriteBatch)> =
-            HashMap::new();
-        let mut local_ops: Vec<AdapterWriteOp> = Vec::new();
-        for op in batch {
-            let key = match &op {
-                AdapterWriteOp::Put { key, .. } => key.as_slice(),
-                AdapterWriteOp::Delete { key } => key.as_slice(),
-            };
-            match Self::route_write(key)? {
-                Some((mgr, WriteRoute::Migration { gid, epoch, .. })) => {
-                    let entry = migration_by_group
-                        .entry(gid)
-                        .or_insert_with(|| (mgr, epoch, ThinWriteBatch::new()));
-                    match op {
-                        AdapterWriteOp::Put { key, value } => entry.2.put(key, value),
-                        AdapterWriteOp::Delete { key } => entry.2.delete(key),
-                    }
-                }
-                Some((mgr, WriteRoute::Plain(gid))) => {
-                    let entry = plain_by_group
-                        .entry(gid)
-                        .or_insert_with(|| (mgr, ThinWriteBatch::new()));
-                    match op {
-                        AdapterWriteOp::Put { key, value } => entry.1.put(key, value),
-                        AdapterWriteOp::Delete { key } => entry.1.delete(key),
-                    }
-                }
-                None if Self::should_use_local_engine(key) => local_ops.push(op),
-                None => return Err(Self::data_group_not_ready_err()),
-            }
-        }
+    async fn write_batch(&self, batch: Vec<AdapterWriteOp>) -> Result<()> {
+        self.apply_writes(batch).await
+    }
 
-        let mut inserted = 0u64;
-        let mut deleted = 0u64;
-        for (gid, (mgr, tb)) in plain_by_group {
-            let op_is_put = Self::thin_op_is_put(&tb.ops);
-            let resp = Self::propose_group_with_retry(&mgr, gid, Request::WriteBatch(tb)).await?;
-            let effects = Self::parse_write_stats(resp)?;
-            let (i, d) = Self::stats_from_effects(&op_is_put, &effects)?;
-            inserted += i;
-            deleted += d;
-        }
-        for (gid, (mgr, epoch, ops)) in migration_by_group {
-            let op_is_put = Self::thin_op_is_put(&ops.ops);
-            let resp =
-                Self::propose_group_with_retry(&mgr, gid, Request::MigrationWrite { epoch, ops })
-                    .await?;
-            let effects = Self::parse_write_stats(resp)?;
-            let (i, d) = Self::stats_from_effects(&op_is_put, &effects)?;
-            inserted += i;
-            deleted += d;
-        }
-        if !local_ops.is_empty() {
-            let local_stats = self.local.write_batch(local_ops).await?;
-            inserted += local_stats.inserted;
-            deleted += local_stats.deleted;
-        }
-        Ok(WriteBatchStats { inserted, deleted })
+    async fn enqueue_batch(&self, batch: Vec<AdapterWriteOp>) -> Result<Box<dyn BatchWriteHandle>> {
+        super::cluster_batcher::enqueue_cluster_batch(
+            &self.set_batchers,
+            self.eager_flush,
+            self.local.clone(),
+            batch,
+        )
+        .await
     }
 
     async fn for_each_prefix(
@@ -763,22 +638,39 @@ impl StorageAdapter for ClusterDataAdapter {
     ) -> Result<()> {
         match CLUSTER_STATE_MGR.get() {
             Some(mgr) => {
+                let end = AiDbEngine::prefix_end(&prefix);
                 for gid in mgr.multi_raft.local_group_ids() {
                     let pairs = mgr
                         .multi_raft
-                        .scan_local_pairs(gid)
+                        .scan_local_pairs_in_range(gid, prefix.clone(), end.clone())
                         .await
                         .map_err(Self::map_err)?;
                     for (k, v) in pairs {
-                        if k.starts_with(&prefix) {
-                            f(k, v)?;
-                        }
+                        f(k, v)?;
                     }
                 }
                 Ok(())
             }
             None => self.local.for_each_prefix(prefix, f).await,
         }
+    }
+
+    async fn last_in_range(
+        &self,
+        start: Vec<u8>,
+        end: Vec<u8>,
+    ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        let Some(mgr) = CLUSTER_STATE_MGR.get().cloned() else {
+            return self.local.last_in_range(start, end).await;
+        };
+        if let Some((_, ReadRoute::Single(gid))) = Self::route_read(&start)? {
+            return mgr
+                .multi_raft
+                .last_local_user_pair(gid, start, end)
+                .await
+                .map_err(Self::map_err);
+        }
+        self.local.last_in_range(start, end).await
     }
 
     async fn delete_range(&self, start: Vec<u8>, end: Vec<u8>) -> Result<()> {
@@ -812,20 +704,13 @@ impl StorageAdapter for ClusterDataAdapter {
     }
 
     async fn len(&self) -> Result<usize> {
+        Ok(self.estimate_entry_count().await? as usize)
+    }
+
+    async fn estimate_entry_count(&self) -> Result<u64> {
         match CLUSTER_STATE_MGR.get() {
-            Some(mgr) => {
-                let mut total = 0usize;
-                for gid in mgr.multi_raft.local_group_ids() {
-                    total += mgr
-                        .multi_raft
-                        .scan_local_pairs(gid)
-                        .await
-                        .map_err(Self::map_err)?
-                        .len();
-                }
-                Ok(total)
-            }
-            None => self.local.len().await,
+            Some(mgr) => Ok(mgr.multi_raft.estimate_entry_count()),
+            None => self.local.estimate_entry_count().await,
         }
     }
 
@@ -898,8 +783,16 @@ impl StorageAdapter for ClusterDataAdapter {
         self.local.engine_kind()
     }
 
+    fn local_script_commit(&self) -> bool {
+        false
+    }
+
     fn approximate_memory_bytes(&self) -> Option<u64> {
         self.local.approximate_memory_bytes()
+    }
+
+    fn aidb_statistics(&self) -> Option<std::sync::Arc<aidb::Statistics>> {
+        self.local.aidb_statistics()
     }
 
     fn allow_lazy_expire_delete(&self, key: &[u8]) -> bool {
@@ -927,44 +820,10 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn parse_write_stats_accepts_effects() {
-        let effects = vec![true, false, true];
-        let got = ClusterDataAdapter::parse_write_stats(Response::WriteStats {
-            effects: effects.clone(),
-        })
-        .expect("WriteStats");
-        assert_eq!(got, effects);
-    }
-
-    #[test]
-    fn parse_write_stats_rejects_ok_and_value() {
-        assert!(ClusterDataAdapter::parse_write_stats(Response::Ok).is_err());
-        assert!(ClusterDataAdapter::parse_write_stats(Response::Value(None)).is_err());
-    }
-
-    #[test]
-    fn stats_from_effects_splits_put_and_delete() {
-        let op_is_put = [true, false, true, false];
-        let effects = [true, true, false, false];
-        let (inserted, deleted) =
-            ClusterDataAdapter::stats_from_effects(&op_is_put, &effects).expect("stats");
-        assert_eq!(inserted, 1);
-        assert_eq!(deleted, 1);
-    }
-
-    #[test]
-    fn stats_from_effects_rejects_len_mismatch() {
-        assert!(ClusterDataAdapter::stats_from_effects(&[true], &[]).is_err());
-    }
-
-    #[test]
-    fn check_response_accepts_ok_and_write_stats() {
+    fn check_response_accepts_ok() {
         ClusterDataAdapter::check_response(Response::Ok).expect("Ok");
-        ClusterDataAdapter::check_response(Response::WriteStats {
-            effects: vec![true],
-        })
-        .expect("WriteStats");
         assert!(ClusterDataAdapter::check_response(Response::Value(Some(vec![1]))).is_err());
+        assert!(ClusterDataAdapter::check_response(Response::Error("x".into())).is_err());
     }
 
     #[test]

@@ -3,7 +3,6 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use tracing::instrument;
 
 use crate::command::router;
 use crate::error::{Error, Result};
@@ -30,7 +29,6 @@ impl PersistenceCommands {
         Ok(())
     }
 
-    #[instrument(level = "debug", name = "cmd_save", skip(self))]
     pub async fn save(&self) -> Result<RespValue> {
         self.ensure_persistent_engine()?;
         self.storage.flush_engine().await?;
@@ -41,7 +39,6 @@ impl PersistenceCommands {
         Ok(router::ok())
     }
 
-    #[instrument(level = "debug", name = "cmd_bgsave", skip(self))]
     pub async fn bgsave(&self) -> Result<RespValue> {
         self.ensure_persistent_engine()?;
         if self
@@ -64,8 +61,6 @@ impl PersistenceCommands {
         let shared = Arc::clone(&self.shared);
         let dest = shared.backup_dir.clone();
         tokio::spawn(async move {
-            let span = tracing::info_span!("bgsave_checkpoint", dest = %dest.display());
-            let _guard = span.enter();
             let result = async {
                 storage.flush_engine().await?;
                 storage.create_checkpoint(&dest).await?;
@@ -97,7 +92,6 @@ impl PersistenceCommands {
         Ok(RespValue::SimpleString("Background saving started".into()))
     }
 
-    #[instrument(level = "debug", name = "cmd_lastsave", skip(self))]
     pub async fn lastsave(&self) -> Result<RespValue> {
         let ts = if self.storage.engine_kind() == StorageEngineKind::AiDb {
             self.shared.last_save_time() as i64
@@ -107,7 +101,6 @@ impl PersistenceCommands {
         Ok(router::integer(ts))
     }
 
-    #[instrument(level = "debug", name = "cmd_shutdown", skip(self, args))]
     pub async fn shutdown(&self, args: &[Bytes]) -> Result<RespValue> {
         let mode = parse_shutdown_mode(args)?;
         match self.storage.engine_kind() {

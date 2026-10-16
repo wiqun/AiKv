@@ -8,19 +8,19 @@ use crate::command::router;
 use crate::command::script::transaction::ScriptTransaction;
 use crate::error::Result;
 use crate::protocol::RespValue;
-use crate::storage::KvStorage;
+use crate::storage::ScriptIo;
 
 use super::{key, wrong_count};
 
-pub(super) async fn exec_sadd(
-    storage: &dyn KvStorage,
+pub(super) fn exec_sadd(
+    storage: &dyn ScriptIo,
     txn: &mut ScriptTransaction,
     args: &[Bytes],
 ) -> Result<RespValue> {
     if args.len() < 2 {
         return Err(wrong_count("SADD"));
     }
-    let mut set = if let Some(stored) = txn.get_value(storage, &args[0]).await? {
+    let mut set = if let Some(stored) = txn.get_value(storage, &args[0])? {
         stored.as_set()?.clone()
     } else {
         HashSet::new()
@@ -35,15 +35,15 @@ pub(super) async fn exec_sadd(
     Ok(router::integer(added))
 }
 
-pub(super) async fn exec_srem(
-    storage: &dyn KvStorage,
+pub(super) fn exec_srem(
+    storage: &dyn ScriptIo,
     txn: &mut ScriptTransaction,
     args: &[Bytes],
 ) -> Result<RespValue> {
     if args.len() < 2 {
         return Err(wrong_count("SREM"));
     }
-    let Some(stored) = txn.get_value(storage, &args[0]).await? else {
+    let Some(stored) = txn.get_value(storage, &args[0])? else {
         return Ok(router::integer(0));
     };
     let mut set = stored.as_set()?.clone();
@@ -61,15 +61,15 @@ pub(super) async fn exec_srem(
     Ok(router::integer(count))
 }
 
-pub(super) async fn exec_smembers(
-    storage: &dyn KvStorage,
+pub(super) fn exec_smembers(
+    storage: &dyn ScriptIo,
     txn: &ScriptTransaction,
     args: &[Bytes],
 ) -> Result<RespValue> {
     if args.len() != 1 {
         return Err(wrong_count("SMEMBERS"));
     }
-    let out = if let Some(stored) = txn.get_value(storage, &args[0]).await? {
+    let out = if let Some(stored) = txn.get_value(storage, &args[0])? {
         stored
             .as_set()?
             .iter()
@@ -81,8 +81,8 @@ pub(super) async fn exec_smembers(
     Ok(RespValue::Array(Some(out)))
 }
 
-pub(super) async fn exec_sismember(
-    storage: &dyn KvStorage,
+pub(super) fn exec_sismember(
+    storage: &dyn ScriptIo,
     txn: &ScriptTransaction,
     args: &[Bytes],
 ) -> Result<RespValue> {
@@ -90,7 +90,7 @@ pub(super) async fn exec_sismember(
         return Err(wrong_count("SISMEMBER"));
     }
     let member = args[1].to_vec();
-    let ok = if let Some(stored) = txn.get_value(storage, &args[0]).await? {
+    let ok = if let Some(stored) = txn.get_value(storage, &args[0])? {
         stored.as_set()?.contains(&member)
     } else {
         false
@@ -98,15 +98,15 @@ pub(super) async fn exec_sismember(
     Ok(router::integer(i64::from(ok)))
 }
 
-pub(super) async fn exec_scard(
-    storage: &dyn KvStorage,
+pub(super) fn exec_scard(
+    storage: &dyn ScriptIo,
     txn: &ScriptTransaction,
     args: &[Bytes],
 ) -> Result<RespValue> {
     if args.len() != 1 {
         return Err(wrong_count("SCARD"));
     }
-    let n = if let Some(stored) = txn.get_value(storage, &args[0]).await? {
+    let n = if let Some(stored) = txn.get_value(storage, &args[0])? {
         stored.as_set()?.len()
     } else {
         0
@@ -114,8 +114,8 @@ pub(super) async fn exec_scard(
     Ok(router::integer(n as i64))
 }
 
-pub(super) async fn exec_sscan(
-    storage: &dyn KvStorage,
+pub(super) fn exec_sscan(
+    storage: &dyn ScriptIo,
     txn: &ScriptTransaction,
     args: &[Bytes],
 ) -> Result<RespValue> {
@@ -126,7 +126,7 @@ pub(super) async fn exec_sscan(
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
-    let members = if let Some(stored) = txn.get_value(storage, &args[0]).await? {
+    let members = if let Some(stored) = txn.get_value(storage, &args[0])? {
         stored
             .as_set()?
             .iter()

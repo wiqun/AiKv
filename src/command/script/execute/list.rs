@@ -8,12 +8,12 @@ use crate::command::router;
 use crate::command::script::transaction::{parse_i64_arg, ScriptTransaction};
 use crate::error::Result;
 use crate::protocol::RespValue;
-use crate::storage::KvStorage;
+use crate::storage::ScriptIo;
 
 use super::{key, wrong_count};
 
-pub(super) async fn exec_lpush(
-    storage: &dyn KvStorage,
+pub(super) fn exec_lpush(
+    storage: &dyn ScriptIo,
     txn: &mut ScriptTransaction,
     args: &[Bytes],
     front: bool,
@@ -21,7 +21,7 @@ pub(super) async fn exec_lpush(
     if args.len() < 2 {
         return Err(wrong_count("LPUSH"));
     }
-    let mut list = if let Some(stored) = txn.get_value(storage, &args[0]).await? {
+    let mut list = if let Some(stored) = txn.get_value(storage, &args[0])? {
         stored.as_list()?.clone()
     } else {
         VecDeque::new()
@@ -40,8 +40,8 @@ pub(super) async fn exec_lpush(
     Ok(router::integer(len))
 }
 
-pub(super) async fn exec_lpop(
-    storage: &dyn KvStorage,
+pub(super) fn exec_lpop(
+    storage: &dyn ScriptIo,
     txn: &mut ScriptTransaction,
     args: &[Bytes],
     from_front: bool,
@@ -49,7 +49,7 @@ pub(super) async fn exec_lpop(
     if args.is_empty() {
         return Err(wrong_count("LPOP"));
     }
-    let Some(stored) = txn.get_value(storage, &args[0]).await? else {
+    let Some(stored) = txn.get_value(storage, &args[0])? else {
         return Ok(RespValue::Null);
     };
     let mut list = stored.as_list()?.clone();
@@ -69,15 +69,15 @@ pub(super) async fn exec_lpop(
     Ok(router::bulk(v))
 }
 
-pub(super) async fn exec_llen(
-    storage: &dyn KvStorage,
+pub(super) fn exec_llen(
+    storage: &dyn ScriptIo,
     txn: &ScriptTransaction,
     args: &[Bytes],
 ) -> Result<RespValue> {
     if args.len() != 1 {
         return Err(wrong_count("LLEN"));
     }
-    let len = if let Some(stored) = txn.get_value(storage, &args[0]).await? {
+    let len = if let Some(stored) = txn.get_value(storage, &args[0])? {
         stored.as_list()?.len()
     } else {
         0
@@ -85,8 +85,8 @@ pub(super) async fn exec_llen(
     Ok(router::integer(len as i64))
 }
 
-pub(super) async fn exec_lrange(
-    storage: &dyn KvStorage,
+pub(super) fn exec_lrange(
+    storage: &dyn ScriptIo,
     txn: &ScriptTransaction,
     args: &[Bytes],
 ) -> Result<RespValue> {
@@ -95,7 +95,7 @@ pub(super) async fn exec_lrange(
     }
     let start = parse_i64_arg(&args[1], "start")?;
     let stop = parse_i64_arg(&args[2], "stop")?;
-    let Some(stored) = txn.get_value(storage, &args[0]).await? else {
+    let Some(stored) = txn.get_value(storage, &args[0])? else {
         return Ok(RespValue::Array(Some(Vec::new())));
     };
     let list = stored.as_list()?;
@@ -114,8 +114,8 @@ pub(super) async fn exec_lrange(
     Ok(RespValue::Array(Some(out)))
 }
 
-pub(super) async fn exec_lindex(
-    storage: &dyn KvStorage,
+pub(super) fn exec_lindex(
+    storage: &dyn ScriptIo,
     txn: &ScriptTransaction,
     args: &[Bytes],
 ) -> Result<RespValue> {
@@ -123,7 +123,7 @@ pub(super) async fn exec_lindex(
         return Err(wrong_count("LINDEX"));
     }
     let idx = parse_i64_arg(&args[1], "index")?;
-    let Some(stored) = txn.get_value(storage, &args[0]).await? else {
+    let Some(stored) = txn.get_value(storage, &args[0])? else {
         return Ok(RespValue::Null);
     };
     let list = stored.as_list()?;

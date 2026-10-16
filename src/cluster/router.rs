@@ -211,7 +211,6 @@ pub struct ClusterRouter;
 impl ClusterRouter {
     /// 决定如何处理 key 的请求.
     /// 同步调用, 所有状态来自 ClusterStateManager 缓存.
-    #[tracing::instrument(level = "debug", name = "kv_cluster_route", skip_all)]
     pub fn decide(
         key: &[u8],
         cmd_type: CommandType,
@@ -452,7 +451,6 @@ fn ask_target(mgr: &ClusterStateManager, slot: u16) -> RouteDecision {
 }
 
 /// 检查多个 key 是否在同一 slot
-#[tracing::instrument(level = "debug", name = "kv_cluster_cross_slot", skip_all)]
 pub fn check_cross_slot(keys: &[&[u8]]) -> Result<(), String> {
     if keys.len() <= 1 {
         return Ok(());

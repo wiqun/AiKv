@@ -249,3 +249,58 @@ impl ClusterStateManager {
 
 /// 全局集群状态管理器
 pub static CLUSTER_STATE_MGR: OnceLock<std::sync::Arc<ClusterStateManager>> = OnceLock::new();
+
+/// 导出时读每个本地 data group 的 OpenRaft metrics. 没有集群时是空.
+pub fn raft_export_views() -> Vec<(String, crate::server::export::RaftExportView)> {
+    use crate::server::export::RaftExportView;
+    use openraft::rt::watch::WatchReceiver;
+    use openraft::ServerState;
+
+    let Some(mgr) = CLUSTER_STATE_MGR.get() else {
+        return Vec::new();
+    };
+    let groups = mgr.multi_raft.get_groups();
+    let guard = groups.read();
+    let mut out = Vec::with_capacity(guard.len());
+    for (gid, node) in guard.iter() {
+        let receiver = node.raft().metrics();
+        let metrics = receiver.borrow_watched();
+        let role = match metrics.state {
+            ServerState::Leader => "leader",
+            ServerState::Follower => "follower",
+            ServerState::Candidate => "candidate",
+            ServerState::Learner => "learner",
+            ServerState::Shutdown => "shutdown",
+        };
+        let max_voter_matched = metrics
+            .replication
+            .as_ref()
+            .and_then(|map| {
+                map.values()
+                    .filter_map(|id| id.as_ref().map(|log| log.index))
+                    .max()
+            })
+            .unwrap_or(0);
+        out.push((
+            gid.to_string(),
+            RaftExportView {
+                commit_index: metrics
+                    .local_committed
+                    .as_ref()
+                    .map(|id| id.index)
+                    .unwrap_or(0),
+                applied_index: metrics
+                    .last_applied
+                    .as_ref()
+                    .map(|id| id.index)
+                    .unwrap_or(0),
+                last_log_index: metrics.last_log_index.unwrap_or(0),
+                max_voter_matched,
+                is_leader: metrics.state == ServerState::Leader,
+                leader_contact_age_secs: 0.0,
+                role,
+            },
+        ));
+    }
+    out
+}

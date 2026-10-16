@@ -16,7 +16,7 @@ use crate::command::router;
 use crate::command::script::transaction::ScriptTransaction;
 use crate::error::{Error, Result};
 use crate::protocol::RespValue;
-use crate::storage::KvStorage;
+use crate::storage::ScriptIo;
 
 fn invalid_json(e: serde_json::Error) -> Error {
     Error::Command(format!("ERR invalid JSON: {e}"))
@@ -33,8 +33,8 @@ fn json_type_name(v: &JsonValue) -> &'static str {
     }
 }
 
-pub async fn exec_json_get(
-    storage: &dyn KvStorage,
+pub fn exec_json_get(
+    storage: &dyn ScriptIo,
     txn: &ScriptTransaction,
     args: &[Bytes],
 ) -> Result<RespValue> {
@@ -46,7 +46,7 @@ pub async fn exec_json_get(
         .map(|b| String::from_utf8_lossy(b).to_string())
         .unwrap_or_else(|| "$".to_string());
 
-    let raw = match txn.get(storage, &args[0]).await? {
+    let raw = match txn.get(storage, &args[0])? {
         Some(v) => v,
         None => return Ok(router::nil_bulk()),
     };
@@ -63,8 +63,8 @@ pub async fn exec_json_get(
     Ok(router::bulk(json_string.into_bytes()))
 }
 
-pub async fn exec_json_mget(
-    storage: &dyn KvStorage,
+pub fn exec_json_mget(
+    storage: &dyn ScriptIo,
     txn: &ScriptTransaction,
     args: &[Bytes],
 ) -> Result<RespValue> {
@@ -76,7 +76,7 @@ pub async fn exec_json_mget(
 
     let mut out = Vec::with_capacity(keys.len());
     for key in keys {
-        let raw = match txn.get(storage, key).await? {
+        let raw = match txn.get(storage, key)? {
             Some(v) => v,
             None => {
                 out.push(RespValue::Null);
@@ -102,8 +102,8 @@ pub async fn exec_json_mget(
     Ok(RespValue::Array(Some(out)))
 }
 
-pub async fn exec_json_set(
-    storage: &dyn KvStorage,
+pub fn exec_json_set(
+    storage: &dyn ScriptIo,
     txn: &mut ScriptTransaction,
     args: &[Bytes],
 ) -> Result<RespValue> {
@@ -130,7 +130,7 @@ pub async fn exec_json_set(
         ));
     }
 
-    let exists = txn.exists(storage, &args[0]).await?;
+    let exists = txn.exists(storage, &args[0])?;
     if nx && exists {
         return Ok(router::nil_bulk());
     }
@@ -143,7 +143,7 @@ pub async fn exec_json_set(
     let result_json = if path == "$" || path == "." {
         new_value
     } else {
-        let mut json_doc: JsonValue = match txn.get(storage, &args[0]).await? {
+        let mut json_doc: JsonValue = match txn.get(storage, &args[0])? {
             Some(raw) => serde_json::from_slice(&raw).map_err(invalid_json)?,
             None => serde_json::json!({}),
         };
@@ -157,8 +157,8 @@ pub async fn exec_json_set(
     Ok(router::ok())
 }
 
-pub async fn exec_json_del(
-    storage: &dyn KvStorage,
+pub fn exec_json_del(
+    storage: &dyn ScriptIo,
     txn: &mut ScriptTransaction,
     args: &[Bytes],
 ) -> Result<RespValue> {
@@ -172,7 +172,7 @@ pub async fn exec_json_del(
         .unwrap_or_else(|| "$".to_string());
 
     if path == "$" || path == "." {
-        let exists = txn.exists(storage, key).await?;
+        let exists = txn.exists(storage, key)?;
         if exists {
             txn.delete(key.to_vec());
             Ok(router::integer(1))
@@ -180,7 +180,7 @@ pub async fn exec_json_del(
             Ok(router::integer(0))
         }
     } else {
-        let raw = match txn.get(storage, key).await? {
+        let raw = match txn.get(storage, key)? {
             Some(v) => v,
             None => return Ok(router::integer(0)),
         };
@@ -195,8 +195,8 @@ pub async fn exec_json_del(
     }
 }
 
-pub async fn exec_json_type(
-    storage: &dyn KvStorage,
+pub fn exec_json_type(
+    storage: &dyn ScriptIo,
     txn: &ScriptTransaction,
     args: &[Bytes],
 ) -> Result<RespValue> {
@@ -208,7 +208,7 @@ pub async fn exec_json_type(
         .map(|b| String::from_utf8_lossy(b).to_string())
         .unwrap_or_else(|| "$".to_string());
 
-    let raw = match txn.get(storage, &args[0]).await? {
+    let raw = match txn.get(storage, &args[0])? {
         Some(v) => v,
         None => return Ok(router::nil_bulk()),
     };
@@ -227,8 +227,8 @@ pub async fn exec_json_type(
     Ok(RespValue::SimpleString(type_name.into()))
 }
 
-pub async fn exec_json_strlen(
-    storage: &dyn KvStorage,
+pub fn exec_json_strlen(
+    storage: &dyn ScriptIo,
     txn: &ScriptTransaction,
     args: &[Bytes],
 ) -> Result<RespValue> {
@@ -240,7 +240,7 @@ pub async fn exec_json_strlen(
         .map(|b| String::from_utf8_lossy(b).to_string())
         .unwrap_or_else(|| "$".to_string());
 
-    let raw = match txn.get(storage, &args[0]).await? {
+    let raw = match txn.get(storage, &args[0])? {
         Some(v) => v,
         None => return Ok(router::nil_bulk()),
     };
@@ -263,8 +263,8 @@ pub async fn exec_json_strlen(
     }
 }
 
-pub async fn exec_json_arrlen(
-    storage: &dyn KvStorage,
+pub fn exec_json_arrlen(
+    storage: &dyn ScriptIo,
     txn: &ScriptTransaction,
     args: &[Bytes],
 ) -> Result<RespValue> {
@@ -276,7 +276,7 @@ pub async fn exec_json_arrlen(
         .map(|b| String::from_utf8_lossy(b).to_string())
         .unwrap_or_else(|| "$".to_string());
 
-    let raw = match txn.get(storage, &args[0]).await? {
+    let raw = match txn.get(storage, &args[0])? {
         Some(v) => v,
         None => return Ok(router::nil_bulk()),
     };
@@ -297,8 +297,8 @@ pub async fn exec_json_arrlen(
     }
 }
 
-pub async fn exec_json_objlen(
-    storage: &dyn KvStorage,
+pub fn exec_json_objlen(
+    storage: &dyn ScriptIo,
     txn: &ScriptTransaction,
     args: &[Bytes],
 ) -> Result<RespValue> {
@@ -310,7 +310,7 @@ pub async fn exec_json_objlen(
         .map(|b| String::from_utf8_lossy(b).to_string())
         .unwrap_or_else(|| "$".to_string());
 
-    let raw = match txn.get(storage, &args[0]).await? {
+    let raw = match txn.get(storage, &args[0])? {
         Some(v) => v,
         None => return Ok(router::nil_bulk()),
     };
@@ -331,8 +331,8 @@ pub async fn exec_json_objlen(
     }
 }
 
-pub async fn exec_json_numincrby(
-    storage: &dyn KvStorage,
+pub fn exec_json_numincrby(
+    storage: &dyn ScriptIo,
     txn: &mut ScriptTransaction,
     args: &[Bytes],
 ) -> Result<RespValue> {
@@ -351,7 +351,7 @@ pub async fn exec_json_numincrby(
         return Err(Error::Command("ERR Cannot increment root".into()));
     }
 
-    let raw = match txn.get(storage, key).await? {
+    let raw = match txn.get(storage, key)? {
         Some(v) => v,
         None => return Ok(router::nil_bulk()),
     };
@@ -377,8 +377,8 @@ pub async fn exec_json_numincrby(
     Ok(router::bulk(json_string.into_bytes()))
 }
 
-pub async fn exec_json_arrappend(
-    storage: &dyn KvStorage,
+pub fn exec_json_arrappend(
+    storage: &dyn ScriptIo,
     txn: &mut ScriptTransaction,
     args: &[Bytes],
 ) -> Result<RespValue> {
@@ -399,7 +399,7 @@ pub async fn exec_json_arrappend(
         values.push(val);
     }
 
-    let raw = match txn.get(storage, key).await? {
+    let raw = match txn.get(storage, key)? {
         Some(v) => v,
         None => return Ok(router::nil_bulk()),
     };

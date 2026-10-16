@@ -52,7 +52,6 @@ use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
 use tokio::sync::broadcast;
 use tokio::time;
-use tracing::instrument;
 
 use crate::command;
 use crate::error::{Error, Result};
@@ -61,6 +60,7 @@ use crate::server::config::ServerSharedState;
 
 mod atom;
 mod monitor;
+pub(crate) mod pipeline;
 mod protocol;
 #[cfg(test)]
 mod tests;
@@ -115,6 +115,7 @@ pub struct Connection {
     cluster_state: crate::cluster::connection::ClusterConnectionState,
     /// 原子事务状态 (ATOM.MULTI / EXEC / DISCARD / WATCH)
     tx_state: TransactionState,
+    pending_timing: Option<self::pipeline::PendingBatchTiming>,
 }
 
 impl Connection {
@@ -138,56 +139,44 @@ impl Connection {
             #[cfg(feature = "cluster")]
             cluster_state: crate::cluster::connection::ClusterConnectionState::new(),
             tx_state: TransactionState::new(),
+            pending_timing: None,
         };
-        tracing::info!(remote = %remote, client_id, "kv.connection.open");
+        tracing::debug!(remote = %remote, client_id, "kv.connection.open");
         let _ = conn.run().await;
         let gate = Arc::clone(&conn.state.transaction_gate);
         let _guard = gate.write_owned().await;
         conn.release_watches();
         drop(_guard);
         state.unregister_client(client_id);
-        tracing::info!(remote = %conn.remote, client_id, "kv.connection.close");
+        tracing::debug!(remote = %conn.remote, client_id, "kv.connection.close");
     }
 
-    #[instrument(
-        name = "kv_connection",
-        skip(self),
-        fields(
-            otel.kind = "server",
-            remote_addr = %self.remote,
-            client.address = %self.remote.ip(),
-            network.peer.address = %self.remote.ip(),
-            network.peer.port = self.remote.port(),
-            server.port = tracing::field::Empty,
-            db_index = 0,
-        )
-    )]
     async fn run(&mut self) -> Result<()> {
-        tracing::Span::current().record("db_index", self.current_db as i64);
-        tracing::Span::current().record("server.port", self.state.tcp_port as i64);
         let config = Arc::clone(&self.state.connection_config);
-        let mut buf = vec![0u8; 16384];
+        let mut buf = vec![0u8; 65536];
         let conn_start = Instant::now();
 
         loop {
             if self.state.shutdown.is_cancelled() {
-                tracing::info!(
+                tracing::debug!(
                     target: "kv.conn.close_reason",
                     client_id = self.client_id,
                     reason = "shutdown",
                     alive_ms = conn_start.elapsed().as_millis() as u64,
                     "kv.connection.close.reason"
                 );
+                self.state.metrics.note_connection_close("shutdown");
                 break;
             }
             if self.quit {
-                tracing::info!(
+                tracing::debug!(
                     target: "kv.conn.close_reason",
                     client_id = self.client_id,
                     reason = "quit",
                     alive_ms = conn_start.elapsed().as_millis() as u64,
                     "kv.connection.close.reason"
                 );
+                self.state.metrics.note_connection_close("quit");
                 break;
             }
 
@@ -198,7 +187,7 @@ impl Connection {
 
             if let Some(idle) = config.idle_timeout {
                 if self.last_active.elapsed() > idle {
-                    tracing::info!(
+                    tracing::debug!(
                         target: "kv.conn.close_reason",
                         client_id = self.client_id,
                         reason = "idle_timeout",
@@ -206,6 +195,7 @@ impl Connection {
                         alive_ms = conn_start.elapsed().as_millis() as u64,
                         "kv.connection.close.reason"
                     );
+                    self.state.metrics.note_connection_close("idle_timeout");
                     break;
                 }
             }
@@ -214,7 +204,7 @@ impl Connection {
                 match time::timeout(timeout, self.read_buf(&mut buf)).await {
                     Ok(Ok(n)) => n,
                     Ok(Err(e)) => {
-                        tracing::info!(
+                        tracing::debug!(
                             target: "kv.conn.close_reason",
                             client_id = self.client_id,
                             reason = "read_error",
@@ -222,10 +212,11 @@ impl Connection {
                             alive_ms = conn_start.elapsed().as_millis() as u64,
                             "kv.connection.close.reason"
                         );
+                        self.state.metrics.note_connection_close("read_error");
                         return Err(e.into());
                     }
                     Err(_) => {
-                        tracing::info!(
+                        tracing::debug!(
                             target: "kv.conn.close_reason",
                             client_id = self.client_id,
                             reason = "read_timeout",
@@ -233,6 +224,7 @@ impl Connection {
                             alive_ms = conn_start.elapsed().as_millis() as u64,
                             "kv.connection.close.reason"
                         );
+                        self.state.metrics.note_connection_close("read_timeout");
                         break;
                     }
                 }
@@ -241,18 +233,19 @@ impl Connection {
             };
 
             if n == 0 {
-                tracing::info!(
+                tracing::debug!(
                     target: "kv.conn.close_reason",
                     client_id = self.client_id,
                     reason = "client_closed",
                     alive_ms = conn_start.elapsed().as_millis() as u64,
                     "kv.connection.close.reason"
                 );
+                self.state.metrics.note_connection_close("client_closed");
                 break;
             }
 
             if self.parser.buffer_len() + n > self.parser.max_buffer_size() {
-                tracing::info!(
+                tracing::debug!(
                     target: "kv.conn.close_reason",
                     client_id = self.client_id,
                     reason = "buffer_overflow",
@@ -261,41 +254,17 @@ impl Connection {
                     alive_ms = conn_start.elapsed().as_millis() as u64,
                     "kv.connection.close.reason"
                 );
+                self.state.metrics.note_connection_close("buffer_overflow");
                 break;
             }
 
             self.parser.feed(&buf[..n]);
 
             loop {
-                match self.parse_frame().await {
-                    Ok(Some(value)) => {
-                        let is_immediate_flush = should_flush_immediately(&value);
-                        // 阻塞命令 await 前必须先刷出同批已排队响应 (Redis 语义)
-                        if is_blocking_command(&value) {
-                            self.flush_responses().await?;
-                        }
-                        if let Err(e) = self.process_value(value).await {
-                            // best-effort: 同批已入队响应尽量先写出; 保留原错误, 忽略 flush 失败
-                            let _ = self.flush_responses().await;
-                            return Err(e);
-                        }
-                        tracing::Span::current().record("db_index", self.current_db as i64);
-                        self.last_active = Instant::now();
-                        if is_immediate_flush || self.quit {
-                            self.flush_responses().await?;
-                            if self.quit {
-                                break;
-                            }
-                        }
-                        if self.mode == ConnectionMode::Monitor {
-                            self.flush_responses().await?;
-                            self.run_monitor(&mut buf).await?;
-                            return Ok(());
-                        }
-                    }
-                    Ok(None) => break,
+                match self.process_next_batch(&mut buf).await {
+                    Ok(true) => continue,
+                    Ok(false) => break,
                     Err(e) if is_fatal_protocol(&e) => {
-                        // best-effort: 保留致命协议错误, 忽略 flush 自身 IO 失败
                         let _ = self.flush_responses().await;
                         return Err(e);
                     }
@@ -309,29 +278,92 @@ impl Connection {
         Ok(())
     }
 
-    #[instrument(level = "debug", name = "kv_read", skip(self, buf))]
+    async fn process_next_batch(&mut self, buf: &mut [u8]) -> Result<bool> {
+        let first = match self.parse_frame().await {
+            Ok(Some(v)) => v,
+            Ok(None) => return Ok(false),
+            Err(e) => return Err(e),
+        };
+
+        let is_immediate = should_flush_immediately(&first);
+        let is_blocking = is_blocking_command(&first);
+        if is_immediate || is_blocking {
+            self.process_single_frame(first, buf).await?;
+            return Ok(true);
+        }
+
+        let mut batch = vec![first];
+        while batch.len() < 128 {
+            match self.parse_frame().await {
+                Ok(Some(value)) => {
+                    let is_imm = should_flush_immediately(&value);
+                    let is_blk = is_blocking_command(&value);
+                    batch.push(value);
+                    if is_imm || is_blk {
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => return Err(e),
+            }
+        }
+
+        let batch_len = batch.len();
+        self::pipeline::record_batch_len(batch_len);
+
+        if batch_len == 1 {
+            self.process_single_frame(batch.pop().unwrap(), buf).await?;
+        } else {
+            if let Err(e) = self.process_pipeline_batch(batch).await {
+                let _ = self.flush_responses().await;
+                return Err(e);
+            }
+            self.last_active = Instant::now();
+            if self.quit {
+                self.flush_responses().await?;
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    async fn process_single_frame(&mut self, value: RespValue, buf: &mut [u8]) -> Result<()> {
+        let is_immediate_flush = should_flush_immediately(&value);
+        if is_blocking_command(&value) {
+            self.flush_responses().await?;
+        }
+        if let Err(e) = self.process_value(value).await {
+            let _ = self.flush_responses().await;
+            return Err(e);
+        }
+        self.last_active = Instant::now();
+        if is_immediate_flush || self.quit {
+            self.flush_responses().await?;
+        }
+        if self.mode == ConnectionMode::Monitor {
+            self.flush_responses().await?;
+            self.run_monitor(buf).await?;
+        }
+        Ok(())
+    }
+
     async fn read_buf(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let n = self.stream.read(buf).await?;
         if n > 0 {
+            if let Some(timing) = self.pending_timing.take() {
+                timing.report_read_next(n);
+            }
             self.state.metrics().on_net_input_bytes(n as u64);
             tracing::debug!(bytes = n, "kv.read.complete");
         }
         Ok(n)
     }
 
-    #[instrument(
-        level = "debug",
-        name = "kv_parse",
-        skip(self),
-        fields(frame_size, resp_version)
-    )]
     async fn parse_frame(&mut self) -> Result<Option<RespValue>> {
         let before = self.parser.buffer_len();
         let result = self.parser.parse();
         if let Ok(Some(_)) = &result {
             let frame_size = before.saturating_sub(self.parser.buffer_len());
-            tracing::Span::current().record("frame_size", frame_size);
-            tracing::Span::current().record("resp_version", self.protocol_version.as_u8());
             tracing::debug!(frame_size, "kv.parse.complete");
         }
         result
@@ -479,7 +511,7 @@ impl Connection {
             .await
     }
 
-    async fn finish_immediate_command(
+    pub(super) async fn finish_immediate_command(
         &mut self,
         cmd: &str,
         _args: &[Bytes],
@@ -596,7 +628,7 @@ impl Connection {
         Ok(())
     }
 
-    fn record_command_observability(&self, cmd: &str, args: &[String], start: Instant, ok: bool) {
+    fn record_command_observability(&self, cmd: &str, args: &[String], start: Instant, _ok: bool) {
         let duration_us = start.elapsed().as_micros() as u64;
         self.state.latency_stats.record(cmd, duration_us);
         self.state.slow_query_log.record(
@@ -606,9 +638,6 @@ impl Connection {
             &self.remote.to_string(),
             self.current_db as u16,
         );
-        self.state
-            .metrics()
-            .on_command_duration(cmd, duration_us, ok);
         if duration_us >= self.state.slow_query_log.threshold_us() {
             self.state.metrics().on_slowlog_command(cmd, duration_us);
             #[cfg(feature = "monitoring")]
@@ -617,7 +646,7 @@ impl Connection {
     }
 }
 
-fn should_track_observability(cmd: &str) -> bool {
+pub(super) fn should_track_observability(cmd: &str) -> bool {
     !matches!(
         cmd,
         "SLOWLOG" | "MONITOR" | "PING" | "ECHO" | "HELLO" | "QUIT"
@@ -711,7 +740,7 @@ fn hello_map(client_id: usize, proto: ProtocolVersion) -> RespValue {
     }
 }
 
-fn extract_bulk(value: &RespValue) -> Option<Bytes> {
+pub(super) fn extract_bulk(value: &RespValue) -> Option<Bytes> {
     match value {
         RespValue::BulkString(Some(b)) => Some(b.clone()),
         RespValue::BulkString(None) => Some(Bytes::new()),
@@ -719,7 +748,7 @@ fn extract_bulk(value: &RespValue) -> Option<Bytes> {
     }
 }
 
-fn should_flush_immediately(frame: &RespValue) -> bool {
+pub(super) fn should_flush_immediately(frame: &RespValue) -> bool {
     let Some(cmd) = frame_command_bytes(frame) else {
         return false;
     };
@@ -729,7 +758,7 @@ fn should_flush_immediately(frame: &RespValue) -> bool {
     )
 }
 
-fn is_blocking_command(frame: &RespValue) -> bool {
+pub(super) fn is_blocking_command(frame: &RespValue) -> bool {
     let Some(cmd) = frame_command_bytes(frame) else {
         return false;
     };

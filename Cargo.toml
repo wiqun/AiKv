@@ -39,6 +39,7 @@ compression = ["aidb/compression"]
 tokio       = { version = "1", features = ["full"] }
 tokio-util  = { version = "0.7", features = ["rt"] }
 async-trait = "0.1"
+futures-util = "0.3"
 
 # Core primitives
 parking_lot = "0.12"
@@ -73,7 +74,7 @@ openraft = { version = "0.10.0-alpha.33", optional = true }
 openraft-rt-tokio = { version = "0.10.0-alpha.33", optional = true }
 
 # AiDb storage engine
-aidb = { git = "https://github.com/wiqun/AiDb.git", branch = "main" }
+aidb = { git = "https://github.com/wiqun/AiDb.git", rev = "21c0d123997217a246eee77700b30c6957917191" }
 
 # Monitoring (optional)
 # Metrics HTTP server (monitoring feature)
@@ -82,7 +83,7 @@ hyper-util = { version = "0.1", features = ["tokio"], optional = true }
 http-body-util = { version = "0.1", optional = true }
 opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic", "metrics"], optional = true }
 opentelemetry = { version = "0.32", optional = true }
-opentelemetry_sdk = { version = "0.32", features = ["rt-tokio", "testing"], optional = true }
+opentelemetry_sdk = { version = "0.32", features = ["rt-tokio", "testing", "experimental_metrics_custom_reader"], optional = true }
 tracing-opentelemetry = { version = "0.33", optional = true }
 
 [dev-dependencies]
@@ -98,4 +99,7 @@ codegen-units = 1
 debug         = 1   # line tables for eBPF/Pyroscope flame graphs (不 strip)
 
 [lints.clippy]
-all = "warn"
+all = { level = "warn", priority = -1 }
+# async_trait 给 Future 加了无说明的 must_use, 与 Result 的 must_use 重复.
+double_must_use = "allow"
+

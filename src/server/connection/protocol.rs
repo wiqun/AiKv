@@ -2,7 +2,6 @@
 //! `flush_responses` 聚合 `write_all`; RESP3 null 适配.
 
 use tokio::io::AsyncWriteExt;
-use tracing::instrument;
 
 use crate::error::{Error, Result};
 use crate::protocol::{ProtocolVersion, RespValue};
@@ -31,12 +30,6 @@ impl Connection {
         self.queue_error(err)
     }
 
-    #[instrument(
-        level = "debug",
-        name = "kv_encode",
-        skip(self, value),
-        fields(value_type)
-    )]
     pub(super) fn queue_response(&mut self, value: &RespValue) {
         // 仅 RESP3 协商后才做 null 适配, 否则直接流式编码 (免克隆, F-034)
         if self.protocol_negotiated && self.protocol_version == ProtocolVersion::Resp3 {
@@ -52,13 +45,11 @@ impl Connection {
         Ok(())
     }
 
-    #[instrument(level = "debug", name = "kv_write", skip(self), fields(response_size))]
     pub(super) async fn flush_responses(&mut self) -> Result<()> {
         if self.write_buf.is_empty() {
             return Ok(());
         }
         let len = self.write_buf.len();
-        tracing::Span::current().record("response_size", len);
         self.stream.write_all(&self.write_buf).await?;
         self.state.metrics().on_net_output_bytes(len as u64);
         tracing::debug!(response_size = len, "kv.write.complete");

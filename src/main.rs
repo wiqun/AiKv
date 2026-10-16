@@ -17,7 +17,9 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use aikv::command::blocking;
-use aikv::config::{print_resolved_config, resolve, Cli, EngineKind, ResolvedSettings};
+use aikv::config::{
+    print_resolved_config, resolve, should_export_traces, Cli, EngineKind, ResolvedSettings,
+};
 use aikv::server::{ConnectionConfig, Server, ServerSharedState};
 use aikv::storage::ttl_filter::TtlExpireFilter;
 use aikv::storage::{
@@ -34,8 +36,6 @@ type StorageBuildResult = Result<
         StorageEngineKind,
         Option<PathBuf>,
         Option<Arc<aidb::DB>>,
-        Option<Arc<aikv::storage::types::DbKeyCounters>>,
-        Option<Arc<aikv::storage::types::ExpireDecrGate>>,
     ),
     String,
 >;
@@ -52,8 +52,6 @@ async fn build_storage(
             StorageEngineKind::Memory,
             None,
             None,
-            None,
-            None,
         )),
         EngineKind::AiDb => {
             let path = settings
@@ -65,21 +63,9 @@ async fn build_storage(
                 server_db_options_with_preset(settings.sync_wal, preset),
             )
             .map_err(|e| e.to_string())?;
-            // 注入 TTL compaction 过滤器 (纯决策) + 键计数 Remove 监听器.
-            let counters = std::sync::Arc::new(aikv::storage::types::DbKeyCounters::new());
-            let expire_gate = std::sync::Arc::new(aikv::storage::types::ExpireDecrGate::new());
             engine
                 .db
                 .set_compaction_filter(Some(std::sync::Arc::new(TtlExpireFilter)));
-            engine
-                .db
-                .set_compaction_removal_listener(Some(std::sync::Arc::new(
-                    aikv::storage::ttl_filter::DbKeyCounterRemovalListener::new(
-                        counters.clone(),
-                        expire_gate.clone(),
-                        engine.db.clone(),
-                    ),
-                )));
             let db = engine.db.clone();
             let adapter: Arc<dyn aikv::storage::StorageAdapter> = engine;
             #[cfg(feature = "cluster")]
@@ -89,19 +75,12 @@ async fn build_storage(
                     aikv::storage::cluster_adapter::ClusterDataAdapter::DEFAULT_EAGER_FLUSH,
                 );
             Ok((
-                KvStorageAdapter::open_with_counters(
-                    adapter,
-                    Some(observation),
-                    counters.clone(),
-                    expire_gate.clone(),
-                )
-                .await
-                .map_err(|e| e.to_string())?,
+                KvStorageAdapter::open(adapter, Some(observation))
+                    .await
+                    .map_err(|e| e.to_string())?,
                 StorageEngineKind::AiDb,
                 Some(path.clone()),
                 Some(db),
-                Some(counters),
-                Some(expire_gate),
             ))
         }
     }
@@ -192,8 +171,6 @@ async fn init_cluster(
     settings: &ResolvedSettings,
     cluster_db: Option<Arc<aidb::DB>>,
     metrics: Arc<aikv::server::metrics::ServerMetrics>,
-    key_counters: Arc<aikv::storage::types::DbKeyCounters>,
-    expire_gate: Arc<aikv::storage::types::ExpireDecrGate>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use std::net::SocketAddr as NetAddr;
 
@@ -217,19 +194,30 @@ async fn init_cluster(
     };
     let bind_addr = settings.bind;
     let aidb_preset = DbPreset::parse(&settings.aidb_preset).unwrap_or(DbPreset::Default);
+    let shared_opts = server_db_options_with_preset(settings.sync_wal, aidb_preset);
+    let shared_stats = match &cluster_db {
+        Some(db) => db.statistics(),
+        None => Arc::new(aidb::Statistics::new(shared_opts.max_levels)),
+    };
 
     // 1. 打开/重用 DB 引擎 (WAL 必须启用)
     let db = match cluster_db {
         Some(db) => db,
         None => {
-            let opts = server_db_options_with_preset(settings.sync_wal, aidb_preset);
+            let mut opts = shared_opts.clone();
+            opts.statistics = Some(shared_stats.clone());
             aidb::DB::open(data_dir, opts)?
         }
     };
 
-    // 2. 创建 RaftNetworkClientFactory (MetaRaft 专用, 独立快超时)
-    let net_factory =
-        RaftNetworkClientFactory::new(node_id, 0, cluster.meta_rpc_timeout_ms, 64 * 1024 * 1024);
+    // 2. 创建 RaftNetworkClientFactory (MetaRaft 专用, 独立快超时, 注入 shared_stats)
+    let net_factory = RaftNetworkClientFactory::new_with_stats(
+        node_id,
+        0,
+        cluster.meta_rpc_timeout_ms,
+        64 * 1024 * 1024,
+        Some(shared_stats.clone()),
+    );
     let net_factory = Arc::new(parking_lot::RwLock::new(net_factory));
 
     let linearizable_read = cluster.linearizable_read;
@@ -284,8 +272,10 @@ async fn init_cluster(
         tracing::info!("meta raft joining via peers (gRPC auto-discovery)");
     }
 
-    // 6. 创建共享 RaftServiceDispatcher (MetaRaft + MultiRaft 共用).
-    let dispatcher: Arc<RaftServiceDispatcher> = Arc::new(RaftServiceDispatcher::new());
+    // 6. 创建共享 RaftServiceDispatcher (MetaRaft + MultiRaft 共用, 注入 shared_stats).
+    let dispatcher: Arc<RaftServiceDispatcher> = Arc::new(RaftServiceDispatcher::new_with_stats(
+        Some(shared_stats.clone()),
+    ));
 
     // 7. 启动 MetaRaft gRPC (独立端口, 使用共享 dispatcher).
     let rpc_socket: NetAddr = tokio::net::lookup_host(rpc_addr)
@@ -361,23 +351,14 @@ async fn init_cluster(
     let mut data_raft_config = raft_config.clone();
     data_raft_config.log_committer_config =
         Some(aidb::cluster::log_committer::LogCommitterConfig::default());
+    let mut data_options = server_db_options_with_preset(settings.sync_wal, aidb_preset);
+    data_options.statistics = Some(shared_stats.clone());
     let lifecycle_cfg = aidb::cluster::multi_raft_node::LifecycleConfig {
         data_dir: data_dir.to_path_buf(),
         raft_node_config: data_raft_config,
-        options: server_db_options_with_preset(settings.sync_wal, aidb_preset),
+        options: data_options,
         compaction_filter: Some(std::sync::Arc::new(TtlExpireFilter)),
-        compaction_removal_listener_factory: Some(std::sync::Arc::new({
-            let counters = key_counters;
-            let gate = expire_gate;
-            move |db: std::sync::Arc<aidb::DB>| {
-                std::sync::Arc::new(aikv::storage::ttl_filter::DbKeyCounterRemovalListener::new(
-                    counters.clone(),
-                    gate.clone(),
-                    db,
-                ))
-                    as std::sync::Arc<dyn aidb::engine::compaction::CompactionRemovalListener>
-            }
-        })),
+        compaction_removal_listener_factory: None,
     };
     let _lifecycle_shutdown = multi_raft.start_lifecycle_with_data(lifecycle_cfg);
 
@@ -502,6 +483,10 @@ async fn init_cluster(
 }
 
 fn init_logging(settings: &ResolvedSettings) {
+    aidb::observability::set_traces_enabled(should_export_traces(
+        settings.observability.otel_sample_ratio,
+        settings.observability.otlp_endpoint.as_deref(),
+    ));
     let json_enabled = settings.observability.json_log;
     #[cfg(feature = "monitoring")]
     let tcp_port = settings.bind.port();
@@ -510,9 +495,7 @@ fn init_logging(settings: &ResolvedSettings) {
     #[cfg(all(feature = "monitoring", not(feature = "cluster")))]
     let cluster_node_id: Option<u64> = None;
 
-    let filter = EnvFilter::builder()
-        .with_default_directive("info".parse().unwrap())
-        .from_env_lossy();
+    let log_level = settings.observability.log_level.as_str();
 
     #[cfg(feature = "monitoring")]
     if let Some(config) = aikv::server::otel::otel_config_from_settings(
@@ -520,9 +503,11 @@ fn init_logging(settings: &ResolvedSettings) {
         tcp_port,
         cluster_node_id,
     ) {
-        if aikv::server::otel::init_otel(&config) {
+        if aikv::server::otel::init_otel(&config) && aikv::server::otel::tracer_installed() {
             let tracer = opentelemetry::global::tracer("aikv");
-            let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+            let otel_layer = tracing_opentelemetry::layer()
+                .with_tracer(tracer)
+                .with_filter(tracing_subscriber::filter::LevelFilter::TRACE);
             let base = Registry::default().with(otel_layer);
             let subscriber = if json_enabled {
                 base.with(
@@ -532,18 +517,18 @@ fn init_logging(settings: &ResolvedSettings) {
                         .with_current_span(true)
                         .with_span_list(true)
                         .with_writer(std::io::stderr)
+                        .with_filter(EnvFilter::new(log_level))
                         .boxed(),
                 )
-                .with(filter)
             } else {
                 base.with(
                     fmt::layer()
                         .compact()
                         .with_target(true)
                         .with_writer(std::io::stderr)
+                        .with_filter(EnvFilter::new(log_level))
                         .boxed(),
                 )
-                .with(filter)
             };
             let _ = subscriber.try_init();
             return;
@@ -552,27 +537,25 @@ fn init_logging(settings: &ResolvedSettings) {
 
     // 无 OTel 时只初始化 fmt subscriber
     let subscriber = if json_enabled {
-        Registry::default()
-            .with(
-                fmt::layer()
-                    .json()
-                    .flatten_event(false)
-                    .with_current_span(true)
-                    .with_span_list(true)
-                    .with_writer(std::io::stderr)
-                    .boxed(),
-            )
-            .with(filter)
+        Registry::default().with(
+            fmt::layer()
+                .json()
+                .flatten_event(false)
+                .with_current_span(true)
+                .with_span_list(true)
+                .with_writer(std::io::stderr)
+                .with_filter(EnvFilter::new(log_level))
+                .boxed(),
+        )
     } else {
-        Registry::default()
-            .with(
-                fmt::layer()
-                    .compact()
-                    .with_target(true)
-                    .with_writer(std::io::stderr)
-                    .boxed(),
-            )
-            .with(filter)
+        Registry::default().with(
+            fmt::layer()
+                .compact()
+                .with_target(true)
+                .with_writer(std::io::stderr)
+                .with_filter(EnvFilter::new(log_level))
+                .boxed(),
+        )
     };
     if let Err(e) = subscriber.try_init() {
         eprintln!("warn: tracing subscriber already initialized ({})", e);
@@ -608,6 +591,7 @@ async fn main() {
         tracing::warn!(target = "aikv::config", ?w, "configuration warning");
     }
 
+    tracing::info!(?settings, "resolved config");
     tracing::info!(
         bind = %settings.bind,
         engine = ?settings.engine,
@@ -615,7 +599,7 @@ async fn main() {
     );
 
     let observation = StorageObservation::new();
-    let (storage, engine_kind, data_dir, _cluster_db, key_counters, expire_gate) =
+    let (storage, engine_kind, data_dir, _cluster_db) =
         match build_storage(&settings, observation.clone()).await {
             Ok(s) => s,
             Err(e) => {
@@ -623,14 +607,10 @@ async fn main() {
                 std::process::exit(1);
             }
         };
-    #[cfg(not(feature = "cluster"))]
-    {
-        let _ = key_counters;
-        let _ = expire_gate;
-    }
     let tcp_port = settings.bind.port();
     let connection_config = ConnectionConfig {
         max_clients: settings.max_clients,
+        script_worker_threads: settings.script_worker_threads,
         ..Default::default()
     };
     let state = ServerSharedState::new_with_backup_dir(
@@ -648,15 +628,7 @@ async fn main() {
     // 集群初始化 (等待 init_cluster 完成, 确保 CLUSTER_STATE_MGR 就绪)
     #[cfg(feature = "cluster")]
     if settings.cluster.node_id.is_some() && settings.cluster.rpc_addr.is_some() {
-        if let Err(e) = init_cluster(
-            &settings,
-            _cluster_db,
-            Arc::clone(&state.metrics),
-            key_counters.unwrap_or_else(|| Arc::new(aikv::storage::types::DbKeyCounters::new())),
-            expire_gate.unwrap_or_else(|| Arc::new(aikv::storage::types::ExpireDecrGate::new())),
-        )
-        .await
-        {
+        if let Err(e) = init_cluster(&settings, _cluster_db, Arc::clone(&state.metrics)).await {
             tracing::error!(error = %e, "cluster initialization failed");
             std::process::exit(1);
         }
@@ -697,14 +669,47 @@ async fn main() {
             }
         }
 
-        // 后台定期刷新 uptime / memory 指标
+        // 一份快照同时写成 /metrics 文本. 端点为空时不推 OTLP.
         let bg_state = Arc::clone(&state);
+        let export_secs = settings.observability.metrics_export_interval_secs.max(1);
+        let otlp_enabled =
+            aikv::server::export::export_config(settings.observability.otlp_endpoint.as_deref())
+                .otlp_enabled;
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(export_secs));
+            let mut baseline = aikv::server::export::ExportSnapshot::default();
             loop {
                 interval.tick().await;
                 bg_state.refresh_runtime_metrics().await;
                 bg_state.metrics().refresh_process_metrics();
+                let keys_estimate = bg_state.storage.len(0).await.unwrap_or(0) as u64;
+                let db_count = bg_state.storage.db_count().await.unwrap_or(0);
+                let mut expires = Vec::with_capacity(db_count);
+                for db in 0..db_count {
+                    if let Ok(count) = bg_state.storage.expires(db).await {
+                        expires.push((db, count));
+                    }
+                }
+                let engine = bg_state.storage.aidb_statistics();
+                #[cfg(feature = "cluster")]
+                let raft = aikv::cluster::state::raft_export_views();
+                #[cfg(not(feature = "cluster"))]
+                let raft = Vec::new();
+                let current = aikv::server::export::collect_export_snapshot(
+                    bg_state.metrics(),
+                    keys_estimate,
+                    &expires,
+                    engine.as_deref(),
+                    &raft,
+                );
+                let text = aikv::server::export::render_prometheus(&current);
+                aikv::server::export::publish_metrics_text(text);
+                if otlp_enabled {
+                    let mut sink = aikv::server::export::OtelSink;
+                    aikv::server::export::push_deltas(&current, &baseline, &mut sink);
+                    aikv::server::otel::flush_otel_metrics().await;
+                }
+                baseline = current;
             }
         });
     }
@@ -720,4 +725,43 @@ async fn main() {
 
     #[cfg(feature = "monitoring")]
     aikv::server::otel::shutdown_otel();
+}
+
+#[cfg(test)]
+#[cfg(test)]
+fn export_spans_enabled_at(level: &str) -> bool {
+    aidb::observability::set_traces_enabled(true);
+    let subscriber = Registry::default()
+        .with(tracing_subscriber::filter::LevelFilter::TRACE)
+        .with(
+            fmt::layer()
+                .with_writer(std::io::sink)
+                .with_filter(EnvFilter::new(level)),
+        );
+    let enabled = tracing::subscriber::with_default(subscriber, || {
+        !aidb::observability::optional_span("kv_command").is_disabled()
+    });
+    aidb::observability::set_traces_enabled(false);
+    enabled
+}
+
+#[cfg(test)]
+mod logging_filter_tests {
+    use super::export_spans_enabled_at;
+
+    #[test]
+    fn error_log_level_still_creates_command_span() {
+        assert!(export_spans_enabled_at("error"));
+    }
+
+    #[test]
+    fn init_logging_does_not_filter_the_whole_subscriber() {
+        let src = include_str!("main.rs");
+        let start = src.find("fn init_logging").expect("init_logging");
+        let body = &src[start..start + 2800];
+        assert!(
+            !body.contains(".with(filter)"),
+            "log filter must sit on the fmt layer, not the whole subscriber"
+        );
+    }
 }

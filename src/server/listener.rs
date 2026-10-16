@@ -34,7 +34,17 @@ impl Server {
                 break;
               }
               accept_result = listener.accept() => {
-                let (stream, remote) = accept_result?;
+                let (stream, remote) = match accept_result {
+                    Ok(pair) => pair,
+                    Err(err) => {
+                        let errno = err.raw_os_error().map(|code| code.to_string()).unwrap_or_else(|| "other".into());
+                        state.metrics.note_accept_error(&errno);
+                        return Err(err.into());
+                    }
+                };
+                if let Err(err) = stream.set_nodelay(true) {
+                    tracing::warn!(%remote, error = %err, "tcp nodelay failed");
+                }
                 tracing::debug!(%remote, "kv.accept");
                 let state = Arc::clone(&state);
                 if !state.try_register_connection() {

@@ -54,6 +54,11 @@ impl Settings {
                 self.server.max_clients = Some(n);
             }
         }
+        if let Some(v) = nonempty(&map, "AIKV_SCRIPT_WORKER_THREADS") {
+            if let Ok(n) = v.parse::<usize>() {
+                self.server.script_worker_threads = Some(n);
+            }
+        }
 
         if let Some(v) = nonempty(&map, "AIKV_ENGINE") {
             if let Some(kind) = parse_engine_kind(v) {
@@ -83,6 +88,11 @@ impl Settings {
                 self.observability.metrics_port = Some(p);
             }
         }
+        if let Some(v) = nonempty(&map, "AIKV_METRICS_EXPORT_INTERVAL_SECS") {
+            if let Ok(secs) = v.parse::<u64>() {
+                self.observability.metrics_export_interval_secs = Some(secs);
+            }
+        }
         if let Some(v) = nonempty(&map, "AIKV_JSON_LOG") {
             if let Some(b) = parse_bool_lenient(v) {
                 self.observability.json_log = Some(b);
@@ -104,10 +114,13 @@ impl Settings {
                     self.observability.otel_sample_ratio = Some(r);
                 }
                 Err(_) => {
-                    self.observability.otel_sample_ratio = Some(1.0);
+                    self.observability.otel_sample_ratio = Some(0.0);
                     warnings.push(ConfigWarning::InvalidOtelSampleRatio { raw: v.to_string() });
                 }
             }
+        }
+        if let Some(v) = nonempty(&map, "AIKV_LOG_LEVEL") {
+            self.observability.log_level = Some(v.to_string());
         }
         if let Some(v) = nonempty(&map, "AIKV_HOST_LABEL") {
             self.observability.host_label = Some(v.to_string());
@@ -219,6 +232,16 @@ mod tests {
     fn parse_bool_lenient_invalid_returns_none() {
         assert_eq!(parse_bool_lenient("maybe"), None);
         assert_eq!(parse_bool_lenient(""), None);
+    }
+
+    #[test]
+    fn merge_env_script_worker_threads() {
+        let mut settings = Settings::default();
+        let vars = HashMap::from([("AIKV_SCRIPT_WORKER_THREADS".to_string(), "3".to_string())]);
+        settings.merge_env(vars);
+        let mut warnings = Vec::new();
+        let resolved = settings.into_resolved(&mut warnings).expect("resolve");
+        assert_eq!(resolved.script_worker_threads, 3);
     }
 
     #[test]

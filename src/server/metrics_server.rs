@@ -1,4 +1,4 @@
-//! Metrics HTTP 服务器: 在独立端口暴露 `/health` (生产指标经 OTLP 出口).
+//! Metrics HTTP 服务器: 在独立端口暴露 `/health` 和 `/metrics`.
 //! 仅在 `--features monitoring` 下编译.
 
 use std::convert::Infallible;
@@ -74,13 +74,21 @@ async fn handle_request(
             .status(StatusCode::OK)
             .body(Full::new(Bytes::from("OK")))
             .unwrap()),
+        "/metrics" => {
+            let body = crate::server::export::metrics_text();
+            Ok(Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", "text/plain; version=0.0.4")
+                .body(Full::new(Bytes::from(body)))
+                .unwrap())
+        }
         "/" => {
             let body = r#"<!DOCTYPE html>
 <html>
 <head><title>AiKv Metrics</title></head>
 <body>
 <h1>AiKv Metrics Server</h1>
-<p>Production metrics are exported via OTLP. Use <a href="/health">/health</a> for liveness.</p>
+<p>Production metrics are exported via OTLP and <a href="/metrics">/metrics</a>. Use <a href="/health">/health</a> for liveness.</p>
 </body>
 </html>"#;
             Ok(Response::builder()

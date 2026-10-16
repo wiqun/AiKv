@@ -15,6 +15,11 @@ pub fn router() -> CommandRouter {
     CommandRouter::new(storage)
 }
 
+pub fn router_with_script_workers(threads: usize) -> CommandRouter {
+    let storage: Arc<dyn KvStorage> = MemoryEngine::new(16);
+    CommandRouter::new(storage).with_script_worker_threads(threads)
+}
+
 pub fn shared_state() -> Arc<ServerSharedState> {
     let storage: Arc<dyn KvStorage> = MemoryEngine::new(16);
     ServerSharedState::new(ConnectionConfig::default(), storage, 6379)
@@ -33,6 +38,7 @@ pub async fn start_ephemeral_server() -> (std::net::SocketAddr, tokio::task::Joi
             read_timeout: None,
             idle_timeout: None,
             max_clients: 0,
+            script_worker_threads: 2,
         },
         storage,
         0,

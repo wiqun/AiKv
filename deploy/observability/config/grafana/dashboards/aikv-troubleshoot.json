@@ -1,0 +1,197 @@
+{
+  "title": "排障",
+  "uid": "aikv-troubleshoot",
+  "tags": ["aikv", "troubleshoot"],
+  "timezone": "browser",
+  "editable": true,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-30m", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "rate_window",
+        "label": "窗口",
+        "type": "custom",
+        "query": "5m",
+        "description": "导出周期大于 75 秒时, 把这个窗口改成至少 4 个导出周期.",
+        "current": { "text": "5m", "value": "5m" },
+        "options": [{ "text": "5m", "value": "5m", "selected": true }]
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "MemTable",
+      "description": "停顿在涨, frozen MemTable 很高而 L0 还不高: 看 flush 的最近一次耗时.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "aidb_memtable_active_bytes", "legendFormat": "active" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "aidb_memtable_frozen_bytes", "legendFormat": "frozen" },
+        { "refId": "C", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "aidb_memtable_limit_bytes", "legendFormat": "limit" }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Block Cache",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "aidb_block_cache_size_bytes", "legendFormat": "size" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "aidb_block_cache_capacity_bytes", "legendFormat": "capacity" }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "各层 SST 字节",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "aidb_sstable_size_bytes", "legendFormat": "{{level}}" }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "WAL",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "aidb_wal_size_bytes", "legendFormat": "size" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "rate(aidb_wal_written_bytes_total[$rate_window])", "legendFormat": "written" }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Flush 与 compaction",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "Bps" } },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "rate(aidb_flush_written_bytes_total[$rate_window])", "legendFormat": "flush written" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "rate(aidb_compaction_written_bytes_total[$rate_window])", "legendFormat": "compaction written" },
+        { "refId": "C", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "rate(aidb_compaction_read_bytes_total[$rate_window])", "legendFormat": "compaction read" }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Flush 与 compaction 最近一次耗时",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "aidb_flush_last_duration_seconds", "legendFormat": "flush last" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "aidb_compaction_last_duration_seconds", "legendFormat": "compaction last" }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "compaction 待处理字节",
+      "description": "它是 L0 超出 trigger 的最老文件, 加上 L1 到倒数第二层超出目标的部分. 最底层不计入. 它不是排队中的真实字节.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "aidb_compaction_pending_bytes" }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Bloom 假阳性率",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(rate(aidb_bloom_false_positive_total[$rate_window])) / sum(rate(aidb_bloom_false_positive_total[$rate_window]) + rate(aidb_bloom_useful_total[$rate_window]))"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "读放大",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "(sum(rate(aidb_block_read_bytes_total[$rate_window])) / sum(rate(aidb_logical_read_bytes_total[$rate_window]))) and sum(rate(aidb_logical_read_bytes_total[$rate_window])) > 0"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "命令 P99 与引擎写 P99",
+      "description": "命令 P99 明显高于引擎写 P99: 看 propose 耗时和集群表里的滞后.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(aikv_command_duration_seconds_bucket[$rate_window])))",
+          "legendFormat": "command"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(aidb_engine_write_duration_seconds_bucket[$rate_window])))",
+          "legendFormat": "engine write"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "按命令的 P99",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 40 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.99, sum by (le, command) (rate(aikv_command_duration_seconds_bucket[$rate_window])))",
+          "legendFormat": "{{command}}"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "慢查询",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 40 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "rate(aikv_slowlog_total[$rate_window])" }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "缓存命中率",
+      "description": "缓存命中下降, 用户读放大上升: 看 Bloom 和 SCAN 的扫描量.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 48 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(rate(aidb_block_cache_hits_total[$rate_window])) / sum(rate(aidb_block_cache_hits_total[$rate_window]) + rate(aidb_block_cache_misses_total[$rate_window]))"
+        }
+      ]
+    }
+  ]
+}

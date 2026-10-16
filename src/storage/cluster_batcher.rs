@@ -2,8 +2,9 @@
 //! 由 `ClusterDataAdapter` 按 group 懒创建.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use tokio::sync::{mpsc, oneshot};
 
@@ -12,15 +13,59 @@ use aidb::error::ClusterError as AidbClusterError;
 
 use crate::cluster::state::ClusterStateManager;
 use crate::error::{Error, Result};
-use crate::storage::cluster_adapter::ClusterDataAdapter;
+use crate::storage::adapter::{AdapterWriteOp, StorageAdapter};
+use crate::storage::cluster_adapter::{ClusterDataAdapter, WriteRoute};
+use crate::storage::types::BatchWriteHandle;
 
 const SET_BATCH_MAX_OPS: usize = 512;
-/// 凑批等待上限. 1ms 平衡吞吐与延迟: 集群 50c 负载下 items 到达快, 等 1ms 足矣.
-#[allow(dead_code)]
-const SET_BATCH_MAX_DELAY: Duration = Duration::from_millis(1);
+
+struct BatcherPerfSampler {
+    batches: AtomicU64,
+    total_ops: AtomicU64,
+    total_wait_us: AtomicU64,
+    total_propose_us: AtomicU64,
+}
+
+impl BatcherPerfSampler {
+    const fn new() -> Self {
+        Self {
+            batches: AtomicU64::new(0),
+            total_ops: AtomicU64::new(0),
+            total_wait_us: AtomicU64::new(0),
+            total_propose_us: AtomicU64::new(0),
+        }
+    }
+
+    fn record(&self, ops: usize, wait_us: u64, propose_us: u64) {
+        self.total_ops.fetch_add(ops as u64, Ordering::Relaxed);
+        self.total_wait_us.fetch_add(wait_us, Ordering::Relaxed);
+        self.total_propose_us
+            .fetch_add(propose_us, Ordering::Relaxed);
+        let n = self.batches.fetch_add(1, Ordering::Relaxed) + 1;
+        if n.is_multiple_of(100) {
+            let ops_avg = self.total_ops.load(Ordering::Relaxed) / n;
+            let wait_avg = self.total_wait_us.load(Ordering::Relaxed) / n;
+            let prop_avg = self.total_propose_us.load(Ordering::Relaxed) / n;
+            tracing::info!(
+                target: "perf",
+                "[BATCHER_PERF] batches={} avg_ops={} avg_wait_us={} avg_propose_us={}",
+                n, ops_avg, wait_avg, prop_avg
+            );
+        }
+    }
+}
+
+static BATCHER_PERF: BatcherPerfSampler = BatcherPerfSampler::new();
 
 pub(super) struct GroupSetBatcher {
     tx: mpsc::Sender<WriteBatchItem>,
+}
+
+/// reverse-dedup 规划用的轻量 op (与 `WriteBatchItem` 同语义, 无 ack).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum PlannedOp {
+    Put { key: Vec<u8>, value: Vec<u8> },
+    Delete { key: Vec<u8> },
 }
 
 pub(super) enum WriteBatchItem {
@@ -33,16 +78,11 @@ pub(super) enum WriteBatchItem {
         key: Vec<u8>,
         ack: oneshot::Sender<std::result::Result<bool, String>>,
     },
+    Batch {
+        ops: Vec<PlannedOp>,
+        ack: oneshot::Sender<std::result::Result<(), String>>,
+    },
 }
-
-struct AckMap {
-    ack: oneshot::Sender<std::result::Result<bool, String>>,
-    /// `None` = reverse-dedup 丢弃的中间 op → ack `false`
-    effect_index: Option<usize>,
-}
-
-const MIN_BATCH_TARGET: usize = 16;
-const MAX_MICRO_WAIT_US: u64 = 50;
 
 pub(super) fn get_or_spawn_set_batcher(
     batchers: &parking_lot::Mutex<HashMap<u64, Arc<GroupSetBatcher>>>,
@@ -70,6 +110,7 @@ pub(super) async fn submit_write_ops(
     mgr: Arc<ClusterStateManager>,
     gid: u64,
     ops: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+    check_delete_existed: bool,
 ) -> Result<Vec<bool>> {
     enum Slot {
         Ready(bool),
@@ -82,7 +123,7 @@ pub(super) async fn submit_write_ops(
 
     let mut prepared: Vec<(Vec<u8>, Option<Vec<u8>>, bool)> = Vec::with_capacity(ops.len());
     for (key, value) in ops {
-        if value.is_none() {
+        if value.is_none() && check_delete_existed {
             let existed = mgr
                 .multi_raft
                 .get_local(gid, &key)
@@ -148,8 +189,8 @@ pub(super) async fn submit_write_ops(
 
 /// 统一写批入口: 将 PUT 或 DELETE 请求发送到对应 group 的 batcher.
 ///
-/// PUT: 不前置 `get_local`, 返回值来自 propose 后的 `WriteStats` (insert 语义).
-/// DELETE: key 不存在则短路跳过 propose, 返回 `Ok(false)`; 否则返回 `WriteStats` 的 deleted.
+/// PUT: 不前置 `get_local`. 成功只认 `Response::Ok`.
+/// DELETE: key 不存在则短路跳过 propose, 返回 `Ok(false)`; 已存在并提交成功返回 `Ok(true)`.
 pub(super) async fn submit_write_op(
     batchers: &parking_lot::Mutex<HashMap<u64, Arc<GroupSetBatcher>>>,
     eager_flush: usize,
@@ -158,12 +199,236 @@ pub(super) async fn submit_write_op(
     key: Vec<u8>,
     value: Option<Vec<u8>>,
 ) -> Result<bool> {
-    let mut flags = submit_write_ops(batchers, eager_flush, mgr, gid, vec![(key, value)]).await?;
+    let mut flags =
+        submit_write_ops(batchers, eager_flush, mgr, gid, vec![(key, value)], true).await?;
     flags.pop().ok_or_else(|| {
         Error::Cluster(crate::error::ClusterError::Aidb(
             AidbClusterError::Internal("submit_write_ops returned no flags".into()),
         ))
     })
+}
+
+pub struct ClusterBatchSlots {
+    slots: Vec<oneshot::Receiver<std::result::Result<(), String>>>,
+}
+
+impl ClusterBatchSlots {
+    pub async fn wait(self) -> Result<()> {
+        for wait in self.slots {
+            wait.await
+                .map_err(|_| {
+                    Error::Cluster(crate::error::ClusterError::Aidb(
+                        AidbClusterError::Internal(
+                            "data group write batcher dropped response".into(),
+                        ),
+                    ))
+                })?
+                .map_err(|e| {
+                    Error::Cluster(crate::error::ClusterError::Aidb(
+                        AidbClusterError::Internal(e),
+                    ))
+                })?;
+        }
+        Ok(())
+    }
+}
+
+pub struct ClusterBatchWaitHandle {
+    slots: Vec<ClusterBatchSlots>,
+    by_mig: Vec<(Arc<ClusterStateManager>, u64, u64, ThinWriteBatch)>,
+    fallback: Vec<AdapterWriteOp>,
+    local: Arc<dyn StorageAdapter>,
+}
+
+#[async_trait::async_trait]
+impl BatchWriteHandle for ClusterBatchWaitHandle {
+    async fn wait(self: Box<Self>) -> Result<()> {
+        for slot in self.slots {
+            slot.wait().await?;
+        }
+        for (mgr, gid, epoch, ops) in self.by_mig {
+            let resp = ClusterDataAdapter::propose_group_with_retry(
+                &mgr,
+                gid,
+                Request::MigrationWrite { epoch, ops },
+            )
+            .await?;
+            ClusterDataAdapter::check_response(resp)?;
+        }
+        if !self.fallback.is_empty() {
+            self.local.write_batch(self.fallback).await?;
+        }
+        Ok(())
+    }
+}
+
+pub(super) async fn enqueue_cluster_batch(
+    set_batchers: &parking_lot::Mutex<HashMap<u64, Arc<GroupSetBatcher>>>,
+    eager_flush: usize,
+    local: Arc<dyn StorageAdapter>,
+    ops: Vec<AdapterWriteOp>,
+) -> Result<Box<dyn BatchWriteHandle>> {
+    if ops.is_empty() {
+        return Ok(Box::new(crate::storage::types::ImmediateWriteHandle));
+    }
+    let (by_gid, by_mig, fallback) = partition_cluster_batch_ops(ops)?;
+
+    let mut slots = Vec::with_capacity(by_gid.len());
+    for (gid, (mgr, items)) in by_gid {
+        let slot = enqueue_write_ops(set_batchers, eager_flush, mgr, gid, items).await?;
+        slots.push(slot);
+    }
+
+    let mut mig_batches = Vec::with_capacity(by_mig.len());
+    for (gid, (mgr, epoch, items)) in by_mig {
+        let mut tb = ThinWriteBatch::new();
+        for (key, value) in items {
+            match value {
+                Some(v) => tb.put(key, v),
+                None => tb.delete(key),
+            }
+        }
+        mig_batches.push((mgr, gid, epoch, tb));
+    }
+
+    Ok(Box::new(ClusterBatchWaitHandle {
+        slots,
+        by_mig: mig_batches,
+        fallback,
+        local,
+    }))
+}
+
+type GidBatches = HashMap<u64, (Arc<ClusterStateManager>, Vec<(Vec<u8>, Option<Vec<u8>>)>)>;
+type MigBatches = HashMap<
+    u64,
+    (
+        Arc<ClusterStateManager>,
+        u64,
+        Vec<(Vec<u8>, Option<Vec<u8>>)>,
+    ),
+>;
+
+fn partition_cluster_batch_ops(
+    ops: Vec<AdapterWriteOp>,
+) -> Result<(GidBatches, MigBatches, Vec<AdapterWriteOp>)> {
+    let mut by_gid: GidBatches = HashMap::new();
+    let mut by_mig: MigBatches = HashMap::new();
+    let mut fallback = Vec::new();
+    let mut route_cache: Option<RouteCache> = None;
+
+    for op in ops {
+        let key_ref = match &op {
+            AdapterWriteOp::Put { key, .. } | AdapterWriteOp::Delete { key } => key.as_slice(),
+        };
+        match route_cached(key_ref, &mut route_cache)? {
+            Some((mgr, WriteRoute::Plain(gid))) => {
+                push_plain(&mut by_gid, gid, mgr, op);
+            }
+            Some((mgr, WriteRoute::Migration { gid, epoch, .. })) => {
+                push_migration(&mut by_mig, gid, mgr, epoch, op);
+            }
+            None => fallback.push(op),
+        }
+    }
+    Ok((by_gid, by_mig, fallback))
+}
+
+struct RouteCache {
+    slot: u16,
+    route: Option<(Arc<ClusterStateManager>, WriteRoute)>,
+}
+
+fn route_cached(
+    key: &[u8],
+    cache: &mut Option<RouteCache>,
+) -> Result<Option<(Arc<ClusterStateManager>, WriteRoute)>> {
+    if let Some(slot) = ClusterDataAdapter::routing_slot(key) {
+        if let Some(cached) = cache.as_ref() {
+            if cached.slot == slot {
+                return Ok(cached.route.clone());
+            }
+        }
+        let route = ClusterDataAdapter::route_write(key)?;
+        *cache = Some(RouteCache {
+            slot,
+            route: route.clone(),
+        });
+        return Ok(route);
+    }
+    ClusterDataAdapter::route_write(key)
+}
+
+fn push_plain(
+    by_gid: &mut GidBatches,
+    gid: u64,
+    mgr: Arc<ClusterStateManager>,
+    op: AdapterWriteOp,
+) {
+    let tuple = op_tuple(op);
+    by_gid
+        .entry(gid)
+        .or_insert_with(|| (mgr, Vec::new()))
+        .1
+        .push(tuple);
+}
+
+fn push_migration(
+    by_mig: &mut MigBatches,
+    gid: u64,
+    mgr: Arc<ClusterStateManager>,
+    epoch: u64,
+    op: AdapterWriteOp,
+) {
+    let tuple = op_tuple(op);
+    by_mig
+        .entry(gid)
+        .or_insert_with(|| (mgr, epoch, Vec::new()))
+        .2
+        .push(tuple);
+}
+
+fn op_tuple(op: AdapterWriteOp) -> (Vec<u8>, Option<Vec<u8>>) {
+    match op {
+        AdapterWriteOp::Put { key, value } => (key, Some(value)),
+        AdapterWriteOp::Delete { key } => (key, None),
+    }
+}
+
+pub(super) async fn enqueue_write_ops(
+    batchers: &parking_lot::Mutex<HashMap<u64, Arc<GroupSetBatcher>>>,
+    eager_flush: usize,
+    mgr: Arc<ClusterStateManager>,
+    gid: u64,
+    ops: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+) -> Result<ClusterBatchSlots> {
+    if ops.is_empty() {
+        return Ok(ClusterBatchSlots { slots: Vec::new() });
+    }
+    let batcher = get_or_spawn_set_batcher(batchers, mgr, gid, eager_flush);
+    let mut planned = Vec::with_capacity(ops.len());
+    for (key, value) in ops {
+        match value {
+            Some(v) => planned.push(PlannedOp::Put { key, value: v }),
+            None => planned.push(PlannedOp::Delete { key }),
+        }
+    }
+    let (ack, wait) = oneshot::channel();
+    let item = WriteBatchItem::Batch { ops: planned, ack };
+    match batcher.tx.try_send(item) {
+        Ok(()) => {}
+        Err(mpsc::error::TrySendError::Full(item)) => {
+            batcher.tx.send(item).await.map_err(|_| batcher_stopped())?;
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => return Err(batcher_stopped()),
+    }
+    Ok(ClusterBatchSlots { slots: vec![wait] })
+}
+
+fn batcher_stopped() -> Error {
+    Error::Cluster(crate::error::ClusterError::Aidb(
+        AidbClusterError::Internal("data group write batcher stopped".into()),
+    ))
 }
 
 pub(super) async fn run_set_batcher(
@@ -174,115 +439,122 @@ pub(super) async fn run_set_batcher(
 ) {
     while let Some(first) = rx.recv().await {
         let t_start = Instant::now();
-
-        let mut items = Vec::with_capacity(SET_BATCH_MAX_OPS);
-        items.push(first);
-
-        // 第一阶段:快速非阻塞拉取
-        while items.len() < SET_BATCH_MAX_OPS {
-            match rx.try_recv() {
-                Ok(item) => items.push(item),
-                Err(mpsc::error::TryRecvError::Empty) => break,
-                Err(mpsc::error::TryRecvError::Disconnected) => break,
-            }
-        }
-
-        // 第二阶段:防单打微退避 (仅在 items 数量小于 MIN_BATCH_TARGET 时触发 50us 避震)
-        if items.len() < MIN_BATCH_TARGET {
-            tokio::time::sleep(Duration::from_micros(MAX_MICRO_WAIT_US)).await;
-            while items.len() < SET_BATCH_MAX_OPS {
-                match rx.try_recv() {
-                    Ok(item) => items.push(item),
-                    Err(mpsc::error::TryRecvError::Empty) => break,
-                    Err(mpsc::error::TryRecvError::Disconnected) => break,
-                }
-            }
-        }
-
-        let wait_us = t_start.elapsed().as_micros();
-
-        // Build ThinWriteBatch with LWW reverse-dedup: 同 key 只保留时间序最后一笔.
-        let item_count = items.len();
-        let mut planned = Vec::with_capacity(item_count);
-        let mut acks = Vec::with_capacity(item_count);
-        for item in items {
-            match item {
-                WriteBatchItem::Put { key, value, ack } => {
-                    planned.push(PlannedOp::Put { key, value });
-                    acks.push(ack);
-                }
-                WriteBatchItem::Delete { key, ack } => {
-                    planned.push(PlannedOp::Delete { key });
-                    acks.push(ack);
-                }
-            }
-        }
-        let (tb, effect_indices) = plan_reverse_dedup(planned);
-        let ack_maps: Vec<AckMap> = acks
-            .into_iter()
-            .zip(effect_indices)
-            .map(|(ack, effect_index)| AckMap { ack, effect_index })
-            .collect();
-
-        let t_propose = Instant::now();
-        let result = super::cluster_adapter::ClusterDataAdapter::propose_group_with_retry(
-            &mgr,
-            gid,
-            Request::WriteBatch(tb),
-        )
-        .await
-        .and_then(super::cluster_adapter::ClusterDataAdapter::parse_write_stats)
-        .map_err(|e| e.to_string());
-
-        let propose_us = t_propose.elapsed().as_micros();
-        let total_us = t_start.elapsed().as_micros();
-
-        tracing::info!(
-            target: "perf",
-            gid = gid,
-            op_count = item_count,
-            wait_us,
-            propose_us,
-            total_us,
-            "batcher_batch_done"
-        );
-
-        match result {
-            Ok(effects) => {
-                let indices: Vec<Option<usize>> = ack_maps.iter().map(|m| m.effect_index).collect();
-                match map_ack_bools(&indices, &effects) {
-                    Ok(bools) => {
-                        for (m, v) in ack_maps.into_iter().zip(bools) {
-                            let _ = m.ack.send(Ok(v));
-                        }
-                    }
-                    Err(e) => {
-                        for m in ack_maps {
-                            let _ = m.ack.send(Err(e.clone()));
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                for m in ack_maps {
-                    let _ = m.ack.send(Err(e.clone()));
-                }
-            }
-        }
+        let items = collect_batch_items(&mut rx, first);
+        dispatch_batch(&mgr, gid, items, t_start).await;
     }
 }
 
-/// reverse-dedup 规划用的轻量 op (与 `WriteBatchItem` 同语义, 无 ack).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum PlannedOp {
-    Put { key: Vec<u8>, value: Vec<u8> },
-    Delete { key: Vec<u8> },
+fn collect_batch_items(
+    rx: &mut mpsc::Receiver<WriteBatchItem>,
+    first: WriteBatchItem,
+) -> Vec<WriteBatchItem> {
+    let mut items = Vec::with_capacity(SET_BATCH_MAX_OPS);
+    let mut op_count = item_op_count(&first);
+    items.push(first);
+
+    while items.len() < SET_BATCH_MAX_OPS && op_count < SET_BATCH_MAX_OPS {
+        match rx.try_recv() {
+            Ok(item) => {
+                op_count += item_op_count(&item);
+                items.push(item);
+            }
+            Err(_) => break,
+        }
+    }
+    items
+}
+
+fn item_op_count(item: &WriteBatchItem) -> usize {
+    match item {
+        WriteBatchItem::Batch { ops, .. } => ops.len(),
+        _ => 1,
+    }
+}
+
+async fn dispatch_batch(
+    mgr: &ClusterStateManager,
+    gid: u64,
+    items: Vec<WriteBatchItem>,
+    t_start: Instant,
+) {
+    let item_count = items.len();
+    let mut planned = Vec::with_capacity(item_count);
+    let mut single_acks = Vec::new();
+    let mut group_acks = Vec::new();
+
+    for item in items {
+        match item {
+            WriteBatchItem::Put { key, value, ack } => {
+                let idx = planned.len();
+                planned.push(PlannedOp::Put { key, value });
+                single_acks.push((idx, ack));
+            }
+            WriteBatchItem::Delete { key, ack } => {
+                let idx = planned.len();
+                planned.push(PlannedOp::Delete { key });
+                single_acks.push((idx, ack));
+            }
+            WriteBatchItem::Batch { ops, ack } => {
+                planned.extend(ops);
+                group_acks.push(ack);
+            }
+        }
+    }
+
+    let (tb, effect_indices) = plan_reverse_dedup(planned);
+    let t_propose = Instant::now();
+    let result = super::cluster_adapter::ClusterDataAdapter::propose_group_with_retry(
+        mgr,
+        gid,
+        Request::WriteBatch(tb),
+    )
+    .await
+    .and_then(super::cluster_adapter::ClusterDataAdapter::check_response)
+    .map_err(|e| e.to_string());
+
+    let propose_us = t_propose.elapsed().as_micros();
+    let total_us = t_start.elapsed().as_micros();
+    let wait_us = total_us.saturating_sub(propose_us);
+    BATCHER_PERF.record(item_count, wait_us as u64, propose_us as u64);
+
+    match result {
+        Ok(()) => {
+            for (idx, ack) in single_acks {
+                let _ = ack.send(Ok(effect_indices[idx].is_some()));
+            }
+            for ack in group_acks {
+                let _ = ack.send(Ok(()));
+            }
+        }
+        Err(e) => {
+            for (_, ack) in single_acks {
+                let _ = ack.send(Err(e.clone()));
+            }
+            for ack in group_acks {
+                let _ = ack.send(Err(e.clone()));
+            }
+        }
+    }
 }
 
 /// reverse + HashSet 按 key 做 last-write-wins: 同 key 只保留时间序最后一笔
 /// (Put 或 Delete). 产出 `ThinWriteBatch` 与每个**时间序** item 对应的 `effects`
 /// 下标 (`None` = 被丢掉的中间 op → ack false).
 pub(super) fn plan_reverse_dedup(items: Vec<PlannedOp>) -> (ThinWriteBatch, Vec<Option<usize>>) {
+    if items.len() <= 1 {
+        let mut tb = ThinWriteBatch::new();
+        let indices = if let Some(item) = items.into_iter().next() {
+            match item {
+                PlannedOp::Put { key, value } => tb.put(key, value),
+                PlannedOp::Delete { key } => tb.delete(key),
+            }
+            vec![Some(0)]
+        } else {
+            Vec::new()
+        };
+        return (tb, indices);
+    }
+
     let mut tb = ThinWriteBatch::new();
     let mut indices_rev = Vec::with_capacity(items.len());
     let mut seen: HashSet<Vec<u8>> = HashSet::new();
@@ -311,21 +583,10 @@ pub(super) fn plan_reverse_dedup(items: Vec<PlannedOp>) -> (ThinWriteBatch, Vec<
     (tb, indices_rev)
 }
 
-/// 将 `effects` (与 dedup 后 `tb.ops` 对齐) 映射为各原始 item 的 ack bool.
-pub(super) fn map_ack_bools(
-    effect_indices: &[Option<usize>],
-    effects: &[bool],
-) -> std::result::Result<Vec<bool>, String> {
-    effect_indices
-        .iter()
-        .map(|opt| match opt {
-            None => Ok(false),
-            Some(i) => effects
-                .get(*i)
-                .copied()
-                .ok_or_else(|| format!("effect index {i} out of range (len={})", effects.len())),
-        })
-        .collect()
+/// 实际提交的 op 在 `Response::Ok` 后 ack true. 被 reverse-dedup 丢掉的中间 op ack false.
+#[allow(dead_code)]
+pub(super) fn map_ack_included(effect_indices: &[Option<usize>]) -> Vec<bool> {
+    effect_indices.iter().map(|opt| opt.is_some()).collect()
 }
 
 #[cfg(test)]
@@ -369,10 +630,8 @@ mod tests {
         }
         assert_eq!(indices, vec![None, Some(1), Some(0)]);
 
-        // effects 与 tb.ops 对齐: m 为 insert, k 为 overwrite
-        let effects = vec![true, false];
-        let acks = map_ack_bools(&indices, &effects).expect("map");
-        assert_eq!(acks, vec![false, false, true]);
+        let acks = map_ack_included(&indices);
+        assert_eq!(acks, vec![false, true, true]);
     }
 
     /// Put→Del→Put 必须 LWW 保留最后 Put; 旧实现保留全部 Delete 会变成 Put 后再 Del,
@@ -400,7 +659,7 @@ mod tests {
             other => panic!("expected Put(k,v2), got {other:?}"),
         }
         assert_eq!(indices, vec![None, None, Some(0)]);
-        let acks = map_ack_bools(&indices, &[true]).expect("map");
+        let acks = map_ack_included(&indices);
         assert_eq!(acks, vec![false, false, true]);
     }
 
@@ -418,7 +677,7 @@ mod tests {
         assert_eq!(tb.ops.len(), 1);
         assert!(matches!(tb.ops[0], ThinWriteOp::Delete { .. }));
         assert_eq!(indices, vec![None, Some(0)]);
-        let acks = map_ack_bools(&indices, &[true]).expect("map");
+        let acks = map_ack_included(&indices);
         assert_eq!(acks, vec![false, true]);
     }
 

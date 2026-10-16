@@ -38,7 +38,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use tracing::{instrument, Instrument};
+use tracing::Instrument;
 
 use crate::command::{
     database, hash, json, key, list, persistence, script, server, set, string, zset,
@@ -53,18 +53,16 @@ mod stats;
 
 use keylock::KEY_LOCK_BUCKETS;
 pub use keylock::{KeyLock, KeyLocksGuard};
+use stats::record_command_outcome;
 #[cfg(feature = "monitoring")]
 use stats::record_command_span_status;
 #[cfg(feature = "cluster")]
 use stats::{classify_command, is_cluster_local_admin_cmd, is_multi_key_cmd};
-use stats::{record_command_outcome, record_keyspace_lookup};
 
 pub struct CommandRouter {
     storage: Arc<dyn KvStorage>,
-    #[expect(dead_code)]
     key_lock: Arc<KeyLock>,
     metrics: Option<Arc<ServerMetrics>>,
-    tcp_port: u16,
     string: string::StringCommands,
     hash: hash::HashCommands,
     list: list::ListCommands,
@@ -101,12 +99,24 @@ impl CommandRouter {
             metrics: None,
             storage,
             key_lock,
-            tcp_port: 6379,
         }
     }
 
+    pub fn with_script_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.script = self.script.with_timeout(timeout);
+        self
+    }
+
+    pub fn with_script_worker_threads(mut self, threads: usize) -> Self {
+        self.script = script::ScriptCommands::with_worker_threads(
+            Arc::clone(&self.storage),
+            Arc::clone(&self.key_lock),
+            threads,
+        );
+        self
+    }
+
     pub fn new_with_shared(storage: Arc<dyn KvStorage>, shared: Arc<ServerSharedState>) -> Self {
-        let tcp_port = shared.tcp_port;
         let key_lock = Arc::new(KeyLock::new(KEY_LOCK_BUCKETS));
         Self {
             string: string::StringCommands::new(storage.clone(), key_lock.clone()),
@@ -133,6 +143,7 @@ impl CommandRouter {
                 storage.clone(),
                 key_lock.clone(),
                 shared.metrics.clone(),
+                shared.connection_config.script_worker_threads,
             ),
             database: database::DatabaseCommands::new(storage.clone()),
             key_cmds: key::KeyCommands::new(storage.clone(), key_lock.clone()),
@@ -144,7 +155,6 @@ impl CommandRouter {
             metrics: Some(Arc::clone(&shared.metrics)),
             storage,
             key_lock,
-            tcp_port,
         }
     }
 
@@ -152,7 +162,6 @@ impl CommandRouter {
         Arc::clone(&self.storage)
     }
 
-    #[instrument(level = "debug", name = "kv_command", skip(self, args), fields(cmd.name = cmd, args_len = args.len()))]
     pub async fn execute(&self, cmd: &str, args: &[Bytes], db: &mut usize) -> Result<RespValue> {
         self.execute_with_client(
             cmd,
@@ -180,33 +189,18 @@ impl CommandRouter {
             &crate::cluster::connection::ClusterConnectionState,
         >,
     ) -> Result<RespValue> {
+        let span = aidb::observability::optional_span("kv_command");
+        if aidb::observability::traces_enabled() {
+            span.record("cmd", crate::command::canonical_command(cmd));
+        }
         #[cfg(feature = "cluster")]
         if let Some(state) = conn_state {
             if let Some(result) = self.cluster_route(cmd, args, state).await {
                 return result;
             }
         }
-        let span = tracing::debug_span!(
-            "kv_command",
-            otel.kind = "server",
-            cmd = cmd,
-            args_len = args.len(),
-            client_id = client_id.unwrap_or(0),
-            client.address = tracing::field::Empty,
-            network.peer.address = tracing::field::Empty,
-            network.peer.port = tracing::field::Empty,
-            db = *db,
-            server.port = self.tcp_port,
-            db.system = "redis",
-            db.operation.name = cmd,
-            trace_id = tracing::field::Empty,
-            span_id = tracing::field::Empty,
-        );
-        if let Some(addr) = client_addr {
-            span.record("client.address", tracing::field::display(addr.ip()));
-            span.record("network.peer.address", tracing::field::display(addr.ip()));
-            span.record("network.peer.port", addr.port() as i64);
-        }
+        let _ = client_addr;
+        let started = std::time::Instant::now();
         let result = async {
             #[cfg(feature = "monitoring")]
             crate::server::otel::record_trace_ids_on_span(&tracing::Span::current());
@@ -215,7 +209,8 @@ impl CommandRouter {
         }
         .instrument(span)
         .await;
-        record_command_outcome(&self.metrics, cmd, &result);
+        let duration_us = started.elapsed().as_micros() as u64;
+        record_command_outcome(&self.metrics, cmd, &result, duration_us);
         #[cfg(feature = "monitoring")]
         record_command_span_status(&result);
         result
@@ -421,46 +416,12 @@ impl CommandRouter {
         protocol_version: ProtocolVersion,
     ) -> Result<RespValue> {
         match cmd {
-            "GET" => {
-                let result = self.string.get(*db, args).await?;
-                record_keyspace_lookup(
-                    &self.metrics,
-                    matches!(&result, RespValue::BulkString(Some(_))),
-                );
-                Ok(result)
-            }
+            "GET" => self.string.get(*db, args).await,
             "SET" => self.string.set(*db, args).await,
-            "MGET" => {
-                let result = self.string.mget(*db, args).await?;
-                if let RespValue::Array(Some(items)) = &result {
-                    for item in items {
-                        record_keyspace_lookup(
-                            &self.metrics,
-                            matches!(item, RespValue::BulkString(Some(_))),
-                        );
-                    }
-                }
-                Ok(result)
-            }
+            "MGET" => self.string.mget(*db, args).await,
             "MSET" => self.string.mset(*db, args).await,
             "DEL" => self.string.del(*db, args).await,
-            "EXISTS" => {
-                let result = self.string.exists(*db, args).await?;
-                if self.metrics.is_some() {
-                    // 从 EXISTS 返回值提取 keyspace hits/misses (避免二次遍历)
-                    if let RespValue::Integer(count) = &result {
-                        let hits = *count as usize;
-                        let misses = args.len().saturating_sub(hits);
-                        for _ in 0..hits {
-                            record_keyspace_lookup(&self.metrics, true);
-                        }
-                        for _ in 0..misses {
-                            record_keyspace_lookup(&self.metrics, false);
-                        }
-                    }
-                }
-                Ok(result)
-            }
+            "EXISTS" => self.string.exists(*db, args).await,
             "STRLEN" => self.string.strlen(*db, args).await,
             "GETRANGE" => self.string.getrange(*db, args).await,
             "SETRANGE" => self.string.setrange(*db, args).await,
@@ -479,14 +440,7 @@ impl CommandRouter {
             "PSETEX" => self.string.psetex(*db, args).await,
             "HSET" => self.hash.hset(*db, args).await,
             "HMSET" => self.hash.hmset(*db, args).await,
-            "HGET" => {
-                let result = self.hash.hget(*db, args).await?;
-                record_keyspace_lookup(
-                    &self.metrics,
-                    matches!(&result, RespValue::BulkString(Some(_))),
-                );
-                Ok(result)
-            }
+            "HGET" => self.hash.hget(*db, args).await,
             "HDEL" => self.hash.hdel(*db, args).await,
             "HEXISTS" => self.hash.hexists(*db, args).await,
             "HLEN" => self.hash.hlen(*db, args).await,
@@ -566,7 +520,13 @@ impl CommandRouter {
             "PTTL" => self.key_cmds.pttl(*db, args).await,
             "PERSIST" => self.key_cmds.persist(*db, args).await,
             "KEYS" => self.key_cmds.keys(*db, args).await,
-            "SCAN" => self.key_cmds.scan(*db, args).await,
+            "SCAN" => {
+                let value = self.key_cmds.scan(*db, args).await?;
+                if let Some(metrics) = self.metrics.as_ref() {
+                    metrics.note_scan_entries(scan_key_count(&value));
+                }
+                Ok(value)
+            }
             "RANDOMKEY" => self.key_cmds.randomkey(*db, args).await,
             "RENAME" => self.key_cmds.rename(*db, args).await,
             "RENAMENX" => self.key_cmds.renamenx(*db, args).await,
@@ -762,6 +722,16 @@ pub(crate) fn require_min_args(cmd: &str, args: &[Bytes], n: usize) -> Result<()
         return Err(wrong_args(cmd, ""));
     }
     Ok(())
+}
+
+fn scan_key_count(value: &RespValue) -> u64 {
+    let RespValue::Array(Some(parts)) = value else {
+        return 0;
+    };
+    let Some(RespValue::Array(Some(keys))) = parts.get(1) else {
+        return 0;
+    };
+    keys.len() as u64
 }
 
 pub(crate) fn ok() -> RespValue {

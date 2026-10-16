@@ -3,7 +3,7 @@
 
 use aikv::protocol::RespValue;
 
-use super::helpers::{assert_int, assert_nil, assert_ok, b, router};
+use super::helpers::{assert_int, assert_nil, assert_ok, b, router, router_with_shared};
 
 /// 验证 SET 命令 EX/NX/XX 参数组合
 #[tokio::test]
@@ -506,4 +506,22 @@ async fn test_set_get_xx_missing_returns_nil() {
         .unwrap();
     assert_nil(resp);
     assert_nil(r.execute("GET", &[b("k")], &mut db).await.unwrap());
+}
+
+#[tokio::test]
+async fn set_keepttl_does_not_grow_expires() {
+    let (r, shared) = router_with_shared();
+    let mut db = 0;
+    assert_ok(
+        r.execute("SET", &[b("k"), b("v"), b("EX"), b("60")], &mut db)
+            .await
+            .unwrap(),
+    );
+    assert_eq!(shared.storage.expires(0).await.unwrap(), 1);
+    assert_ok(
+        r.execute("SET", &[b("k"), b("v2"), b("KEEPTTL")], &mut db)
+            .await
+            .unwrap(),
+    );
+    assert_eq!(shared.storage.expires(0).await.unwrap(), 1);
 }

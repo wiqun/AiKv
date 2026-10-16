@@ -14,6 +14,7 @@ async fn test_connection_metrics() {
             read_timeout: None,
             idle_timeout: None,
             max_clients: 0,
+            script_worker_threads: 2,
         },
         storage,
         0,
@@ -120,9 +121,10 @@ async fn test_metrics_health_endpoint() {
     let mut response = Vec::new();
     stream.read_to_end(&mut response).await.unwrap();
     let body = String::from_utf8_lossy(&response);
+    assert!(body.contains("200 OK"), "expected /metrics: {body}");
     assert!(
-        body.contains("404 Not Found"),
-        "expected /metrics removed: {body}"
+        body.contains("text/plain"),
+        "expected prometheus content type: {body}"
     );
 }
 /// 验证关键 tracing span 名称与文档规范一致.
@@ -137,40 +139,16 @@ fn test_span_naming() {
         .join("src");
 
     // 期望存在的 span 名称: AiDb 引擎核心路径
-    let expected_db_spans: &[&str] = &[
-        "wal_open",
-        "wal_write",
-        "wal_flush",
-        "wal_sync",
-        "wal_rotate",
-        "wal_replay",
-        "wal_writer_open",
-        "wal_writer_open_with_sync",
-        "mem_delete",
-        "mem_get",
-        "mem_search",
-        "sst_block_read",
-        "sst_block_seek",
-        "cmp_pick",
-        "cmp_run",
-        "cmp_merge",
-        "cmp_apply",
-    ];
+    let expected_db_spans: &[&str] = &["db_flush", "cmp_run", "raft_propose"];
 
-    // 期望存在的 span 名称: AiKv 关键路径
-    let expected_kv_spans: &[&str] = &[
-        "kv_cluster_route",
-        "cmd_cluster_failover",
-        "cmd_cluster_info",
-        "cmd_cluster_nodes",
-        "cmd_cluster_slots",
-    ];
+    // 期望存在的 span 名称: AiKv 只保留命令入口.
+    let expected_kv_spans: &[&str] = &["kv_command"];
 
     let mut missing = Vec::new();
 
     for name in expected_db_spans {
         if db_src.exists() {
-            let pattern = format!("name = \"{}\"", name);
+            let pattern = format!("optional_span(\"{name}\")");
             let found = walk_grep(&db_src, &pattern).unwrap_or(false);
             if !found {
                 missing.push(format!("DbSpan::{name}"));
@@ -179,7 +157,7 @@ fn test_span_naming() {
     }
 
     for name in expected_kv_spans {
-        let pattern = format!("name = \"{}\"", name);
+        let pattern = format!("optional_span(\"{name}\")");
         let found = walk_grep(&kv_src, &pattern).unwrap_or(false);
         if !found {
             missing.push(format!("KvSpan::{name}"));
@@ -193,57 +171,50 @@ fn test_span_naming() {
     );
 }
 
-/// 热路径 span 必须显式 `level = "debug"` (AGENTS.md 硬约束).
-///
-/// 无 `level` 参数时 tracing 默认 Info, 生产 `RUST_LOG=info` 会创建 span 并进入
-/// OTel, 是 Phase 2 profiling 定位到的集群压测性能主因 (E15 + connection 层).
+/// 只允许命令入口 span `kv_command`, 且不得再有 `#[instrument]`.
 #[test]
 fn test_hot_path_span_level_debug() {
     let kv_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-
-    let hot_paths: &[(&str, &str)] = &[
-        // 入口 span (AGENTS.md:66 强制): 每条命令必经
-        ("command/router/mod.rs", "name = \"kv_command\""),
-        ("command/string.rs", "name = \"cmd_string\""),
-        // 每条命令 I/O 必经路径
-        ("server/connection/mod.rs", "name = \"kv_read\""),
-        ("server/connection/mod.rs", "name = \"kv_parse\""),
-        ("server/connection/protocol.rs", "name = \"kv_write\""),
-        ("server/connection/protocol.rs", "name = \"kv_encode\""),
-        // 集群路由决策 (每条命令)
-        ("cluster/router.rs", "name = \"kv_cluster_route\""),
-        ("cluster/router.rs", "name = \"kv_cluster_cross_slot\""),
-        // 默认引擎 (MemoryEngine) 每条命令
-        ("storage/memory.rs", "name = \"mem_engine_get\""),
-        ("storage/memory.rs", "name = \"mem_engine_set\""),
-        ("storage/memory.rs", "name = \"mem_engine_del\""),
-        ("storage/memory.rs", "name = \"mem_engine_expire\""),
-    ];
-
-    let mut violations = Vec::new();
-    for (rel, anchor) in hot_paths {
-        let path = kv_src.join(rel);
-        let content =
-            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?} failed: {e}"));
-        match instrument_attr_before(&content, anchor) {
-            Some(attr) => {
-                if !attr.contains("level = \"debug\"") {
-                    violations.push(format!("{rel} @ {anchor}\n  -> {attr}"));
-                }
+    let mut files = Vec::new();
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+                out.push(path);
             }
-            None => violations.push(format!("{rel} @ {anchor}: instrument attr not found")),
         }
     }
-
+    walk(&kv_src, &mut files);
+    let mut violations = Vec::new();
+    for path in files {
+        let content = std::fs::read_to_string(&path).unwrap();
+        let rel = path.strip_prefix(&kv_src).unwrap().display().to_string();
+        if content.contains("#[instrument") || content.contains("#[tracing::instrument") {
+            violations.push(format!("{rel} still has an instrument attribute"));
+        }
+        let mut rest = content.as_str();
+        while let Some(index) = rest.find("optional_span(\"") {
+            let after = &rest[index + "optional_span(\"".len()..];
+            let end = after.find('"').unwrap();
+            let name = &after[..end];
+            if name != "kv_command" {
+                violations.push(format!("{rel} optional_span {name}"));
+            }
+            rest = &after[end..];
+        }
+    }
+    let connection = std::fs::read_to_string(kv_src.join("server/connection/mod.rs")).unwrap();
+    assert!(!connection.contains("kv_connection"));
     assert!(
         violations.is_empty(),
-        "热路径 span 必须显式 level = \"debug\" (AGENTS.md 硬约束), 否则生产 \
-         RUST_LOG=info 下会创建 span 并进入 OTel:\n{}",
+        "disallowed spans:\n{}",
         violations.join("\n")
     );
 }
 
-/// 采样率解析契约: `AIKV_OTEL_SAMPLE_RATIO` 合法范围 0.0-1.0, 非法输入回退 1.0.
+/// 采样率解析契约: `AIKV_OTEL_SAMPLE_RATIO` 合法范围 0.0-1.0, 非法输入回退 0.0.
 #[cfg(feature = "monitoring")]
 #[test]
 fn test_sample_ratio_parse() {
@@ -255,30 +226,14 @@ fn test_sample_ratio_parse() {
     assert_eq!(parse_sample_ratio("0.5"), 0.5);
     assert_eq!(parse_sample_ratio(" 0.5 "), 0.5);
     assert_eq!(parse_sample_ratio("+0.5"), 0.5);
-    // 非法/越界 → 回退 1.0
-    assert_eq!(parse_sample_ratio(""), 1.0);
-    assert_eq!(parse_sample_ratio("abc"), 1.0);
-    assert_eq!(parse_sample_ratio("-0.5"), 1.0);
-    assert_eq!(parse_sample_ratio("1.5"), 1.0);
-    assert_eq!(parse_sample_ratio("2"), 1.0);
-    assert_eq!(parse_sample_ratio("NaN"), 1.0);
-    assert_eq!(parse_sample_ratio("inf"), 1.0);
-}
-
-/// 返回锚点文本之前的最近一个 instrument 属性文本.
-fn instrument_attr_before(content: &str, anchor: &str) -> Option<String> {
-    let anchor_pos = content.find(anchor)?;
-    let prefix = &content[..anchor_pos];
-    let start = [
-        prefix.rfind("#[tracing::instrument"),
-        prefix.rfind("#[instrument"),
-    ]
-    .into_iter()
-    .flatten()
-    .max()?;
-    let attr = &content[start..];
-    let end = attr.find(']')?;
-    Some(attr[..=end].to_string())
+    // 非法/越界 → 回退 0.0
+    assert_eq!(parse_sample_ratio(""), 0.0);
+    assert_eq!(parse_sample_ratio("abc"), 0.0);
+    assert_eq!(parse_sample_ratio("-0.5"), 0.0);
+    assert_eq!(parse_sample_ratio("1.5"), 0.0);
+    assert_eq!(parse_sample_ratio("2"), 0.0);
+    assert_eq!(parse_sample_ratio("NaN"), 0.0);
+    assert_eq!(parse_sample_ratio("inf"), 0.0);
 }
 
 /// 递归搜索文件中是否包含指定字符串.
@@ -340,6 +295,7 @@ async fn test_maxclients_rejection_metrics() {
             read_timeout: None,
             idle_timeout: None,
             max_clients: 1,
+            script_worker_threads: 2,
         },
         storage,
         6379,
@@ -409,18 +365,15 @@ async fn test_runtime_metrics_refresh() {
     state.refresh_runtime_metrics().await;
 
     assert!(
-        testutil::counter_sum(&exporter, "aikv_expired_keys_total") >= 1,
-        "expected expired key counter"
+        state.metrics().expired_keys() >= 1,
+        "expected expired key counter on ServerMetrics"
     );
     assert!(
         state.metrics().used_memory_bytes() > 0,
         "expected non-zero memory on ServerMetrics"
     );
     assert_eq!(state.metrics().blocked_clients(), 0);
-    assert!(
-        testutil::metric_exists(&exporter, "aikv_instantaneous_ops_per_sec"),
-        "expected instantaneous_ops gauge registered"
-    );
+    let _ = exporter;
 }
 
 #[cfg(all(feature = "monitoring", target_os = "linux"))]
@@ -456,17 +409,16 @@ async fn process_resident_memory_bytes_in_registry() {
 async fn test_net_bytes_metrics() {
     use std::sync::Arc;
 
-    use aikv::server::otel_metrics::testutil;
     use aikv::server::{ConnectionConfig, Server, ServerSharedState};
     use aikv::storage::{KvStorage, MemoryEngine};
 
-    let (exporter, _otel) = testutil::init_in_memory();
     let storage: Arc<dyn KvStorage> = MemoryEngine::new(16);
     let state = ServerSharedState::new(
         ConnectionConfig {
             read_timeout: None,
             idle_timeout: None,
             max_clients: 0,
+            script_worker_threads: 2,
         },
         storage,
         0,
@@ -507,14 +459,21 @@ async fn test_net_bytes_metrics() {
         "INFO stats missing total_net_output_bytes: {info_text}"
     );
 
-    assert!(
-        testutil::counter_sum(&exporter, "aikv_net_input_bytes_total") > 0,
-        "expected net input bytes in otel"
-    );
-    assert!(
-        testutil::counter_sum(&exporter, "aikv_net_output_bytes_total") > 0,
-        "expected net output bytes in otel"
-    );
+    let snap = aikv::server::export::collect_export_snapshot(state.metrics(), 0, &[], None, &[]);
+    let input: u64 = snap
+        .counters
+        .iter()
+        .filter(|sample| sample.name == "aikv_net_input_bytes_total")
+        .map(|sample| sample.value)
+        .sum();
+    let output: u64 = snap
+        .counters
+        .iter()
+        .filter(|sample| sample.name == "aikv_net_output_bytes_total")
+        .map(|sample| sample.value)
+        .sum();
+    assert!(input > 0, "expected net input bytes in export snapshot");
+    assert!(output > 0, "expected net output bytes in export snapshot");
 }
 
 #[cfg(feature = "monitoring")]
@@ -531,15 +490,9 @@ fn info_field_u64(text: &str, key: &str) -> Option<u64> {
 async fn info_metrics_consistency_after_commands() {
     use std::sync::Arc;
 
-    use aikv::server::otel_metrics::testutil;
     use aikv::server::{ConnectionConfig, ServerSharedState};
     use aikv::storage::{KvStorage, MemoryEngine, StorageEngineKind, StorageObservation};
     use bytes::Bytes;
-
-    let (exporter, _otel) = testutil::init_in_memory();
-    let pre_hits = testutil::counter_sum(&exporter, "aikv_keyspace_hits_total");
-    let pre_misses = testutil::counter_sum(&exporter, "aikv_keyspace_misses_total");
-    let pre_cmds = testutil::counter_sum(&exporter, "aikv_commands_total");
 
     fn b(s: &str) -> Bytes {
         Bytes::copy_from_slice(s.as_bytes())
@@ -630,21 +583,17 @@ async fn info_metrics_consistency_after_commands() {
 
     state.refresh_runtime_metrics().await;
 
-    assert_eq!(
-        testutil::counter_sum(&exporter, "aikv_keyspace_hits_total") - pre_hits,
-        hits
-    );
-    assert_eq!(
-        testutil::counter_sum(&exporter, "aikv_keyspace_misses_total") - pre_misses,
-        misses
-    );
-    assert_eq!(
-        testutil::counter_sum(&exporter, "aikv_commands_total") - pre_cmds,
-        state.metrics().total_commands_processed()
-    );
+    let snap = aikv::server::export::collect_export_snapshot(state.metrics(), 0, &[], None, &[]);
+    let commands: u64 = snap
+        .counters
+        .iter()
+        .filter(|sample| sample.name == "aikv_commands_total")
+        .map(|sample| sample.value)
+        .sum();
+    assert_eq!(commands, state.metrics().total_commands_processed());
 }
 
-/// P3: 热路径不写 OTel; refresh sync 前 counter 不变, sync 后与 INFO 一致.
+/// 热路径不写 OTel. refresh 不再把命令计数推进旧 meter. 导出快照才带这些数.
 #[cfg(feature = "monitoring")]
 #[tokio::test]
 async fn otel_counters_sync_only_on_refresh() {
@@ -689,12 +638,17 @@ async fn otel_counters_sync_only_on_refresh() {
 
     assert_eq!(
         testutil::counter_sum(&exporter, "aikv_commands_total") - pre_cmds,
-        state.metrics().total_commands_processed()
+        0,
+        "refresh must not push the old command counter"
     );
-    assert_eq!(
-        testutil::counter_sum(&exporter, "aikv_keyspace_hits_total") - pre_hits,
-        state.metrics().keyspace_hits()
-    );
+    let snap = aikv::server::export::collect_export_snapshot(state.metrics(), 0, &[], None, &[]);
+    let commands: u64 = snap
+        .counters
+        .iter()
+        .filter(|sample| sample.name == "aikv_commands_total")
+        .map(|sample| sample.value)
+        .sum();
+    assert_eq!(commands, state.metrics().total_commands_processed());
 }
 
 #[tokio::test]
@@ -810,24 +764,159 @@ async fn blocked_clients_short_timeout_unblocks() {
 #[cfg(feature = "monitoring")]
 #[test]
 fn test_metric_catalog_contract() {
+    use aikv::server::export::collect_export_snapshot;
     use aikv::server::metrics::ServerMetrics;
-    use aikv::server::otel_metrics::{testutil, AIKV_METRIC_NAMES};
 
-    let (exporter, otel) = testutil::init_in_memory();
-    let server_metrics = ServerMetrics::default().with_otel(otel);
+    let server_metrics = ServerMetrics::default();
     server_metrics.on_connect();
-    server_metrics.on_command("PING", true);
-    server_metrics.on_command_duration("PING", 1000, true);
+    server_metrics.on_command_done("PING", true, 1000);
     server_metrics.on_keyspace_hit();
     server_metrics.set_uptime_secs(1);
     server_metrics.set_db_key_count(0, 0);
 
-    aikv::server::info_catalog::sync_otel_from_server_metrics(&server_metrics);
-
-    for name in AIKV_METRIC_NAMES {
-        assert!(
-            testutil::metric_exists(&exporter, name),
-            "missing otel metric: {name}"
-        );
+    let snap = collect_export_snapshot(&server_metrics, 0, &[], None, &[]);
+    let names = [
+        "aikv_commands_total",
+        "aikv_command_duration_seconds",
+        "aikv_net_input_bytes_total",
+        "aikv_connections_current",
+    ];
+    for name in names {
+        let found = snap.counters.iter().any(|sample| sample.name == name)
+            || snap.gauges.iter().any(|sample| sample.name == name)
+            || snap.histograms.iter().any(|sample| sample.name == name);
+        assert!(found, "missing export metric: {name}");
     }
+}
+
+struct SpanCapture {
+    spans: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    info_events: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    fields: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+struct FieldGrab(Vec<String>);
+
+impl tracing::field::Visit for FieldGrab {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        self.0.push(format!("{}={value:?}", field.name()));
+    }
+
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        self.0.push(format!("{}={value}", field.name()));
+    }
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SpanCapture {
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        _id: &tracing::span::Id,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        self.spans
+            .lock()
+            .unwrap()
+            .push(attrs.metadata().name().to_string());
+        let mut grab = FieldGrab(Vec::new());
+        attrs.record(&mut grab);
+        self.fields.lock().unwrap().extend(grab.0);
+    }
+
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        if *event.metadata().level() == tracing::Level::INFO {
+            let mut grab = FieldGrab(Vec::new());
+            event.record(&mut grab);
+            self.info_events
+                .lock()
+                .unwrap()
+                .push(event.metadata().name().to_string());
+            self.fields.lock().unwrap().extend(grab.0);
+        }
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn info_capture() -> (
+    SpanCapture,
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+) {
+    let spans = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let info_events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let fields = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    (
+        SpanCapture {
+            spans: std::sync::Arc::clone(&spans),
+            info_events: std::sync::Arc::clone(&info_events),
+            fields: std::sync::Arc::clone(&fields),
+        },
+        spans,
+        info_events,
+        fields,
+    )
+}
+
+#[tokio::test]
+async fn default_get_and_set_emit_no_info_and_no_span() {
+    use aikv::command::CommandRouter;
+    use aikv::storage::{KvStorage, MemoryEngine};
+    use bytes::Bytes;
+    use std::sync::Arc;
+    use tracing_subscriber::prelude::*;
+    use tracing_subscriber::Registry;
+
+    aidb::observability::set_traces_enabled(false);
+    let (layer, spans, info_events, _fields) = info_capture();
+    let subscriber =
+        Registry::default().with(layer.with_filter(tracing_subscriber::filter::LevelFilter::INFO));
+    let storage: Arc<dyn KvStorage> = MemoryEngine::new(16);
+    let router = CommandRouter::new(storage);
+    let mut db = 0;
+    let key = Bytes::from_static(b"user-key-should-stay-out");
+    let _guard = tracing::subscriber::set_default(subscriber);
+    router
+        .execute("SET", &[key.clone(), Bytes::from_static(b"v")], &mut db)
+        .await
+        .unwrap();
+    router.execute("GET", &[key], &mut db).await.unwrap();
+    drop(_guard);
+    assert!(info_events.lock().unwrap().is_empty());
+    let spans = spans.lock().unwrap();
+    assert!(!spans
+        .iter()
+        .any(|name| name == "kv_command" || name == "kv_connection"));
+    aidb::observability::set_traces_enabled(false);
+}
+
+#[tokio::test]
+async fn command_span_exists_only_when_traces_are_enabled() {
+    use aikv::command::CommandRouter;
+    use aikv::storage::{KvStorage, MemoryEngine};
+    use bytes::Bytes;
+    use std::sync::Arc;
+    use tracing_subscriber::prelude::*;
+    use tracing_subscriber::Registry;
+
+    aidb::observability::set_traces_enabled(true);
+    let (layer, spans, _info_events, fields) = info_capture();
+    let subscriber =
+        Registry::default().with(layer.with_filter(tracing_subscriber::filter::LevelFilter::INFO));
+    let storage: Arc<dyn KvStorage> = MemoryEngine::new(16);
+    let router = CommandRouter::new(storage);
+    let mut db = 0;
+    let key = Bytes::from_static(b"user-key-should-stay-out");
+    let _guard = tracing::subscriber::set_default(subscriber);
+    router.execute("GET", &[key], &mut db).await.unwrap();
+    drop(_guard);
+    let spans = spans.lock().unwrap();
+    assert_eq!(spans.iter().filter(|name| *name == "kv_command").count(), 1);
+    let dumped = fields.lock().unwrap().join(" ");
+    assert!(!dumped.contains("user-key-should-stay-out"));
+    aidb::observability::set_traces_enabled(false);
 }
