@@ -1,30 +1,21 @@
 //! Connection Pipeline 并发优化: 将多笔安全命令并行执行并聚合写凑批.
 
-use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
 use bytes::Bytes;
 use parking_lot::Mutex;
-use tokio::task::JoinSet;
 
-use crate::command::CommandRouter;
 use crate::error::Result;
-use crate::protocol::{ProtocolVersion, RespValue};
+use crate::protocol::RespValue;
 
 use super::{Connection, ConnectionMode};
-
-const PIPELINE_MAX_IN_FLIGHT: usize = 512;
 
 impl Connection {
     /// 尝试对同一批中的命令进行流水线并发执行.
     /// 若包含事务、阻塞或状态敏感命令, 则回退到顺序执行.
-    pub(super) async fn process_pipeline_batch(
-        &mut self,
-        batch: Vec<RespValue>,
-        buf: &mut [u8],
-    ) -> Result<()> {
+    pub(super) async fn process_pipeline_batch(&mut self, batch: Vec<RespValue>) -> Result<()> {
         if let Some(timing) = self.pending_timing.take() {
             timing.report_from_buffer();
         }
@@ -43,7 +34,7 @@ impl Connection {
             parsed.push((cmd, args));
         }
 
-        self.execute_concurrent_pipeline(parsed, buf).await
+        self.execute_concurrent_pipeline(parsed).await
     }
 
     async fn process_sequential_batch(&mut self, batch: Vec<RespValue>) -> Result<()> {
@@ -66,167 +57,86 @@ impl Connection {
     async fn execute_concurrent_pipeline(
         &mut self,
         commands: Vec<(String, Vec<Bytes>)>,
-        buf: &mut [u8],
     ) -> Result<()> {
-        let launch = self.pipeline_launch();
+        let router = self.state.router().clone();
+        let client_id = self.client_id;
+        let remote = self.remote;
+        let proto = self.protocol_version;
+        let current_db = self.current_db;
+        #[cfg(feature = "cluster")]
+        let cluster_state = self.cluster_state.clone();
+
         let gate = Arc::clone(&self.state.transaction_gate);
         let _guard = gate.read_owned().await;
+
+        let total = commands.len();
+        let tracker = Arc::new(BatchTracker::new(total));
         let t_enter = Instant::now();
-        let mut join_set = JoinSet::new();
-        let mut next_idx = 0usize;
-        let initial = commands.len();
-        self.spawn_pipeline(&mut join_set, &mut next_idx, commands, &launch);
-        let mut results = Vec::with_capacity(initial);
-        self.collect_pipeline(&mut join_set, &mut results, &mut next_idx, &launch, buf)
-            .await?;
+        let mut join_set = tokio::task::JoinSet::new();
+
+        for (idx, (cmd, args)) in commands.into_iter().enumerate() {
+            let router = router.clone();
+            #[cfg(feature = "cluster")]
+            let cluster_state = cluster_state.clone();
+            let track = super::should_track_observability(&cmd);
+            let arg_strings: Vec<String> = if track {
+                args.iter()
+                    .map(|b| String::from_utf8_lossy(b).into_owned())
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let started = track.then(Instant::now);
+            let b_tracker = Arc::clone(&tracker);
+            join_set.spawn(async move {
+                CURRENT_BATCH
+                    .scope(b_tracker, async move {
+                        let mut db = current_db;
+                        let result = router
+                            .execute_with_client(
+                                &cmd,
+                                &args,
+                                &mut db,
+                                Some(client_id),
+                                Some(remote),
+                                proto,
+                                #[cfg(feature = "cluster")]
+                                Some(&cluster_state),
+                            )
+                            .await;
+                        (idx, cmd, args, arg_strings, started, result)
+                    })
+                    .await
+            });
+        }
+
+        let mut results = Vec::with_capacity(total);
+        while let Some(res) = join_set.join_next().await {
+            match res {
+                Ok(item) => results.push(item),
+                Err(e) => {
+                    return Err(crate::error::Error::Command(format!(
+                        "pipeline task failed: {e}"
+                    )))
+                }
+            }
+        }
         let t_join = Instant::now();
         drop(_guard);
+
         results.sort_unstable_by_key(|(idx, ..)| *idx);
         self.finish_pipeline_results(results).await?;
         let t_flushed = Instant::now();
-        record_batch_len(next_idx);
+
+        let t_last_enq = *tracker.t_last_enq.lock();
         self.pending_timing = Some(PendingBatchTiming {
-            cmds: next_idx,
+            cmds: total,
             t_enter,
-            t_last_enq: None,
+            t_last_enq,
             t_join,
             t_flushed,
         });
         Ok(())
-    }
-
-    fn pipeline_launch(&self) -> PipelineLaunch {
-        PipelineLaunch {
-            router: self.state.router().clone(),
-            client_id: self.client_id,
-            remote: self.remote,
-            proto: self.protocol_version,
-            db: self.current_db,
-            #[cfg(feature = "cluster")]
-            cluster_state: self.cluster_state.clone(),
-        }
-    }
-
-    fn spawn_pipeline(
-        &self,
-        join_set: &mut JoinSet<PipelineTaskResult>,
-        next_idx: &mut usize,
-        commands: Vec<(String, Vec<Bytes>)>,
-        launch: &PipelineLaunch,
-    ) {
-        for (cmd, args) in commands {
-            launch_pipeline_task(join_set, *next_idx, cmd, args, launch);
-            *next_idx += 1;
-        }
-    }
-
-    async fn collect_pipeline(
-        &mut self,
-        join_set: &mut JoinSet<PipelineTaskResult>,
-        results: &mut Vec<PipelineTaskResult>,
-        next_idx: &mut usize,
-        launch: &PipelineLaunch,
-        buf: &mut [u8],
-    ) -> Result<()> {
-        let mut accept = true;
-        loop {
-            if self.spawn_buffered(join_set, next_idx, launch, &mut accept)? {
-                continue;
-            }
-            if join_set.is_empty() {
-                if !self.drain_for_more(buf, &mut accept)? {
-                    break;
-                }
-                continue;
-            }
-            self.wait_pipeline(results, join_set, buf, &mut accept)
-                .await?;
-        }
-        Ok(())
-    }
-
-    fn spawn_buffered(
-        &mut self,
-        join_set: &mut JoinSet<PipelineTaskResult>,
-        next_idx: &mut usize,
-        launch: &PipelineLaunch,
-        accept: &mut bool,
-    ) -> Result<bool> {
-        let room = PIPELINE_MAX_IN_FLIGHT.saturating_sub(*next_idx);
-        if !*accept || room == 0 {
-            *accept = room > 0 && *accept;
-            return Ok(false);
-        }
-        let parsed = self.parse_ready_commands(room)?;
-        if parsed.stop {
-            *accept = false;
-        }
-        if parsed.commands.is_empty() {
-            return Ok(false);
-        }
-        self.spawn_pipeline(join_set, next_idx, parsed.commands, launch);
-        Ok(true)
-    }
-
-    fn drain_for_more(&mut self, buf: &mut [u8], accept: &mut bool) -> Result<bool> {
-        if !*accept {
-            return Ok(false);
-        }
-        let before = self.parser.buffer_len();
-        let drained = self.drain_ready(buf)?;
-        if drained != ReadyDrain::Open {
-            self.ready_after = drained;
-            *accept = false;
-        }
-        Ok(self.parser.buffer_len() > before)
-    }
-
-    async fn wait_pipeline(
-        &mut self,
-        results: &mut Vec<PipelineTaskResult>,
-        join_set: &mut JoinSet<PipelineTaskResult>,
-        buf: &mut [u8],
-        accept: &mut bool,
-    ) -> Result<()> {
-        let wake = tokio::select! {
-            biased;
-            ready = self.stream.readable(), if *accept => PipelineWake::Socket(ready),
-            joined = join_set.join_next() => PipelineWake::Joined(joined),
-        };
-        match wake {
-            PipelineWake::Socket(ready) => {
-                ready?;
-                self.drain_for_more(buf, accept)?;
-            }
-            PipelineWake::Joined(Some(Ok(item))) => results.push(item),
-            PipelineWake::Joined(Some(Err(err))) => {
-                return Err(crate::error::Error::Command(format!(
-                    "pipeline task failed: {err}"
-                )));
-            }
-            PipelineWake::Joined(None) => {}
-        }
-        Ok(())
-    }
-
-    fn parse_ready_commands(&mut self, room: usize) -> Result<ReadyCommands> {
-        let mut commands = Vec::new();
-        while commands.len() < room {
-            let frame = match self.parser.parse()? {
-                Some(frame) => frame,
-                None => break,
-            };
-            if !push_ready_command(&mut commands, frame, &mut self.held_frame) {
-                return Ok(ReadyCommands {
-                    commands,
-                    stop: true,
-                });
-            }
-        }
-        Ok(ReadyCommands {
-            commands,
-            stop: false,
-        })
     }
 
     async fn finish_pipeline_results(&mut self, results: Vec<PipelineTaskResult>) -> Result<()> {
@@ -281,91 +191,6 @@ pub(super) fn close_reason(drained: ReadyDrain) -> Option<&'static str> {
         ReadyDrain::PeerClosed => Some("client_closed"),
         ReadyDrain::Overflow => Some("buffer_overflow"),
     }
-}
-
-struct PipelineLaunch {
-    router: Arc<CommandRouter>,
-    client_id: usize,
-    remote: SocketAddr,
-    proto: ProtocolVersion,
-    db: usize,
-    #[cfg(feature = "cluster")]
-    cluster_state: crate::cluster::connection::ClusterConnectionState,
-}
-
-struct ReadyCommands {
-    commands: Vec<(String, Vec<Bytes>)>,
-    stop: bool,
-}
-
-enum PipelineWake {
-    Socket(std::io::Result<()>),
-    Joined(Option<std::result::Result<PipelineTaskResult, tokio::task::JoinError>>),
-}
-
-fn push_ready_command(
-    commands: &mut Vec<(String, Vec<Bytes>)>,
-    frame: RespValue,
-    held: &mut Option<RespValue>,
-) -> bool {
-    if super::should_flush_immediately(&frame) || super::is_blocking_command(&frame) {
-        *held = Some(frame);
-        return false;
-    }
-    let Some((cmd, args)) = parse_command_parts(&frame) else {
-        *held = Some(frame);
-        return false;
-    };
-    if !is_safe_concurrent_command(&cmd) {
-        *held = Some(frame);
-        return false;
-    }
-    commands.push((cmd, args));
-    true
-}
-
-fn launch_pipeline_task(
-    join_set: &mut JoinSet<PipelineTaskResult>,
-    idx: usize,
-    cmd: String,
-    args: Vec<Bytes>,
-    launch: &PipelineLaunch,
-) {
-    let router = launch.router.clone();
-    let client_id = launch.client_id;
-    let remote = launch.remote;
-    let proto = launch.proto;
-    let db = launch.db;
-    #[cfg(feature = "cluster")]
-    let cluster_state = launch.cluster_state.clone();
-    let track = super::should_track_observability(&cmd);
-    let arg_strings = tracked_args(track, &args);
-    let started = track.then(Instant::now);
-    join_set.spawn(async move {
-        let mut db = db;
-        let result = router
-            .execute_with_client(
-                &cmd,
-                &args,
-                &mut db,
-                Some(client_id),
-                Some(remote),
-                proto,
-                #[cfg(feature = "cluster")]
-                Some(&cluster_state),
-            )
-            .await;
-        (idx, cmd, args, arg_strings, started, result)
-    });
-}
-
-fn tracked_args(track: bool, args: &[Bytes]) -> Vec<String> {
-    if !track {
-        return Vec::new();
-    }
-    args.iter()
-        .map(|arg| String::from_utf8_lossy(arg).into_owned())
-        .collect()
 }
 
 type PipelineTaskResult = (
