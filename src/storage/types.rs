@@ -26,6 +26,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 
+pub type RawPairVisitor = Box<dyn FnMut(Vec<u8>, Vec<u8>) -> Result<()> + Send>;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeyspaceStats {
     pub keys: usize,
@@ -519,7 +521,7 @@ impl ExpiresCounters {
         if n == 0 || db >= DB_COUNT {
             return;
         }
-        let _ = self.counts[db].fetch_update(Ordering::Relaxed, Ordering::Relaxed, |curr| {
+        let _ = self.counts[db].try_update(Ordering::Relaxed, Ordering::Relaxed, |curr| {
             Some(curr.saturating_sub(n))
         });
     }

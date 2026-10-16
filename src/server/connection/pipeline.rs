@@ -1,11 +1,10 @@
 //! Connection Pipeline 并发优化: 将多笔安全命令并行执行并聚合写凑批.
 
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
 use bytes::Bytes;
-use parking_lot::Mutex;
 
 use crate::error::Result;
 use crate::protocol::RespValue;
@@ -70,7 +69,6 @@ impl Connection {
         let _guard = gate.read_owned().await;
 
         let total = commands.len();
-        let tracker = Arc::new(BatchTracker::new(total));
         let t_enter = Instant::now();
         let mut join_set = tokio::task::JoinSet::new();
 
@@ -87,26 +85,21 @@ impl Connection {
                 Vec::new()
             };
             let started = track.then(Instant::now);
-            let b_tracker = Arc::clone(&tracker);
             join_set.spawn(async move {
-                CURRENT_BATCH
-                    .scope(b_tracker, async move {
-                        let mut db = current_db;
-                        let result = router
-                            .execute_with_client(
-                                &cmd,
-                                &args,
-                                &mut db,
-                                Some(client_id),
-                                Some(remote),
-                                proto,
-                                #[cfg(feature = "cluster")]
-                                Some(&cluster_state),
-                            )
-                            .await;
-                        (idx, cmd, args, arg_strings, started, result)
-                    })
-                    .await
+                let mut db = current_db;
+                let result = router
+                    .execute_with_client(
+                        &cmd,
+                        &args,
+                        &mut db,
+                        Some(client_id),
+                        Some(remote),
+                        proto,
+                        #[cfg(feature = "cluster")]
+                        Some(&cluster_state),
+                    )
+                    .await;
+                (idx, cmd, args, arg_strings, started, result)
             });
         }
 
@@ -128,11 +121,10 @@ impl Connection {
         self.finish_pipeline_results(results).await?;
         let t_flushed = Instant::now();
 
-        let t_last_enq = *tracker.t_last_enq.lock();
         self.pending_timing = Some(PendingBatchTiming {
             cmds: total,
             t_enter,
-            t_last_enq,
+            t_last_enq: None,
             t_join,
             t_flushed,
         });
@@ -255,39 +247,6 @@ static CONN_BATCH_SAMPLER: ConnBatchSampler = ConnBatchSampler::new();
 
 pub(super) fn record_batch_len(len: usize) {
     CONN_BATCH_SAMPLER.record(len);
-}
-
-pub struct BatchTracker {
-    pub total: usize,
-    pub enqueued: AtomicUsize,
-    pub t_last_enq: Mutex<Option<Instant>>,
-}
-
-impl BatchTracker {
-    pub fn new(total: usize) -> Self {
-        Self {
-            total,
-            enqueued: AtomicUsize::new(0),
-            t_last_enq: Mutex::new(None),
-        }
-    }
-
-    pub fn on_enqueued(&self) {
-        let prev = self.enqueued.fetch_add(1, Ordering::SeqCst);
-        if prev + 1 == self.total {
-            *self.t_last_enq.lock() = Some(Instant::now());
-        }
-    }
-}
-
-tokio::task_local! {
-    pub(crate) static CURRENT_BATCH: Arc<BatchTracker>;
-}
-
-pub(crate) fn notify_enqueued() {
-    let _ = CURRENT_BATCH.try_with(|t| {
-        t.on_enqueued();
-    });
 }
 
 pub(super) struct PendingBatchTiming {

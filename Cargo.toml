@@ -99,7 +99,9 @@ codegen-units = 1
 debug         = 1   # line tables for eBPF/Pyroscope flame graphs (不 strip)
 
 [lints.clippy]
-all = "warn"
+all = { level = "warn", priority = -1 }
+# async_trait 给 Future 加了无说明的 must_use, 与 Result 的 must_use 重复.
+double_must_use = "allow"
 
 [patch."https://github.com/wiqun/AiDb.git"]
 aidb = { path = "../aidb" }

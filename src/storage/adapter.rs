@@ -37,8 +37,8 @@ use crate::storage::memory::glob_match;
 use crate::storage::observation::{PointReadCounter, StorageObservation};
 use crate::storage::types::{
     now_ms, BatchWriteHandle, ExpiresCounters, ImmediateWriteHandle, KeyspaceStats, KvStorage,
-    ScanResult, StorageEngineKind, StoredValue, ValueType, WriteOp, DB_COUNT, TTL_NO_EXPIRY,
-    WRONGTYPE,
+    RawPairVisitor, ScanResult, StorageEngineKind, StoredValue, ValueType, WriteOp, DB_COUNT,
+    TTL_NO_EXPIRY, WRONGTYPE,
 };
 use crate::storage::watch_registry::WatchRegistry;
 use crate::storage::watch_version::{
@@ -104,11 +104,7 @@ pub trait StorageAdapter: Send + Sync {
         let _ = (start, end);
         Err(Error::Storage("sync last_in_range not supported".into()))
     }
-    fn for_each_prefix_sync(
-        &self,
-        prefix: Vec<u8>,
-        mut f: Box<dyn FnMut(Vec<u8>, Vec<u8>) -> Result<()> + Send>,
-    ) -> Result<()> {
+    fn for_each_prefix_sync(&self, prefix: Vec<u8>, f: RawPairVisitor) -> Result<()> {
         let _ = (prefix, f);
         Err(Error::Storage("sync for_each_prefix not supported".into()))
     }

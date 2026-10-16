@@ -3,8 +3,8 @@
 use std::cell::Cell;
 use std::time::Instant;
 
-use crate::error::{Error, Result};
-use crate::storage::types::{StorageEngineKind, StoredValue, WriteOp};
+use crate::error::Result;
+use crate::storage::types::{RawPairVisitor, StorageEngineKind, StoredValue, WriteOp};
 
 pub trait ScriptIo: Send + Sync {
     fn engine_kind(&self) -> StorageEngineKind;
@@ -14,12 +14,7 @@ pub trait ScriptIo: Send + Sync {
     fn raw_prefix_last(&self, prefix: Vec<u8>) -> Result<Option<(Vec<u8>, Vec<u8>)>>;
     fn raw_range_last(&self, start: Vec<u8>, end: Vec<u8>) -> Result<Option<(Vec<u8>, Vec<u8>)>>;
     fn raw_subkey_get(&self, db: usize, encoded_key: Vec<u8>) -> Result<Option<Vec<u8>>>;
-    fn raw_subkey_for_each(
-        &self,
-        db: usize,
-        prefix: Vec<u8>,
-        f: Box<dyn FnMut(Vec<u8>, Vec<u8>) -> Result<()> + Send>,
-    ) -> Result<()>;
+    fn raw_subkey_for_each(&self, db: usize, prefix: Vec<u8>, f: RawPairVisitor) -> Result<()>;
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

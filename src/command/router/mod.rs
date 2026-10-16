@@ -61,7 +61,6 @@ use stats::{classify_command, is_cluster_local_admin_cmd, is_multi_key_cmd};
 
 pub struct CommandRouter {
     storage: Arc<dyn KvStorage>,
-    #[expect(dead_code)]
     key_lock: Arc<KeyLock>,
     metrics: Option<Arc<ServerMetrics>>,
     string: string::StringCommands,

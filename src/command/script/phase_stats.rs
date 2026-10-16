@@ -120,9 +120,11 @@ mod tests {
 
     #[test]
     fn gap_excludes_redis_call_time() {
-        let mut calls = ScriptCallStats::default();
-        calls.string_us = 120;
-        calls.zadd_us = 30;
+        let calls = ScriptCallStats {
+            string_us: 120,
+            zadd_us: 30,
+            ..ScriptCallStats::default()
+        };
         assert_eq!(gap_us(500, calls), 350);
         assert_eq!(gap_us(100, calls), 0);
     }
