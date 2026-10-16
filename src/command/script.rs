@@ -26,7 +26,6 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use mlua::{HookTriggers, MultiValue, Value as LuaValue, VmState};
 use sha1::{Digest, Sha1};
-use tokio::sync::Mutex;
 
 use self::cache::ScriptCache;
 use self::convert::lua_to_resp;
@@ -38,7 +37,6 @@ use crate::command::router::{self, KeyLock};
 use crate::error::{Error, Result};
 use crate::protocol::RespValue;
 use crate::server::ServerMetrics;
-use crate::storage::ScriptIo;
 use crate::storage::{KvStorage, WriteOp};
 
 const DEFAULT_SCRIPT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -443,9 +441,21 @@ impl ScriptCommands {
         let t_locked = Instant::now();
 
         let lua = self.acquire_vm()?;
-        let drive = self
-            .drive_script(lua, db, sha1, script, keys, argv, seg_id, slot_idx)
-            .await?;
+        let job = drive::ScriptJob {
+            lua,
+            storage: Arc::clone(&self.storage),
+            in_flight: Arc::clone(&self.in_flight),
+            timeout: self.script_timeout,
+            db,
+            sha1: sha1.to_string(),
+            script: script.to_string(),
+            keys: keys.to_vec(),
+            argv: argv.to_vec(),
+            local_commit: self.storage.local_script_commit(),
+            seg_id,
+            slot_idx,
+        };
+        let drive = self.drive_script(job).await?;
         self.release_vm(drive.lua);
         IO_SAMPLER.record(drive.io);
         call_stats::record_script_calls(drive.calls);
@@ -476,31 +486,7 @@ impl ScriptCommands {
         lua_to_resp(body.value)
     }
 
-    async fn drive_script(
-        &self,
-        lua: mlua::Lua,
-        db: usize,
-        sha1: &str,
-        script: &str,
-        keys: &[Bytes],
-        argv: &[Bytes],
-        seg_id: usize,
-        slot_idx: usize,
-    ) -> Result<drive::ScriptDrive> {
-        let job = drive::ScriptJob {
-            lua,
-            storage: Arc::clone(&self.storage),
-            in_flight: Arc::clone(&self.in_flight),
-            timeout: self.script_timeout,
-            db,
-            sha1: sha1.to_string(),
-            script: script.to_string(),
-            keys: keys.to_vec(),
-            argv: argv.to_vec(),
-            local_commit: self.storage.local_script_commit(),
-            seg_id,
-            slot_idx,
-        };
+    async fn drive_script(&self, job: drive::ScriptJob) -> Result<drive::ScriptDrive> {
         if !drive::script_runs_off_worker() {
             return Ok(job.run());
         }
@@ -644,7 +630,7 @@ fn lua_redis_entry(
                 })?;
             Arc::clone(&ctx.declared)
         };
-        let mut ctx = lua
+        let ctx = lua
             .app_data_mut::<ScriptExecutionContext>()
             .ok_or_else(|| {
                 mlua::Error::RuntimeError("ERR missing script execution context".into())

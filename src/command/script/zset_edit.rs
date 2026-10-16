@@ -12,7 +12,7 @@ use crate::command::script::transaction::{
 use crate::error::Result;
 use crate::protocol::RespValue;
 use crate::storage::zset_subkey::{self, member_key};
-use crate::storage::{AiDbEngine, KvStorage, WriteOp};
+use crate::storage::{AiDbEngine, WriteOp};
 
 use super::in_flight::InFlightBuffer;
 

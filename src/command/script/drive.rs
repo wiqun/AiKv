@@ -5,7 +5,6 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use mlua::Value as LuaValue;
-use tokio::sync::Mutex;
 
 use super::execute::DeclaredKeys;
 use super::in_flight::InFlightBuffer;
@@ -20,8 +19,9 @@ pub(super) struct ScriptBody {
     pub(super) t_lua_done: Instant,
     pub(super) t_prep_done: Instant,
     pub(super) t_local_done: Instant,
-    pub(super) io: crate::storage::script_io::ScriptIoStats,
 }
+
+type PreparedScript = (LuaValue, Instant, Instant, Vec<(Vec<u8>, WriteOp)>);
 
 pub(super) struct ScriptDrive {
     pub(super) lua: mlua::Lua,
@@ -51,20 +51,7 @@ pub(super) struct ScriptJob {
 
 impl ScriptJob {
     pub(super) fn run(self) -> ScriptDrive {
-        drive_script_body(
-            self.lua,
-            self.storage,
-            self.in_flight,
-            self.timeout,
-            self.db,
-            self.sha1,
-            self.script,
-            self.keys,
-            self.argv,
-            self.local_commit,
-            self.seg_id,
-            self.slot_idx,
-        )
+        drive_script_body(self)
     }
 }
 
@@ -73,35 +60,19 @@ pub(super) fn script_runs_off_worker() -> bool {
         .is_ok_and(|handle| handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
 }
 
-fn drive_script_body(
-    lua: mlua::Lua,
-    storage: Arc<dyn KvStorage>,
-    in_flight: Arc<InFlightBuffer>,
-    timeout: Duration,
-    db: usize,
-    sha1: String,
-    script: String,
-    keys: Vec<Bytes>,
-    argv: Vec<Bytes>,
-    local_commit: bool,
-    seg_id: usize,
-    slot_idx: usize,
-) -> ScriptDrive {
+fn drive_script_body(job: ScriptJob) -> ScriptDrive {
     let t_entered = Instant::now();
     crate::storage::script_io::begin_script_io_sample();
     super::call_stats::begin_script_call_sample();
     super::phase_stats::begin_eval_span();
-    let prepared = prepare_script(
-        &lua, &storage, &in_flight, timeout, db, &sha1, &script, &keys, &argv,
-    );
+    let prepared = prepare_script(&job.lua, &job);
     let (value, t_lua_done, t_prep_done, batch_ops) = match prepared {
         Ok(parts) => parts,
-        Err(err) => return failed_drive(lua, err, t_entered),
+        Err(err) => return failed_drive(job.lua, err, t_entered),
     };
-    let pending = if local_commit {
-        if let Err(err) = commit_local_batch(&storage, &in_flight, db, batch_ops, seg_id, slot_idx)
-        {
-            return failed_drive(lua, err, t_entered);
+    let pending = if job.local_commit {
+        if let Err(err) = commit_local_batch(&job, batch_ops) {
+            return failed_drive(job.lua, err, t_entered);
         }
         None
     } else {
@@ -111,14 +82,13 @@ fn drive_script_body(
     let calls = super::call_stats::take_script_call_stats();
     let (setup_us, call_wall_us, teardown_us) = super::phase_stats::take_eval_span();
     ScriptDrive {
-        lua,
+        lua: job.lua,
         result: Ok(ScriptBody {
             value,
             pending,
             t_lua_done,
             t_prep_done,
             t_local_done: Instant::now(),
-            io,
         }),
         io,
         calls,
@@ -129,28 +99,18 @@ fn drive_script_body(
     }
 }
 
-fn prepare_script(
-    lua: &mlua::Lua,
-    storage: &Arc<dyn KvStorage>,
-    in_flight: &Arc<InFlightBuffer>,
-    timeout: Duration,
-    db: usize,
-    sha1: &str,
-    script: &str,
-    keys: &[Bytes],
-    argv: &[Bytes],
-) -> Result<(LuaValue, Instant, Instant, Vec<(Vec<u8>, WriteOp)>)> {
-    let declared = Arc::new(DeclaredKeys::new(keys));
-    let txn = ScriptTransaction::with_in_flight(db, Some(Arc::clone(in_flight)));
+fn prepare_script(lua: &mlua::Lua, job: &ScriptJob) -> Result<PreparedScript> {
+    let declared = Arc::new(DeclaredKeys::new(&job.keys));
+    let txn = ScriptTransaction::with_in_flight(job.db, Some(Arc::clone(&job.in_flight)));
     let args = ScriptArgs {
-        sha1,
-        script,
-        keys,
-        argv,
+        sha1: &job.sha1,
+        script: &job.script,
+        keys: &job.keys,
+        argv: &job.argv,
     };
-    let (value, txn) = ScriptCommands::eval_lua_func(lua, timeout, &args, txn, declared)?;
+    let (value, txn) = ScriptCommands::eval_lua_func(lua, job.timeout, &args, txn, declared)?;
     let t_lua_done = Instant::now();
-    let batch_ops = txn.prepare_batch_ops_owned(storage.script_io())?;
+    let batch_ops = txn.prepare_batch_ops_owned(job.storage.script_io())?;
     Ok((value, t_lua_done, Instant::now(), batch_ops))
 }
 
@@ -170,27 +130,20 @@ fn failed_drive(lua: mlua::Lua, err: Error, t_entered: Instant) -> ScriptDrive {
     }
 }
 
-fn commit_local_batch(
-    storage: &Arc<dyn KvStorage>,
-    in_flight: &InFlightBuffer,
-    db: usize,
-    batch_ops: Vec<(Vec<u8>, WriteOp)>,
-    seg_id: usize,
-    slot_idx: usize,
-) -> Result<()> {
+fn commit_local_batch(job: &ScriptJob, batch_ops: Vec<(Vec<u8>, WriteOp)>) -> Result<()> {
     if batch_ops.is_empty() {
-        SEG_TRACKER.on_enqueued(slot_idx);
-        SEG_TRACKER.on_committed(seg_id, slot_idx);
+        SEG_TRACKER.on_enqueued(job.slot_idx);
+        SEG_TRACKER.on_committed(job.seg_id, job.slot_idx);
         return Ok(());
     }
-    let (seq, encoded) = in_flight.insert_batch(db, &batch_ops);
-    if let Err(err) = storage.script_io().write_batch(db, batch_ops) {
-        rollback_inserted(in_flight, Some((seq, encoded)));
+    let (seq, encoded) = job.in_flight.insert_batch(job.db, &batch_ops);
+    if let Err(err) = job.storage.script_io().write_batch(job.db, batch_ops) {
+        rollback_inserted(&job.in_flight, Some((seq, encoded)));
         return Err(err);
     }
-    in_flight.remove_encoded(&encoded, seq);
-    SEG_TRACKER.on_enqueued(slot_idx);
-    SEG_TRACKER.on_committed(seg_id, slot_idx);
+    job.in_flight.remove_encoded(&encoded, seq);
+    SEG_TRACKER.on_enqueued(job.slot_idx);
+    SEG_TRACKER.on_committed(job.seg_id, job.slot_idx);
     Ok(())
 }
 
