@@ -1,6 +1,5 @@
-# syntax=docker/dockerfile:1
 # Multi-stage build: compile aikv with the GitHub main aidb dependency, ship minimal runtime.
-FROM rust:bookworm@sha256:e536cf316987faedfe8ae120f83b70c7df0068fdb4fc9efcce55c71a625001d5 AS builder
+FROM --platform=linux/amd64 rust:1.98-bookworm AS builder
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -19,7 +18,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --locked --release --features cluster,monitoring,compression \
     && cp /src/aikv/target/release/aikv /usr/local/bin/aikv
 
-FROM debian:bookworm-slim AS runtime
+FROM --platform=linux/amd64 debian:bookworm-slim AS runtime
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \

@@ -13,7 +13,6 @@ use super::parse_int;
 // ---------------------------------------------------------------------------
 // CLUSTER ADDSLOTS
 // ---------------------------------------------------------------------------
-#[tracing::instrument(level = "debug", name = "cmd_cluster_add_slots", skip_all)]
 pub async fn cluster_add_slots(
     slots: &[u16],
     target_node_id: Option<u64>,
@@ -100,7 +99,6 @@ pub async fn cluster_add_slots(
 // ---------------------------------------------------------------------------
 // CLUSTER DELSLOTS
 // ---------------------------------------------------------------------------
-#[tracing::instrument(level = "debug", name = "cmd_cluster_del_slots", skip_all)]
 pub async fn cluster_del_slots(slots: &[u16]) -> Result<String, String> {
     let mgr = CLUSTER_STATE_MGR
         .get()
@@ -117,7 +115,6 @@ pub async fn cluster_del_slots(slots: &[u16]) -> Result<String, String> {
 // ---------------------------------------------------------------------------
 // CLUSTER SETSLOT
 // ---------------------------------------------------------------------------
-#[tracing::instrument(level = "debug", name = "cmd_cluster_set_slot", skip_all)]
 pub async fn cluster_set_slot(
     slot: u16,
     sub: &str,

@@ -81,8 +81,8 @@ flowchart TD
 ### 容器化部署配置
 
 `deploy/aikv.example.toml` 是单机基线模板, 不包含 `[cluster]` 段.
-`up-single.sh` 将它复制到 `deploy/.runtime/single/aikv.toml` 后挂载到容器;
-`up-cluster.sh` 为 `node1` 至 `node6` 分别复制模板并追加 `[cluster]`, 写入
+`aikv-single.sh up` 将它复制到 `deploy/.runtime/single/aikv.toml` 后挂载到容器;
+`aikv-cluster.sh up` 为 `node1` 至 `node6` 分别复制模板并追加 `[cluster]`, 写入
 唯一的 `node_id`、Docker service RPC 地址、宿主机 client 地址和
 `cluster_data_port_offset = 10000`.
 
@@ -94,8 +94,8 @@ MultiRaft 端口依次为 `26379`, `26380`, `26381`, `27379`, `27380`, `27381`.
 集群数据卷为 `aikv1-data` 至 `aikv6-data`. 容器内每个节点的监听端口与其
 宿主机映射端口一致. 集群配置的 `announce_mode = "fixed"` 默认公布
 `127.0.0.1:<宿主机 client 端口>`; 本机客户端应使用 `redis-cli -c -p 6379`
-跟随 `MOVED` 重定向. 远程访问时由 `up-cluster.sh` 的 `AIKV_ANNOUNCE_IP`
-覆盖公布地址, 并由 Compose 的 `AIKV_BIND_IP` (默认 `127.0.0.1`) 控制宿主机
+跟随 `MOVED` 重定向. 远程访问时由 `aikv-cluster.sh up -a/--announce` 覆盖公布地址,
+并由 `-b/--bind` (默认 `127.0.0.1`, 环境变量 `AIKV_BIND_IP`) 控制宿主机
 端口绑定; 详见 [deployment.md § 容器化部署](../deployment.md).
 
 ---
@@ -108,6 +108,9 @@ MultiRaft 端口依次为 `26379`, `26380`, `26381`, `27379`, `27380`, `27381`.
 | :--- | :--- | :--- |
 | `server.bind` | `AIKV_BIND` | `--bind` |
 | `server.max_clients` | `AIKV_MAX_CLIENTS` | `--max-clients` |
+| `server.script_worker_threads` | `AIKV_SCRIPT_WORKER_THREADS` | (仅 env/TOML) |
+
+未配置 `server.script_worker_threads` 时, 取 `available_parallelism` 并夹到 2..=16; 探测失败为 8. 显式 `0` 使配置加载失败. 大于等于 1 的显式值不再夹取. 多线程运行时上 `EVAL` / `EVALSHA` 在这些线程里执行.
 | `engine.kind` | `AIKV_ENGINE` | `--engine` |
 | `engine.data_dir` | `AIKV_DATA_DIR` | `--data-dir` |
 | `engine.sync_wal` | `AIKV_SYNC_WAL` | `--sync-wal` |
@@ -119,6 +122,7 @@ MultiRaft 端口依次为 `26379`, `26380`, `26381`, `27379`, `27380`, `27381`.
 | `observability.otlp_endpoint` | `AIKV_OTLP_ENDPOINT` | (仅 env/TOML) |
 | `observability.otel_service_name` | `AIKV_OTEL_SERVICE_NAME` | (仅 env/TOML) |
 | `observability.otel_sample_ratio` | `AIKV_OTEL_SAMPLE_RATIO` | (仅 env/TOML) |
+| `observability.log_level` | `AIKV_LOG_LEVEL` | `--log-level` |
 | `observability.host_label` | `AIKV_HOST_LABEL` | (仅 env/TOML) |
 | `observability.deployment_env` | `AIKV_DEPLOYMENT_ENV` | (仅 env/TOML) |
 | `cluster.node_id` | `AIKV_CLUSTER_NODE_ID` | `--cluster-node-id` |
@@ -141,7 +145,7 @@ MultiRaft 端口依次为 `26379`, `26380`, `26381`, `27379`, `27380`, `27381`.
 
 | 变量 | 作用 | 与 AIKV_* 关系 |
 | :--- | :--- | :--- |
-| `RUST_LOG` | tracing 级别 | 仅 env, 不参与四层 merge |
+| `RUST_LOG` | 不再决定本进程过滤级别 | 级别走 `observability.log_level` / `AIKV_LOG_LEVEL` / `--log-level`, 默认 `info` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP 端点 | 优先于 `AIKV_OTLP_ENDPOINT` |
 | `OTEL_SERVICE_NAME` | 服务名 | 优先于 `AIKV_OTEL_SERVICE_NAME` |
 | `OTEL_DEPLOYMENT_ENVIRONMENT` | 部署环境 | 优先于 `AIKV_DEPLOYMENT_ENV` |
@@ -232,7 +236,8 @@ pub fn resolve_from_parts(
 | :--- | :--- | :--- |
 | `UnknownAidbPreset { raw }` | 非法 preset 字符串 | 回退 `default` |
 | `UnknownAnnounceMode { raw }` | 非法 announce_mode | 回退 `unknown` |
-| `InvalidOtelSampleRatio { raw }` | 非 [0,1] 有限值 | 回退 `1.0` |
+| `InvalidOtelSampleRatio { raw }` | 非 [0,1] 有限值 | 回退 `0.0` |
+| `InvalidLogLevel { raw }` | 认不出的日志级别 | 回退 `info` |
 | `ClusterSectionIgnored` | 无 cluster feature 但 TOML 含 `[cluster]` | 忽略该段 |
 | `PartialClusterConfig` | 仅配 `node_id` 或 `rpc_addr` 其一 | 退化为单机 |
 | `MemoryEngineProductionHint` | `engine=memory` | 提示生产慎用 |

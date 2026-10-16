@@ -8,7 +8,6 @@ use std::sync::Arc;
 /// 从 MetaRaft 同步本地 leader 路由缓存, 并更新 CLUSTER INFO gossip metrics.
 /// 不发送 Redis cluster bus PING/PONG; 成员与故障以 MetaRaft/Raft 为准.
 /// `CLUSTER NODES` 直接读 MetaRaft (见 `cluster_nodes()`).
-#[tracing::instrument(level = "debug", name = "gossip_tick", skip_all)]
 pub fn start_background_refresh(
     state: Arc<crate::cluster::state::ClusterStateManager>,
     interval_secs: u64,

@@ -3,7 +3,10 @@ use bytes::Bytes;
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::helpers::{assert_err_contains, assert_int, assert_nil, b, router, router_with_shared};
+use super::helpers::{
+    assert_err_contains, assert_int, assert_nil, b, router, router_with_script_workers,
+    router_with_shared,
+};
 use aikv::command::KeyLock;
 
 #[tokio::test]
@@ -72,6 +75,67 @@ async fn test_script_numkeys_mismatch() {
 
 #[tokio::test]
 async fn test_script_eval_get_set() {
+    let r = router();
+    let mut db = 0;
+    let script = r#"
+    redis.call('SET', KEYS[1], ARGV[1])
+    return redis.call('GET', KEYS[1])
+  "#;
+    let resp = r
+        .execute("EVAL", &[b(script), b("1"), b("k"), b("v")], &mut db)
+        .await
+        .unwrap();
+    assert_eq!(resp, RespValue::BulkString(Some(b("v"))));
+}
+
+#[tokio::test]
+async fn test_script_timeout() {
+    let r = router().with_script_timeout(Duration::from_millis(200));
+    let mut db = 0;
+    let err = r
+        .execute("EVAL", &[b("while true do end"), b("0")], &mut db)
+        .await
+        .unwrap_err();
+    assert_err_contains(err, "Script timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_same_key_incr_serialized_on_one_script_thread() {
+    let r = Arc::new(router_with_script_workers(1));
+    let script = "return redis.call('INCR', KEYS[1])";
+    let first = {
+        let r = Arc::clone(&r);
+        tokio::spawn(async move {
+            r.execute("EVAL", &[b(script), b("1"), b("k")], &mut 0)
+                .await
+                .unwrap()
+        })
+    };
+    let second = {
+        let r = Arc::clone(&r);
+        tokio::spawn(async move {
+            r.execute("EVAL", &[b(script), b("1"), b("k")], &mut 0)
+                .await
+                .unwrap()
+        })
+    };
+    let mut values = vec![
+        integer_of(first.await.unwrap()),
+        integer_of(second.await.unwrap()),
+    ];
+    values.sort();
+    assert_eq!(values, vec![1, 2]);
+}
+
+fn integer_of(resp: RespValue) -> i64 {
+    match resp {
+        RespValue::Integer(n) => n,
+        other => panic!("expected integer, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_script_eval_get_set_on_worker_thread() {
     let r = router();
     let mut db = 0;
     let script = r#"
@@ -221,6 +285,28 @@ async fn test_evalsha_loaded() {
         .await
         .unwrap();
     assert_eq!(resp, RespValue::BulkString(Some(b("hello"))));
+}
+
+#[tokio::test]
+async fn test_eval_caches_script_for_evalsha() {
+    let r = router();
+    let mut db = 0;
+    let eval_resp = r
+        .execute("EVAL", &[b("return 'cached_by_eval'"), b("0")], &mut db)
+        .await
+        .unwrap();
+    assert_eq!(eval_resp, RespValue::BulkString(Some(b("cached_by_eval"))));
+
+    use sha1::{Digest, Sha1};
+    let mut hasher = Sha1::new();
+    hasher.update(b"return 'cached_by_eval'");
+    let sha = format!("{:x}", hasher.finalize());
+
+    let resp = r
+        .execute("EVALSHA", &[Bytes::from(sha), b("0")], &mut db)
+        .await
+        .unwrap();
+    assert_eq!(resp, RespValue::BulkString(Some(b("cached_by_eval"))));
 }
 
 #[tokio::test]
@@ -850,4 +936,59 @@ async fn test_script_json_read_own_writes() {
         resp,
         RespValue::BulkString(Some(Bytes::from_static(br#"{"a":2}"#)))
     );
+}
+
+#[tokio::test]
+async fn test_script_hash_tag_dynamic_keys_and_new_commands() {
+    let r = router();
+    let mut db = 0;
+    let script = r#"
+        local tag_prefix = KEYS[1]
+        local zkey = tag_prefix .. ':zset'
+        local hkey = tag_prefix .. ':hash'
+        redis.call('ZADD', zkey, 10, 'm10', 20, 'm20', 30, 'm30')
+        local rev = redis.call('ZREVRANGE', zkey, 0, 1)
+        local range_score = redis.call('ZRANGEBYSCORE', zkey, 15, 35)
+        local rev_score = redis.call('ZREVRANGEBYSCORE', zkey, 25, 5, 'LIMIT', 0, 1)
+        redis.call('HSETNX', hkey, 'f1', 'v1')
+        local nx2 = redis.call('HSETNX', hkey, 'f1', 'v2')
+        return {rev, range_score, rev_score, nx2}
+    "#;
+    let resp = r
+        .execute("EVAL", &[b(script), b("1"), b("prefix:{user1}")], &mut db)
+        .await
+        .unwrap();
+    if let RespValue::Array(Some(arr)) = resp {
+        assert_eq!(arr.len(), 4);
+        assert_eq!(arr[3], RespValue::Integer(0));
+    } else {
+        panic!("expected array response");
+    }
+}
+
+#[tokio::test]
+async fn test_script_zrevrangebyscore_limit_0_1_precision() {
+    let r = router();
+    let mut db = 0;
+    let script = r#"
+        local k = KEYS[1]
+        redis.call('ZADD', k, 100, 'seg100', 200, 'seg200', 300, 'seg300')
+        local r1 = redis.call('ZREVRANGEBYSCORE', k, 250, 0, 'LIMIT', 0, 1)
+        local r2 = redis.call('ZREVRANGEBYSCORE', k, 300, 0, 'LIMIT', 0, 1)
+        local r3 = redis.call('ZREVRANGEBYSCORE', k, 99, 0, 'LIMIT', 0, 1)
+        local r4 = redis.call('ZREVRANGEBYSCORE', k, '(200', 0, 'LIMIT', 0, 1)
+        return {r1[1], r2[1], #r3, r4[1]}
+    "#;
+    let resp = r
+        .execute("EVAL", &[b(script), b("1"), b("test:{zset}")], &mut db)
+        .await
+        .unwrap();
+    if let RespValue::Array(Some(arr)) = resp {
+        assert_eq!(arr[0], RespValue::BulkString(Some(b("seg200"))));
+        assert_eq!(arr[1], RespValue::BulkString(Some(b("seg300"))));
+        assert_eq!(arr[2], RespValue::Integer(0));
+        assert_eq!(arr[3], RespValue::BulkString(Some(b("seg100"))));
+    } else {
+        panic!("expected array response: {resp:?}");
+    }
 }

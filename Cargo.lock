@@ -14,7 +14,7 @@ dependencies = [
 [[package]]
 name = "aidb"
 version = "1.0.0"
-source = "git+https://github.com/wiqun/AiDb.git?branch=main#946347b3013046987ac5f101f33958f4aefbc7c3"
+source = "git+https://github.com/wiqun/AiDb.git?rev=21c0d123997217a246eee77700b30c6957917191#21c0d123997217a246eee77700b30c6957917191"
 dependencies = [
  "async-trait",
  "bytes",
@@ -61,6 +61,7 @@ dependencies = [
  "crc32fast",
  "criterion",
  "dashmap",
+ "futures-util",
  "http-body-util",
  "hyper",
  "hyper-util",

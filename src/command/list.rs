@@ -29,7 +29,6 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use tokio::sync::oneshot;
-use tracing::instrument;
 
 use crate::command::blocking::{self, BlockedClientGuard, BlockingRegistry};
 use crate::command::router::{self, KeyLock};
@@ -74,7 +73,6 @@ impl ListCommands {
         }
     }
 
-    #[instrument(level = "debug", name = "cmd_list", skip(self, args), fields(cmd.name = "LPUSH"))]
     pub async fn lpush(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_min_args("LPUSH", args, 2)?;
         self.push(db, &args[0], &args[1..], true).await
@@ -105,7 +103,7 @@ impl ListCommands {
             }
         }
         let len = list.len() as i64;
-        self.storage.set_typed(db, key, stored).await?;
+        self.storage.rewrite_stored(db, key, stored).await?;
         BlockingRegistry::global().notify(key, RespValue::SimpleString("OK".into()));
         Ok(router::integer(len))
     }
@@ -159,7 +157,7 @@ impl ListCommands {
         if list.is_empty() {
             self.storage.delete(db, key).await?;
         } else {
-            self.storage.set_typed(db, key, stored).await?;
+            self.storage.rewrite_stored(db, key, stored).await?;
         }
         if count == 1 && popped.len() == 1 {
             return Ok(router::bulk(popped.into_iter().next().unwrap()));
@@ -221,7 +219,7 @@ impl ListCommands {
             return Err(Error::Command("ERR index out of range".into()));
         };
         *slot = args[2].to_vec();
-        self.storage.set_typed(db, &args[0], stored).await?;
+        self.storage.rewrite_stored(db, &args[0], stored).await?;
         Ok(router::ok())
     }
 
@@ -246,12 +244,11 @@ impl ListCommands {
         if list.is_empty() {
             self.storage.delete(db, &args[0]).await?;
         } else {
-            self.storage.set_typed(db, &args[0], stored).await?;
+            self.storage.rewrite_stored(db, &args[0], stored).await?;
         }
         Ok(router::integer(removed as i64))
     }
 
-    #[instrument(level = "debug", name = "cmd_list", skip(self, args), fields(cmd.name = "LINSERT"))]
     pub async fn linsert(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_args("LINSERT", args, 4)?;
         let key = &args[0];
@@ -277,11 +274,10 @@ impl ListCommands {
         let insert_at = if before { idx } else { idx + 1 };
         list.insert(insert_at, element);
         let len = list.len() as i64;
-        self.storage.set_typed(db, key, stored).await?;
+        self.storage.rewrite_stored(db, key, stored).await?;
         Ok(router::integer(len))
     }
 
-    #[instrument(level = "debug", name = "cmd_list", skip(self, args), fields(cmd.name = "LMOVE"))]
     pub async fn lmove(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_args("LMOVE", args, 4)?;
         let source = &args[0];
@@ -320,14 +316,14 @@ impl ListCommands {
             } else {
                 src_list.push_back(element.clone());
             }
-            self.storage.set_typed(db, source, src_stored).await?;
+            self.storage.rewrite_stored(db, source, src_stored).await?;
             return Ok(router::bulk(element));
         }
 
         if src_list.is_empty() {
             self.storage.delete(db, source).await?;
         } else {
-            self.storage.set_typed(db, source, src_stored).await?;
+            self.storage.rewrite_stored(db, source, src_stored).await?;
         }
 
         let mut dest_stored = match self.storage.get_typed(db, destination).await? {
@@ -340,11 +336,12 @@ impl ListCommands {
         } else {
             dest_list.push_back(element.clone());
         }
-        self.storage.set_typed(db, destination, dest_stored).await?;
+        self.storage
+            .rewrite_stored(db, destination, dest_stored)
+            .await?;
         Ok(router::bulk(element))
     }
 
-    #[instrument(level = "debug", name = "cmd_list", skip(self, args), fields(cmd.name = "LPOS"))]
     pub async fn lpos(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_min_args("LPOS", args, 2)?;
         let key = &args[0];
@@ -386,7 +383,7 @@ impl ListCommands {
         if list.is_empty() {
             self.storage.delete(db, &args[0]).await?;
         } else {
-            self.storage.set_typed(db, &args[0], stored).await?;
+            self.storage.rewrite_stored(db, &args[0], stored).await?;
         }
         Ok(router::ok())
     }
@@ -449,7 +446,7 @@ impl ListCommands {
             if list.is_empty() {
                 self.storage.delete(db, key).await?;
             } else {
-                self.storage.set_typed(db, key, stored).await?;
+                self.storage.rewrite_stored(db, key, stored).await?;
             }
             return Ok(Some(RespValue::Array(Some(vec![
                 RespValue::BulkString(Some(key.clone())),

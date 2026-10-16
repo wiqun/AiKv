@@ -6,26 +6,17 @@ use crate::error::{Error, Result};
 use crate::protocol::RespValue;
 use crate::server::ServerMetrics;
 
-pub(super) fn record_keyspace_lookup(metrics: &Option<Arc<ServerMetrics>>, hit: bool) {
-    let Some(metrics) = metrics else {
-        return;
-    };
-    if hit {
-        metrics.on_keyspace_hit();
-    } else {
-        metrics.on_keyspace_miss();
-    }
-}
-
 pub(super) fn record_command_outcome(
     metrics: &Option<Arc<ServerMetrics>>,
     cmd: &str,
     result: &Result<RespValue>,
+    duration_us: u64,
 ) {
     let Some(metrics) = metrics else {
         return;
     };
-    metrics.on_command(cmd, result.is_ok());
+    let name = crate::command::canonical_command(cmd);
+    metrics.on_command_done(name, result.is_ok(), duration_us);
     if let Err(err) = result {
         if let Some(msg) = error_message_for_stats(err) {
             metrics.on_error_stat(msg);

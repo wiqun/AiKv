@@ -110,6 +110,7 @@ impl<'a> InfoRenderer<'a> {
             "keysizes" => self.render_keysizes().await,
             "hotkeys" => self.render_hotkeys(),
             "modules" => self.render_modules(),
+            "storage" => self.render_storage(),
             _ => String::new(),
         }
     }
@@ -125,6 +126,7 @@ impl<'a> InfoRenderer<'a> {
         append_section(&mut out, &self.render_cpu());
         append_section(&mut out, &self.render_cluster_section());
         append_section(&mut out, &self.render_keyspace().await);
+        append_section(&mut out, &self.render_storage());
         out
     }
 
@@ -498,14 +500,12 @@ impl<'a> InfoRenderer<'a> {
         use crate::storage::types::DB_COUNT;
 
         let mut out = String::from("# Keyspace\r\n");
+        let estimate = self.storage.len(0).await.unwrap_or(0);
+        let _ = write!(out, "keys_estimate:{estimate}\r\n");
         let db_count = self.storage.db_count().await.unwrap_or(0).min(DB_COUNT);
         for db in 0..db_count {
-            if let Ok(stats) = self.storage.keyspace_stats(db).await {
-                let _ = write!(
-                    out,
-                    "db{db}:keys={},expires={},avg_ttl={},subexpiry=0\r\n",
-                    stats.keys, stats.expires, stats.avg_ttl
-                );
+            if let Ok(expires) = self.storage.expires(db).await {
+                let _ = write!(out, "db{db}:expires={expires}\r\n");
             }
         }
         out
@@ -551,7 +551,12 @@ impl<'a> InfoRenderer<'a> {
     }
 
     fn render_threads(&self) -> String {
-        String::from("# Threads\r\n")
+        let mut out = String::from("# Threads\r\n");
+        let (threads, vol, nonvol) = self.shared.metrics.get_threads_and_context_switches();
+        append_kv_u64(&mut out, "process_threads", threads);
+        append_kv_u64(&mut out, "context_switches_voluntary", vol);
+        append_kv_u64(&mut out, "context_switches_nonvoluntary", nonvol);
+        out
     }
 
     fn render_latencystats(&self) -> String {
@@ -593,6 +598,128 @@ impl<'a> InfoRenderer<'a> {
 
     fn render_modules(&self) -> String {
         "# Modules\r\n".to_string()
+    }
+
+    fn render_storage(&self) -> String {
+        let mut out = String::from("# Storage\r\n");
+        if let Some(stats) = self.storage.aidb_statistics() {
+            append_kv(&mut out, "storage_engine", "aidb");
+            let snap = stats.snapshot();
+            append_kv_u64(&mut out, "aidb_block_cache_hits", snap.block_cache_hits);
+            append_kv_u64(&mut out, "aidb_block_cache_misses", snap.block_cache_misses);
+            append_kv_u64(&mut out, "aidb_block_cache_size", snap.block_cache_size);
+            append_kv_u64(
+                &mut out,
+                "aidb_block_cache_capacity",
+                snap.block_cache_capacity,
+            );
+            append_kv_u64(
+                &mut out,
+                "aidb_memtable_active_bytes",
+                snap.memtable_size_bytes[0],
+            );
+            append_kv_u64(
+                &mut out,
+                "aidb_memtable_frozen_bytes",
+                snap.memtable_size_bytes[1],
+            );
+            append_kv_u64(&mut out, "aidb_wal_size_bytes", snap.wal_size_bytes);
+            append_kv_u64(&mut out, "aidb_sequence", snap.sequence);
+            append_kv_u64(&mut out, "aidb_flush_total", snap.flush_total);
+            append_kv_u64(
+                &mut out,
+                "aidb_bloom_false_positive",
+                snap.bloom_false_positive,
+            );
+            let sst_count: u64 = snap.sstable_count.iter().sum();
+            append_kv_u64(&mut out, "aidb_sstable_count_total", sst_count);
+            let sst_size: u64 = snap.sstable_size_bytes.iter().sum();
+            append_kv_u64(&mut out, "aidb_sstable_size_bytes_total", sst_size);
+            append_kv_u64(&mut out, "aidb_live_bytes", snap.live_bytes);
+
+            // 写放大 (WA) 指标
+            append_kv_u64(&mut out, "aidb_wal_written_bytes", snap.wal_written_bytes);
+            append_kv_u64(
+                &mut out,
+                "aidb_flush_written_bytes",
+                snap.flush_written_bytes,
+            );
+            append_kv_u64(
+                &mut out,
+                "aidb_compaction_written_bytes",
+                snap.compaction_written_bytes,
+            );
+            append_kv_u64(
+                &mut out,
+                "aidb_logical_write_bytes",
+                snap.logical_write_bytes,
+            );
+
+            // 读放大 (RA) 指标
+            append_kv_u64(&mut out, "aidb_block_read_bytes", snap.block_read_bytes);
+            append_kv_u64(&mut out, "aidb_logical_read_bytes", snap.logical_read_bytes);
+            // 经典读放大 RA 口径: block 触碰次数 (含 BlockCache 命中) / 逻辑读次数
+            append_kv_u64(&mut out, "aidb_block_seek_count", snap.block_seek_count);
+            append_kv_u64(&mut out, "aidb_logical_read_count", snap.logical_read_count);
+            append_kv_u64(
+                &mut out,
+                "aidb_compaction_read_bytes",
+                snap.compaction_read_bytes,
+            );
+            append_kv_u64(&mut out, "aidb_bloom_useful", snap.bloom_useful);
+
+            // Compaction 积压
+            append_kv_u64(
+                &mut out,
+                "aidb_compaction_pending_bytes",
+                snap.compaction_pending_bytes,
+            );
+
+            // 写停顿 (Write Stall) 汇总指标
+            let stall_requests: u64 = snap.write_stall_requests.iter().sum();
+            append_kv_u64(&mut out, "aidb_write_stall_requests", stall_requests);
+            let stall_duration_us: u64 = snap.write_stall_duration_sum_us.iter().sum();
+            append_kv_u64(&mut out, "aidb_write_stall_duration_us", stall_duration_us);
+            append_kv_u64(
+                &mut out,
+                "aidb_write_stall_max_duration_us",
+                snap.write_stall_max_duration_us,
+            );
+
+            // 冷启动恢复 (Recovery) 指标
+            append_kv_u64(
+                &mut out,
+                "aidb_recovery_wal_replay_duration_us",
+                snap.recovery_wal_replay_duration_us,
+            );
+            append_kv_u64(
+                &mut out,
+                "aidb_recovery_wal_replayed_bytes",
+                snap.recovery_wal_replayed_bytes,
+            );
+            append_kv_u64(
+                &mut out,
+                "aidb_recovery_manifest_duration_us",
+                snap.recovery_manifest_duration_us,
+            );
+            append_kv_u64(
+                &mut out,
+                "aidb_recovery_sstable_open_duration_us",
+                snap.recovery_sstable_open_duration_us,
+            );
+            append_kv_u64(
+                &mut out,
+                "aikv_recovery_rebuild_counters_duration_us",
+                self.storage.rebuild_counters_duration_us(),
+            );
+        } else {
+            let engine = match self.shared.engine_kind {
+                StorageEngineKind::Memory => "memory",
+                StorageEngineKind::AiDb => "aidb",
+            };
+            append_kv(&mut out, "storage_engine", engine);
+        }
+        out
     }
 }
 

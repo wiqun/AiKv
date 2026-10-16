@@ -1,0 +1,50 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+processors:
+  # 容器内存上限 128M: 在 80% 处软限流并预留 25M 尖峰, 超限时反压/丢弃以自我保护
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 100
+    spike_limit_mib: 25
+  batch:
+    timeout: 1s
+    send_batch_size: 1024
+  transform/strip_unit_one:
+    metric_statements:
+      - context: metric
+        statements:
+          - set(metric.unit, "") where metric.unit == "1"
+
+exporters:
+  debug: {}
+  prometheus_remote_write:
+    endpoint: http://prometheus:9090/api/v1/write
+    tls:
+      insecure: true
+    resource_constant_labels:
+      included: ["*"]
+
+service:
+  extensions: [health_check]
+  telemetry:
+    logs:
+      level: info
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, transform/strip_unit_one, batch]
+      exporters: [prometheus_remote_write]
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [debug]

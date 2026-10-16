@@ -12,6 +12,8 @@
 
 **ClusterRouter**: 在集群模式下, 根据 key 的 CRC16 哈希计算 slot, 将请求路由到正确的节点或返回 MOVED 错误.
 
+**脚本线程池**: 多线程运行时上执行 `EVAL` / `EVALSHA` 的线程池, 与 tokio worker 和 tokio 阻塞线程池分开. 脚本不占住 tokio worker.
+
 ## 存储层
 
 **KvStorage**: 存储抽象接口, 统一内存和持久化两种后端.
@@ -24,18 +26,15 @@
 
 **ValueType**: Redis 数据类型的枚举 (String, List, Set, ZSet, Hash 等).
 
-**DbKeyCounters**: 内存原子键计数器 (`[AtomicU64; 16]`), 跟踪各逻辑 DB 的顶级用户 key 总数, 提供 $O(1)$ 的 `DBSIZE` 与 `db_key_counts()` 统计. 真源在 aikv 侧; 不由 aidb 持久化.
+**大 ZSet**: 成员数不超过 64 时仍是一整块 `ValueType::ZSet`. 超过后用户 key 只留 `CollectionHeader`, 每个 member 和按 score 排序的索引各写一条 subkey. 一次 `ZADD` 提交变动的 member, 旧 score 索引, 新 score 索引和 header 计数. 脚本范围读取先叠加上一笔尚未提交的 member subkey: 在途删除不再出现, 在途写入可见, 当前脚本自己的增量盖过这层. `MemoryEngine` 不拆 subkey.
 
-**回传法 (WriteStats)**: 集群 Plain / 迁移 PUT / `write_batch` / `apply_writes` **禁止** propose 前 `get_local` / `exists` 判定 insert; 存在性由 aidb apply / `DB::put` 融合判定, 经 `Response::WriteStats` 回传 per-op `effects` 后由 aikv 更新 `DbKeyCounters`. 仅支持同版本滚动 (消费者对数据写成功响应 fail-fast 接受 `WriteStats`, 不吞意外变体). DELETE Plain 前置 `get_local` 短路本期保留. Batcher 同 key last-write-wins reverse-dedup; 丢掉的中间 op ack `false`. SET/DEL 的 watch meta 仅在本节点有 WATCH 时与用户写走 `submit_write_ops` 同批 propose (`#83`).
+**ExpiresCounters**: 各逻辑 DB 的进程内 TTL 写入计数. 成功写入 `expires_at = Some` 时加 1, 包括没有读过旧值的覆盖写. 这次调用已经看到旧 TTL, 或惰性过期删掉带 TTL 的值时饱和减. compaction 不改它. 重启从 0 开始, 不扫库补存量.
 
-**ExpireDecrGate**: 过期 / Compaction 与热路径重生之间的单飞门闩. 写成功后无论 `inserted` 真假均须 `expire_gate.release` (覆盖写也要释放), 避免门闩卡住无法再次 `decr`.
+**estimate_entry_count**: 引擎条目估值, 等于已打开 SSTable 的 `num_entries` 与 MemTable `entry_count` 之和. 集群实现把本地各 group 的估值相加, 不扫描. `MemoryEngine` 没有 SST, 估值是全部逻辑 DB 上未过期用户 key 之和.
 
-**键计数与过期语义** (三层一致):
-1. **热路径**: 计数含尚未惰性删除的过期 key (对齐 Redis `DBSIZE`); 主动删 / 覆盖写 / 读触发惰性删成功时精确 `decr`; SET 成功按 `inserted` `incr`, 且始终 `expire_gate.release`.
-2. **冷启动 Rebuild**: `open` 时按「当前未过期存活逻辑 key」扫描填充, 并可能顺带 lazy 清理过期 key.
-3. **Compaction GC**: listener 持 `Weak<DB>`; Version 安装后仅在 `get==None` 且 `ExpireDecrGate` 单飞成功时 `decr`; 惰性删/`DEL` 同样需赢得门闩并持有至 `set_typed` / `write_batch` Put 重生, 避免 tombstone 被再次 notify.
+**DBSIZE**: 返回引擎条目估值, 不随 `SELECT` 改变. `SET NX` / `XX`, `DEL` 返回值和 `EXISTS` 仍是精确命令结果.
 
-**Rebuild Counters**: 在冷启动 `open` 时对各 DB 执行一次性前缀扫描恢复键计数器, 杜绝生产重启后指标从 0 开始失真.
+**键过期语义**: `TtlExpireFilter` 在 compaction 时丢弃过期值, 且不改 `ExpiresCounters`. `KvStorage::delete` 用一次存在性读取决定返回个数.
 
 ## 集群层
 
@@ -61,4 +60,4 @@
 
 **OTLP**: OpenTelemetry Protocol, AiKv 的生产指标出口; 指标前缀为 `aikv_*`.
 
-**INFO**: Redis 兼容的 INFO 命令输出; 目标是与 Redis 8.8 的 INFO 字段对齐, 部分字段为 stub 值.
+**INFO**: Redis 兼容的 INFO 命令输出. 默认 Keyspace 只有一行 `keys_estimate`, 再加每个逻辑 DB 的 `dbN:expires`. 不输出 `keys=` 和 `avg_ttl`. `sample_avg_ttl` 是唯一会扫描并计算平均剩余 TTL 的路径, 默认 INFO 不调用它.

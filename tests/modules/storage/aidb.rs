@@ -117,11 +117,11 @@ async fn test_aidb_adapter_list_and_flushdb() {
 
         storage.set(0, b"other", b"x").await.unwrap();
         storage.clear(0).await.unwrap();
-        assert_eq!(storage.len(0).await.unwrap(), 0);
+        assert!(storage.get(0, b"other").await.unwrap().is_none());
     }
 
     let storage2 = adapter(&dir);
-    assert_eq!(storage2.len(0).await.unwrap(), 0);
+    assert!(storage2.get(0, b"other").await.unwrap().is_none());
 }
 
 #[tokio::test]

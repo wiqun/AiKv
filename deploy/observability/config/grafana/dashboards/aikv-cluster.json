@@ -1,0 +1,163 @@
+{
+  "title": "集群",
+  "uid": "aikv-cluster",
+  "description": "只有启用 Raft 时使用.",
+  "tags": ["aikv", "cluster"],
+  "timezone": "browser",
+  "editable": true,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-30m", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "rate_window",
+        "label": "窗口",
+        "type": "custom",
+        "query": "5m",
+        "description": "导出周期大于 75 秒时, 把这个窗口改成至少 4 个导出周期.",
+        "current": { "text": "5m", "value": "5m" },
+        "options": [{ "text": "5m", "value": "5m", "selected": true }]
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "table",
+      "title": "每个 group",
+      "description": "角色看 role 列. 数值 1 只表示该角色当前成立.",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "transformations": [
+        {
+          "id": "joinByField",
+          "options": { "byField": "group", "mode": "outer" }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Value": true,
+              "Value #A": true,
+              "Time": true,
+              "Time 1": true,
+              "Time 2": true,
+              "Time 3": true
+            },
+            "renameByName": {
+              "Value 1": "apply lag",
+              "Value 2": "replication lag",
+              "Value 3": "leader contact age",
+              "Value #B": "apply lag",
+              "Value #C": "replication lag",
+              "Value #D": "leader contact age"
+            }
+          }
+        }
+      ],
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "aidb_raft_role",
+          "instant": true,
+          "format": "table",
+          "legendFormat": "role"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "aidb_raft_apply_lag_entries",
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "refId": "C",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "aidb_raft_replication_lag_entries",
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "refId": "D",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "aidb_raft_leader_contact_age_seconds",
+          "instant": true,
+          "format": "table"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "L0 文件数",
+      "description": "没有 group 标签. 这是进程合计, 不按 group 分行.",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 10 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "aidb_l0_files" }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "MemTable 字节",
+      "description": "没有 group 标签. 这是进程合计, 不按 group 分行.",
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 10 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "aidb_memtable_active_bytes" }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "本周期最大停顿",
+      "description": "没有 group 标签. 这是进程合计, 不按 group 分行. 0 表示这个导出周期没有停顿.",
+      "fieldConfig": { "defaults": { "unit": "µs" } },
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 10 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "aidb_write_stall_window_max_us" }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "propose P99",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.99, sum by (le, group) (rate(aidb_propose_duration_seconds_bucket[$rate_window])))",
+          "legendFormat": "{{group}}"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "重定向",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(rate(aikv_redirects_total{type=\"moved\"}[$rate_window]))",
+          "legendFormat": "MOVED"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(rate(aikv_redirects_total{type=\"ask\"}[$rate_window]))",
+          "legendFormat": "ASK"
+        }
+      ]
+    }
+  ]
+}

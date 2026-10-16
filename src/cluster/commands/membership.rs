@@ -17,7 +17,6 @@ use super::parse_int;
 // ---------------------------------------------------------------------------
 // CLUSTER MEET
 // ---------------------------------------------------------------------------
-#[tracing::instrument(level = "debug", name = "cmd_cluster_meet", skip_all)]
 pub async fn cluster_meet(
     addr: &str,
     port: u16,
@@ -73,7 +72,6 @@ pub async fn cluster_meet(
 // ---------------------------------------------------------------------------
 // CLUSTER FORGET
 // ---------------------------------------------------------------------------
-#[tracing::instrument(level = "debug", name = "cmd_cluster_forget", skip_all)]
 pub async fn cluster_forget(hex_node_id: &str, force: bool) -> Result<String, String> {
     let mgr = CLUSTER_STATE_MGR
         .get()
@@ -166,7 +164,6 @@ pub fn save_nodes_conf(
     Ok(())
 }
 
-#[tracing::instrument(level = "debug", name = "cmd_cluster_saveconfig", skip_all)]
 pub(super) fn cluster_saveconfig() -> Result<String, String> {
     let mgr = CLUSTER_STATE_MGR
         .get()
@@ -181,7 +178,6 @@ pub(super) fn cluster_saveconfig() -> Result<String, String> {
 // ---------------------------------------------------------------------------
 // CLUSTER FAILOVER
 // ---------------------------------------------------------------------------
-#[tracing::instrument(level = "debug", name = "cmd_cluster_failover", skip_all)]
 pub async fn cluster_failover(mode: &str) -> Result<String, String> {
     let mgr = CLUSTER_STATE_MGR
         .get()
@@ -223,7 +219,6 @@ pub async fn cluster_failover(mode: &str) -> Result<String, String> {
 // 设置本节点为指定 primary 的副本 (仅元数据层面).
 // 实际的 MultiRaft 成员变更受限于 group 在本地才可操作,
 // 当前版本 replicas 不服务数据读取, 这是已知限制.
-#[tracing::instrument(level = "debug", name = "cmd_cluster_replicate", skip_all)]
 pub async fn cluster_replicate(primary_id: u64) -> Result<String, String> {
     let mgr = CLUSTER_STATE_MGR
         .get()
@@ -234,7 +229,6 @@ pub async fn cluster_replicate(primary_id: u64) -> Result<String, String> {
 // ---------------------------------------------------------------------------
 // CLUSTER REPLICAS
 // ---------------------------------------------------------------------------
-#[tracing::instrument(level = "debug", name = "cmd_cluster_replicas", skip_all)]
 pub fn cluster_replicas(node_id: u64) -> Result<Vec<String>, String> {
     let mgr = CLUSTER_STATE_MGR
         .get()

@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Loadgen 控制台</title>
+    <link rel="icon" href="/wiqun.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/app.css">
+</head>
+
+<body>
+
+    <header class="top-nav">
+        <div class="top-nav-inner">
+            <div class="brand-group">
+                <div class="brand">
+                    <img src="/wiqun.svg" width="24" height="24" alt="">
+                    Loadgen
+                </div>
+                <div class="status-divider"></div>
+                <div class="status-pills">
+                    <span id="endpoints"></span>
+                    <span id="mode_badge" class="badge">Cluster</span>
+                    <span id="state" class="badge idle">
+                        <span id="state_dot" class="dot idle"></span>
+                        <span id="state_label">未运行</span>
+                        <span id="task_info_btn" class="task-info-btn" hidden aria-label="当前任务参数">
+                            <svg viewBox="0 0 16 16" aria-hidden="true">
+                                <circle cx="8" cy="8" r="6.25" fill="none" stroke="currentColor" stroke-width="1.4"></circle>
+                                <rect x="7.25" y="4.15" width="1.5" height="5.2" rx="0.75" fill="currentColor"></rect>
+                                <circle cx="8" cy="11.4" r="0.95" fill="currentColor"></circle>
+                            </svg>
+                        </span>
+                        <button type="button" id="task_stop_btn" class="task-stop-btn" hidden aria-label="终止任务">
+                            <svg viewBox="0 0 16 16" aria-hidden="true">
+                                <path d="M4.2 4.2l7.6 7.6M11.8 4.2l-7.6 7.6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"></path>
+                            </svg>
+                        </button>
+                        <div id="task_info_pop" class="task-info-pop" hidden></div>
+                    </span>
+                </div>
+            </div>
+
+            <div class="nav-actions">
+                <span id="dirty_hint" class="dirty-hint" hidden>草稿已改 · 终止后点启动才生效</span>
+                <button id="btn_primary" class="primary" onclick="triggerPrimary()">
+                    <svg id="btn_primary_icon" width="13" height="13" viewBox="0 0 24 24" fill="currentColor">
+                        <polygon points="5 3 19 12 5 21 5 3" />
+                    </svg>
+                    <span id="btn_primary_label">启动</span>
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <main class="app-window">
+        <div class="workspace-layout">
+            <aside class="sidebar-col">
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-title">预设场景</div>
+                    </div>
+                    <div class="presets-list" id="presets_list"></div>
+                </div>
+            </aside>
+
+            <section class="main-col">
+                <div id="toast" role="status"></div>
+                <div class="top-configs-grid">
+                    <div class="card card-apple">
+                        <div class="card-header">
+                            <div class="card-title">目标与加压</div>
+                        </div>
+
+                        <div class="apple-row">
+                            <span class="apple-label">服务地址</span>
+                            <div class="apple-control">
+                                <input id="endpoint_host" type="text" value="127.0.0.1" spellcheck="false"
+                                    placeholder="IP / 主机名" style="flex:1;min-width:100px;">
+                                <span class="apple-sep">:</span>
+                                <input id="endpoint_port" type="number" min="1" max="65535" value="6379"
+                                    placeholder="端口" style="width:58px;flex-shrink:0;">
+                                <div class="custom-mode-dropdown" id="custom_mode_dropdown">
+                                    <div class="custom-mode-trigger" onclick="toggleCustomMode(event)">
+                                        <span id="mode_display_label">Cluster</span>
+                                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#94a3b8"
+                                            stroke-width="2.5">
+                                            <polyline points="6 9 12 15 18 9"></polyline>
+                                        </svg>
+                                    </div>
+                                    <div class="custom-mode-menu" id="custom_mode_menu">
+                                        <div class="custom-mode-option active" data-val="cluster"
+                                            onclick="selectCustomMode('cluster')">Cluster</div>
+                                        <div class="custom-mode-option" data-val="single"
+                                            onclick="selectCustomMode('single')">Single</div>
+                                    </div>
+                                    <select id="mode" onchange="markDirty()" style="display:none;">
+                                        <option value="cluster" selected>Cluster</option>
+                                        <option value="single">Single</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="apple-row">
+                            <span class="apple-label">速度上限</span>
+                            <div class="apple-control">
+                                <input id="target_ops" type="number" min="0" step="1000" placeholder="0 表示不限速"
+                                    style="flex:1;">
+                                <span class="apple-unit">ops/s</span>
+                            </div>
+                        </div>
+
+                        <div class="apple-row">
+                            <span class="apple-label">并发深度</span>
+                            <div class="apple-control">
+                                <span class="apple-sublabel">连接数</span>
+                                <input id="connections" type="number" min="1" max="1024" style="flex:1;">
+                                <span class="apple-sublabel" style="margin-left:6px;">pipeline</span>
+                                <input id="pipeline" type="number" min="1" max="256" style="flex:1;">
+                            </div>
+                        </div>
+
+                        <div class="apple-row">
+                            <span class="apple-label">请求超时</span>
+                            <div class="apple-control">
+                                <input id="timeout_ms" type="number" min="1" max="60000" style="flex:1;">
+                                <span class="apple-unit">毫秒 (ms)</span>
+                            </div>
+                        </div>
+
+                        <div class="apple-row">
+                            <span class="apple-label">集中单槽</span>
+                            <div class="apple-control">
+                                <input id="target_slot" type="number" min="0" max="16383"
+                                    placeholder="留空为全槽分散 (0~16383)" style="flex:1;">
+                                <span id="slot_preview" class="apple-slot-badge">全槽分散</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card card-apple">
+                        <div class="card-header">
+                            <div class="card-title">数据特征</div>
+                        </div>
+
+                        <div class="apple-row">
+                            <span class="apple-label">键名空间</span>
+                            <div class="apple-control">
+                                <span class="apple-sublabel">前缀</span>
+                                <input id="key_prefix" type="text" spellcheck="false" placeholder="kv:"
+                                    style="width:85px;flex-shrink:0;">
+                                <span class="apple-sublabel" style="margin-left:6px;">总量</span>
+                                <input id="keyspace" type="number" min="1" placeholder="1000000" style="flex:1;">
+                            </div>
+                        </div>
+
+                        <div class="apple-row">
+                            <span class="apple-label">数据大小</span>
+                            <div class="apple-control">
+                                <input id="value_size_min" type="number" min="1" placeholder="最小"
+                                    style="width:68px;text-align:center;">
+                                <span class="apple-sep">~</span>
+                                <input id="value_size_max" type="number" min="1" placeholder="最大"
+                                    style="width:68px;text-align:center;">
+                                <span class="apple-unit">bytes</span>
+                            </div>
+                        </div>
+
+                        <div class="apple-row">
+                            <span class="apple-label">键命中率</span>
+                            <div class="apple-control">
+                                <input type="range" id="hit_ratio_slider" min="0" max="1" step="0.05"
+                                    oninput="syncHitRange(this.value)">
+                                <span class="apple-badge" id="hit_ratio_display">90%</span>
+                            </div>
+                        </div>
+
+                        <div class="apple-row">
+                            <span class="apple-label">TTL 比例</span>
+                            <div class="apple-control">
+                                <input type="range" id="ttl_ratio_slider" min="0" max="1" step="0.05"
+                                    oninput="syncTtlRange(this.value)">
+                                <span class="apple-badge" id="ttl_ratio_display">10%</span>
+                            </div>
+                        </div>
+
+                        <div class="apple-row">
+                            <span class="apple-label">过期时长</span>
+                            <div class="apple-control">
+                                <input id="ttl_seconds" type="number" min="1" placeholder="60"
+                                    title="SET EX / EXPIRE 过期时长 (秒)" style="flex:1;">
+                                <span class="apple-unit">秒 (SET EX / EXPIRE)</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-title">命令占比</div>
+                    </div>
+
+                    <div class="cmd-selector-section">
+                        <div class="cmd-pills-row">
+                            <div class="cmd-pills-list" id="cmd_pills"></div>
+                            <div class="cmd-add-capsule-wrapper" id="cmd_add_container">
+                                <div class="cmd-pill add-pill" id="cmd_add_pill" onclick="startAddCmd(event)" title="添加 aikv 客户端命令">
+                                    <span>+ 添加命令</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="section-divider"></div>
+
+                    <div class="mix-control-layout">
+                        <div class="donut-chart-container" id="pie_container">
+                            <svg id="donut_svg" class="donut-svg" viewBox="0 0 420 420">
+                                <g id="donut_slices"></g>
+                                <g id="donut_labels"></g>
+                                <g id="donut_handles"></g>
+                            </svg>
+                            <div class="grafana-pie-tooltip" id="pie_tooltip">
+                                <span class="tooltip-bar" id="tooltip_bar"></span>
+                                <span class="tooltip-name" id="tooltip_name">GET</span>
+                                <span class="tooltip-val" id="tooltip_val">40%</span>
+                            </div>
+                        </div>
+
+                        <div class="mix-legend-panel">
+                            <div class="legend-list" id="legend_list"></div>
+                            <div class="legend-footer">
+                                <button type="button" class="btn-xs" onclick="splitEvenly()">均分</button>
+                                <button type="button" class="btn-xs" id="btn_fill" onclick="fillRemaining()">补齐</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </div>
+    </main>
+
+    <div id="heavy_dialog" class="modal-backdrop" hidden>
+        <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="heavy_dialog_title">
+            <div class="modal-title" id="heavy_dialog_title">这条命令比较重</div>
+            <p id="heavy_dialog_text"></p>
+            <div class="modal-note">已加入 mix，不会拦截。</div>
+            <div class="modal-actions">
+                <button type="button" class="primary" onclick="closeHeavyDialog()">知道了</button>
+            </div>
+        </div>
+    </div>
+    <script src="/app.js"></script>
+</body>
+
+</html>

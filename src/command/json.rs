@@ -23,7 +23,6 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use serde_json::{json, Value as JsonValue};
-use tracing::instrument;
 
 use crate::command::jsonpath::JsonPathEngine;
 use crate::command::router::{self, KeyLock};
@@ -75,7 +74,8 @@ impl JsonCommands {
             .await?
             .and_then(|s| s.expires_at);
         if let Some(at) = expire_at {
-            self.storage.set_with_ttl(db, key, json_bytes, at).await
+            self.storage.set_with_ttl(db, key, json_bytes, at).await?;
+            self.storage.release_seen_ttl(db).await
         } else {
             self.storage.set(db, key, json_bytes).await
         }
@@ -104,14 +104,6 @@ impl JsonCommands {
         String::from_utf8_lossy(key).into_owned()
     }
 
-    fn record_span_key(key: &[u8]) {
-        tracing::Span::current().record("key", tracing::field::display(Self::key_str(key)));
-    }
-
-    fn record_span_path(path: &str) {
-        tracing::Span::current().record("path", path);
-    }
-
     fn debug_cmd(command: &str, key: &[u8], path: Option<&str>) {
         let key = Self::key_str(key);
         match path {
@@ -128,18 +120,10 @@ impl JsonCommands {
         v.as_f64().map(|n| n.is_finite()).unwrap_or(true)
     }
 
-    #[instrument(
-    level = "debug",
-    name = "cmd_json_get",
-    skip(self, args),
-    fields(cmd.name = "JSON.GET", key = tracing::field::Empty, path = tracing::field::Empty)
-  )]
     pub async fn json_get(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_min_args("JSON.GET", args, 1)?;
         let key = &args[0];
         let path = Self::parse_path(args, 1);
-        Self::record_span_key(key);
-        Self::record_span_path(&path);
         Self::debug_cmd("get", key, Some(&path));
 
         let result = async {
@@ -161,18 +145,10 @@ impl JsonCommands {
         result
     }
 
-    #[instrument(
-    level = "debug",
-    name = "cmd_json_mget",
-    skip(self, args),
-    fields(cmd.name = "JSON.MGET", key_count = tracing::field::Empty, path = tracing::field::Empty)
-  )]
     pub async fn json_mget(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_min_args("JSON.MGET", args, 2)?;
         let path = String::from_utf8_lossy(&args[args.len() - 1]).to_string();
         let keys = &args[..args.len() - 1];
-        tracing::Span::current().record("key_count", keys.len());
-        Self::record_span_path(&path);
         Self::debug_cmd("mget", &args[0], Some(&path));
 
         let result = async {
@@ -204,18 +180,10 @@ impl JsonCommands {
         result
     }
 
-    #[instrument(
-    level = "debug",
-    name = "cmd_json_set",
-    skip(self, args),
-    fields(cmd.name = "JSON.SET", key = tracing::field::Empty, path = tracing::field::Empty)
-  )]
     pub async fn json_set(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_min_args("JSON.SET", args, 3)?;
         let key = &args[0];
         let path = String::from_utf8_lossy(&args[1]).to_string();
-        Self::record_span_key(key);
-        Self::record_span_path(&path);
         Self::debug_cmd("set", key, Some(&path));
         let value_str = String::from_utf8_lossy(&args[2]).to_string();
 
@@ -318,18 +286,10 @@ impl JsonCommands {
         result
     }
 
-    #[instrument(
-    level = "debug",
-    name = "cmd_json_del",
-    skip(self, args),
-    fields(cmd.name = "JSON.DEL", key = tracing::field::Empty, path = tracing::field::Empty)
-  )]
     pub async fn json_del(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_min_args("JSON.DEL", args, 1)?;
         let key = &args[0];
         let path = Self::parse_path(args, 1);
-        Self::record_span_key(key);
-        Self::record_span_path(&path);
         Self::debug_cmd("del", key, Some(&path));
 
         let result = async {
@@ -358,18 +318,10 @@ impl JsonCommands {
         result
     }
 
-    #[instrument(
-    level = "debug",
-    name = "cmd_json_type",
-    skip(self, args),
-    fields(cmd.name = "JSON.TYPE", key = tracing::field::Empty, path = tracing::field::Empty)
-  )]
     pub async fn json_type(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_min_args("JSON.TYPE", args, 1)?;
         let key = &args[0];
         let path = Self::parse_path(args, 1);
-        Self::record_span_key(key);
-        Self::record_span_path(&path);
         Self::debug_cmd("type", key, Some(&path));
 
         let result = async {
@@ -393,18 +345,10 @@ impl JsonCommands {
         result
     }
 
-    #[instrument(
-    level = "debug",
-    name = "cmd_json_strlen",
-    skip(self, args),
-    fields(cmd.name = "JSON.STRLEN", key = tracing::field::Empty, path = tracing::field::Empty)
-  )]
     pub async fn json_strlen(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_min_args("JSON.STRLEN", args, 1)?;
         let key = &args[0];
         let path = Self::parse_path(args, 1);
-        Self::record_span_key(key);
-        Self::record_span_path(&path);
         Self::debug_cmd("strlen", key, Some(&path));
 
         let result = async {
@@ -436,23 +380,10 @@ impl JsonCommands {
         result
     }
 
-    #[instrument(
-    level = "debug",
-    name = "cmd_json_arrlen",
-    skip(self, args),
-    fields(
-      cmd.name = "JSON.ARRLEN",
-      key = tracing::field::Empty,
-      path = tracing::field::Empty,
-      arr_length = tracing::field::Empty
-    )
-  )]
     pub async fn json_arrlen(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_min_args("JSON.ARRLEN", args, 1)?;
         let key = &args[0];
         let path = Self::parse_path(args, 1);
-        Self::record_span_key(key);
-        Self::record_span_path(&path);
         Self::debug_cmd("arrlen", key, Some(&path));
 
         let result = async {
@@ -468,7 +399,6 @@ impl JsonCommands {
                 }
             };
             if let JsonValue::Array(arr) = target {
-                tracing::Span::current().record("arr_length", arr.len());
                 Ok(router::integer(arr.len() as i64))
             } else {
                 Ok(router::nil_bulk())
@@ -480,18 +410,10 @@ impl JsonCommands {
         result
     }
 
-    #[instrument(
-    level = "debug",
-    name = "cmd_json_objlen",
-    skip(self, args),
-    fields(cmd.name = "JSON.OBJLEN", key = tracing::field::Empty, path = tracing::field::Empty)
-  )]
     pub async fn json_objlen(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_min_args("JSON.OBJLEN", args, 1)?;
         let key = &args[0];
         let path = Self::parse_path(args, 1);
-        Self::record_span_key(key);
-        Self::record_span_path(&path);
         Self::debug_cmd("objlen", key, Some(&path));
 
         let result = async {
@@ -518,18 +440,10 @@ impl JsonCommands {
         result
     }
 
-    #[instrument(
-    level = "debug",
-    name = "cmd_json_numincrby",
-    skip(self, args),
-    fields(cmd.name = "JSON.NUMINCRBY", key = tracing::field::Empty, path = tracing::field::Empty)
-  )]
     pub async fn json_numincrby(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_args("JSON.NUMINCRBY", args, 3)?;
         let key = &args[0];
         let path = String::from_utf8_lossy(&args[1]).to_string();
-        Self::record_span_key(key);
-        Self::record_span_path(&path);
         Self::debug_cmd("numincrby", key, Some(&path));
         let incr_str = String::from_utf8_lossy(&args[2]).to_string();
 
@@ -575,18 +489,10 @@ impl JsonCommands {
         result
     }
 
-    #[instrument(
-    level = "debug",
-    name = "cmd_json_arrappend",
-    skip(self, args),
-    fields(cmd.name = "JSON.ARRAPPEND", key = tracing::field::Empty, path = tracing::field::Empty)
-  )]
     pub async fn json_arrappend(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_min_args("JSON.ARRAPPEND", args, 3)?;
         let key = &args[0];
         let path = String::from_utf8_lossy(&args[1]).to_string();
-        Self::record_span_key(key);
-        Self::record_span_path(&path);
         Self::debug_cmd("arrappend", key, Some(&path));
 
         let result = async {
@@ -632,22 +538,10 @@ impl JsonCommands {
         result
     }
 
-    #[instrument(
-    level = "debug",
-    name = "cmd_json_update",
-    skip(self, args),
-    fields(
-      cmd.name = "JSON.UPDATE",
-      key = tracing::field::Empty,
-      where_path = tracing::field::Empty
-    )
-  )]
     pub async fn json_update(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_min_args("JSON.UPDATE", args, 4)?;
         let key = &args[0];
         let where_path = String::from_utf8_lossy(&args[1]).to_string();
-        Self::record_span_key(key);
-        tracing::Span::current().record("where_path", where_path.as_str());
         Self::debug_cmd("update", key, Some(&where_path));
 
         let result = async {
@@ -714,18 +608,11 @@ impl JsonCommands {
         result
     }
 
-    #[instrument(
-    level = "debug",
-    name = "cmd_json_mset",
-    skip(self, args),
-    fields(cmd.name = "JSON.MSET", key_count = tracing::field::Empty)
-  )]
     pub async fn json_mset(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         if args.len() < 3 || !args.len().is_multiple_of(3) {
             return Err(router::wrong_args("JSON.MSET", ""));
         }
         let key_count = args.len() / 3;
-        tracing::Span::current().record("key_count", key_count);
         tracing::debug!(target: "cmd.json", command = "mset", key_count);
 
         let result = async {

@@ -159,6 +159,7 @@ async fn test_shutdown_nosave_exits_server() {
             read_timeout: None,
             idle_timeout: None,
             max_clients: 0,
+            script_worker_threads: 2,
         },
         storage,
         0,

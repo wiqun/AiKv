@@ -3,7 +3,7 @@
 
 use aikv::protocol::RespValue;
 
-use super::helpers::{assert_int, assert_nil, b, router};
+use super::helpers::{assert_int, assert_nil, b, router, router_with_shared};
 
 /// 验证 HMSET 返回 OK 字符串而非整数
 #[tokio::test]
@@ -207,4 +207,21 @@ async fn test_hash_wrong_type_all_commands() {
             "{cmd} should return WRONGTYPE"
         );
     }
+}
+
+#[tokio::test]
+async fn hset_on_ttl_hash_does_not_grow_expires() {
+    let (r, shared) = router_with_shared();
+    let mut db = 0;
+    r.execute("HSET", &[b("h"), b("f"), b("v")], &mut db)
+        .await
+        .unwrap();
+    r.execute("EXPIRE", &[b("h"), b("60")], &mut db)
+        .await
+        .unwrap();
+    assert_eq!(shared.storage.expires(0).await.unwrap(), 1);
+    r.execute("HSET", &[b("h"), b("f2"), b("v2")], &mut db)
+        .await
+        .unwrap();
+    assert_eq!(shared.storage.expires(0).await.unwrap(), 1);
 }

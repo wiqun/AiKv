@@ -20,7 +20,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use tracing::instrument;
 
 use crate::command::router::{self, KeyLock};
 use crate::command::scan_util;
@@ -43,7 +42,6 @@ impl HashCommands {
         Self { storage, key_lock }
     }
 
-    #[instrument(level = "debug", name = "cmd_hash", skip(self, args), fields(cmd.name = "HSET"))]
     pub async fn hset(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         if args.len() < 3 || args.len().is_multiple_of(2) {
             return Err(router::wrong_args("HSET", ""));
@@ -72,7 +70,7 @@ impl HashCommands {
                     self.migrate_hash_to_subkey(db, key, &stored.expires_at, map)
                         .await?;
                 } else {
-                    self.storage.set_typed(db, key, stored).await?;
+                    self.storage.rewrite_stored(db, key, stored).await?;
                 }
                 Ok(router::integer(new_fields))
             }
@@ -105,7 +103,7 @@ impl HashCommands {
                     kind: CollectionKind::Hash,
                     count: old_count,
                 };
-                self.storage.set_typed(db, key, stored).await?;
+                self.storage.rewrite_stored(db, key, stored).await?;
                 Ok(router::integer(new_fields))
             }
             _ => Err(router::wrongtype()),
@@ -113,7 +111,6 @@ impl HashCommands {
     }
 
     /// HMSET — Redis 兼容: 始终返回 `OK` (HSET 返回新增字段数).
-    #[instrument(level = "debug", name = "cmd_hash", skip(self, args), fields(cmd.name = "HMSET"))]
     pub async fn hmset(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         self.hset(db, args).await?;
         Ok(RespValue::SimpleString("OK".into()))
@@ -175,7 +172,7 @@ impl HashCommands {
                 if map.is_empty() {
                     self.storage.delete(db, key).await?;
                 } else {
-                    self.storage.set_typed(db, key, stored).await?;
+                    self.storage.rewrite_stored(db, key, stored).await?;
                 }
                 Ok(router::integer(count))
             }
@@ -207,7 +204,7 @@ impl HashCommands {
                         kind: CollectionKind::Hash,
                         count: new_count,
                     };
-                    self.storage.set_typed(db, key, stored).await?;
+                    self.storage.rewrite_stored(db, key, stored).await?;
                 }
                 Ok(router::integer(removed))
             }
@@ -352,7 +349,7 @@ impl HashCommands {
                     self.migrate_hash_to_subkey(db, key, &stored.expires_at, map)
                         .await?;
                 } else {
-                    self.storage.set_typed(db, key, stored).await?;
+                    self.storage.rewrite_stored(db, key, stored).await?;
                 }
             }
             ValueType::CollectionHeader {
@@ -377,7 +374,7 @@ impl HashCommands {
                     kind: CollectionKind::Hash,
                     count: *count + 1,
                 };
-                self.storage.set_typed(db, key, stored).await?;
+                self.storage.rewrite_stored(db, key, stored).await?;
             }
             _ => return Err(router::wrongtype()),
         }
@@ -457,7 +454,7 @@ impl HashCommands {
                         .await?;
                     return Ok(router::bulk(s.into_bytes()));
                 }
-                self.storage.set_typed(db, key, stored).await?;
+                self.storage.rewrite_stored(db, key, stored).await?;
                 return Ok(router::bulk(s.into_bytes()));
             }
             ValueType::CollectionHeader {
@@ -497,7 +494,7 @@ impl HashCommands {
                         kind: CollectionKind::Hash,
                         count: *count + 1,
                     };
-                    self.storage.set_typed(db, key, stored).await?;
+                    self.storage.rewrite_stored(db, key, stored).await?;
                 }
                 s.as_bytes().to_vec()
             }
@@ -535,7 +532,7 @@ impl HashCommands {
                         .await?;
                     return Ok(router::integer(new_val));
                 }
-                self.storage.set_typed(db, key, stored).await?;
+                self.storage.rewrite_stored(db, key, stored).await?;
                 return Ok(router::integer(new_val));
             }
             ValueType::CollectionHeader {
@@ -567,7 +564,7 @@ impl HashCommands {
                         kind: CollectionKind::Hash,
                         count: *count + 1,
                     };
-                    self.storage.set_typed(db, key, stored).await?;
+                    self.storage.rewrite_stored(db, key, stored).await?;
                 }
                 new_val
             }
@@ -707,7 +704,7 @@ impl HashCommands {
             },
             expires_at: *expires_at,
         };
-        self.storage.set_typed(db, key, metadata).await
+        self.storage.rewrite_stored(db, key, metadata).await
     }
 
     /// 删除某个 key 下的所有 hash subkey entries.

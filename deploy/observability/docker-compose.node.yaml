@@ -1,0 +1,38 @@
+name: aikv-observability
+services:
+  node-exporter:
+    image: prom/node-exporter:v1.9.0
+    container_name: node-exporter
+    restart: unless-stopped
+    pid: "host"
+    ports:
+      - "${NODE_EXPORTER_BIND:-0.0.0.0:9100}:9100"
+    command:
+      - --path.procfs=/host/proc
+      - --path.sysfs=/host/sys
+      - --path.rootfs=/rootfs
+      - --collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    deploy:
+      resources:
+        limits:
+          cpus: "${NODE_EXPORTER_CPU_LIMIT:-0.2}"
+          memory: "${NODE_EXPORTER_MEM_LIMIT:-64M}"
+        reservations:
+          cpus: "${NODE_EXPORTER_CPU_RESERVATION:-0.05}"
+          memory: "${NODE_EXPORTER_MEM_RESERVATION:-32M}"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+    networks:
+      - aikv-net
+
+networks:
+  aikv-net:
+    name: aikv-net
+    external: true

@@ -9,7 +9,7 @@
 pub const WATCH_META_PREFIX: &[u8] = b"\xff\xff/aikv/watch/";
 
 /// 提取 Redis hash tag (第一个 `{...}` 之间的内容). 无合法 tag 时返回完整 key.
-fn extract_hash_tag(key: &[u8]) -> &[u8] {
+pub(crate) fn extract_hash_tag(key: &[u8]) -> &[u8] {
     let Some(start) = key.iter().position(|&b| b == b'{') else {
         return key;
     };

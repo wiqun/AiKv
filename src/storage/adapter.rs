@@ -9,7 +9,7 @@
 //!   ├─ db_prefix(db) = encode_key(db, "")  # 每 DB 的扫描前缀
 //!   ├─ prefix_end    = 前缀进位            # 范围扫描上界
 //!   └─ 值: postcard(StoredValue)            # 类型 + expires_at
-//! subkey:  {db_index}:{user_key}\x01H|S... # 大 Hash/Set 的 field/member, raw bytes
+//! subkey:  {db_index}:{user_key}\x01H|S|Z|Y... # 大 Hash/Set/ZSet 的 field/member, raw bytes
 //! ```
 //!
 //! 多 DB 完全靠 key 前缀隔离 (`clear`/`keys`/`scan` 依赖 `db_prefix` + `prefix_end`).
@@ -28,16 +28,17 @@
 //!   (对齐 Redis 7, 与 `GET` 的 WRONGTYPE 不同).
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 
 use crate::error::{Error, Result};
 use crate::storage::memory::glob_match;
-use crate::storage::observation::StorageObservation;
+use crate::storage::observation::{PointReadCounter, StorageObservation};
 use crate::storage::types::{
-    now_ms, DbKeyCounters, ExpireDecrGate, KeyspaceStats, KvStorage, ScanResult, StorageEngineKind,
-    StoredValue, ValueType, WriteOp, DB_COUNT, TTL_NO_EXPIRY, WRONGTYPE,
+    now_ms, BatchWriteHandle, ExpiresCounters, ImmediateWriteHandle, KeyspaceStats, KvStorage,
+    ScanResult, StorageEngineKind, StoredValue, ValueType, WriteOp, DB_COUNT, TTL_NO_EXPIRY,
+    WRONGTYPE,
 };
 use crate::storage::watch_registry::WatchRegistry;
 use crate::storage::watch_version::{
@@ -52,32 +53,31 @@ pub enum AdapterWriteOp {
     Delete { key: Vec<u8> },
 }
 
-/// `write_batch` 成功后的键变更摘要 (inserted=新 key 数, deleted=真实删除数).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct WriteBatchStats {
-    pub inserted: u64,
-    pub deleted: u64,
-}
-
 #[async_trait]
 pub trait StorageAdapter: Send + Sync {
+    /// 暴露底层引擎的无锁原子统计实例 (若支持)
+    fn aidb_statistics(&self) -> Option<std::sync::Arc<aidb::Statistics>> {
+        None
+    }
+
     async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>>;
-    async fn set(&self, key: Vec<u8>, value: Vec<u8>) -> Result<bool>;
+    async fn set(&self, key: Vec<u8>, value: Vec<u8>) -> Result<()>;
     /// 一次提交多笔写. 集群实现须把 ops 全部送进同一 group 的 `GroupSetBatcher`
     /// 后再等 ack, 避免每条 SET 串行两次 Raft propose (Issue #83).
     /// 默认逐条 `set` / `delete`.
-    async fn apply_writes(&self, ops: Vec<AdapterWriteOp>) -> Result<Vec<bool>> {
-        let mut out = Vec::with_capacity(ops.len());
+    async fn apply_writes(&self, ops: Vec<AdapterWriteOp>) -> Result<()> {
         for op in ops {
             match op {
-                AdapterWriteOp::Put { key, value } => out.push(self.set(key, value).await?),
-                AdapterWriteOp::Delete { key } => out.push(self.delete(key).await?),
+                AdapterWriteOp::Put { key, value } => self.set(key, value).await?,
+                AdapterWriteOp::Delete { key } => {
+                    self.delete(key).await?;
+                }
             }
         }
-        Ok(out)
+        Ok(())
     }
     /// 一次提交多笔 PUT; 默认转发 `apply_writes`.
-    async fn put_many(&self, ops: Vec<(Vec<u8>, Vec<u8>)>) -> Result<Vec<bool>> {
+    async fn put_many(&self, ops: Vec<(Vec<u8>, Vec<u8>)>) -> Result<()> {
         self.apply_writes(
             ops.into_iter()
                 .map(|(key, value)| AdapterWriteOp::Put { key, value })
@@ -87,9 +87,68 @@ pub trait StorageAdapter: Send + Sync {
     }
     async fn delete(&self, key: Vec<u8>) -> Result<bool>;
     async fn exists(&self, key: Vec<u8>) -> Result<bool>;
-    async fn write_batch(&self, batch: Vec<AdapterWriteOp>) -> Result<WriteBatchStats>;
+    async fn write_batch(&self, batch: Vec<AdapterWriteOp>) -> Result<()>;
+    fn get_sync(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>> {
+        let _ = key;
+        Err(Error::Storage("sync get not supported".into()))
+    }
+    fn write_batch_sync(&self, batch: Vec<AdapterWriteOp>) -> Result<()> {
+        let _ = batch;
+        Err(Error::Storage("sync write_batch not supported".into()))
+    }
+    fn last_in_range_sync(
+        &self,
+        start: Vec<u8>,
+        end: Vec<u8>,
+    ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        let _ = (start, end);
+        Err(Error::Storage("sync last_in_range not supported".into()))
+    }
+    fn for_each_prefix_sync(
+        &self,
+        prefix: Vec<u8>,
+        mut f: Box<dyn FnMut(Vec<u8>, Vec<u8>) -> Result<()> + Send>,
+    ) -> Result<()> {
+        let _ = (prefix, f);
+        Err(Error::Storage("sync for_each_prefix not supported".into()))
+    }
+    async fn enqueue_batch(&self, batch: Vec<AdapterWriteOp>) -> Result<Box<dyn BatchWriteHandle>> {
+        self.write_batch(batch).await?;
+        Ok(Box::new(ImmediateWriteHandle))
+    }
     async fn delete_range(&self, start: Vec<u8>, end: Vec<u8>) -> Result<()>;
+
+    /// 半开区间 `[start, end)` 里字典序最大的一条. 默认扫前缀后过滤.
+    async fn last_in_range(
+        &self,
+        start: Vec<u8>,
+        end: Vec<u8>,
+    ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        let best = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let best_c = std::sync::Arc::clone(&best);
+        let end_c = end.clone();
+        self.for_each_prefix(
+            start,
+            Box::new(move |key, value| {
+                if key.as_slice() < end_c.as_slice() {
+                    let mut slot = best_c.lock().expect("last key");
+                    if slot.as_ref().is_none_or(|(prev, _)| key > *prev) {
+                        *slot = Some((key, value));
+                    }
+                }
+                Ok(())
+            }),
+        )
+        .await?;
+        Ok(std::sync::Arc::try_unwrap(best)
+            .unwrap_or_else(|_| unreachable!("last key still shared"))
+            .into_inner()
+            .expect("last key"))
+    }
     async fn len(&self) -> Result<usize>;
+    async fn estimate_entry_count(&self) -> Result<u64> {
+        Ok(self.len().await? as u64)
+    }
     async fn is_empty(&self) -> Result<bool>;
     async fn clear(&self) -> Result<()>;
 
@@ -143,6 +202,11 @@ pub trait StorageAdapter: Send + Sync {
         StorageEngineKind::Memory
     }
 
+    /// 脚本提交是否只写本地引擎. 集群实现要等 Raft, 必须留在脚本线程外面.
+    fn local_script_commit(&self) -> bool {
+        true
+    }
+
     /// 近似进程内热数据内存 (字节); 仅持久化引擎实现.
     fn approximate_memory_bytes(&self) -> Option<u64> {
         None
@@ -164,8 +228,8 @@ pub struct KvStorageAdapter {
     storage: Arc<dyn StorageAdapter>,
     db_count: usize,
     observation: Option<Arc<StorageObservation>>,
-    counters: Arc<DbKeyCounters>,
-    expire_gate: Arc<ExpireDecrGate>,
+    point_reads: OnceLock<Arc<PointReadCounter>>,
+    expires: Arc<ExpiresCounters>,
     watchers: Arc<WatchRegistry>,
 }
 
@@ -174,32 +238,7 @@ impl KvStorageAdapter {
         storage: Arc<dyn StorageAdapter>,
         observation: Option<Arc<StorageObservation>>,
     ) -> Result<Arc<Self>> {
-        Self::open_with_counters(
-            storage,
-            observation,
-            Arc::new(DbKeyCounters::new()),
-            Arc::new(ExpireDecrGate::new()),
-        )
-        .await
-    }
-
-    /// 使用外部提供的计数器与过期扣减门闩 open (便于在 open 前注册 compaction listener).
-    pub async fn open_with_counters(
-        storage: Arc<dyn StorageAdapter>,
-        observation: Option<Arc<StorageObservation>>,
-        counters: Arc<DbKeyCounters>,
-        expire_gate: Arc<ExpireDecrGate>,
-    ) -> Result<Arc<Self>> {
-        let adapter = Arc::new(Self {
-            storage,
-            db_count: DB_COUNT,
-            observation,
-            counters,
-            expire_gate,
-            watchers: WatchRegistry::new(),
-        });
-        adapter.rebuild_counters().await?;
-        Ok(adapter)
+        Ok(Self::with_observation(storage, observation))
     }
 
     pub fn new(storage: Arc<dyn StorageAdapter>) -> Arc<Self> {
@@ -214,43 +253,10 @@ impl KvStorageAdapter {
             storage,
             db_count: DB_COUNT,
             observation,
-            counters: Arc::new(DbKeyCounters::new()),
-            expire_gate: Arc::new(ExpireDecrGate::new()),
+            point_reads: OnceLock::new(),
+            expires: Arc::new(ExpiresCounters::new()),
             watchers: WatchRegistry::new(),
         })
-    }
-
-    /// 重建全部逻辑 DB 的键计数器 (存活未过期 user key; 过期 key `try_claim` 门闩, 不清空).
-    pub async fn rebuild_counters(&self) -> Result<()> {
-        for db in 0..self.db_count {
-            self.claim_expired_logical_keys(db).await?;
-            self.counters
-                .set(db, self.keys_for_db(db, b"").await?.len() as u64);
-        }
-        Ok(())
-    }
-
-    async fn claim_expired_logical_keys(&self, db: usize) -> Result<()> {
-        self.check_db(db)?;
-        let prefix = Self::db_prefix(db);
-        let gate = self.expire_gate.clone();
-        self.storage
-            .for_each_prefix(
-                prefix,
-                Box::new(move |encoded, raw| {
-                    if Self::decode_user_key(&encoded).is_none() {
-                        return Ok(());
-                    }
-                    let Ok(stored) = Self::deserialize(&raw) else {
-                        return Ok(());
-                    };
-                    if stored.is_expired() {
-                        let _ = gate.try_claim(&encoded);
-                    }
-                    Ok(())
-                }),
-            )
-            .await
     }
 
     fn check_db(&self, db: usize) -> Result<()> {
@@ -353,10 +359,8 @@ impl KvStorageAdapter {
         if let Ok(Some((mk, mv))) = self.next_watch_meta_put(db, key).await {
             ops.push(AdapterWriteOp::Put { key: mk, value: mv });
         }
-        if let Ok(flags) = self.storage.apply_writes(ops).await {
-            if flags.first().copied().unwrap_or(false) && self.expire_gate.try_claim(&encoded) {
-                self.counters.decr(db);
-            }
+        if self.storage.apply_writes(ops).await.is_ok() {
+            self.expires.on_ttl_clear(db);
         }
     }
 
@@ -442,34 +446,305 @@ impl KvStorageAdapter {
     async fn clear_db(&self, db: usize) -> Result<()> {
         self.check_db(db)?;
         let prefix = Self::db_prefix(db);
-        let gate = self.expire_gate.clone();
-        self.storage
-            .for_each_prefix(
-                prefix.clone(),
-                Box::new(move |encoded, raw| {
-                    if Self::decode_user_key(&encoded).is_none() {
-                        return Ok(());
-                    }
-                    if Self::deserialize(&raw).is_ok() {
-                        let _ = gate.try_claim(&encoded);
-                    }
-                    Ok(())
-                }),
-            )
-            .await?;
         let end = AiDbEngine::prefix_end(&prefix).unwrap_or_else(|| {
             let mut max = prefix.clone();
             max.push(0xff);
             max
         });
         self.storage.delete_range(prefix, end).await?;
-        self.counters.reset_db(db);
+        self.expires.reset_db(db);
+        Ok(())
+    }
+
+    async fn prepare_adapter_batch(
+        &self,
+        db: usize,
+        ops: Vec<(Vec<u8>, WriteOp)>,
+    ) -> Result<Vec<AdapterWriteOp>> {
+        self.check_db(db)?;
+        let mut batch = Vec::with_capacity(ops.len());
+        let mut touched: Vec<Vec<u8>> = Vec::with_capacity(ops.len());
+        for (key, op) in ops {
+            match op {
+                WriteOp::PutEngine { value } => {
+                    batch.push(AdapterWriteOp::Put {
+                        key,
+                        value: (*value).clone(),
+                    });
+                }
+                WriteOp::DeleteEngine => {
+                    batch.push(AdapterWriteOp::Delete { key });
+                }
+                WriteOp::Put(value) => {
+                    let encoded = Self::encode(db, &key);
+                    touched.push(encoded.clone());
+                    let stored = StoredValue::string((*value).clone());
+                    let bytes = Self::serialize(&stored)?;
+                    batch.push(AdapterWriteOp::Put {
+                        key: encoded,
+                        value: bytes,
+                    });
+                }
+                WriteOp::PutStored(stored) => {
+                    let encoded = Self::encode(db, &key);
+                    touched.push(encoded.clone());
+                    let bytes = Self::serialize(&stored)?;
+                    batch.push(AdapterWriteOp::Put {
+                        key: encoded,
+                        value: bytes,
+                    });
+                }
+                WriteOp::Delete => {
+                    let encoded = Self::encode(db, &key);
+                    touched.push(encoded.clone());
+                    if self.is_zset_header_key(db, &key).await? {
+                        self.push_zset_subkey_deletes(db, &key, &mut batch).await?;
+                    }
+                    batch.push(AdapterWriteOp::Delete { key: encoded });
+                }
+            }
+        }
+        for encoded in &touched {
+            let Some(user_key) = Self::decode_user_key(encoded) else {
+                continue;
+            };
+            if let Some((mk, mv)) = self.next_watch_meta_put(db, &user_key).await? {
+                batch.push(AdapterWriteOp::Put { key: mk, value: mv });
+            }
+        }
+        Ok(batch)
+    }
+
+    fn prepare_adapter_batch_sync(
+        &self,
+        db: usize,
+        ops: Vec<(Vec<u8>, WriteOp)>,
+    ) -> Result<Vec<AdapterWriteOp>> {
+        self.check_db(db)?;
+        let mut batch = Vec::with_capacity(ops.len());
+        let mut touched: Vec<Vec<u8>> = Vec::with_capacity(ops.len());
+        for (key, op) in ops {
+            match op {
+                WriteOp::PutEngine { value } => {
+                    batch.push(AdapterWriteOp::Put {
+                        key,
+                        value: (*value).clone(),
+                    });
+                }
+                WriteOp::DeleteEngine => {
+                    batch.push(AdapterWriteOp::Delete { key });
+                }
+                WriteOp::Put(value) => {
+                    let encoded = Self::encode(db, &key);
+                    touched.push(encoded.clone());
+                    let stored = StoredValue::string((*value).clone());
+                    batch.push(AdapterWriteOp::Put {
+                        key: encoded,
+                        value: Self::serialize(&stored)?,
+                    });
+                }
+                WriteOp::PutStored(stored) => {
+                    let encoded = Self::encode(db, &key);
+                    touched.push(encoded.clone());
+                    batch.push(AdapterWriteOp::Put {
+                        key: encoded,
+                        value: Self::serialize(&stored)?,
+                    });
+                }
+                WriteOp::Delete => {
+                    let encoded = Self::encode(db, &key);
+                    touched.push(encoded.clone());
+                    if self.is_zset_header_key_sync(db, &key)? {
+                        self.push_zset_subkey_deletes_sync(db, &key, &mut batch)?;
+                    }
+                    batch.push(AdapterWriteOp::Delete { key: encoded });
+                }
+            }
+        }
+        for encoded in &touched {
+            let Some(user_key) = Self::decode_user_key(encoded) else {
+                continue;
+            };
+            if let Some((mk, mv)) = self.next_watch_meta_put_sync(db, &user_key)? {
+                batch.push(AdapterWriteOp::Put { key: mk, value: mv });
+            }
+        }
+        Ok(batch)
+    }
+
+    fn is_zset_header_key_sync(&self, db: usize, key: &[u8]) -> Result<bool> {
+        let stored = crate::storage::script_io::ScriptIo::get_typed(self, db, key)?;
+        Ok(stored
+            .as_ref()
+            .and_then(crate::storage::zset_subkey::is_zset_header)
+            .is_some())
+    }
+
+    fn push_zset_subkey_deletes_sync(
+        &self,
+        db: usize,
+        user_key: &[u8],
+        batch: &mut Vec<AdapterWriteOp>,
+    ) -> Result<()> {
+        let encoded = Self::encode(db, user_key);
+        self.push_prefix_deletes_sync(crate::storage::zset_subkey::member_prefix(&encoded), batch)?;
+        self.push_prefix_deletes_sync(crate::storage::zset_subkey::score_prefix(&encoded), batch)
+    }
+
+    fn push_prefix_deletes_sync(
+        &self,
+        prefix: Vec<u8>,
+        batch: &mut Vec<AdapterWriteOp>,
+    ) -> Result<()> {
+        let keys = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let keys_c = std::sync::Arc::clone(&keys);
+        self.storage.for_each_prefix_sync(
+            prefix,
+            Box::new(move |key, _| {
+                keys_c.lock().expect("prefix deletes").push(key);
+                Ok(())
+            }),
+        )?;
+        let keys = std::sync::Arc::try_unwrap(keys)
+            .unwrap_or_else(|_| unreachable!("prefix delete keys still shared"))
+            .into_inner()
+            .expect("prefix deletes");
+        for key in keys {
+            batch.push(AdapterWriteOp::Delete { key });
+        }
+        Ok(())
+    }
+
+    fn read_watch_version_sync(&self, db: usize, user_key: &[u8]) -> Result<u64> {
+        if is_watch_meta_user_key(user_key) {
+            return Ok(0);
+        }
+        let meta = meta_user_key(user_key);
+        match self.storage.get_sync(Self::encode(db, &meta))? {
+            Some(bytes) => Ok(decode_version(&bytes)),
+            None => Ok(0),
+        }
+    }
+
+    fn next_watch_meta_put_sync(
+        &self,
+        db: usize,
+        user_key: &[u8],
+    ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        if is_watch_meta_user_key(user_key) || !self.watchers.is_watched(db, user_key) {
+            return Ok(None);
+        }
+        let next = self
+            .read_watch_version_sync(db, user_key)?
+            .saturating_add(1);
+        Ok(Some((
+            Self::encode(db, &meta_user_key(user_key)),
+            encode_version(next).to_vec(),
+        )))
+    }
+
+    fn load_typed_for_script(&self, db: usize, key: &[u8]) -> Result<Option<StoredValue>> {
+        let Some(raw) = self.storage.get_sync(Self::encode(db, key))? else {
+            return Ok(None);
+        };
+        let stored = Self::deserialize(&raw)?;
+        if stored.is_expired() {
+            if let Some(obs) = &self.observation {
+                obs.record_expired_key();
+            }
+            let encoded = Self::encode(db, key);
+            if self.storage.allow_lazy_expire_delete(&encoded)
+                && self
+                    .storage
+                    .write_batch_sync(vec![AdapterWriteOp::Delete { key: encoded }])
+                    .is_ok()
+            {
+                self.expires.on_ttl_clear(db);
+            }
+            return Ok(None);
+        }
+        Ok(Some(stored))
+    }
+
+    fn ttl_for_script(&self, db: usize, key: &[u8]) -> Result<Option<i64>> {
+        let Some(stored) = self.load_typed_for_script(db, key)? else {
+            return Ok(None);
+        };
+        match stored.expires_at {
+            None => Ok(Some(TTL_NO_EXPIRY)),
+            Some(expires_at) => {
+                let now = now_ms();
+                if now >= expires_at {
+                    Ok(None)
+                } else {
+                    Ok(Some((expires_at - now) as i64))
+                }
+            }
+        }
+    }
+
+    fn prefix_last_for_script(&self, prefix: Vec<u8>) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        let mut end = prefix.clone();
+        if let Some(last) = end.last_mut() {
+            *last = last.saturating_add(1);
+        }
+        self.storage.last_in_range_sync(prefix, end)
+    }
+
+    async fn is_zset_header_key(&self, db: usize, key: &[u8]) -> Result<bool> {
+        let stored = self.get_typed(db, key).await?;
+        Ok(stored
+            .as_ref()
+            .and_then(crate::storage::zset_subkey::is_zset_header)
+            .is_some())
+    }
+
+    async fn push_zset_subkey_deletes(
+        &self,
+        db: usize,
+        user_key: &[u8],
+        batch: &mut Vec<AdapterWriteOp>,
+    ) -> Result<()> {
+        let encoded = Self::encode(db, user_key);
+        self.push_prefix_deletes(crate::storage::zset_subkey::member_prefix(&encoded), batch)
+            .await?;
+        self.push_prefix_deletes(crate::storage::zset_subkey::score_prefix(&encoded), batch)
+            .await
+    }
+
+    async fn push_prefix_deletes(
+        &self,
+        prefix: Vec<u8>,
+        batch: &mut Vec<AdapterWriteOp>,
+    ) -> Result<()> {
+        let keys = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let keys_c = std::sync::Arc::clone(&keys);
+        self.storage
+            .for_each_prefix(
+                prefix,
+                Box::new(move |key, _| {
+                    keys_c.lock().expect("prefix deletes").push(key);
+                    Ok(())
+                }),
+            )
+            .await?;
+        let keys = std::sync::Arc::try_unwrap(keys)
+            .unwrap_or_else(|_| unreachable!("prefix delete keys still shared"))
+            .into_inner()
+            .expect("prefix deletes");
+        for key in keys {
+            batch.push(AdapterWriteOp::Delete { key });
+        }
         Ok(())
     }
 }
 
 #[async_trait]
 impl KvStorage for KvStorageAdapter {
+    fn aidb_statistics(&self) -> Option<std::sync::Arc<aidb::Statistics>> {
+        self.storage.aidb_statistics()
+    }
+
     async fn get(&self, db: usize, key: &[u8]) -> Result<Option<Vec<u8>>> {
         let stored = self.get_typed(db, key).await?;
         match stored {
@@ -505,22 +780,29 @@ impl KvStorage for KvStorageAdapter {
     }
 
     async fn delete(&self, db: usize, key: &[u8]) -> Result<bool> {
-        let encoded = Self::encode(db, key);
-        if self.get_raw(db, key).await?.is_none() {
+        let Some(raw) = self.get_raw(db, key).await? else {
             return Ok(false);
+        };
+        let stored = Self::deserialize(&raw).ok();
+        let saw_ttl = stored.as_ref().and_then(|value| value.expires_at).is_some();
+        let encoded = Self::encode(db, key);
+        let mut ops = Vec::new();
+        if stored
+            .as_ref()
+            .and_then(crate::storage::zset_subkey::is_zset_header)
+            .is_some()
+        {
+            self.push_zset_subkey_deletes(db, key, &mut ops).await?;
         }
-        let mut ops = vec![AdapterWriteOp::Delete {
-            key: encoded.clone(),
-        }];
+        ops.push(AdapterWriteOp::Delete { key: encoded });
         if let Some((mk, mv)) = self.next_watch_meta_put(db, key).await? {
             ops.push(AdapterWriteOp::Put { key: mk, value: mv });
         }
-        let flags = self.storage.apply_writes(ops).await?;
-        let deleted = flags.first().copied().unwrap_or(false);
-        if deleted && self.expire_gate.try_claim(&encoded) {
-            self.counters.decr(db);
+        self.storage.apply_writes(ops).await?;
+        if saw_ttl {
+            self.expires.on_ttl_clear(db);
         }
-        Ok(deleted)
+        Ok(true)
     }
 
     async fn exists(&self, db: usize, key: &[u8]) -> Result<bool> {
@@ -545,80 +827,24 @@ impl KvStorage for KvStorageAdapter {
     async fn mset(&self, db: usize, pairs: &[(Vec<u8>, Vec<u8>)]) -> Result<()> {
         let mut ops = Vec::with_capacity(pairs.len());
         for (key, value) in pairs {
-            ops.push((key.clone(), WriteOp::Put(value.clone())));
+            ops.push((key.clone(), WriteOp::put(value.clone())));
         }
         self.write_batch(db, ops).await
     }
 
     async fn write_batch(&self, db: usize, ops: Vec<(Vec<u8>, WriteOp)>) -> Result<()> {
-        self.check_db(db)?;
-        let mut batch = Vec::with_capacity(ops.len());
-        let mut deleted_keys: Vec<Vec<u8>> = Vec::new();
-        let mut put_keys: Vec<Vec<u8>> = Vec::new();
-        let mut user_is_put: Vec<bool> = Vec::with_capacity(ops.len());
-        for (key, op) in ops {
-            let encoded = Self::encode(db, &key);
-            match op {
-                WriteOp::Put(value) => {
-                    let stored = StoredValue::string(value);
-                    let bytes = Self::serialize(&stored)?;
-                    put_keys.push(encoded.clone());
-                    batch.push(AdapterWriteOp::Put {
-                        key: encoded,
-                        value: bytes,
-                    });
-                    user_is_put.push(true);
-                }
-                WriteOp::Delete => {
-                    deleted_keys.push(encoded.clone());
-                    batch.push(AdapterWriteOp::Delete { key: encoded });
-                    user_is_put.push(false);
-                }
-            }
-        }
-        for encoded in put_keys.iter().chain(deleted_keys.iter()) {
-            let Some(user_key) = Self::decode_user_key(encoded) else {
-                continue;
-            };
-            if let Some((mk, mv)) = self.next_watch_meta_put(db, &user_key).await? {
-                batch.push(AdapterWriteOp::Put { key: mk, value: mv });
-            }
-        }
-        let flags = match self.storage.apply_writes(batch).await {
-            Ok(flags) => flags,
-            Err(e) => {
-                if let Err(rebuild_err) = self.rebuild_counters().await {
-                    tracing::warn!(error = %rebuild_err, "write_batch failed and rebuild_counters also failed");
-                }
-                crate::storage::counter_batch::release_live_puts(
-                    self.storage.as_ref(),
-                    &self.expire_gate,
-                    &put_keys,
-                )
-                .await;
-                return Err(e);
-            }
-        };
-        let mut inserted = 0u64;
-        let mut deleted = 0u64;
-        for (i, is_put) in user_is_put.iter().enumerate() {
-            if flags.get(i).copied().unwrap_or(false) {
-                if *is_put {
-                    inserted += 1;
-                } else {
-                    deleted += 1;
-                }
-            }
-        }
-        crate::storage::counter_batch::apply_successful_batch(
-            &self.counters,
-            &self.expire_gate,
-            db,
-            &put_keys,
-            &deleted_keys,
-            WriteBatchStats { inserted, deleted },
-        );
+        let batch = self.prepare_adapter_batch(db, ops).await?;
+        self.storage.write_batch(batch).await?;
         Ok(())
+    }
+
+    async fn enqueue_batch(
+        &self,
+        db: usize,
+        ops: Vec<(Vec<u8>, WriteOp)>,
+    ) -> Result<Box<dyn BatchWriteHandle>> {
+        let batch = self.prepare_adapter_batch(db, ops).await?;
+        self.storage.enqueue_batch(batch).await
     }
 
     async fn keys(&self, db: usize, pattern: &[u8]) -> Result<Vec<Vec<u8>>> {
@@ -646,15 +872,30 @@ impl KvStorage for KvStorageAdapter {
 
     async fn len(&self, db: usize) -> Result<usize> {
         self.check_db(db)?;
-        Ok(self.counters.get(db) as usize)
+        Ok(self.storage.estimate_entry_count().await? as usize)
     }
 
-    async fn db_key_counts(&self) -> Result<Vec<usize>> {
-        Ok(self.counters.snapshot())
+    async fn expires(&self, db: usize) -> Result<u64> {
+        self.check_db(db)?;
+        Ok(self.expires.get(db))
     }
 
-    async fn rebuild_key_counts(&self) -> Result<()> {
-        self.rebuild_counters().await
+    async fn release_seen_ttl(&self, db: usize) -> Result<()> {
+        self.check_db(db)?;
+        self.expires.on_ttl_clear(db);
+        Ok(())
+    }
+
+    async fn sample_avg_ttl(&self, db: usize) -> Result<u64> {
+        let entries = self.collect_db_entries(db).await?;
+        let now = now_ms();
+        let remaining = entries.iter().filter_map(|(_, value)| {
+            value
+                .expires_at
+                .filter(|exp| *exp > now)
+                .map(|exp| exp - now)
+        });
+        Ok(crate::storage::types::compute_avg_ttl_ms(remaining))
     }
 
     async fn keyspace_stats(&self, db: usize) -> Result<KeyspaceStats> {
@@ -687,7 +928,7 @@ impl KvStorage for KvStorageAdapter {
         for db in 0..self.db_count {
             self.clear_db(db).await?;
         }
-        self.counters.reset_all();
+        self.expires.reset_all();
         Ok(())
     }
 
@@ -698,8 +939,12 @@ impl KvStorage for KvStorageAdapter {
         let Some(mut stored) = self.load_typed(db, key).await? else {
             return Ok(false);
         };
+        let saw_ttl = stored.expires_at.is_some();
         stored.expires_at = Some(now_ms().saturating_add(ttl_ms));
         self.set_typed(db, key, stored).await?;
+        if saw_ttl {
+            self.expires.on_ttl_clear(db);
+        }
         Ok(true)
     }
 
@@ -711,8 +956,12 @@ impl KvStorage for KvStorageAdapter {
         let Some(mut stored) = self.load_typed(db, key).await? else {
             return Ok(false);
         };
+        let saw_ttl = stored.expires_at.is_some();
         stored.expires_at = Some(timestamp_ms);
         self.set_typed(db, key, stored).await?;
+        if saw_ttl {
+            self.expires.on_ttl_clear(db);
+        }
         Ok(true)
     }
 
@@ -738,8 +987,12 @@ impl KvStorage for KvStorageAdapter {
         let Some(mut stored) = self.load_typed(db, key).await? else {
             return Ok(false);
         };
+        let saw_ttl = stored.expires_at.is_some();
         stored.expires_at = None;
         self.set_typed(db, key, stored).await?;
+        if saw_ttl {
+            self.expires.on_ttl_clear(db);
+        }
         Ok(true)
     }
 
@@ -767,7 +1020,17 @@ impl KvStorage for KvStorageAdapter {
     }
 
     async fn get_typed(&self, db: usize, key: &[u8]) -> Result<Option<StoredValue>> {
-        self.load_typed(db, key).await
+        let result = self.load_typed(db, key).await;
+        if let Ok(value) = &result {
+            if let Some(counter) = self.point_reads.get() {
+                counter.note(value.is_some());
+            }
+        }
+        result
+    }
+
+    fn set_point_read_counter(&self, counter: Arc<PointReadCounter>) {
+        let _ = self.point_reads.set(counter);
     }
 
     async fn set_typed(&self, db: usize, key: &[u8], value: StoredValue) -> Result<()> {
@@ -777,11 +1040,10 @@ impl KvStorage for KvStorageAdapter {
         if let Some(meta) = self.next_watch_meta_put(db, key).await? {
             ops.push(meta);
         }
-        let flags = self.storage.put_many(ops).await?;
-        if flags.first().copied().unwrap_or(false) {
-            self.counters.incr(db);
+        self.storage.put_many(ops).await?;
+        if value.expires_at.is_some() {
+            self.expires.on_ttl_write(db);
         }
-        self.expire_gate.release(&encoded);
         Ok(())
     }
 
@@ -833,10 +1095,18 @@ impl KvStorage for KvStorageAdapter {
         if src_db == dst_db && src_key == dst_key {
             return Ok(replace);
         }
-        if self.load_typed(dst_db, dst_key).await?.is_some() && !replace {
+        let existing = self.load_typed(dst_db, dst_key).await?;
+        if existing.is_some() && !replace {
             return Ok(false);
         }
+        let saw_ttl = existing
+            .as_ref()
+            .and_then(|value| value.expires_at)
+            .is_some();
         self.set_typed(dst_db, dst_key, stored).await?;
+        if saw_ttl {
+            self.expires.on_ttl_clear(dst_db);
+        }
         Ok(true)
     }
 
@@ -851,6 +1121,10 @@ impl KvStorage for KvStorageAdapter {
 
     fn engine_kind(&self) -> StorageEngineKind {
         self.storage.engine_kind()
+    }
+
+    fn local_script_commit(&self) -> bool {
+        self.storage.local_script_commit()
     }
 
     async fn flush_engine(&self) -> Result<()> {
@@ -870,6 +1144,23 @@ impl KvStorage for KvStorageAdapter {
     }
 
     // ---- raw subkey 访问 ----
+
+    async fn raw_prefix_last(&self, prefix: Vec<u8>) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        self.check_db(0)?;
+        let Some(end) = AiDbEngine::prefix_end(&prefix) else {
+            return Ok(None);
+        };
+        self.storage.last_in_range(prefix, end).await
+    }
+
+    async fn raw_range_last(
+        &self,
+        start: Vec<u8>,
+        end: Vec<u8>,
+    ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        self.check_db(0)?;
+        self.storage.last_in_range(start, end).await
+    }
 
     async fn raw_subkey_get(&self, db: usize, encoded_key: Vec<u8>) -> Result<Option<Vec<u8>>> {
         self.check_db(db)?;
@@ -895,6 +1186,79 @@ impl KvStorage for KvStorageAdapter {
     ) -> Result<()> {
         self.check_db(db)?;
         self.storage.for_each_prefix(prefix, f).await
+    }
+
+    fn script_io(&self) -> &dyn crate::storage::script_io::ScriptIo {
+        self
+    }
+}
+
+impl crate::storage::script_io::ScriptIo for KvStorageAdapter {
+    fn engine_kind(&self) -> StorageEngineKind {
+        self.storage.engine_kind()
+    }
+
+    fn get_typed(&self, db: usize, key: &[u8]) -> Result<Option<StoredValue>> {
+        crate::storage::script_io::time_script_io(
+            crate::storage::script_io::ScriptIoOp::Get,
+            || self.load_typed_for_script(db, key),
+        )
+    }
+
+    fn ttl(&self, db: usize, key: &[u8]) -> Result<Option<i64>> {
+        crate::storage::script_io::time_script_io(
+            crate::storage::script_io::ScriptIoOp::Get,
+            || self.ttl_for_script(db, key),
+        )
+    }
+
+    fn write_batch(&self, db: usize, ops: Vec<(Vec<u8>, WriteOp)>) -> Result<()> {
+        crate::storage::script_io::time_script_io(
+            crate::storage::script_io::ScriptIoOp::Write,
+            || {
+                let batch = self.prepare_adapter_batch_sync(db, ops)?;
+                self.storage.write_batch_sync(batch)
+            },
+        )
+    }
+
+    fn raw_prefix_last(&self, prefix: Vec<u8>) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        crate::storage::script_io::time_script_io(
+            crate::storage::script_io::ScriptIoOp::Prefix,
+            || self.prefix_last_for_script(prefix),
+        )
+    }
+
+    fn raw_range_last(&self, start: Vec<u8>, end: Vec<u8>) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        crate::storage::script_io::time_script_io(
+            crate::storage::script_io::ScriptIoOp::Range,
+            || self.storage.last_in_range_sync(start, end),
+        )
+    }
+
+    fn raw_subkey_get(&self, db: usize, encoded_key: Vec<u8>) -> Result<Option<Vec<u8>>> {
+        crate::storage::script_io::time_script_io(
+            crate::storage::script_io::ScriptIoOp::Get,
+            || {
+                self.check_db(db)?;
+                self.storage.get_sync(encoded_key)
+            },
+        )
+    }
+
+    fn raw_subkey_for_each(
+        &self,
+        db: usize,
+        prefix: Vec<u8>,
+        f: Box<dyn FnMut(Vec<u8>, Vec<u8>) -> Result<()> + Send>,
+    ) -> Result<()> {
+        crate::storage::script_io::time_script_io(
+            crate::storage::script_io::ScriptIoOp::Scan,
+            || {
+                self.check_db(db)?;
+                self.storage.for_each_prefix_sync(prefix, f)
+            },
+        )
     }
 }
 

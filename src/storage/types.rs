@@ -19,6 +19,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -56,10 +57,33 @@ pub struct ScanResult {
 }
 
 /// 批量写入操作 (命令层; 与底层 LSM WriteOp 独立)
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum WriteOp {
-    Put(Vec<u8>),
+    Put(Arc<Vec<u8>>),
+    PutStored(Arc<StoredValue>),
     Delete,
+    /// 配对 key 已是 engine key, 值为原始字节, 不再套 `StoredValue`.
+    PutEngine {
+        value: Arc<Vec<u8>>,
+    },
+    /// 配对 key 已是 engine key.
+    DeleteEngine,
+}
+
+impl WriteOp {
+    pub fn put(bytes: Vec<u8>) -> Self {
+        WriteOp::Put(Arc::new(bytes))
+    }
+
+    pub fn put_stored(stored: StoredValue) -> Self {
+        WriteOp::PutStored(Arc::new(stored))
+    }
+
+    pub fn put_engine(value: Vec<u8>) -> Self {
+        WriteOp::PutEngine {
+            value: Arc::new(value),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -83,6 +107,7 @@ pub enum ValueType {
 pub enum CollectionKind {
     Hash = 1,
     Set = 2,
+    ZSet = 3,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -117,6 +142,7 @@ impl StoredValue {
             ValueType::CollectionHeader { kind, .. } => match kind {
                 CollectionKind::Hash => "hash",
                 CollectionKind::Set => "set",
+                CollectionKind::ZSet => "zset",
             },
         }
     }
@@ -235,6 +261,20 @@ pub fn is_wrongtype(err: &Error) -> bool {
 
 #[async_trait]
 pub trait KvStorage: Send + Sync {
+    /// 暴露底层 AiDb 引擎的无锁原子统计实例 (若支持)
+    fn aidb_statistics(&self) -> Option<std::sync::Arc<aidb::Statistics>> {
+        None
+    }
+
+    /// 键计数器全库重扫耗时 (微秒). 重扫已去掉, 固定返回 0.
+    fn rebuild_counters_duration_us(&self) -> u64 {
+        0
+    }
+
+    /// 绑定点查计数. 默认空实现, 内存引擎和适配器会记 hit / miss.
+    fn set_point_read_counter(&self, _counter: Arc<crate::storage::observation::PointReadCounter>) {
+    }
+
     async fn get(&self, db: usize, key: &[u8]) -> Result<Option<Vec<u8>>>;
     async fn set(&self, db: usize, key: &[u8], value: &[u8]) -> Result<()>;
     async fn set_with_ttl(
@@ -250,6 +290,14 @@ pub trait KvStorage: Send + Sync {
     async fn mget(&self, db: usize, keys: &[Vec<u8>]) -> Result<Vec<Option<Vec<u8>>>>;
     async fn mset(&self, db: usize, pairs: &[(Vec<u8>, Vec<u8>)]) -> Result<()>;
     async fn write_batch(&self, db: usize, ops: Vec<(Vec<u8>, WriteOp)>) -> Result<()>;
+    async fn enqueue_batch(
+        &self,
+        db: usize,
+        ops: Vec<(Vec<u8>, WriteOp)>,
+    ) -> Result<Box<dyn BatchWriteHandle>> {
+        self.write_batch(db, ops).await?;
+        Ok(Box::new(ImmediateWriteHandle))
+    }
 
     async fn keys(&self, db: usize, pattern: &[u8]) -> Result<Vec<Vec<u8>>>;
     async fn scan(
@@ -260,6 +308,13 @@ pub trait KvStorage: Send + Sync {
         count: usize,
     ) -> Result<ScanResult>;
     async fn len(&self, db: usize) -> Result<usize>;
+    /// 本进程在该逻辑 DB 上登记过的 TTL 写入次数, 不是磁盘上的 TTL 存量.
+    async fn expires(&self, db: usize) -> Result<u64> {
+        let _ = db;
+        Ok(0)
+    }
+    /// 抽样该逻辑 DB 的平均剩余 TTL (毫秒). 默认 INFO 不调用.
+    async fn sample_avg_ttl(&self, db: usize) -> Result<u64>;
     async fn keyspace_stats(&self, db: usize) -> Result<KeyspaceStats>;
     async fn clear(&self, db: usize) -> Result<()>;
     async fn clear_all(&self) -> Result<()>;
@@ -275,6 +330,22 @@ pub trait KvStorage: Send + Sync {
 
     async fn get_typed(&self, db: usize, key: &[u8]) -> Result<Option<StoredValue>>;
     async fn set_typed(&self, db: usize, key: &[u8], value: StoredValue) -> Result<()>;
+
+    /// 这次调用已经看到该逻辑 DB 上的一条 TTL 时饱和减. 盲写不要调用.
+    async fn release_seen_ttl(&self, db: usize) -> Result<()> {
+        let _ = db;
+        Ok(())
+    }
+
+    /// 把已经读到的值写回同一个 key. 值上带 TTL 时, 写入的加 1 再饱和减.
+    async fn rewrite_stored(&self, db: usize, key: &[u8], stored: StoredValue) -> Result<()> {
+        let saw_ttl = stored.expires_at.is_some();
+        self.set_typed(db, key, stored).await?;
+        if saw_ttl {
+            self.release_seen_ttl(db).await?;
+        }
+        Ok(())
+    }
 
     async fn rename_key(&self, db: usize, old_key: &[u8], new_key: &[u8]) -> Result<()>;
     async fn rename_key_nx(&self, db: usize, old_key: &[u8], new_key: &[u8]) -> Result<bool>;
@@ -300,6 +371,14 @@ pub trait KvStorage: Send + Sync {
     fn engine_kind(&self) -> StorageEngineKind {
         StorageEngineKind::Memory
     }
+
+    /// 脚本提交是否只写本地引擎. 集群实现要等 Raft, 必须留在脚本线程外面.
+    fn local_script_commit(&self) -> bool {
+        true
+    }
+
+    /// 脚本线程上的同步存储. 实现必须不调用 `spawn_blocking`.
+    fn script_io(&self) -> &dyn crate::storage::script_io::ScriptIo;
 
     async fn flush_engine(&self) -> Result<()> {
         Ok(())
@@ -358,6 +437,20 @@ pub trait KvStorage: Send + Sync {
         Err(Error::Storage("raw subkey access not supported".into()))
     }
 
+    /// 前缀下字典序最大的原始 KV. 大 ZSET 的 `ZREVRANGE 0 0` 用它读最高分.
+    async fn raw_prefix_last(&self, _prefix: Vec<u8>) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        Err(Error::Storage("raw subkey access not supported".into()))
+    }
+
+    /// 半开区间 `[start, end)` 内字典序最大的原始 KV. 大 ZSET 的 `ZREVRANGEBYSCORE ... LIMIT 0 1` 用它定位单条.
+    async fn raw_range_last(
+        &self,
+        _start: Vec<u8>,
+        _end: Vec<u8>,
+    ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        Err(Error::Storage("raw subkey access not supported".into()))
+    }
+
     /// 绕过 StoredValue 编解码, 扫描 subkey 前缀范围内的所有原始 KV 对.
     /// 仅持久化引擎实现; MemoryEngine 返回 Err.
     async fn raw_subkey_for_each(
@@ -370,41 +463,30 @@ pub trait KvStorage: Send + Sync {
     }
 }
 
-/// 内存逻辑 DB 键计数器 (固定容量 `DB_COUNT`, 线程安全原子数组).
+/// 批量写入在途等待 handle: 支持将写操作排入底层凑批队列后立即释放外层排他锁,
+/// 后续在锁外 await 批量落盘与复制结果.
+#[async_trait::async_trait]
+pub trait BatchWriteHandle: Send + Sync {
+    async fn wait(self: Box<Self>) -> Result<()>;
+}
+
+/// 默认立即完成的批量写入 handle (用于无异步凑批队列的存储实现).
+pub struct ImmediateWriteHandle;
+
+#[async_trait::async_trait]
+impl BatchWriteHandle for ImmediateWriteHandle {
+    async fn wait(self: Box<Self>) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// 进程内各逻辑 DB 的 TTL 写入计数. 重启从 0 开始, 不扫库补存量.
 #[derive(Debug, Default)]
-pub struct DbKeyCounters {
+pub struct ExpiresCounters {
     counts: [AtomicU64; DB_COUNT],
 }
 
-/// 过期键 `decr` 单飞门闩: 惰性删除/`DEL`/compaction 至多一方扣减, 持有至 `set_typed` 重生.
-#[derive(Debug, Default)]
-pub struct ExpireDecrGate {
-    claimed: dashmap::DashSet<Vec<u8>>,
-}
-
-impl ExpireDecrGate {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// 若本调用方赢得扣减权则返回 true.
-    #[inline]
-    pub fn try_claim(&self, encoded_or_lsm_key: &[u8]) -> bool {
-        self.claimed.insert(encoded_or_lsm_key.to_vec())
-    }
-
-    #[inline]
-    pub fn release(&self, encoded_or_lsm_key: &[u8]) {
-        self.claimed.remove(encoded_or_lsm_key);
-    }
-
-    #[inline]
-    pub fn clear(&self) {
-        self.claimed.clear();
-    }
-}
-
-impl DbKeyCounters {
+impl ExpiresCounters {
     pub fn new() -> Self {
         Self::default()
     }
@@ -418,27 +500,28 @@ impl DbKeyCounters {
         }
     }
 
+    /// 本次成功写入 `expires_at = Some` 时加 1, 包括没有读过旧值的覆盖写.
     #[inline]
-    pub fn incr(&self, db: usize) {
+    pub fn on_ttl_write(&self, db: usize) {
         if db < DB_COUNT {
             self.counts[db].fetch_add(1, Ordering::Relaxed);
         }
     }
 
+    /// 本次调用已经看到旧值带 TTL, 或惰性过期删掉了带 TTL 的值时饱和减.
     #[inline]
-    pub fn decr(&self, db: usize) {
-        if db < DB_COUNT {
-            let _ = self.counts[db].fetch_update(Ordering::Relaxed, Ordering::Relaxed, |curr| {
-                Some(curr.saturating_sub(1))
-            });
-        }
+    pub fn on_ttl_clear(&self, db: usize) {
+        self.on_ttl_clear_n(db, 1);
     }
 
     #[inline]
-    pub fn set(&self, db: usize, count: u64) {
-        if db < DB_COUNT {
-            self.counts[db].store(count, Ordering::Relaxed);
+    pub fn on_ttl_clear_n(&self, db: usize, n: u64) {
+        if n == 0 || db >= DB_COUNT {
+            return;
         }
+        let _ = self.counts[db].fetch_update(Ordering::Relaxed, Ordering::Relaxed, |curr| {
+            Some(curr.saturating_sub(n))
+        });
     }
 
     #[inline]
@@ -455,11 +538,15 @@ impl DbKeyCounters {
         }
     }
 
-    pub fn snapshot(&self) -> Vec<usize> {
-        self.counts
-            .iter()
-            .map(|c| c.load(Ordering::Relaxed) as usize)
-            .collect()
+    #[inline]
+    pub fn swap(&self, a: usize, b: usize) {
+        if a >= DB_COUNT || b >= DB_COUNT || a == b {
+            return;
+        }
+        let left = self.counts[a].load(Ordering::Relaxed);
+        let right = self.counts[b].load(Ordering::Relaxed);
+        self.counts[a].store(right, Ordering::Relaxed);
+        self.counts[b].store(left, Ordering::Relaxed);
     }
 }
 
@@ -481,78 +568,18 @@ mod tests {
     }
 
     #[test]
-    fn test_db_key_counters_initial_and_bounds() {
-        let counters = DbKeyCounters::new();
-        for db in 0..DB_COUNT {
-            assert_eq!(counters.get(db), 0);
-        }
-        // 越界读返回 0
-        assert_eq!(counters.get(DB_COUNT), 0);
-        assert_eq!(counters.get(999), 0);
-
-        // 越界操作 no-op
-        counters.incr(DB_COUNT);
-        counters.decr(DB_COUNT);
-        counters.set(DB_COUNT, 100);
-        counters.reset_db(DB_COUNT);
-        assert_eq!(counters.get(DB_COUNT), 0);
-    }
-
-    #[test]
-    fn test_db_key_counters_incr_decr_and_saturation() {
-        let counters = DbKeyCounters::new();
-        counters.incr(0);
-        counters.incr(0);
+    fn expires_counters_write_clear_and_saturation() {
+        let counters = ExpiresCounters::new();
+        assert_eq!(counters.get(0), 0);
+        counters.on_ttl_write(0);
+        counters.on_ttl_write(0);
         assert_eq!(counters.get(0), 2);
-
-        counters.decr(0);
+        counters.on_ttl_clear(0);
         assert_eq!(counters.get(0), 1);
-
-        counters.decr(0);
+        counters.on_ttl_clear(0);
+        counters.on_ttl_clear(0);
         assert_eq!(counters.get(0), 0);
-
-        // 下溢饱和保护: 0 减 1 保持 0, 不 wrap 成 u64::MAX
-        counters.decr(0);
-        assert_eq!(counters.get(0), 0);
-    }
-
-    #[test]
-    fn test_db_key_counters_set_and_resets() {
-        let counters = DbKeyCounters::new();
-        counters.set(1, 42);
-        counters.set(2, 100);
-        assert_eq!(counters.get(1), 42);
-        assert_eq!(counters.get(2), 100);
-
-        counters.reset_db(1);
-        assert_eq!(counters.get(1), 0);
-        assert_eq!(counters.get(2), 100);
-
-        counters.reset_all();
-        assert_eq!(counters.get(2), 0);
-    }
-
-    #[test]
-    fn test_db_key_counters_snapshot() {
-        let counters = DbKeyCounters::new();
-        counters.set(0, 10);
-        counters.set(3, 30);
-        let snap = counters.snapshot();
-        assert_eq!(snap.len(), DB_COUNT);
-        assert_eq!(snap[0], 10);
-        assert_eq!(snap[1], 0);
-        assert_eq!(snap[3], 30);
-    }
-
-    #[test]
-    fn test_expire_decr_gate_claim_release() {
-        let gate = ExpireDecrGate::new();
-        assert!(gate.try_claim(b"k"));
-        assert!(!gate.try_claim(b"k"));
-        gate.release(b"k");
-        assert!(gate.try_claim(b"k"));
-        gate.clear();
-        assert!(gate.try_claim(b"k"));
-        assert!(!gate.try_claim(b"k"));
+        counters.on_ttl_write(DB_COUNT);
+        assert_eq!(counters.get(DB_COUNT), 0);
     }
 }

@@ -248,6 +248,16 @@ pub fn lookup(name: &str) -> Option<CommandInfo> {
     command_index().get(upper.as_str()).copied()
 }
 
+/// 命令表里的名字返回那条 `&'static str`. 表里没有的返回静态 `unknown`.
+pub fn canonical_command(name: &str) -> &'static str {
+    for info in COMMAND_TABLE {
+        if info.name.eq_ignore_ascii_case(name) {
+            return info.name;
+        }
+    }
+    "unknown"
+}
+
 pub fn all_commands() -> &'static [CommandInfo] {
     COMMAND_TABLE
 }

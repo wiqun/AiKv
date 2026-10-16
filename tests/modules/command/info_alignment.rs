@@ -16,13 +16,11 @@ fn info_field(text: &str, key: &str) -> Option<u64> {
     })
 }
 
-fn info_db_avg_ttl(text: &str, db: usize) -> Option<u64> {
-    let prefix = format!("db{db}:");
-    text.lines().find_map(|line| {
-        let rest = line.strip_prefix(&prefix)?;
-        rest.split(',')
-            .find_map(|part| part.strip_prefix("avg_ttl=").and_then(|v| v.parse().ok()))
-    })
+fn info_has_keyspace_contract(text: &str) -> bool {
+    text.contains("keys_estimate:")
+        && text.contains("db0:expires=")
+        && !text.contains("avg_ttl")
+        && !text.contains("keys=")
 }
 
 #[tokio::test]
@@ -109,6 +107,7 @@ async fn info_default_section_order_and_fields() {
         "CPU",
         "Cluster",
         "Keyspace",
+        "Storage",
     ];
     assert_eq!(headers, expected);
     assert!(text.contains("redis_compatible_version:8.8"));
@@ -345,8 +344,8 @@ async fn info_clients_includes_maxclients() {
 }
 
 #[tokio::test]
-async fn info_keyspace_avg_ttl_reflects_pexpire() {
-    let (router, _shared) = router_with_shared();
+async fn info_keyspace_reports_estimate_and_expires() {
+    let (router, shared) = router_with_shared();
     let mut db = 0;
     router
         .execute("SET", &[b("ttlkey"), b("v")], &mut db)
@@ -363,6 +362,13 @@ async fn info_keyspace_avg_ttl_reflects_pexpire() {
             .await
             .unwrap(),
     );
-    let avg_ttl = info_db_avg_ttl(&text, 0).expect("avg_ttl");
-    assert!(avg_ttl > 50_000 && avg_ttl <= 60_000, "avg_ttl={avg_ttl}");
+    assert!(info_has_keyspace_contract(&text), "keyspace text: {text}");
+
+    let sample = shared
+        .storage
+        .sample_avg_ttl(0)
+        .await
+        .expect("sample_avg_ttl");
+    assert!(sample > 50_000 && sample <= 60_000, "sample={sample}");
+    assert!(!text.contains(&sample.to_string()));
 }

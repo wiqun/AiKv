@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 
 use aikv::error::Result;
-use aikv::storage::adapter::{AdapterWriteOp, KvStorageAdapter, StorageAdapter, WriteBatchStats};
+use aikv::storage::adapter::{AdapterWriteOp, KvStorageAdapter, StorageAdapter};
 use aikv::storage::types::KvStorage;
 use aikv::storage::watch_version::is_watch_meta_user_key;
 use aikv::storage::AiDbEngine;
@@ -36,21 +36,19 @@ impl StorageAdapter for CountingAdapter {
         Ok(self.data.lock().unwrap().get(&key).cloned())
     }
 
-    async fn set(&self, key: Vec<u8>, value: Vec<u8>) -> Result<bool> {
+    async fn set(&self, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
         self.set_calls.fetch_add(1, Ordering::SeqCst);
-        let existed = self.data.lock().unwrap().insert(key, value).is_some();
-        Ok(!existed)
+        self.data.lock().unwrap().insert(key, value);
+        Ok(())
     }
 
-    async fn put_many(&self, ops: Vec<(Vec<u8>, Vec<u8>)>) -> Result<Vec<bool>> {
+    async fn put_many(&self, ops: Vec<(Vec<u8>, Vec<u8>)>) -> Result<()> {
         self.put_many_calls.fetch_add(1, Ordering::SeqCst);
         *self.last_put_many.lock().unwrap() = ops.clone();
-        let mut flags = Vec::with_capacity(ops.len());
         for (key, value) in ops {
-            let existed = self.data.lock().unwrap().insert(key, value).is_some();
-            flags.push(!existed);
+            self.data.lock().unwrap().insert(key, value);
         }
-        Ok(flags)
+        Ok(())
     }
 
     async fn delete(&self, key: Vec<u8>) -> Result<bool> {
@@ -61,24 +59,16 @@ impl StorageAdapter for CountingAdapter {
         Ok(self.data.lock().unwrap().contains_key(&key))
     }
 
-    async fn write_batch(&self, batch: Vec<AdapterWriteOp>) -> Result<WriteBatchStats> {
-        let mut inserted = 0u64;
-        let mut deleted = 0u64;
+    async fn write_batch(&self, batch: Vec<AdapterWriteOp>) -> Result<()> {
         for op in batch {
             match op {
-                AdapterWriteOp::Put { key, value } => {
-                    if self.set(key, value).await? {
-                        inserted += 1;
-                    }
-                }
+                AdapterWriteOp::Put { key, value } => self.set(key, value).await?,
                 AdapterWriteOp::Delete { key } => {
-                    if self.delete(key).await? {
-                        deleted += 1;
-                    }
+                    self.delete(key).await?;
                 }
             }
         }
-        Ok(WriteBatchStats { inserted, deleted })
+        Ok(())
     }
 
     async fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
