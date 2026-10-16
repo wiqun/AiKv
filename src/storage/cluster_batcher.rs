@@ -39,7 +39,8 @@ impl BatcherPerfSampler {
     fn record(&self, ops: usize, wait_us: u64, propose_us: u64) {
         self.total_ops.fetch_add(ops as u64, Ordering::Relaxed);
         self.total_wait_us.fetch_add(wait_us, Ordering::Relaxed);
-        self.total_propose_us.fetch_add(propose_us, Ordering::Relaxed);
+        self.total_propose_us
+            .fetch_add(propose_us, Ordering::Relaxed);
         let n = self.batches.fetch_add(1, Ordering::Relaxed) + 1;
         if n.is_multiple_of(100) {
             let ops_avg = self.total_ops.load(Ordering::Relaxed) / n;
@@ -299,7 +300,14 @@ pub(super) async fn enqueue_cluster_batch(
 }
 
 type GidBatches = HashMap<u64, (Arc<ClusterStateManager>, Vec<(Vec<u8>, Option<Vec<u8>>)>)>;
-type MigBatches = HashMap<u64, (Arc<ClusterStateManager>, u64, Vec<(Vec<u8>, Option<Vec<u8>>)>)>;
+type MigBatches = HashMap<
+    u64,
+    (
+        Arc<ClusterStateManager>,
+        u64,
+        Vec<(Vec<u8>, Option<Vec<u8>>)>,
+    ),
+>;
 
 fn partition_cluster_batch_ops(
     ops: Vec<AdapterWriteOp>,
@@ -307,34 +315,84 @@ fn partition_cluster_batch_ops(
     let mut by_gid: GidBatches = HashMap::new();
     let mut by_mig: MigBatches = HashMap::new();
     let mut fallback = Vec::new();
+    let mut route_cache: Option<RouteCache> = None;
 
     for op in ops {
         let key_ref = match &op {
             AdapterWriteOp::Put { key, .. } | AdapterWriteOp::Delete { key } => key.as_slice(),
         };
-        match ClusterDataAdapter::route_write(key_ref)? {
+        match route_cached(key_ref, &mut route_cache)? {
             Some((mgr, WriteRoute::Plain(gid))) => {
-                let tuple = match op {
-                    AdapterWriteOp::Put { key, value } => (key, Some(value)),
-                    AdapterWriteOp::Delete { key } => (key, None),
-                };
-                by_gid.entry(gid).or_insert_with(|| (mgr, Vec::new())).1.push(tuple);
+                push_plain(&mut by_gid, gid, mgr, op);
             }
             Some((mgr, WriteRoute::Migration { gid, epoch, .. })) => {
-                let tuple = match op {
-                    AdapterWriteOp::Put { key, value } => (key, Some(value)),
-                    AdapterWriteOp::Delete { key } => (key, None),
-                };
-                by_mig
-                    .entry(gid)
-                    .or_insert_with(|| (mgr, epoch, Vec::new()))
-                    .2
-                    .push(tuple);
+                push_migration(&mut by_mig, gid, mgr, epoch, op);
             }
-            _ => fallback.push(op),
+            None => fallback.push(op),
         }
     }
     Ok((by_gid, by_mig, fallback))
+}
+
+struct RouteCache {
+    slot: u16,
+    route: Option<(Arc<ClusterStateManager>, WriteRoute)>,
+}
+
+fn route_cached(
+    key: &[u8],
+    cache: &mut Option<RouteCache>,
+) -> Result<Option<(Arc<ClusterStateManager>, WriteRoute)>> {
+    if let Some(slot) = ClusterDataAdapter::routing_slot(key) {
+        if let Some(cached) = cache.as_ref() {
+            if cached.slot == slot {
+                return Ok(cached.route.clone());
+            }
+        }
+        let route = ClusterDataAdapter::route_write(key)?;
+        *cache = Some(RouteCache {
+            slot,
+            route: route.clone(),
+        });
+        return Ok(route);
+    }
+    ClusterDataAdapter::route_write(key)
+}
+
+fn push_plain(
+    by_gid: &mut GidBatches,
+    gid: u64,
+    mgr: Arc<ClusterStateManager>,
+    op: AdapterWriteOp,
+) {
+    let tuple = op_tuple(op);
+    by_gid
+        .entry(gid)
+        .or_insert_with(|| (mgr, Vec::new()))
+        .1
+        .push(tuple);
+}
+
+fn push_migration(
+    by_mig: &mut MigBatches,
+    gid: u64,
+    mgr: Arc<ClusterStateManager>,
+    epoch: u64,
+    op: AdapterWriteOp,
+) {
+    let tuple = op_tuple(op);
+    by_mig
+        .entry(gid)
+        .or_insert_with(|| (mgr, epoch, Vec::new()))
+        .2
+        .push(tuple);
+}
+
+fn op_tuple(op: AdapterWriteOp) -> (Vec<u8>, Option<Vec<u8>>) {
+    match op {
+        AdapterWriteOp::Put { key, value } => (key, Some(value)),
+        AdapterWriteOp::Delete { key } => (key, None),
+    }
 }
 
 pub(super) async fn enqueue_write_ops(
@@ -356,16 +414,21 @@ pub(super) async fn enqueue_write_ops(
         }
     }
     let (ack, wait) = oneshot::channel();
-    batcher
-        .tx
-        .send(WriteBatchItem::Batch { ops: planned, ack })
-        .await
-        .map_err(|_| {
-            Error::Cluster(crate::error::ClusterError::Aidb(
-                AidbClusterError::Internal("data group write batcher stopped".into()),
-            ))
-        })?;
+    let item = WriteBatchItem::Batch { ops: planned, ack };
+    match batcher.tx.try_send(item) {
+        Ok(()) => {}
+        Err(mpsc::error::TrySendError::Full(item)) => {
+            batcher.tx.send(item).await.map_err(|_| batcher_stopped())?;
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => return Err(batcher_stopped()),
+    }
     Ok(ClusterBatchSlots { slots: vec![wait] })
+}
+
+fn batcher_stopped() -> Error {
+    Error::Cluster(crate::error::ClusterError::Aidb(
+        AidbClusterError::Internal("data group write batcher stopped".into()),
+    ))
 }
 
 pub(super) async fn run_set_batcher(

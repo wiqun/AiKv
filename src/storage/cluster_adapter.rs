@@ -57,6 +57,7 @@ enum ReadRoute {
 /// F-056-A1 写路由结果: `Plain` 为老路径 (`Request::Put`/`Delete`/`WriteBatch`);
 /// `Migration` 为 Copying (Prepare/Migrating) 期写, 必须走
 /// `Request::MigrationWrite` 记录 tombstone (关闭"不存在则跳过 propose"短路).
+#[derive(Clone, Copy)]
 pub(super) enum WriteRoute {
     Plain(u64),
     Migration {
@@ -258,6 +259,13 @@ impl ClusterDataAdapter {
             }
             _ => None,
         })
+    }
+
+    /// 写路径用的 slot. 子键与父键相同. 无法解码时返回 `None`.
+    pub(super) fn routing_slot(key: &[u8]) -> Option<u16> {
+        let (_, user_key) = AiDbEngine::decode_key(key)?;
+        let routing_key = Self::strip_subkey_suffix(&user_key);
+        Some(key_to_slot(routing_key))
     }
 
     /// 写路径: IMPORTING 时优先写入本节点目标 group.
