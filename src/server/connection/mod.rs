@@ -116,6 +116,8 @@ pub struct Connection {
     /// 原子事务状态 (ATOM.MULTI / EXEC / DISCARD / WATCH)
     tx_state: TransactionState,
     pending_timing: Option<self::pipeline::PendingBatchTiming>,
+    held_frame: Option<crate::protocol::RespValue>,
+    ready_after: self::pipeline::ReadyDrain,
 }
 
 impl Connection {
@@ -140,6 +142,8 @@ impl Connection {
             cluster_state: crate::cluster::connection::ClusterConnectionState::new(),
             tx_state: TransactionState::new(),
             pending_timing: None,
+            held_frame: None,
+            ready_after: self::pipeline::ReadyDrain::Open,
         };
         tracing::debug!(remote = %remote, client_id, "kv.connection.open");
         let _ = conn.run().await;
@@ -275,7 +279,10 @@ impl Connection {
                 }
             }
             self.flush_responses().await?;
-            if let Some(reason) = self::pipeline::close_reason(drained) {
+            let stop = self::pipeline::close_reason(drained)
+                .or(self::pipeline::close_reason(self.ready_after));
+            self.ready_after = self::pipeline::ReadyDrain::Open;
+            if let Some(reason) = stop {
                 self.state.metrics.note_connection_close(reason);
                 break;
             }
@@ -283,11 +290,16 @@ impl Connection {
         Ok(())
     }
 
+    async fn next_batch_frame(&mut self) -> Result<Option<crate::protocol::RespValue>> {
+        if let Some(frame) = self.held_frame.take() {
+            return Ok(Some(frame));
+        }
+        self.parse_frame().await
+    }
+
     async fn process_next_batch(&mut self, buf: &mut [u8]) -> Result<bool> {
-        let first = match self.parse_frame().await {
-            Ok(Some(v)) => v,
-            Ok(None) => return Ok(false),
-            Err(e) => return Err(e),
+        let Some(first) = self.next_batch_frame().await? else {
+            return Ok(false);
         };
 
         let is_immediate = should_flush_immediately(&first);
@@ -314,12 +326,11 @@ impl Connection {
         }
 
         let batch_len = batch.len();
-        self::pipeline::record_batch_len(batch_len);
-
         if batch_len == 1 {
+            self::pipeline::record_batch_len(1);
             self.process_single_frame(batch.pop().unwrap(), buf).await?;
         } else {
-            if let Err(e) = self.process_pipeline_batch(batch).await {
+            if let Err(e) = self.process_pipeline_batch(batch, buf).await {
                 let _ = self.flush_responses().await;
                 return Err(e);
             }

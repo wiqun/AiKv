@@ -218,6 +218,52 @@ async fn test_tcp_pipeline_larger_than_one_read() {
 }
 
 #[tokio::test]
+async fn test_tcp_pipeline_incr_stays_ordered_across_reads() {
+    let (addr, _handle) = start_server().await;
+    let mut stream = connect(addr).await;
+    let incr = b"*2\r\n$4\r\nINCR\r\n$1\r\nk\r\n";
+    let count = 4000;
+    let mut payload = Vec::with_capacity(count * incr.len());
+    for _ in 0..count {
+        payload.extend_from_slice(incr);
+    }
+    assert!(payload.len() > 65536);
+    stream.write_all(&payload).await.unwrap();
+    let resp = read_n_integers(&mut stream, count).await;
+    assert_eq!(resp, (1..=count as i64).collect::<Vec<_>>());
+}
+
+async fn read_n_integers(stream: &mut tokio::net::TcpStream, count: usize) -> Vec<i64> {
+    let mut resp = Vec::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if std::time::Instant::now() > deadline {
+            panic!("timed out after {} bytes", resp.len());
+        }
+        let mut buf = [0u8; 8192];
+        let n = stream.read(&mut buf).await.unwrap();
+        assert!(n > 0, "connection closed early");
+        resp.extend_from_slice(&buf[..n]);
+        if let Some(values) = integers_if_complete(&resp, count) {
+            return values;
+        }
+    }
+}
+
+fn integers_if_complete(buf: &[u8], count: usize) -> Option<Vec<i64>> {
+    let mut parser = RespParser::new();
+    parser.feed(buf);
+    let mut values = Vec::new();
+    while let Some(value) = parser.parse().unwrap() {
+        let aikv::protocol::RespValue::Integer(n) = value else {
+            panic!("expected integer, got {value:?}");
+        };
+        values.push(n);
+    }
+    (values.len() == count).then_some(values)
+}
+
+#[tokio::test]
 async fn test_tcp_concurrent_connections() {
     let (addr, _handle) = start_server().await;
     let mut handles = Vec::new();

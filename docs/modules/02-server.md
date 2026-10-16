@@ -30,7 +30,7 @@ description: AiKv Server 运行时与连接管理 — TCP Listener、Connection 
 ## 关键 Invariants (勿破坏规则)
 
 - **每连接独立 Task**: 每个客户端连接通过 `tokio::spawn(Connection::handle)` 派发至独立异步任务处理, 连接级状态 (`current_db`, `parser`, `tx_state`, `cluster_state`) 绝对隔离, 不跨连接共享.
-- **Pipeline 批量写聚合与缓冲复用**: 单次从 TCP 读取数据后调用 `parser.feed()`, 再用非阻塞读把内核里已经到达的字节一并读入, 然后在内层循环中连续解析与执行命令, 响应流式写入独占连接缓冲区 `write_buf: BytesMut` (初始 8 KiB), 在批次末尾或遇到立即 flush 命令 (`QUIT`/`MONITOR`/`EXEC`/`ATOM.EXEC`/`SHUTDOWN`) 时统一单次 `write_all` 写出; 带 `blocking` flag 的命令 (如 `BLPOP`) 在 await 前先 flush 同批已排队响应; MONITOR 内 `QUIT` 断连前也必须 flush. 偶发大响应导致容量超过 64 KiB 时在 flush 后自动收缩回 8 KiB, 消除逐命令堆分配与多余系统调用.
+- **Pipeline 批量写聚合与缓冲复用**: 单次从 TCP 读取数据后调用 `parser.feed()`, 再用非阻塞读把内核里已经到达的字节一并读入, 然后在内层循环中连续解析与执行命令. 本批还在执行时, 继续把已经到达的后续命令加入同一批, 响应仍按到达顺序写回. 响应流式写入独占连接缓冲区 `write_buf: BytesMut` (初始 8 KiB), 在批次末尾或遇到立即 flush 命令 (`QUIT`/`MONITOR`/`EXEC`/`ATOM.EXEC`/`SHUTDOWN`) 时统一单次 `write_all` 写出; 带 `blocking` flag 的命令 (如 `BLPOP`) 在 await 前先 flush 同批已排队响应; MONITOR 内 `QUIT` 断连前也必须 flush. 偶发大响应导致容量超过 64 KiB 时在 flush 后自动收缩回 8 KiB, 消除逐命令堆分配与多余系统调用.
 - **Buffer 溢出断连**: 当接收数据与缓冲区现有数据之和超过 `max_buffer_size` (64 MiB) 时, 直接中断连接循环并关闭 Socket, 不向客户端写错误响应.
 - **协议协商与 Null 适配 (`adapt_for_protocol`)**:
   - 内部业务层统一生成 RESP3 AST (如 `RespValue::Null`);
