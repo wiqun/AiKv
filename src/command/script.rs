@@ -1,31 +1,14 @@
-//! Lua 脚本命令入口: EVAL / EVALSHA / SCRIPT (LOAD/EXISTS/FLUSH/KILL). 子模块:
-//! `sandbox` (mlua 沙箱) / `execute` (redis.call) / `json_exec` (JSON 子集) /
-//! `transaction` (写缓冲 + commit) / `convert` (Lua ↔ RESP) / `cache` (SCRIPT LOAD LRU).
+//! Lua 脚本命令入口: EVAL / EVALSHA / SCRIPT (LOAD/EXISTS/FLUSH/KILL).
 //!
-//! # 执行流程
-//!
-//! ```text
-//! EVAL script numkeys key… arg…
-//!   ├─ parse_keys_argv: 按 numkeys 切分 KEYS / ARGV
-//!   ├─ key_lock.lock_keys_sorted_with_timeout(KEYS, 30s)
-//!   ├─ new_sandbox_lua: StdLib = TABLE|STRING|MATH|UTF8; 封印 load/require/rawget/rawset…
-//!   ├─ set_memory_limit (128MB) + 指令 hook 超时 (默认 5s)
-//!   ├─ populate_keys_argv (全局 KEYS/ARGV) + install_redis_api (redis.call/pcall)
-//!   ├─ eval: 多线程运行时整段脚本在同一条阻塞线程上执行, 存储调用不再逐次换线程
-//!   ├─ 单机写入也在这条线程上完成; 集群的 Raft 确认留在线程外, 在途缓冲保持可见
-//!   └─ lua_to_resp
-//! ```
-//!
-//! # Invariant
-//!
-//! - 原子性: 脚本内写操作进 `ScriptTransaction` 缓冲; 成功结束单次 `commit`, 失败 drop.
-//! - 仅 `SCRIPT LOAD` 写入 LRU 缓存 (max 256); **EVAL 不自动缓存**; EVALSHA 未命中 → NOSCRIPT.
-//! - 超时与内存上限由 mlua hook 与 memory limit 强制; SCRIPT KILL 恒 NOTBUSY (stub).
+//! 先按 KEYS 拿 key 锁, 再在脚本线程上同步执行. 单机写入在该线程完成.
+//! 集群先把写放进在途缓冲再放开 key 锁, 入队在锁外按 key 排队, Raft 确认仍在其后.
+//! 脚本内写进 `ScriptTransaction`, 成功才一次提交. EVAL 不写入 SCRIPT 缓存.
 
 mod cache;
 mod call_stats;
 mod convert;
 mod drive;
+mod enqueue_chain;
 mod execute;
 pub(crate) mod in_flight;
 pub(crate) mod json_exec;
@@ -288,6 +271,7 @@ pub struct ScriptCommands {
     metrics: Option<Arc<ServerMetrics>>,
     vm_pool: parking_lot::Mutex<Vec<mlua::Lua>>,
     in_flight: Arc<InFlightBuffer>,
+    enqueue_chain: enqueue_chain::EnqueueChain,
     pool: pool::ScriptWorkerPool,
 }
 
@@ -319,6 +303,7 @@ impl ScriptCommands {
             metrics: None,
             vm_pool: parking_lot::Mutex::new(Vec::new()),
             in_flight: Arc::new(InFlightBuffer::new()),
+            enqueue_chain: enqueue_chain::EnqueueChain::new(),
             pool: pool::ScriptWorkerPool::new(threads),
         }
     }
@@ -476,7 +461,7 @@ impl ScriptCommands {
         });
         let body = drive.result?;
         let (commit_done, unlocked) = self
-            .finish_pending_commit(body.pending, db, seg_id, slot_idx, _guard)
+            .finish_pending_commit(body.pending, db, seg_id, slot_idx, keys, _guard)
             .await?;
         let t_done = commit_done.unwrap_or(body.t_local_done);
 
@@ -528,6 +513,7 @@ impl ScriptCommands {
         db: usize,
         seg_id: usize,
         slot_idx: usize,
+        keys: &[Bytes],
         guard: G,
     ) -> Result<(Option<Instant>, Instant)> {
         let Some(batch_ops) = pending else {
@@ -542,17 +528,24 @@ impl ScriptCommands {
             return Ok((Some(unlocked), unlocked));
         }
         let inserted = self.in_flight.insert_batch(db, &batch_ops);
+        let key_refs: Vec<&[u8]> = keys.iter().map(|key| key.as_ref()).collect();
+        let mut publication = self.enqueue_chain.publish(&key_refs);
+        drop(guard);
+        let unlocked = Instant::now();
+        tokio::task::yield_now().await;
+        if let Err(err) = publication.wait_predecessors().await {
+            drive::rollback_inserted(&self.in_flight, Some(inserted));
+            return Err(err);
+        }
         let handle = match self.storage.enqueue_batch(db, batch_ops).await {
             Ok(handle) => handle,
             Err(err) => {
                 drive::rollback_inserted(&self.in_flight, Some(inserted));
-                drop(guard);
                 return Err(err);
             }
         };
+        publication.succeed();
         SEG_TRACKER.on_enqueued(slot_idx);
-        drop(guard);
-        let unlocked = Instant::now();
         let write_res = handle.wait().await;
         self.in_flight.remove_encoded(&inserted.1, inserted.0);
         SEG_TRACKER.on_committed(seg_id, slot_idx);
