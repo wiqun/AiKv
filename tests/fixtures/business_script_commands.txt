@@ -1,0 +1,28 @@
+# redis.call / redis.pcall 字面量, 加上线上观察到的 BITFIELD.
+# 不是 Redis 命令的名字同时记在 business_command_noise.txt.
+BITFIELD
+DEL
+EXEC
+EXPIRE
+GET
+HDEL
+HGET
+HINCRBY
+HMGET
+HSET
+HSETNX
+INC
+INCR
+LLEN
+MULTI
+SET
+SSCAN
+TTL
+WATCH
+ZADD
+ZCARD
+ZRANGEBYSCORE
+ZREM
+ZREVRANGE
+ZREVRANGEBYSCORE
+ZSCORE

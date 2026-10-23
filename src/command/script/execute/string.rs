@@ -191,3 +191,67 @@ pub(super) fn exec_strlen(
     let len = txn.get(storage, &args[0])?.map(|v| v.len()).unwrap_or(0) as i64;
     Ok(router::integer(len))
 }
+
+pub(super) fn exec_getbit(
+    storage: &dyn ScriptIo,
+    txn: &ScriptTransaction,
+    args: &[Bytes],
+) -> Result<RespValue> {
+    if args.len() != 2 {
+        return Err(wrong_count("GETBIT"));
+    }
+    let data = txn.get(storage, &args[0])?.unwrap_or_default();
+    let offset = crate::command::string::parse_bit_offset(&args[1])?;
+    Ok(router::integer(i64::from(
+        crate::command::string::read_bit(&data, offset),
+    )))
+}
+
+pub(super) fn exec_setbit(
+    storage: &dyn ScriptIo,
+    txn: &mut ScriptTransaction,
+    args: &[Bytes],
+) -> Result<RespValue> {
+    if args.len() != 3 {
+        return Err(wrong_count("SETBIT"));
+    }
+    let mut data = txn.get(storage, &args[0])?.unwrap_or_default();
+    let offset = crate::command::string::parse_bit_offset(&args[1])?;
+    let bit = crate::command::string::parse_bit_value(&args[2])?;
+    let prev = crate::command::string::read_bit(&data, offset);
+    crate::command::string::write_bit(&mut data, offset, bit);
+    txn.set_string(key(&args[0]), data);
+    Ok(router::integer(i64::from(prev)))
+}
+
+pub(super) fn exec_bitcount(
+    storage: &dyn ScriptIo,
+    txn: &ScriptTransaction,
+    args: &[Bytes],
+) -> Result<RespValue> {
+    if args.is_empty() {
+        return Err(wrong_count("BITCOUNT"));
+    }
+    let data = txn.get(storage, &args[0])?;
+    let n = crate::command::bitfield::bitcount(data.as_deref(), args)?;
+    Ok(router::integer(n))
+}
+
+pub(super) fn exec_bitfield(
+    storage: &dyn ScriptIo,
+    txn: &mut ScriptTransaction,
+    args: &[Bytes],
+    readonly: bool,
+) -> Result<RespValue> {
+    let cmd = if readonly { "BITFIELD_RO" } else { "BITFIELD" };
+    if args.is_empty() {
+        return Err(wrong_count(cmd));
+    }
+    let plan = crate::command::bitfield::parse_bitfield(&args[1..], readonly)?;
+    let existing = txn.get(storage, &args[0])?;
+    let result = crate::command::bitfield::execute_bitfield(existing.as_deref(), &plan);
+    if let Some(bytes) = result.stored {
+        txn.set_string(key(&args[0]), bytes);
+    }
+    Ok(RespValue::Array(Some(result.replies)))
+}

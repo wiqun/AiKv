@@ -29,7 +29,11 @@ use sha1::{Digest, Sha1};
 
 use self::cache::ScriptCache;
 use self::convert::lua_to_resp;
-use self::execute::{redis_call, DeclaredKeys};
+use self::execute::{redis_call, DeclaredKeys, SCRIPT_COMMANDS};
+
+pub fn script_commands() -> &'static [&'static str] {
+    SCRIPT_COMMANDS
+}
 use self::in_flight::InFlightBuffer;
 use self::sandbox::new_sandbox_lua;
 use self::transaction::ScriptTransaction;

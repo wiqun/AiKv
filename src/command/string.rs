@@ -1,5 +1,6 @@
 //! String 命令: GET/SET/SETNX/SETEX/PSETEX/GETEX/GETDEL/MGET/MSET/STRLEN/GETRANGE/
-//! SETRANGE/SETBIT/GETBIT/APPEND/INCR/DECR/INCRBY/DECRBY/INCRBYFLOAT, 以及 DEL/EXISTS.
+//! SETRANGE/SETBIT/GETBIT/BITCOUNT/BITFIELD/BITFIELD_RO/APPEND/INCR/DECR/INCRBY/DECRBY/INCRBYFLOAT,
+//! 以及 DEL/EXISTS.
 //!
 //! # Invariant
 //!
@@ -225,6 +226,44 @@ impl StringCommands {
         let data = self.storage.get(db, &args[0]).await?.unwrap_or_default();
         let offset = parse_bit_offset(&args[1])?;
         Ok(router::integer(i64::from(read_bit(&data, offset))))
+    }
+
+    pub async fn bitcount(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
+        if args.is_empty() {
+            return Err(router::wrong_args("BITCOUNT", ""));
+        }
+        let data = self.storage.get(db, &args[0]).await?;
+        let n = crate::command::bitfield::bitcount(data.as_deref(), args)?;
+        Ok(router::integer(n))
+    }
+
+    pub async fn bitfield(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
+        self.run_bitfield(db, args, false).await
+    }
+
+    pub async fn bitfield_ro(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
+        self.run_bitfield(db, args, true).await
+    }
+
+    async fn run_bitfield(&self, db: usize, args: &[Bytes], readonly: bool) -> Result<RespValue> {
+        let cmd = if readonly { "BITFIELD_RO" } else { "BITFIELD" };
+        if args.is_empty() {
+            return Err(router::wrong_args(cmd, ""));
+        }
+        let plan = crate::command::bitfield::parse_bitfield(&args[1..], readonly)?;
+        let key = &args[0];
+        if !plan.writes {
+            let existing = self.storage.get(db, key).await?;
+            let result = crate::command::bitfield::execute_bitfield(existing.as_deref(), &plan);
+            return Ok(RespValue::Array(Some(result.replies)));
+        }
+        let _lock = self.key_lock.lock(key).await;
+        let existing = self.storage.get(db, key).await?;
+        let result = crate::command::bitfield::execute_bitfield(existing.as_deref(), &plan);
+        if let Some(bytes) = &result.stored {
+            self.storage.set(db, key, bytes).await?;
+        }
+        Ok(RespValue::Array(Some(result.replies)))
     }
 
     pub async fn append(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
@@ -567,14 +606,14 @@ pub(crate) fn parse_set_options(args: &[Bytes]) -> Result<SetOptions> {
 }
 
 /// Redis bit offset: 0 is the leftmost bit of the first byte.
-fn read_bit(data: &[u8], offset: u64) -> u8 {
+pub(crate) fn read_bit(data: &[u8], offset: u64) -> u8 {
     let byte_idx = (offset / 8) as usize;
     let bit_pos = 7 - (offset % 8);
     let byte = data.get(byte_idx).copied().unwrap_or(0);
     (byte >> bit_pos) & 1
 }
 
-fn write_bit(data: &mut Vec<u8>, offset: u64, bit: u8) {
+pub(crate) fn write_bit(data: &mut Vec<u8>, offset: u64, bit: u8) {
     let byte_idx = (offset / 8) as usize;
     let bit_pos = 7 - (offset % 8);
     if data.len() <= byte_idx {
@@ -623,7 +662,7 @@ fn parse_setrange_offset(b: &[u8]) -> Result<usize> {
         .map_err(|_| Error::Command("ERR offset is out of range".into()))
 }
 
-fn parse_bit_offset(b: &[u8]) -> Result<u64> {
+pub(crate) fn parse_bit_offset(b: &[u8]) -> Result<u64> {
     let s = std::str::from_utf8(b)
         .map_err(|_| Error::Command("ERR bit offset is not an integer or out of range".into()))?;
     if s.starts_with('-') {
@@ -635,7 +674,7 @@ fn parse_bit_offset(b: &[u8]) -> Result<u64> {
         .map_err(|_| Error::Command("ERR bit offset is not an integer or out of range".into()))
 }
 
-fn parse_bit_value(b: &[u8]) -> Result<u8> {
+pub(crate) fn parse_bit_value(b: &[u8]) -> Result<u8> {
     let s = std::str::from_utf8(b)
         .map_err(|_| Error::Command("ERR bit is not an integer or out of range".into()))?;
     match s {

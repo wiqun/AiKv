@@ -49,8 +49,8 @@ use self::hash::{
 use self::list::{exec_lindex, exec_llen, exec_lpop, exec_lpush, exec_lrange};
 use self::set::{exec_sadd, exec_scard, exec_sismember, exec_smembers, exec_srem, exec_sscan};
 use self::string::{
-    exec_append, exec_decrby, exec_del, exec_exists, exec_get, exec_incr, exec_incrby,
-    exec_incrbyfloat, exec_set, exec_strlen,
+    exec_append, exec_bitcount, exec_bitfield, exec_decrby, exec_del, exec_exists, exec_get,
+    exec_getbit, exec_incr, exec_incrby, exec_incrbyfloat, exec_set, exec_setbit, exec_strlen,
 };
 use self::zset::{
     exec_zadd, exec_zcard, exec_zrange, exec_zrangebyscore, exec_zrank, exec_zrem, exec_zrevrange,
@@ -230,14 +230,89 @@ fn reply_call(
     }
 }
 
+/// `redis.call` 允许的命令. 与下面的 `dispatch` 保持同一集合:
+/// 在白名单里但没有 match 臂时, 仍返回 "not supported", 脚本回归测试会失败.
+pub(crate) const SCRIPT_COMMANDS: &[&str] = &[
+    "APPEND",
+    "BITCOUNT",
+    "BITFIELD",
+    "BITFIELD_RO",
+    "DECR",
+    "DECRBY",
+    "DEL",
+    "EXISTS",
+    "EXPIRE",
+    "GET",
+    "GETBIT",
+    "HDEL",
+    "HEXISTS",
+    "HGET",
+    "HGETALL",
+    "HINCRBY",
+    "HLEN",
+    "HMGET",
+    "HMSET",
+    "HSET",
+    "HSETNX",
+    "INCR",
+    "INCRBY",
+    "INCRBYFLOAT",
+    "JSON.ARRAPPEND",
+    "JSON.ARRLEN",
+    "JSON.DEL",
+    "JSON.GET",
+    "JSON.MGET",
+    "JSON.NUMINCRBY",
+    "JSON.OBJLEN",
+    "JSON.SET",
+    "JSON.STRLEN",
+    "JSON.TYPE",
+    "LINDEX",
+    "LLEN",
+    "LPOP",
+    "LPUSH",
+    "LRANGE",
+    "RPOP",
+    "RPUSH",
+    "SADD",
+    "SCARD",
+    "SET",
+    "SETBIT",
+    "SISMEMBER",
+    "SMEMBERS",
+    "SREM",
+    "SSCAN",
+    "STRLEN",
+    "TTL",
+    "ZADD",
+    "ZCARD",
+    "ZRANGE",
+    "ZRANGEBYSCORE",
+    "ZRANK",
+    "ZREM",
+    "ZREVRANGE",
+    "ZREVRANGEBYSCORE",
+    "ZSCORE",
+];
+
 fn dispatch(
     storage: &dyn ScriptIo,
     txn: &mut ScriptTransaction,
     cmd: &str,
     args: &[Bytes],
 ) -> Result<RespValue> {
+    if SCRIPT_COMMANDS.binary_search(&cmd).is_err() {
+        return Err(Error::Command(format!(
+            "ERR Command not supported in scripts: {cmd}"
+        )));
+    }
     match cmd {
         "GET" => exec_get(storage, txn, args),
+        "GETBIT" => exec_getbit(storage, txn, args),
+        "SETBIT" => exec_setbit(storage, txn, args),
+        "BITCOUNT" => exec_bitcount(storage, txn, args),
+        "BITFIELD" => exec_bitfield(storage, txn, args, false),
+        "BITFIELD_RO" => exec_bitfield(storage, txn, args, true),
         "SET" => exec_set(storage, txn, args),
         "DEL" => exec_del(storage, txn, args),
         "EXISTS" => exec_exists(storage, txn, args),

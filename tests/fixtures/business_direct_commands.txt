@@ -1,0 +1,6 @@
+# ExecuteAsync 字面量, 以及会发出命令名的客户端方法.
+BITCOUNT
+BITFIELD_RO
+GETBIT
+SCAN
+SETBIT

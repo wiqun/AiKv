@@ -114,22 +114,34 @@ pub(super) fn is_cluster_local_admin_cmd(cmd: &str) -> bool {
     )
 }
 
+/// 副本本地读的判定. 与命令注册表的 `readonly` 标志一致, 不再维护第二份名单.
 #[cfg(feature = "cluster")]
 pub(super) fn classify_command(cmd: &str) -> crate::cluster::router::CommandType {
-    match cmd.to_ascii_lowercase().as_str() {
-        "get" | "exists" | "hget" | "hgetall" | "hkeys" | "hvals" | "hlen" | "hexists"
-        | "lrange" | "lindex" | "llen" | "smembers" | "scard" | "sismember" | "zrange"
-        | "zcard" | "zscore" | "zrank" | "type" | "ttl" | "pttl" | "strlen" | "getbit"
-        | "getrange" | "mget" | "json.get" | "json.mget" => {
-            crate::cluster::router::CommandType::Read
-        }
-        _ => crate::cluster::router::CommandType::Write,
+    let readonly = crate::command::lookup(cmd).is_some_and(|info| info.flags.contains(&"readonly"));
+    if readonly {
+        crate::cluster::router::CommandType::Read
+    } else {
+        crate::cluster::router::CommandType::Write
     }
 }
 
 #[cfg(all(test, feature = "cluster"))]
 mod tests {
     use super::is_cluster_local_admin_cmd;
+    use crate::cluster::router::CommandType;
+
+    /// 注册表的 readonly 标志决定副本能否本地读. 漏标会把 BITFIELD_RO 当成写命令 MOVED 到主节点.
+    #[test]
+    fn readonly_commands_are_replica_reads() {
+        for info in crate::command::all_commands() {
+            let got = super::classify_command(info.name);
+            if info.flags.contains(&"readonly") {
+                assert_eq!(got, CommandType::Read, "{}", info.name);
+            } else {
+                assert_eq!(got, CommandType::Write, "{}", info.name);
+            }
+        }
+    }
 
     /// KEYS/DBSIZE/FLUSH* 首参不是路由 key; 若走 slot 路由会误返 MOVED.
     #[test]

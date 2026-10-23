@@ -40,7 +40,7 @@ description: AiKv Redis 兼容范围 — RESP2/RESP3 协议边界, 已实现命�
 
 ### String
 
-`GET` `SET` `MGET` `MSET` `DEL` `EXISTS` `STRLEN` `GETRANGE` `SETRANGE` `SETBIT` `GETBIT` `APPEND` `INCR` `DECR` `INCRBY` `DECRBY` `INCRBYFLOAT` `GETDEL` `GETEX` `SETNX` `SETEX` `PSETEX`
+`GET` `SET` `MGET` `MSET` `DEL` `EXISTS` `STRLEN` `GETRANGE` `SETRANGE` `SETBIT` `GETBIT` `BITCOUNT` `BITFIELD` `BITFIELD_RO` `APPEND` `INCR` `DECR` `INCRBY` `DECRBY` `INCRBYFLOAT` `GETDEL` `GETEX` `SETNX` `SETEX` `PSETEX`
 
 ### JSON
 
@@ -133,6 +133,18 @@ description: AiKv Redis 兼容范围 — RESP2/RESP3 协议边界, 已实现命�
 | `CLUSTER RESET` | **不支持** | MetaRaft 保护元数据; 需停服清 `data_dir` 重搭 |
 
 ---
+
+## 命令对齐门禁
+
+`tests/command_alignment.rs` 用三份清单做差集, 对不上就失败. 运行时要加 `--features cluster`.
+
+1. Redis 8.8.3 的顶层命令 (`tests/fixtures/redis_8_8_3_commands.txt`, 来自该 tag 的 `src/commands/*.json`) 必须落在注册表或 `redis_unsupported.txt` 里. 注册表里 Redis 没有的名字必须落在 `aikv_extensions.txt`.
+2. 注册表中 Redis 允许在脚本里调用、AiKv 的 `redis.call` 白名单却没有的命令, 必须和 `script_command_gaps.txt` 完全一致. Redis 标记为 `NOSCRIPT` 的命令不进这份缺口, 只要求脚本白名单同样不收它们.
+3. 业务实际发出的命令没有豁免. `business_script_commands.txt` 里 Redis 允许进脚本的名字必须在白名单中; `business_direct_commands.txt` 里的名字必须在注册表中. 扫描噪声 (例如解析器单测里的 `INC`) 记在 `business_command_noise.txt`.
+
+刷新清单: `python3 aikv/tools/refresh_command_alignment.py`. 业务脚本或注册表有增减时要重跑, 否则这道测试失败.
+
+这层只核对命令名字和脚本可否调用. 同一条命令的回复是否与 Redis 逐字节一致, 不在这道测试里.
 
 ## 相关文档
 
