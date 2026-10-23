@@ -525,3 +525,53 @@ async fn set_keepttl_does_not_grow_expires() {
     );
     assert_eq!(shared.storage.expires(0).await.unwrap(), 1);
 }
+
+/// 业务客户端会发 BITFIELD / BITFIELD_RO / BITCOUNT. SET 的旧值、只读拒绝写、非字符串 WRONGTYPE 与 Redis 一致.
+#[tokio::test]
+async fn bitfield_set_get_readonly_and_wrongtype() {
+    let r = router();
+    let mut db = 0;
+    let resp = r
+        .execute(
+            "BITFIELD",
+            &[b("k"), b("SET"), b("u8"), b("0"), b("128")],
+            &mut db,
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp, RespValue::Array(Some(vec![RespValue::Integer(0)])));
+    assert_int(
+        r.execute("GETBIT", &[b("k"), b("0")], &mut db)
+            .await
+            .unwrap(),
+        1,
+    );
+    assert_int(
+        r.execute("BITCOUNT", &[b("k"), b("0"), b("-1")], &mut db)
+            .await
+            .unwrap(),
+        1,
+    );
+    let ro = r
+        .execute("BITFIELD_RO", &[b("k"), b("GET"), b("u8"), b("0")], &mut db)
+        .await
+        .unwrap();
+    assert_eq!(ro, RespValue::Array(Some(vec![RespValue::Integer(128)])));
+    let err = r
+        .execute(
+            "BITFIELD_RO",
+            &[b("k"), b("SET"), b("u8"), b("0"), b("1")],
+            &mut db,
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("BITFIELD_RO"));
+    r.execute("HSET", &[b("h"), b("f"), b("v")], &mut db)
+        .await
+        .unwrap();
+    let err = r
+        .execute("BITFIELD", &[b("h"), b("GET"), b("u8"), b("0")], &mut db)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("WRONGTYPE"));
+}

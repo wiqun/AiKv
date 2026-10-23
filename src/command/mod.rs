@@ -1,5 +1,6 @@
 //! Redis 命令层 (Phase 9–10)
 
+mod bitfield;
 pub mod blocking;
 mod database;
 mod hash;
@@ -24,4 +25,5 @@ pub use registry::{
     all_commands, canonical_command, command_count, command_keys, key_indices, lookup, CommandInfo,
 };
 pub use router::{CommandRouter, KeyLock, KeyLocksGuard};
+pub use script::script_commands;
 pub use script::ScriptCommands;

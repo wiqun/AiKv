@@ -46,7 +46,7 @@ description: AiKv Redis Cluster 协议层 — 16384 槽位 CRC16 计算、MOVED/
   - **严禁在服务端代为透明网络转发**, 所有路由重定向均由客户端处理.
 - **连接级标志 (`ASKING` & `READONLY`)**:
   - `ASKING`: 仅在当前连接的**紧接着下一条命令**临时生效, 允许目标节点在 `IMPORTING` 状态下执行该命令;
-  - `READONLY`: 标记当前连接为只读, 允许在从副本节点上直接读取本 Group 的数据而无需 MOVED 重定向至 Leader; 写命令仍强制 MOVED.
+  - `READONLY`: 标记当前连接为只读, 允许在从副本节点上直接读取本 Group 的数据而无需 MOVED 重定向至 Leader. 是否只读以命令注册表的 `readonly` 标志为准. 写命令仍强制 MOVED.
 - **拓扑真源为 MetaRaft**:
   - `CLUSTER NODES`, `CLUSTER SLOTS`, `CLUSTER SHARDS` 的权威数据均读取 AiDb 的 `MetaRaft` 快照;
   - AiKv 内部的 Gossip 仅负责周期性拉取 MetaRaft 拓扑并刷新本地缓存, 严禁使用 Gossip 进行投票选主.

@@ -992,3 +992,20 @@ async fn test_script_zrevrangebyscore_limit_0_1_precision() {
         panic!("expected array response: {resp:?}");
     }
 }
+
+/// 线上 CreateUsers 的 Lua 调用 BITFIELD, 以前被脚本白名单拒绝.
+#[tokio::test]
+async fn eval_bitfield_is_callable() {
+    let r = router();
+    let mut db = 0;
+    let script = "return redis.call('BITFIELD', KEYS[1], 'SET', 'u8', '0', '255')";
+    let resp = r
+        .execute("EVAL", &[b(script), b("1"), b("k")], &mut db)
+        .await
+        .unwrap();
+    assert_eq!(resp, RespValue::Array(Some(vec![RespValue::Integer(0)])));
+    assert_eq!(
+        r.execute("GET", &[b("k")], &mut db).await.unwrap(),
+        RespValue::BulkString(Some(Bytes::from(vec![255])))
+    );
+}
