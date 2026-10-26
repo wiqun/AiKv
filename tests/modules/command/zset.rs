@@ -1045,3 +1045,85 @@ async fn test_zscan() {
     }
     assert_eq!(seen.len(), 5);
 }
+
+/// ZREMRANGEBYSCORE / ZREMRANGEBYRANK / ZREMRANGEBYLEX 删除区间并在删空后移除 key.
+#[tokio::test]
+async fn test_zremrange_by_score_rank_lex() {
+    let r = router();
+    let mut db = 0;
+    r.execute(
+        "ZADD",
+        &[
+            b("z"),
+            b("1"),
+            b("a"),
+            b("2"),
+            b("b"),
+            b("3"),
+            b("c"),
+            b("4"),
+            b("d"),
+        ],
+        &mut db,
+    )
+    .await
+    .unwrap();
+    assert_int(
+        r.execute("ZREMRANGEBYSCORE", &[b("z"), b("(1"), b("3")], &mut db)
+            .await
+            .unwrap(),
+        2,
+    );
+    assert_int(r.execute("ZCARD", &[b("z")], &mut db).await.unwrap(), 2);
+    assert_int(
+        r.execute("ZREMRANGEBYRANK", &[b("z"), b("0"), b("0")], &mut db)
+            .await
+            .unwrap(),
+        1,
+    );
+    assert_int(r.execute("ZCARD", &[b("z")], &mut db).await.unwrap(), 1);
+    assert_int(
+        r.execute("ZREMRANGEBYRANK", &[b("z"), b("0"), b("-1")], &mut db)
+            .await
+            .unwrap(),
+        1,
+    );
+    assert_int(r.execute("EXISTS", &[b("z")], &mut db).await.unwrap(), 0);
+    assert_int(
+        r.execute(
+            "ZREMRANGEBYSCORE",
+            &[b("missing"), b("-inf"), b("+inf")],
+            &mut db,
+        )
+        .await
+        .unwrap(),
+        0,
+    );
+
+    r.execute(
+        "ZADD",
+        &[b("lex"), b("0"), b("a"), b("0"), b("c"), b("0"), b("m")],
+        &mut db,
+    )
+    .await
+    .unwrap();
+    assert_int(
+        r.execute("ZREMRANGEBYLEX", &[b("lex"), b("[a"), b("[c")], &mut db)
+            .await
+            .unwrap(),
+        2,
+    );
+    assert_int(r.execute("ZCARD", &[b("lex")], &mut db).await.unwrap(), 1);
+
+    r.execute("SET", &[b("str"), b("x")], &mut db)
+        .await
+        .unwrap();
+    let err = r
+        .execute("ZREMRANGEBYSCORE", &[b("str"), b("0"), b("1")], &mut db)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("WRONGTYPE"),
+        "expected WRONGTYPE, got {err}"
+    );
+}

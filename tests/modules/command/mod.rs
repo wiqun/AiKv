@@ -1,5 +1,6 @@
 pub mod atom;
 pub mod atom_json_batch;
+pub mod compat_aliases;
 pub mod database;
 pub mod hash;
 pub mod helpers;

@@ -100,9 +100,8 @@ pub(super) fn script_call_family(cmd: &str) -> ScriptCallOp {
         "SADD" | "SREM" | "SMEMBERS" | "SISMEMBER" | "SCARD" | "SSCAN" => ScriptCallOp::Set,
         "ZADD" => ScriptCallOp::Zadd,
         "ZREVRANGEBYSCORE" => ScriptCallOp::Zrev,
-        "ZREM" | "ZSCORE" | "ZRANK" | "ZRANGE" | "ZREVRANGE" | "ZRANGEBYSCORE" | "ZCARD" => {
-            ScriptCallOp::Zother
-        }
+        "ZREM" | "ZREMRANGEBYLEX" | "ZREMRANGEBYRANK" | "ZREMRANGEBYSCORE" | "ZSCORE" | "ZRANK"
+        | "ZRANGE" | "ZREVRANGE" | "ZRANGEBYSCORE" | "ZCARD" => ScriptCallOp::Zother,
         _ => ScriptCallOp::Other,
     }
 }

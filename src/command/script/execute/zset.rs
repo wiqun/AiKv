@@ -70,6 +70,22 @@ pub(super) fn exec_zrem(
     Ok(router::integer(count))
 }
 
+pub(super) fn exec_zmscore(
+    storage: &dyn ScriptIo,
+    txn: &ScriptTransaction,
+    args: &[Bytes],
+) -> Result<RespValue> {
+    if args.len() < 2 {
+        return Err(wrong_count("ZMSCORE"));
+    }
+    let mut items = Vec::with_capacity(args.len() - 1);
+    for member in &args[1..] {
+        let pair = [args[0].clone(), member.clone()];
+        items.push(exec_zscore(storage, txn, &pair)?);
+    }
+    Ok(RespValue::Array(Some(items)))
+}
+
 pub(super) fn exec_zscore(
     storage: &dyn ScriptIo,
     txn: &ScriptTransaction,
@@ -127,8 +143,9 @@ pub(super) fn exec_zrank(
 }
 
 use crate::command::zset::helpers::{
-    bytes_to_str, eq_ignore_case, members_to_resp, normalize_range, parse_limit_args,
-    parse_score_bound, score_in_range, sorted_by_score, ScoreBound,
+    bytes_to_str, eq_ignore_case, lex_in_range, members_in_rank, members_to_resp, normalize_range,
+    parse_i64, parse_lex_bound, parse_limit_args, parse_score_bound, score_in_range,
+    sorted_by_score, ScoreBound,
 };
 use crate::storage::zset_subkey::{self, score_index_entry, score_prefix};
 use crate::storage::AiDbEngine;
@@ -474,4 +491,94 @@ pub(super) fn exec_zcard(
         .with_zset(storage, &args[0], |zset| Ok(zset.len() as i64))?
         .unwrap_or(0);
     Ok(router::integer(len))
+}
+
+pub(super) fn exec_zremrangebyscore(
+    storage: &dyn ScriptIo,
+    txn: &mut ScriptTransaction,
+    args: &[Bytes],
+) -> Result<RespValue> {
+    if args.len() != 3 {
+        return Err(wrong_count("ZREMRANGEBYSCORE"));
+    }
+    let min = parse_score_bound(bytes_to_str(&args[1])?, true)?;
+    let max = parse_score_bound(bytes_to_str(&args[2])?, false)?;
+    remove_selected(storage, txn, &args[0], |zset| {
+        zset.iter()
+            .filter(|(_, score)| score_in_range(**score, &min, &max))
+            .map(|(member, _)| member.clone())
+            .collect()
+    })
+}
+
+pub(super) fn exec_zremrangebyrank(
+    storage: &dyn ScriptIo,
+    txn: &mut ScriptTransaction,
+    args: &[Bytes],
+) -> Result<RespValue> {
+    if args.len() != 3 {
+        return Err(wrong_count("ZREMRANGEBYRANK"));
+    }
+    let start = parse_i64(&args[1])?;
+    let stop = parse_i64(&args[2])?;
+    remove_selected(storage, txn, &args[0], |zset| {
+        members_in_rank(zset, start, stop)
+    })
+}
+
+pub(super) fn exec_zremrangebylex(
+    storage: &dyn ScriptIo,
+    txn: &mut ScriptTransaction,
+    args: &[Bytes],
+) -> Result<RespValue> {
+    if args.len() != 3 {
+        return Err(wrong_count("ZREMRANGEBYLEX"));
+    }
+    let min = parse_lex_bound(bytes_to_str(&args[1])?)?;
+    let max = parse_lex_bound(bytes_to_str(&args[2])?)?;
+    remove_selected(storage, txn, &args[0], |zset| {
+        zset.keys()
+            .filter(|member| lex_in_range(member, &min, &max))
+            .cloned()
+            .collect()
+    })
+}
+
+fn remove_selected<F>(
+    storage: &dyn ScriptIo,
+    txn: &mut ScriptTransaction,
+    key: &Bytes,
+    select: F,
+) -> Result<RespValue>
+where
+    F: FnOnce(&BTreeMap<Vec<u8>, f64>) -> Vec<Vec<u8>>,
+{
+    let members = txn
+        .with_zset(storage, key, |zset| Ok(select(zset)))?
+        .unwrap_or_default();
+    if members.is_empty() {
+        return Ok(router::integer(0));
+    }
+    if txn.uses_subkey_zset(storage, key)? {
+        let mut call = Vec::with_capacity(members.len() + 1);
+        call.push(key.clone());
+        call.extend(members.into_iter().map(Bytes::from));
+        return txn.subkey_zrem(storage, &call);
+    }
+    let stored_key = key.to_vec();
+    let mut count = 0i64;
+    let should_delete = if let Some(zset) = txn.ensure_zset_mut(storage, &stored_key)? {
+        for member in &members {
+            if zset.remove(member).is_some() {
+                count += 1;
+            }
+        }
+        zset.is_empty()
+    } else {
+        false
+    };
+    if should_delete {
+        txn.delete(stored_key);
+    }
+    Ok(router::integer(count))
 }

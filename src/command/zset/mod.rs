@@ -1,5 +1,6 @@
 //! Sorted Set 命令: ZADD/ZREM/ZSCORE/ZRANK/ZREVRANK/ZRANGE*/ZRANGEBYSCORE/ZRANGEBYLEX/
-//! ZCOUNT/ZLEXCOUNT/ZPOPMIN/ZPOPMAX/BZPOPMIN/BZPOPMAX/ZINCRBY/ZSCAN, 以及聚合
+//! ZREMRANGEBYSCORE/ZREMRANGEBYRANK/ZREMRANGEBYLEX/ZCOUNT/ZLEXCOUNT/
+//! ZPOPMIN/ZPOPMAX/BZPOPMIN/BZPOPMAX/ZINCRBY/ZSCAN, 以及聚合
 //! ZINTER/ZUNION/ZDIFF (含 *STORE 变体).
 //!
 //! 子模块: `helpers` (范围边界 / LIMIT / 聚合解析).
@@ -45,10 +46,29 @@ mod persist;
 
 use self::helpers::{
     aggregate_score, apply_limit, array_of_bulk, bytes_to_str, eq_ignore_case, format_score,
-    lex_in_range, members_to_resp, normalize_range, parse_i64, parse_lex_bound, parse_limit_args,
-    parse_score, parse_score_bound, parse_zset_combine_args, scan_response, score_in_range,
-    sort_by_score_then_member, sorted_by_score,
+    lex_in_range, members_in_rank, members_to_resp, normalize_range, parse_i64, parse_lex_bound,
+    parse_limit_args, parse_score, parse_score_bound, parse_zset_combine_args, scan_response,
+    score_in_range, sort_by_score_then_member, sorted_by_score,
 };
+
+fn parse_zdiff_args(cmd: &str, args: &[Bytes], allow_withscores: bool) -> Result<(usize, bool)> {
+    router::require_min_args(cmd, args, 2)?;
+    let numkeys: usize = bytes_to_str(&args[0])?
+        .parse()
+        .map_err(|_| Error::Command("ERR value is not an integer or out of range".into()))?;
+    if numkeys < 1 || args.len() < 1 + numkeys {
+        return Err(router::wrong_args(cmd, ""));
+    }
+    let rest = &args[1 + numkeys..];
+    if allow_withscores {
+        let withscores = rest.iter().any(|arg| eq_ignore_case(arg, b"WITHSCORES"));
+        return Ok((numkeys, withscores));
+    }
+    if !rest.is_empty() {
+        return Err(Error::Command("ERR syntax error".into()));
+    }
+    Ok((numkeys, false))
+}
 
 pub struct ZSetCommands {
     storage: Arc<dyn KvStorage>,
@@ -110,6 +130,53 @@ impl ZSetCommands {
         Ok(router::integer(count))
     }
 
+    pub async fn zremrangebyscore(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
+        router::require_args("ZREMRANGEBYSCORE", args, 3)?;
+        let min = parse_score_bound(bytes_to_str(&args[1])?, true)?;
+        let max = parse_score_bound(bytes_to_str(&args[2])?, false)?;
+        self.remove_where(db, &args[0], |zset| {
+            zset.iter()
+                .filter(|(_, score)| score_in_range(**score, &min, &max))
+                .map(|(member, _)| member.clone())
+                .collect()
+        })
+        .await
+    }
+
+    pub async fn zremrangebyrank(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
+        router::require_args("ZREMRANGEBYRANK", args, 3)?;
+        let start = parse_i64(&args[1])?;
+        let stop = parse_i64(&args[2])?;
+        self.remove_where(db, &args[0], |zset| members_in_rank(zset, start, stop))
+            .await
+    }
+
+    pub async fn zremrangebylex(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
+        router::require_args("ZREMRANGEBYLEX", args, 3)?;
+        let min = parse_lex_bound(bytes_to_str(&args[1])?)?;
+        let max = parse_lex_bound(bytes_to_str(&args[2])?)?;
+        self.remove_where(db, &args[0], |zset| {
+            zset.keys()
+                .filter(|member| lex_in_range(member, &min, &max))
+                .cloned()
+                .collect()
+        })
+        .await
+    }
+
+    async fn remove_where<F>(&self, db: usize, key: &Bytes, select: F) -> Result<RespValue>
+    where
+        F: FnOnce(&BTreeMap<Vec<u8>, f64>) -> Vec<Vec<u8>>,
+    {
+        let _lock = self.key_lock.lock(key).await;
+        let Some(zset) = persist::load_map(self.storage.as_ref(), db, key).await? else {
+            return Ok(router::integer(0));
+        };
+        let members = select(&zset);
+        let removed = persist::remove_members(self.storage.as_ref(), db, key, &members).await?;
+        Ok(router::integer(removed))
+    }
+
     pub async fn zscore(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_args("ZSCORE", args, 2)?;
         let zset = self.load_zset(db, &args[0]).await?;
@@ -120,6 +187,16 @@ impl ZSetCommands {
             None => Ok(router::nil_bulk()),
             Some(score) => Ok(router::bulk(format_score(*score).into_bytes())),
         }
+    }
+
+    pub async fn zmscore(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
+        router::require_min_args("ZMSCORE", args, 2)?;
+        let mut items = Vec::with_capacity(args.len() - 1);
+        for member in &args[1..] {
+            let pair = [args[0].clone(), member.clone()];
+            items.push(self.zscore(db, &pair).await?);
+        }
+        Ok(RespValue::Array(Some(items)))
     }
 
     pub async fn zrank(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
@@ -465,11 +542,65 @@ impl ZSetCommands {
 
     pub async fn zinter(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         let opts = parse_zset_combine_args("ZINTER", args)?;
-        let mut zsets = Vec::with_capacity(opts.keys.len());
-        for key in &opts.keys {
-            let zs = self.load_zset(db, key).await?.unwrap_or_default();
-            zsets.push(zs);
+        let results = self
+            .inter_members(db, &opts.keys, &opts.weights, &opts.aggregate)
+            .await?;
+        Ok(members_to_resp(&results, opts.withscores))
+    }
+
+    pub async fn zinterstore(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
+        router::require_min_args("ZINTERSTORE", args, 3)?;
+        let opts = parse_zset_combine_args("ZINTERSTORE", &args[1..])?;
+        if opts.withscores {
+            return Err(Error::Command("ERR syntax error".into()));
         }
+        let results = self
+            .inter_members(db, &opts.keys, &opts.weights, &opts.aggregate)
+            .await?;
+        self.store_zset(db, &args[0], results).await
+    }
+
+    pub async fn zunion(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
+        let opts = parse_zset_combine_args("ZUNION", args)?;
+        let results = self
+            .union_members(db, &opts.keys, &opts.weights, &opts.aggregate)
+            .await?;
+        Ok(members_to_resp(&results, opts.withscores))
+    }
+
+    pub async fn zunionstore(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
+        router::require_min_args("ZUNIONSTORE", args, 3)?;
+        let opts = parse_zset_combine_args("ZUNIONSTORE", &args[1..])?;
+        if opts.withscores {
+            return Err(Error::Command("ERR syntax error".into()));
+        }
+        let results = self
+            .union_members(db, &opts.keys, &opts.weights, &opts.aggregate)
+            .await?;
+        self.store_zset(db, &args[0], results).await
+    }
+
+    pub async fn zdiff(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
+        let (numkeys, withscores) = parse_zdiff_args("ZDIFF", args, true)?;
+        let results = self.diff_members(db, &args[1..1 + numkeys]).await?;
+        Ok(members_to_resp(&results, withscores))
+    }
+
+    pub async fn zdiffstore(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
+        router::require_min_args("ZDIFFSTORE", args, 3)?;
+        let (numkeys, _) = parse_zdiff_args("ZDIFFSTORE", &args[1..], false)?;
+        let results = self.diff_members(db, &args[2..2 + numkeys]).await?;
+        self.store_zset(db, &args[0], results).await
+    }
+
+    async fn inter_members(
+        &self,
+        db: usize,
+        keys: &[Bytes],
+        weights: &[f64],
+        aggregate: &helpers::Aggregate,
+    ) -> Result<Vec<(Vec<u8>, f64)>> {
+        let zsets = self.load_zsets(db, keys).await?;
         let smallest = zsets
             .iter()
             .enumerate()
@@ -477,23 +608,27 @@ impl ZSetCommands {
             .map(|(i, _)| i)
             .unwrap_or(0);
         let mut results = Vec::new();
+        if zsets.is_empty() {
+            return Ok(results);
+        }
         for member in zsets[smallest].keys() {
             if zsets.iter().all(|z| z.contains_key(member)) {
-                let score = aggregate_score(&zsets, member, &opts.weights, &opts.aggregate);
+                let score = aggregate_score(&zsets, member, weights, aggregate);
                 results.push((member.clone(), score));
             }
         }
         sort_by_score_then_member(&mut results);
-        Ok(members_to_resp(&results, opts.withscores))
+        Ok(results)
     }
 
-    pub async fn zunion(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
-        let opts = parse_zset_combine_args("ZUNION", args)?;
-        let mut zsets = Vec::with_capacity(opts.keys.len());
-        for key in &opts.keys {
-            let zs = self.load_zset(db, key).await?.unwrap_or_default();
-            zsets.push(zs);
-        }
+    async fn union_members(
+        &self,
+        db: usize,
+        keys: &[Bytes],
+        weights: &[f64],
+        aggregate: &helpers::Aggregate,
+    ) -> Result<Vec<(Vec<u8>, f64)>> {
+        let zsets = self.load_zsets(db, keys).await?;
         let mut seen: Vec<Vec<u8>> = Vec::new();
         for zset in &zsets {
             for member in zset.keys() {
@@ -504,29 +639,19 @@ impl ZSetCommands {
         }
         let mut results = Vec::with_capacity(seen.len());
         for member in &seen {
-            let score = aggregate_score(&zsets, member, &opts.weights, &opts.aggregate);
+            let score = aggregate_score(&zsets, member, weights, aggregate);
             results.push((member.clone(), score));
         }
         sort_by_score_then_member(&mut results);
-        Ok(members_to_resp(&results, opts.withscores))
+        Ok(results)
     }
 
-    pub async fn zdiff(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
-        router::require_min_args("ZDIFF", args, 2)?;
-        let nkeys_str = bytes_to_str(&args[0])?;
-        let numkeys: usize = nkeys_str
-            .parse()
-            .map_err(|_| Error::Command("ERR value is not an integer or out of range".into()))?;
-        if numkeys < 1 || args.len() < 1 + numkeys {
-            return Err(router::wrong_args("ZDIFF", ""));
-        }
-        let withscores = args.iter().any(|a| eq_ignore_case(a, b"WITHSCORES"));
-        let mut zsets = Vec::with_capacity(numkeys);
-        for i in 0..numkeys {
-            let zs = self.load_zset(db, &args[1 + i]).await?.unwrap_or_default();
-            zsets.push(zs);
-        }
+    async fn diff_members(&self, db: usize, keys: &[Bytes]) -> Result<Vec<(Vec<u8>, f64)>> {
+        let zsets = self.load_zsets(db, keys).await?;
         let mut results = Vec::new();
+        if zsets.is_empty() {
+            return Ok(results);
+        }
         for (member, score) in &zsets[0] {
             let in_others = zsets[1..].iter().any(|z| z.contains_key(member));
             if !in_others {
@@ -534,7 +659,35 @@ impl ZSetCommands {
             }
         }
         sort_by_score_then_member(&mut results);
-        Ok(members_to_resp(&results, withscores))
+        Ok(results)
+    }
+
+    async fn load_zsets(&self, db: usize, keys: &[Bytes]) -> Result<Vec<BTreeMap<Vec<u8>, f64>>> {
+        let mut zsets = Vec::with_capacity(keys.len());
+        for key in keys {
+            zsets.push(self.load_zset(db, key).await?.unwrap_or_default());
+        }
+        Ok(zsets)
+    }
+
+    async fn store_zset(
+        &self,
+        db: usize,
+        dest: &Bytes,
+        results: Vec<(Vec<u8>, f64)>,
+    ) -> Result<RespValue> {
+        let _lock = self.key_lock.lock(dest).await;
+        let len = results.len() as i64;
+        self.storage.delete(db, dest).await?;
+        if results.is_empty() {
+            return Ok(router::integer(0));
+        }
+        let pairs: Vec<(f64, Vec<u8>)> = results
+            .into_iter()
+            .map(|(member, score)| (score, member))
+            .collect();
+        persist::add_members(self.storage.as_ref(), db, dest, &pairs).await?;
+        Ok(router::integer(len))
     }
 
     // -- 阻塞命令 --

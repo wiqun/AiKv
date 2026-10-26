@@ -13,7 +13,7 @@
 ## 为什么开发 AiKv (Why AiKv?)
 
 - **磁盘级 KV 存储, 大幅降低成本**: 原生 Redis 全量内存导致成本高昂且容量受限; AiKv 将冷热数据下沉至 SSD 优化的 LSM-Tree 引擎, 在保障高并发低延迟的同时显著降低硬件成本与运维开销.
-- **原生支持 JSON 与 Lua 脚本**: 无需额外编译或维护第三方 C 扩展 (如 RedisJSON), 原生支持 RedisJSON (JSONPath) 兼容命令与 Lua 5.4 安全沙箱, 开箱即用.
+- **原生支持 JSON 与 Lua 脚本**: 无需额外编译或维护第三方 C 扩展 (如 RedisJSON), 原生支持 RedisJSON (JSONPath) 兼容命令与 Lua 5.1 安全沙箱, 开箱即用.
 - **彻底解决 Redis 集群模式痛点**: 摒弃 Redis Gossip 带来的脑裂与收敛慢问题, 引入强一致的 Raft 算法, 提供确定性拓扑管理与无损在线槽位迁移.
 - **存算分离, 架构解耦**: 网络协议与命令路由由 AiKv 实现, 持久化与分布式共识由纯 Rust LSM 引擎 [wiqun/AiDb](https://github.com/wiqun/AiDb) 承载, 各层独立演进.
 
@@ -23,7 +23,7 @@
 
 - **RESP2/RESP3 兼容及已实现命令子集**: 支持标准 array framing 双栈协议与 registry 内命令语义; 完整清单见 [docs/compatibility.md](docs/compatibility.md), 非 registry 命令或未实现能力需客户端适配.
 - **纯 Rust 实现**: 内存安全, 零 C/C++ 依赖, 采用 mimalloc 降低内存碎片.
-- **丰富的数据结构与原生扩展**: 完整支持 String, Hash, List, Set, Sorted Set, 原生内置 JSON (JSONPath) 与 Lua 5.4 脚本 (EVAL / SCRIPT).
+- **丰富的数据结构与原生扩展**: 完整支持 String, Hash, List, Set, Sorted Set, 原生内置 JSON (JSONPath) 与 Lua 5.1 脚本 (EVAL / SCRIPT, 含 cjson / bit / struct / cmsgpack).
 - **细粒度并发与事务**: 4096 桶按 Key 字典序排序加锁, 彻底杜绝死锁; 支持 MULTI/EXEC/WATCH 原子事务.
 - **分布式集群模式**: 16384 槽位路由, Hash Tag, 在线槽位迁移, 客户端透明重定向 (redis-cli -c).
 - **云原生高并发架构**: Tokio 异步运行时 + 4096 桶细粒度 KeyLock, 保证原子性与无死锁的同时最大化多核吞吐.

@@ -67,7 +67,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 clap = { version = "4", features = ["derive"] }
 
 # Lua scripting
-mlua = { version = "0.10", features = ["lua54", "async", "send", "vendored"] }
+mlua = { version = "0.10", features = ["lua51", "async", "send", "vendored"] }
 
 # Openraft
 openraft = { version = "0.10.0-alpha.33", optional = true }

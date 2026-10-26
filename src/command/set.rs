@@ -1,5 +1,5 @@
-//! Set 命令: SADD/SREM/SMEMBERS/SISMEMBER/SCARD/SPOP/SRANDMEMBER/SMOVE/SSCAN,
-//! 以及集合运算 SUNION/SINTER/SDIFF 与其 *STORE 变体.
+//! Set 命令: SADD/SREM/SMEMBERS/SISMEMBER/SMISMEMBER/SCARD/SPOP/SRANDMEMBER/SMOVE/SSCAN,
+//! 以及集合运算 SUNION/SINTER/SDIFF/SINTERCARD 与其 *STORE 变体.
 //!
 //! # 存储表示 (双格式)
 //!
@@ -169,6 +169,53 @@ impl SetCommands {
             _ => return Err(router::wrongtype()),
         };
         Ok(router::integer(i64::from(exists)))
+    }
+
+    pub async fn smismember(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
+        router::require_min_args("SMISMEMBER", args, 2)?;
+        let mut items = Vec::with_capacity(args.len() - 1);
+        for member in &args[1..] {
+            let pair = [args[0].clone(), member.clone()];
+            items.push(self.sismember(db, &pair).await?);
+        }
+        Ok(RespValue::Array(Some(items)))
+    }
+
+    pub async fn sintercard(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
+        router::require_min_args("SINTERCARD", args, 2)?;
+        let numkeys = parse_count(&args[0])?;
+        if numkeys < 1 || args.len() < 1 + numkeys {
+            return Err(Error::Command(
+                "ERR at least 1 input key is needed for the 'SINTERCARD' command".into(),
+            ));
+        }
+        let mut index = 1 + numkeys;
+        let mut limit = None;
+        if index < args.len() {
+            if !args[index].eq_ignore_ascii_case(b"LIMIT") {
+                return Err(Error::Command("ERR syntax error".into()));
+            }
+            let Some(raw_limit) = args.get(index + 1) else {
+                return Err(router::wrong_args("SINTERCARD", ""));
+            };
+            let n = parse_limit(raw_limit)?;
+            if n < 0 {
+                return Err(Error::Command("ERR LIMIT can't be negative".into()));
+            }
+            if n > 0 {
+                limit = Some(n as usize);
+            }
+            index += 2;
+            if index != args.len() {
+                return Err(Error::Command("ERR syntax error".into()));
+            }
+        }
+        let set = self.compute_inter(db, &args[1..1 + numkeys]).await?;
+        let count = match limit {
+            Some(limit) => set.len().min(limit),
+            None => set.len(),
+        };
+        Ok(router::integer(count as i64))
     }
 
     pub async fn smembers(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
@@ -630,6 +677,20 @@ impl SetCommands {
 
 fn array_of_bulk(items: Vec<Vec<u8>>) -> RespValue {
     RespValue::Array(Some(items.into_iter().map(router::bulk).collect()))
+}
+
+fn parse_count(b: &Bytes) -> Result<usize> {
+    let s = std::str::from_utf8(b)
+        .map_err(|_| Error::Command("ERR value is not an integer or out of range".into()))?;
+    s.parse::<usize>()
+        .map_err(|_| Error::Command("ERR value is not an integer or out of range".into()))
+}
+
+fn parse_limit(b: &Bytes) -> Result<i64> {
+    let s = std::str::from_utf8(b)
+        .map_err(|_| Error::Command("ERR value is not an integer or out of range".into()))?;
+    s.parse::<i64>()
+        .map_err(|_| Error::Command("ERR value is not an integer or out of range".into()))
 }
 
 fn parse_i64(b: &Bytes) -> Result<i64> {

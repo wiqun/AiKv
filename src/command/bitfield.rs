@@ -2,6 +2,7 @@
 //!
 //! 位序与 `string.rs` 的 GETBIT/SETBIT 相同: offset 0 是首字节的最高位.
 //! 溢出语义按 Redis 8.8 `bitops.c` 的 WRAP / SAT / FAIL 移植.
+//! 类型首字母与 Kvrocks 一样按 ASCII 转成小写, `U32` 与 `u32` 相同. 宽度仍是有符号 1..=64, 无符号 1..=63.
 //! 有写子命令时, 即使每条都因 OVERFLOW FAIL 没有改位, 也会把字符串补零到最高写位,
 //! 与 Redis 先扩容再执行子命令一致.
 
@@ -410,17 +411,26 @@ fn last_byte_mask(end: i64) -> u8 {
 }
 
 fn parse_type(raw: &[u8]) -> Result<(bool, u32)> {
-    let s = std::str::from_utf8(raw).map_err(|_| Error::Command(ERR_TYPE.into()))?;
-    let (signed, rest) = match s.as_bytes().first() {
-        Some(b'i') => (true, &s[1..]),
-        Some(b'u') => (false, &s[1..]),
-        _ => return Err(Error::Command(ERR_TYPE.into())),
+    let Some((first, rest)) = raw.split_first() else {
+        return Err(type_error(raw));
     };
-    let bits: i64 = rest.parse().map_err(|_| Error::Command(ERR_TYPE.into()))?;
+    let (signed, rest) = match first.to_ascii_lowercase() {
+        b'i' => (true, rest),
+        b'u' => (false, rest),
+        _ => return Err(type_error(raw)),
+    };
+    let rest = std::str::from_utf8(rest).map_err(|_| type_error(raw))?;
+    let bits: i64 = rest.parse().map_err(|_| type_error(raw))?;
     if bits < 1 || (signed && bits > 64) || (!signed && bits > 63) {
-        return Err(Error::Command(ERR_TYPE.into()));
+        return Err(type_error(raw));
     }
     Ok((signed, bits as u32))
+}
+
+/// 客户端仍能看到 Redis 的那句说明. 末尾带上收到的原文, 失败日志才能区分 `U32` / `u64` / `u8.0`.
+fn type_error(raw: &[u8]) -> Error {
+    let shown: String = String::from_utf8_lossy(raw).chars().take(64).collect();
+    Error::Command(format!("{ERR_TYPE} Got '{shown}'."))
 }
 
 fn parse_offset(raw: &[u8], bits: u32) -> Result<u64> {
@@ -540,7 +550,27 @@ mod tests {
         let Err(err) = parse_bitfield(&[b("GET"), b("u64"), b("0")], false) else {
             panic!("u64 must be rejected");
         };
-        assert!(err.to_string().contains("u64 is not supported"));
+        let msg = err.to_string();
+        assert!(msg.contains("u64 is not supported"));
+        assert!(msg.contains("Got 'u64'"));
+    }
+
+    #[test]
+    fn bitfield_type_prefix_ignores_ascii_case() {
+        let unsigned = run(None, &["GET", "U32", "0"], false).unwrap();
+        assert_eq!(ints(&unsigned), vec![Some(0)]);
+        let signed = run(None, &["GET", "I8", "0"], false).unwrap();
+        assert_eq!(ints(&signed), vec![Some(0)]);
+
+        let Err(err) = parse_bitfield(&[b("GET"), b("U64"), b("0")], false) else {
+            panic!("U64 must be rejected");
+        };
+        assert!(err.to_string().contains("Got 'U64'"));
+
+        let Err(err) = parse_bitfield(&[b("GET"), b("u8.0"), b("0")], false) else {
+            panic!("u8.0 must be rejected");
+        };
+        assert!(err.to_string().contains("Got 'u8.0'"));
     }
 
     #[test]

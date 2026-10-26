@@ -54,9 +54,7 @@ impl KeyLock {
 
     /// 多 key 字典序加锁 (去重); Drop 时逆序释放
     pub async fn lock_keys_sorted<'a>(&'a self, keys: &[&[u8]]) -> KeyLocksGuard<'a> {
-        let mut unique: Vec<&[u8]> = keys.to_vec();
-        unique.sort();
-        unique.dedup();
+        let unique = unique_keys_by_bucket(self.locks.len(), keys);
         let mut guards = Vec::with_capacity(unique.len());
         for k in unique {
             guards.push(self.lock(k).await);
@@ -70,9 +68,7 @@ impl KeyLock {
         keys: &[&[u8]],
         timeout: Duration,
     ) -> Result<KeyLocksGuard<'a>> {
-        let mut unique: Vec<&[u8]> = keys.to_vec();
-        unique.sort();
-        unique.dedup();
+        let unique = unique_keys_by_bucket(self.locks.len(), keys);
         if unique.is_empty() {
             return Ok(KeyLocksGuard { locks: Vec::new() });
         }
@@ -106,6 +102,25 @@ impl Drop for KeyLocksGuard<'_> {
     fn drop(&mut self) {
         while self.locks.pop().is_some() {}
     }
+}
+
+/// 按 key 字节序加锁, 同一把桶锁只取一次. 桶锁不可重入, 两个 key 落到同一桶时第二次 lock 会把自己卡住.
+fn unique_keys_by_bucket<'a>(buckets: usize, keys: &[&'a [u8]]) -> Vec<&'a [u8]> {
+    let buckets = buckets.max(1);
+    let mut unique: Vec<&[u8]> = keys.to_vec();
+    unique.sort();
+    unique.dedup();
+    let mut seen = vec![false; buckets];
+    unique.retain(|key| {
+        let idx = hash_key(key) % buckets;
+        if seen[idx] {
+            false
+        } else {
+            seen[idx] = true;
+            true
+        }
+    });
+    unique
 }
 
 fn hash_key(key: &[u8]) -> usize {

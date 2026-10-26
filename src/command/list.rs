@@ -1,5 +1,5 @@
-//! List 命令: LPUSH/RPUSH/LPOP/RPOP/LLEN/LRANGE/LINDEX/LSET/LREM/LINSERT/LMOVE/LPOS/
-//! LTRIM, 以及阻塞 BLPOP/BRPOP/BLMOVE.
+//! List 命令: LPUSH/LPUSHX/RPUSH/RPUSHX/LPOP/RPOP/LLEN/LRANGE/LINDEX/LSET/LREM/LINSERT/LMOVE/
+//! RPOPLPUSH/LPOS/LTRIM, 以及阻塞 BLPOP/BRPOP/BLMOVE/BRPOPLPUSH.
 //!
 //! # 存储表示
 //!
@@ -75,12 +75,45 @@ impl ListCommands {
 
     pub async fn lpush(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_min_args("LPUSH", args, 2)?;
-        self.push(db, &args[0], &args[1..], true).await
+        self.push(db, &args[0], &args[1..], true, true).await
     }
 
     pub async fn rpush(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_min_args("RPUSH", args, 2)?;
-        self.push(db, &args[0], &args[1..], false).await
+        self.push(db, &args[0], &args[1..], false, true).await
+    }
+
+    pub async fn lpushx(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
+        router::require_min_args("LPUSHX", args, 2)?;
+        self.push(db, &args[0], &args[1..], true, false).await
+    }
+
+    pub async fn rpushx(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
+        router::require_min_args("RPUSHX", args, 2)?;
+        self.push(db, &args[0], &args[1..], false, false).await
+    }
+
+    pub async fn rpoplpush(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
+        router::require_args("RPOPLPUSH", args, 2)?;
+        let moved = [
+            args[0].clone(),
+            args[1].clone(),
+            Bytes::from_static(b"RIGHT"),
+            Bytes::from_static(b"LEFT"),
+        ];
+        self.lmove(db, &moved).await
+    }
+
+    pub async fn brpoplpush(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
+        router::require_args("BRPOPLPUSH", args, 3)?;
+        let moved = [
+            args[0].clone(),
+            args[1].clone(),
+            Bytes::from_static(b"RIGHT"),
+            Bytes::from_static(b"LEFT"),
+            args[2].clone(),
+        ];
+        self.blmove_blocking(db, &moved).await
     }
 
     async fn push(
@@ -89,9 +122,20 @@ impl ListCommands {
         key: &Bytes,
         elements: &[Bytes],
         front: bool,
+        create: bool,
     ) -> Result<RespValue> {
         let _lock = self.key_lock.lock(key).await;
-        let mut stored = self.load_or_create_list(db, key).await?;
+        let mut stored = if create {
+            self.load_or_create_list(db, key).await?
+        } else {
+            match self.storage.get_typed(db, key).await? {
+                None => return Ok(router::integer(0)),
+                Some(stored) => match stored.value {
+                    ValueType::List(_) => stored,
+                    _ => return Err(router::wrongtype()),
+                },
+            }
+        };
         let list = stored.as_list_mut()?;
         if front {
             for el in elements {
@@ -618,7 +662,7 @@ impl ListCommands {
     }
 }
 
-fn normalize_range(len: usize, start: i64, stop: i64) -> (usize, usize) {
+pub(crate) fn normalize_range(len: usize, start: i64, stop: i64) -> (usize, usize) {
     let len_i = len as i64;
     let start_idx = if start < 0 {
         (len_i + start).max(0) as usize
@@ -633,7 +677,7 @@ fn normalize_range(len: usize, start: i64, stop: i64) -> (usize, usize) {
     (start_idx, stop_idx)
 }
 
-fn normalize_index(len: usize, index: i64) -> usize {
+pub(crate) fn normalize_index(len: usize, index: i64) -> usize {
     if index < 0 {
         (len as i64 + index) as usize
     } else {
@@ -641,7 +685,7 @@ fn normalize_index(len: usize, index: i64) -> usize {
     }
 }
 
-fn remove_direction(
+pub(crate) fn remove_direction(
     list: &mut VecDeque<Vec<u8>>,
     element: &[u8],
     max: usize,
@@ -699,7 +743,7 @@ fn eq_ignore_case(a: &Bytes, b: &[u8]) -> bool {
             .all(|(x, y)| x.eq_ignore_ascii_case(y))
 }
 
-fn parse_side(b: &Bytes) -> Result<bool> {
+pub(crate) fn parse_side(b: &Bytes) -> Result<bool> {
     if eq_ignore_case(b, b"LEFT") {
         Ok(true)
     } else if eq_ignore_case(b, b"RIGHT") {
@@ -709,13 +753,13 @@ fn parse_side(b: &Bytes) -> Result<bool> {
     }
 }
 
-struct LposOptions {
-    rank: i64,
-    count: Option<i64>,
-    maxlen: i64,
+pub(crate) struct LposOptions {
+    pub(crate) rank: i64,
+    pub(crate) count: Option<i64>,
+    pub(crate) maxlen: i64,
 }
 
-fn parse_lpos_options(args: &[Bytes]) -> Result<LposOptions> {
+pub(crate) fn parse_lpos_options(args: &[Bytes]) -> Result<LposOptions> {
     let mut rank = 1_i64;
     let mut count = None;
     let mut maxlen = 0_i64;
@@ -755,7 +799,11 @@ fn parse_lpos_options(args: &[Bytes]) -> Result<LposOptions> {
     })
 }
 
-fn find_lpos(list: &VecDeque<Vec<u8>>, element: &[u8], opts: &LposOptions) -> Result<RespValue> {
+pub(crate) fn find_lpos(
+    list: &VecDeque<Vec<u8>>,
+    element: &[u8],
+    opts: &LposOptions,
+) -> Result<RespValue> {
     if opts.rank == 0 {
         return Err(Error::Command("ERR RANK can't be zero".into()));
     }
