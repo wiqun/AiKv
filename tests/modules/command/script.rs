@@ -10,6 +10,51 @@ use super::helpers::{
 use aikv::command::KeyLock;
 
 #[tokio::test]
+async fn test_script_zremrange_sees_own_writes() {
+    let r = router();
+    let mut db = 0;
+    let script = b"\
+redis.call('ZADD', KEYS[1], '1', 'a', '2', 'b', '3', 'c', '4', 'd')
+local byscore = redis.call('ZREMRANGEBYSCORE', KEYS[1], '(1', '3')
+local byrank = redis.call('ZREMRANGEBYRANK', KEYS[1], '0', '0')
+local left = redis.call('ZRANGE', KEYS[1], '0', '-1')
+redis.call('ZADD', KEYS[2], '0', 'a', '0', 'c', '0', 'm')
+local bylex = redis.call('ZREMRANGEBYLEX', KEYS[2], '[a', '[c')
+local missing = redis.call('ZREMRANGEBYSCORE', KEYS[3], '-inf', '+inf')
+return byscore .. ':' .. byrank .. ':' .. left[1] .. ':' .. bylex .. ':' .. missing";
+    let resp = r
+        .execute(
+            "EVAL",
+            &[
+                Bytes::from_static(script),
+                b("3"),
+                b("zrange"),
+                b("zlex"),
+                b("zmissing"),
+            ],
+            &mut db,
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp, RespValue::BulkString(Some(b("2:1:d:2:0"))));
+}
+
+#[tokio::test]
+async fn test_script_lua51_unpack_and_number_format() {
+    let r = router();
+    let mut db = 0;
+    let resp = r
+        .execute(
+            "EVAL",
+            &[b("return type(unpack) .. ':' .. ('u' .. 8.0)"), b("0")],
+            &mut db,
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp, RespValue::BulkString(Some(b("function:u8"))));
+}
+
+#[tokio::test]
 async fn test_script_eval_basic() {
     let r = router();
     let mut db = 0;
@@ -991,6 +1036,165 @@ async fn test_script_zrevrangebyscore_limit_0_1_precision() {
     } else {
         panic!("expected array response: {resp:?}");
     }
+}
+
+/// Redis 脚本环境: cjson / bit / struct / cmsgpack / os.clock / redis.* .
+#[tokio::test]
+async fn test_script_redis_runtime_libraries() {
+    let r = router();
+    let mut db = 0;
+    let script = r#"
+        local band = bit.band(bit.bor(1, 2), 7)
+        local neg = bit.tobit(0xffffffff)
+        local obj = cjson.decode('{"a":1}')
+        local arr = cjson.decode(cjson.encode({10, 20}))
+        local packed = struct.pack('>I', 291)
+        local n = struct.unpack('>I', packed)
+        local a, b = cmsgpack.unpack(cmsgpack.pack('hi', 7))
+        math.randomseed(1)
+        local r1 = math.random(1000)
+        math.randomseed(1)
+        local r2 = math.random(1000)
+        redis.setresp(3)
+        local missing = redis.call('GET', KEYS[1])
+        redis.set_repl(redis.REPL_ALL)
+        local acl = redis.acl_check_cmd('GET', KEYS[1])
+        local clock_ok = type(os.clock()) == 'number' and os.clock() >= 0
+        if type(os.getenv) ~= 'nil' then error('os.getenv') end
+        return table.concat({
+            tostring(band), tostring(neg), tostring(obj.a), tostring(arr[2]),
+            tostring(n), tostring(struct.size('>IH')), a, tostring(b),
+            tostring(r1 == r2), type(missing), tostring(acl),
+            redis.REDIS_VERSION, tostring(redis.REDIS_VERSION_NUM),
+            tostring(redis.LOG_WARNING), tostring(redis.REPL_NONE),
+            tostring(clock_ok)
+        }, ',')
+    "#;
+    let resp = r
+        .execute("EVAL", &[b(script), b("1"), b("missing")], &mut db)
+        .await
+        .unwrap();
+    assert_eq!(
+        resp,
+        RespValue::BulkString(Some(b(
+            "3,-1,1,20,291,6,hi,7,true,nil,true,8.8,526336,3,0,true"
+        )))
+    );
+}
+
+/// 已实现的数据命令可以在脚本事务里调用, 写完马上能读到.
+#[tokio::test]
+async fn test_script_data_commands_see_own_writes() {
+    let r = router();
+    let mut db = 0;
+    let script = r#"
+        redis.call('MSET', KEYS[1], 'ab', KEYS[2], 'w')
+        redis.call('SETRANGE', KEYS[1], '0', 'X')
+        local range = redis.call('GETRANGE', KEYS[1], 0, 0)
+        local got = redis.call('MGET', KEYS[1], KEYS[2])
+        redis.call('HSET', KEYS[3], 'f', '1')
+        local hk = redis.call('HKEYS', KEYS[3])
+        redis.call('LPUSH', KEYS[4], 'a', 'b')
+        redis.call('LTRIM', KEYS[4], 0, 0)
+        redis.call('SADD', KEYS[5], 'x', 'y')
+        redis.call('SADD', KEYS[6], 'y', 'z')
+        local inter = redis.call('SINTER', KEYS[5], KEYS[6])
+        redis.call('ZADD', KEYS[7], 1, 'm')
+        local score = redis.call('ZINCRBY', KEYS[7], 2, 'm')
+        local typ = redis.call('TYPE', KEYS[7])
+        redis.call('PEXPIRE', KEYS[1], 60000)
+        local pttl = redis.call('PTTL', KEYS[1])
+        return table.concat({
+            range, got[1], got[2], hk[1],
+            tostring(redis.call('LLEN', KEYS[4])), inter[1], score, typ,
+            tostring(pttl > 0), redis.call('PING'), redis.call('ECHO', 'e')
+        }, ',')
+    "#;
+    let resp = r
+        .execute(
+            "EVAL",
+            &[
+                b(script),
+                b("7"),
+                b("s"),
+                b("s2"),
+                b("h"),
+                b("l"),
+                b("a"),
+                b("b"),
+                b("z"),
+            ],
+            &mut db,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp,
+        RespValue::BulkString(Some(b("X,Xb,w,f,1,y,3,zset,true,PONG,e")))
+    );
+}
+
+/// 白名单中的每条命令都要进 `dispatch`。漏写 match 臂时，`redis.pcall` 仍返回 not supported。
+#[tokio::test]
+async fn test_every_script_command_is_dispatched() {
+    let r = router();
+    let mut db = 0;
+    let names = aikv::command::script_commands()
+        .iter()
+        .map(|name| format!("'{name}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let script = format!(
+        r#"
+        local names = {{{names}}}
+        local bad = {{}}
+        for _, cmd in ipairs(names) do
+            local result = redis.pcall(
+                cmd, KEYS[1], KEYS[2], KEYS[3], KEYS[4],
+                '0', '1', '2', 'a', 'b', 'c',
+                'WITHSCORES', 'LIMIT', '0', '10', 'NX', 'EX', '60', '$', '{{}}'
+            )
+            if type(result) == 'table' and type(result.err) == 'string'
+                and string.find(result.err, 'Command not supported in scripts', 1, true) then
+                bad[#bad + 1] = cmd
+            end
+        end
+        if #bad == 0 then
+            return 'ok:' .. #names
+        end
+        return table.concat(bad, ',')
+        "#
+    );
+    let resp = r
+        .execute(
+            "EVAL",
+            &[b(&script), b("4"), b("k1"), b("k2"), b("k3"), b("k4")],
+            &mut db,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp,
+        RespValue::BulkString(Some(Bytes::from(format!(
+            "ok:{}",
+            aikv::command::script_commands().len()
+        ))))
+    );
+}
+
+#[tokio::test]
+async fn test_script_blocking_still_rejected() {
+    let r = router();
+    let mut db = 0;
+    let err = r
+        .execute(
+            "EVAL",
+            &[b("return redis.call('BLPOP', KEYS[1], 1)"), b("1"), b("k")],
+            &mut db,
+        )
+        .await
+        .unwrap_err();
+    assert_err_contains(err, "not supported");
 }
 
 /// 线上 CreateUsers 的 Lua 调用 BITFIELD, 以前被脚本白名单拒绝.

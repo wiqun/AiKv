@@ -123,6 +123,31 @@ impl ScriptTransaction {
         self.write_buffer.insert(key, ExtendedBatchOp::Delete);
     }
 
+    pub fn replace_stored(&mut self, key: Vec<u8>, stored: StoredValue) -> Result<()> {
+        let expires_at = stored.expires_at;
+        let op = match stored.value {
+            ValueType::String(value) => ExtendedBatchOp::SetString(value),
+            ValueType::List(value) => ExtendedBatchOp::SetList(value),
+            ValueType::Hash(value) => ExtendedBatchOp::SetHash(value),
+            ValueType::Set(value) => ExtendedBatchOp::SetSet(value),
+            ValueType::ZSet(value) => ExtendedBatchOp::SetZSet(value),
+            ValueType::CollectionHeader { .. } => {
+                return Err(Error::Command(
+                    "ERR DUMP payload version or checksum error".into(),
+                ));
+            }
+        };
+        self.read_cache.lock().remove(&key);
+        self.orig_expires_at
+            .lock()
+            .entry(key.clone())
+            .or_insert(None);
+        self.zset_deltas.remove(&key);
+        self.write_buffer.insert(key.clone(), op);
+        self.expire_at.insert(key, expires_at);
+        Ok(())
+    }
+
     pub fn set_expire_at(&mut self, key: Vec<u8>, expires_at: Option<u64>) {
         self.expire_at.insert(key, expires_at);
     }

@@ -56,10 +56,14 @@ static COMMAND_TABLE: &[CommandInfo] = &[
     cmd!("SET", -3, &["write", "denyoom"], 1, 1, 1),
     cmd!("MGET", -2, &["readonly", "fast"], 1, -1, 1),
     cmd!("MSET", -3, &["write", "denyoom"], 1, -1, 2),
+    cmd!("MSETNX", -3, &["write", "denyoom"], 1, -1, 2),
     cmd!("DEL", -2, &["write"], 1, -1, 1),
+    cmd!("UNLINK", -2, &["write"], 1, -1, 1),
     cmd!("EXISTS", -2, &["readonly", "fast"], 1, -1, 1),
     cmd!("STRLEN", 2, &["readonly", "fast"], 1, 1, 1),
     cmd!("GETRANGE", 4, &["readonly", "fast"], 1, 1, 1),
+    cmd!("GETSET", 3, &["write", "denyoom", "fast"], 1, 1, 1),
+    cmd!("SUBSTR", 4, &["readonly", "fast"], 1, 1, 1),
     cmd!("SETRANGE", 4, &["write", "denyoom"], 1, 1, 1),
     cmd!("SETBIT", 4, &["write", "denyoom"], 1, 1, 1),
     cmd!("GETBIT", 3, &["readonly", "fast"], 1, 1, 1),
@@ -111,7 +115,9 @@ static COMMAND_TABLE: &[CommandInfo] = &[
     cmd!("HSCAN", -3, &["readonly"], 1, 1, 1),
     // List
     cmd!("LPUSH", -3, &["write", "denyoom", "fast"], 1, 1, 1),
+    cmd!("LPUSHX", -3, &["write", "denyoom", "fast"], 1, 1, 1),
     cmd!("RPUSH", -3, &["write", "denyoom", "fast"], 1, 1, 1),
+    cmd!("RPUSHX", -3, &["write", "denyoom", "fast"], 1, 1, 1),
     cmd!("LPOP", -2, &["write", "fast"], 1, 1, 1),
     cmd!("RPOP", -2, &["write", "fast"], 1, 1, 1),
     cmd!("LLEN", 2, &["readonly", "fast"], 1, 1, 1),
@@ -122,20 +128,24 @@ static COMMAND_TABLE: &[CommandInfo] = &[
     cmd!("LTRIM", 4, &["write"], 1, 1, 1),
     cmd!("LINSERT", 5, &["write", "denyoom"], 1, 1, 1),
     cmd!("LMOVE", 5, &["write", "denyoom"], 1, 2, 1),
+    cmd!("RPOPLPUSH", 3, &["write", "denyoom"], 1, 2, 1),
     cmd!("LPOS", -3, &["readonly"], 1, 1, 1),
     cmd!("BLPOP", -3, &["write", "blocking"], 1, -2, 1),
     cmd!("BRPOP", -3, &["write", "blocking"], 1, -2, 1),
     cmd!("BLMOVE", 6, &["write", "denyoom", "blocking"], 1, 2, 1),
+    cmd!("BRPOPLPUSH", 4, &["write", "denyoom", "blocking"], 1, 2, 1),
     // Set
     cmd!("SADD", -3, &["write", "denyoom", "fast"], 1, 1, 1),
     cmd!("SREM", -3, &["write", "fast"], 1, 1, 1),
     cmd!("SISMEMBER", 3, &["readonly", "fast"], 1, 1, 1),
+    cmd!("SMISMEMBER", -3, &["readonly", "fast"], 1, 1, 1),
     cmd!("SMEMBERS", 2, &["readonly"], 1, 1, 1),
     cmd!("SCARD", 2, &["readonly", "fast"], 1, 1, 1),
     cmd!("SPOP", -2, &["write", "fast"], 1, 1, 1),
     cmd!("SRANDMEMBER", -2, &["readonly"], 1, 1, 1),
     cmd!("SUNION", -2, &["readonly"], 1, -1, 1),
     cmd!("SINTER", -2, &["readonly"], 1, -1, 1),
+    cmd!("SINTERCARD", -3, &["readonly"], 0, 0, 0),
     cmd!("SDIFF", -2, &["readonly"], 1, -1, 1),
     cmd!("SUNIONSTORE", -3, &["write", "denyoom"], 1, -1, 1),
     cmd!("SINTERSTORE", -3, &["write", "denyoom"], 1, -1, 1),
@@ -146,6 +156,7 @@ static COMMAND_TABLE: &[CommandInfo] = &[
     cmd!("ZADD", -4, &["write", "denyoom", "fast"], 1, 1, 1),
     cmd!("ZREM", -3, &["write", "fast"], 1, 1, 1),
     cmd!("ZSCORE", 3, &["readonly", "fast"], 1, 1, 1),
+    cmd!("ZMSCORE", -3, &["readonly", "fast"], 1, 1, 1),
     cmd!("ZRANK", 3, &["readonly", "fast"], 1, 1, 1),
     cmd!("ZREVRANK", 3, &["readonly", "fast"], 1, 1, 1),
     cmd!("ZRANGE", -4, &["readonly"], 1, 1, 1),
@@ -163,9 +174,15 @@ static COMMAND_TABLE: &[CommandInfo] = &[
     cmd!("ZRANGEBYLEX", -4, &["readonly"], 1, 1, 1),
     cmd!("ZREVRANGEBYLEX", -4, &["readonly"], 1, 1, 1),
     cmd!("ZLEXCOUNT", 4, &["readonly", "fast"], 1, 1, 1),
+    cmd!("ZREMRANGEBYLEX", 4, &["write", "fast"], 1, 1, 1),
+    cmd!("ZREMRANGEBYRANK", 4, &["write", "fast"], 1, 1, 1),
+    cmd!("ZREMRANGEBYSCORE", 4, &["write", "fast"], 1, 1, 1),
     cmd!("ZINTER", -3, &["readonly"], 1, -1, 1),
+    cmd!("ZINTERSTORE", -4, &["write", "denyoom"], 0, 0, 0),
     cmd!("ZUNION", -3, &["readonly"], 1, -1, 1),
+    cmd!("ZUNIONSTORE", -4, &["write", "denyoom"], 0, 0, 0),
     cmd!("ZDIFF", -3, &["readonly"], 1, -1, 1),
+    cmd!("ZDIFFSTORE", -4, &["write", "denyoom"], 0, 0, 0),
     // Database
     cmd!("SELECT", 2, &["fast"], 0, 0, 0),
     cmd!("DBSIZE", 1, &["readonly", "fast"], 0, 0, 0),
@@ -300,6 +317,15 @@ pub fn command_keys<'a>(cmd: &str, args: &'a [Bytes]) -> Vec<&'a [u8]> {
     match cmd.to_ascii_uppercase().as_str() {
         "EVAL" | "EVALSHA" => counted_keys(args, 1, 2),
         "ZINTER" | "ZUNION" | "ZDIFF" => counted_keys(args, 0, 1),
+        "SINTERCARD" => counted_keys(args, 0, 1),
+        "ZINTERSTORE" | "ZUNIONSTORE" | "ZDIFFSTORE" => {
+            let mut keys = Vec::new();
+            if let Some(dest) = args.first() {
+                keys.push(dest.as_ref());
+            }
+            keys.extend(counted_keys(args, 1, 2));
+            keys
+        }
         _ => lookup(cmd)
             .map(|info| {
                 key_indices(&info, args.len() + 1)
@@ -364,6 +390,17 @@ mod tests {
         assert!(command_keys("ZUNION", &invalid).is_empty());
         let out_of_bounds = bytes(&["3", "z1", "z2"]);
         assert!(command_keys("ZUNION", &out_of_bounds).is_empty());
+
+        let sintercard = bytes(&["2", "s1", "s2", "LIMIT", "1"]);
+        assert_eq!(
+            command_keys("SINTERCARD", &sintercard),
+            vec![b"s1".as_slice(), b"s2"]
+        );
+        let zunionstore = bytes(&["out", "2", "z1", "z2", "WEIGHTS", "1", "2"]);
+        assert_eq!(
+            command_keys("ZUNIONSTORE", &zunionstore),
+            vec![b"out".as_slice(), b"z1", b"z2"]
+        );
     }
 
     #[test]

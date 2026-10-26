@@ -44,14 +44,27 @@ pub fn lua_to_resp(value: LuaValue) -> Result<RespValue> {
 }
 
 pub fn resp_to_lua(lua: &Lua, value: RespValue) -> mlua::Result<LuaValue> {
+    let resp3 = matches!(lua.named_registry_value::<i64>("aikv_script_resp"), Ok(3));
     match value {
-        RespValue::Null => Ok(LuaValue::Boolean(false)),
+        RespValue::Null => {
+            if resp3 {
+                Ok(LuaValue::Nil)
+            } else {
+                Ok(LuaValue::Boolean(false))
+            }
+        }
         RespValue::SimpleString(s) => Ok(LuaValue::String(lua.create_string(s.as_bytes())?)),
         RespValue::Error(e) => Ok(LuaValue::String(lua.create_string(e.as_bytes())?)),
         RespValue::Integer(i) => Ok(LuaValue::Integer(i)),
         RespValue::BulkString(opt) => match opt {
             Some(b) => Ok(LuaValue::String(lua.create_string(&b)?)),
-            None => Ok(LuaValue::Boolean(false)),
+            None => {
+                if resp3 {
+                    Ok(LuaValue::Nil)
+                } else {
+                    Ok(LuaValue::Boolean(false))
+                }
+            }
         },
         RespValue::Array(opt) => match opt {
             Some(arr) => {
@@ -61,7 +74,13 @@ pub fn resp_to_lua(lua: &Lua, value: RespValue) -> mlua::Result<LuaValue> {
                 }
                 Ok(LuaValue::Table(table))
             }
-            None => Ok(LuaValue::Boolean(false)),
+            None => {
+                if resp3 {
+                    Ok(LuaValue::Nil)
+                } else {
+                    Ok(LuaValue::Boolean(false))
+                }
+            }
         },
         _ => Ok(LuaValue::Nil),
     }

@@ -12,6 +12,7 @@ mod enqueue_chain;
 mod execute;
 pub(crate) mod in_flight;
 pub(crate) mod json_exec;
+mod libs;
 mod phase_stats;
 mod pool;
 mod sandbox;
@@ -719,6 +720,43 @@ fn populate_keys_argv(lua: &mlua::Lua, keys: &[Bytes], argv: &[Bytes]) -> Result
     Ok(())
 }
 
+fn redis_log(args: MultiValue) -> mlua::Result<()> {
+    let mut iter = args.into_iter();
+    let level = match iter.next() {
+        Some(mlua::Value::Integer(i)) => i,
+        Some(mlua::Value::Number(n)) => n as i64,
+        Some(_) => {
+            return Err(mlua::Error::runtime(
+                "First argument must be a number (log level)",
+            ))
+        }
+        None => {
+            return Err(mlua::Error::runtime(
+                "redis.log() requires at least one argument",
+            ))
+        }
+    };
+    let mut msg = String::new();
+    for arg in iter {
+        match arg {
+            mlua::Value::String(s) => msg.push_str(&String::from_utf8_lossy(s.as_bytes().as_ref())),
+            mlua::Value::Integer(i) => msg.push_str(&i.to_string()),
+            mlua::Value::Number(n) => msg.push_str(&n.to_string()),
+            mlua::Value::Boolean(true) => msg.push_str("true"),
+            mlua::Value::Boolean(false) => msg.push_str("false"),
+            mlua::Value::Nil => msg.push_str("nil"),
+            _ => msg.push_str("(table)"),
+        }
+    }
+    match level {
+        0 | 1 => tracing::debug!(target: "redis.script", "{msg}"),
+        2 => tracing::info!(target: "redis.script", "{msg}"),
+        3 => tracing::warn!(target: "redis.script", "{msg}"),
+        _ => return Err(mlua::Error::runtime("ERR invalid log level")),
+    }
+    Ok(())
+}
+
 fn install_redis_api(lua: &mlua::Lua, storage: Arc<dyn KvStorage>) -> Result<()> {
     let redis = lua
         .create_table()
@@ -744,7 +782,47 @@ fn install_redis_api(lua: &mlua::Lua, storage: Arc<dyn KvStorage>) -> Result<()>
         .map_err(|e| Error::Command(format!("ERR {e}")))?;
 
     let log_fn = lua
-        .create_function(|_lua, _args: MultiValue| Ok(()))
+        .create_function(|_lua, args: MultiValue| redis_log(args))
+        .map_err(|e| Error::Command(format!("ERR {e}")))?;
+    let setresp_fn = lua
+        .create_function(|lua, version: i64| {
+            if version != 2 && version != 3 {
+                return Err(mlua::Error::runtime("ERR RESP version must be 2 or 3"));
+            }
+            lua.set_named_registry_value("aikv_script_resp", version)?;
+            Ok(())
+        })
+        .map_err(|e| Error::Command(format!("ERR {e}")))?;
+    let set_repl_fn = lua
+        .create_function(|lua, mode: i64| {
+            if !(0..=3).contains(&mode) {
+                return Err(mlua::Error::runtime("ERR Invalid replication flags"));
+            }
+            lua.set_named_registry_value("aikv_script_repl", mode)?;
+            Ok(())
+        })
+        .map_err(|e| Error::Command(format!("ERR {e}")))?;
+    let acl_fn = lua
+        .create_function(|_lua, args: MultiValue| {
+            let mut iter = args.into_iter();
+            let Some(name) = iter.next() else {
+                return Err(mlua::Error::runtime(
+                    "ERR wrong number of arguments for redis.acl_check_cmd",
+                ));
+            };
+            let mlua::Value::String(name) = name else {
+                return Err(mlua::Error::runtime(
+                    "ERR Invalid command passed to redis.acl_check_cmd()",
+                ));
+            };
+            let cmd = String::from_utf8_lossy(name.as_bytes().as_ref()).to_ascii_uppercase();
+            if crate::command::lookup(&cmd).is_none() {
+                return Err(mlua::Error::runtime(
+                    "ERR Invalid command passed to redis.acl_check_cmd()",
+                ));
+            }
+            Ok(true)
+        })
         .map_err(|e| Error::Command(format!("ERR {e}")))?;
 
     let sha1hex_fn = lua
@@ -774,6 +852,36 @@ fn install_redis_api(lua: &mlua::Lua, storage: Arc<dyn KvStorage>) -> Result<()>
     redis
         .set("sha1hex", sha1hex_fn)
         .map_err(|e| Error::Command(format!("ERR {e}")))?;
+    redis
+        .set("setresp", setresp_fn)
+        .map_err(|e| Error::Command(format!("ERR {e}")))?;
+    redis
+        .set("set_repl", set_repl_fn)
+        .map_err(|e| Error::Command(format!("ERR {e}")))?;
+    redis
+        .set("acl_check_cmd", acl_fn)
+        .map_err(|e| Error::Command(format!("ERR {e}")))?;
+    redis
+        .set("REDIS_VERSION", "8.8")
+        .map_err(|e| Error::Command(format!("ERR {e}")))?;
+    redis
+        .set("REDIS_VERSION_NUM", 8_i64 << 16 | 8_i64 << 8)
+        .map_err(|e| Error::Command(format!("ERR {e}")))?;
+    for (name, level) in [
+        ("LOG_DEBUG", 0_i64),
+        ("LOG_VERBOSE", 1),
+        ("LOG_NOTICE", 2),
+        ("LOG_WARNING", 3),
+        ("REPL_NONE", 0),
+        ("REPL_AOF", 1),
+        ("REPL_SLAVE", 2),
+        ("REPL_REPLICA", 2),
+        ("REPL_ALL", 3),
+    ] {
+        redis
+            .set(name, level)
+            .map_err(|e| Error::Command(format!("ERR {e}")))?;
+    }
     lua.globals()
         .set("redis", redis)
         .map_err(|e| Error::Command(format!("ERR {e}")))?;

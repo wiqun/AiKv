@@ -81,6 +81,22 @@ pub(super) fn exec_smembers(
     Ok(RespValue::Array(Some(out)))
 }
 
+pub(super) fn exec_smismember(
+    storage: &dyn ScriptIo,
+    txn: &ScriptTransaction,
+    args: &[Bytes],
+) -> Result<RespValue> {
+    if args.len() < 2 {
+        return Err(wrong_count("SMISMEMBER"));
+    }
+    let mut items = Vec::with_capacity(args.len() - 1);
+    for member in &args[1..] {
+        let pair = [args[0].clone(), member.clone()];
+        items.push(exec_sismember(storage, txn, &pair)?);
+    }
+    Ok(RespValue::Array(Some(items)))
+}
+
 pub(super) fn exec_sismember(
     storage: &dyn ScriptIo,
     txn: &ScriptTransaction,

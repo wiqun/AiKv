@@ -26,6 +26,18 @@ pub(super) fn exec_get(
 
 use crate::command::string::{parse_set_options, SetCondition};
 
+pub(super) fn exec_getset(
+    storage: &dyn ScriptIo,
+    txn: &mut ScriptTransaction,
+    args: &[Bytes],
+) -> Result<RespValue> {
+    if args.len() != 2 {
+        return Err(wrong_count("GETSET"));
+    }
+    let with_get = vec![args[0].clone(), args[1].clone(), Bytes::from_static(b"GET")];
+    exec_set(storage, txn, &with_get)
+}
+
 pub(super) fn exec_set(
     storage: &dyn ScriptIo,
     txn: &mut ScriptTransaction,

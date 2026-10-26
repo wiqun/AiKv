@@ -123,9 +123,10 @@ AiKv 定位为纯 Rust **Redis RESP 兼容的高性能分布式 KV 网络服务 
 
 全量文档采用 JSON 文本保存于 String 类型, 内部借助 `serde_json` 与 `jsonpath` 库进行解析与过滤. 保持与底层通用 KV 引擎的解耦, 避免引入复杂的专有数据格式.
 
-### 为什么 Lua 脚本基于 mlua (Lua 5.4)?
+### 为什么 Lua 脚本基于 mlua (Lua 5.1)?
 
-- 选用 `mlua` (vendored lua54), 零系统 C 动态库依赖;
+- 业务脚本按 Redis 内嵌的 Lua 5.1 编写, Kvrocks 的 LuaJIT 也是这套语义. 全局 `unpack`、单一数字类型和整数字符串格式都依赖 5.1.
+- 选用 `mlua` (vendored lua51), 零系统 C 动态库依赖;
 - 对标准库进行严格沙箱裁剪, 仅暴露安全算子;
 - 在 `ScriptTransaction` 中通过 `WriteBatch` 收集 `redis.call` 的写入操作, 实现脚本多写操作的原子提交与失败回滚.
 

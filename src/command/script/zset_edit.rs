@@ -191,6 +191,49 @@ impl ScriptTransaction {
             },
         );
     }
+
+    pub(crate) fn subkey_zincrby(
+        &mut self,
+        storage: &dyn crate::storage::ScriptIo,
+        key: &[u8],
+        increment: f64,
+        member: &[u8],
+    ) -> Result<RespValue> {
+        self.ensure_zset_delta(storage, key)?;
+        let current = self.current_member_score(storage, key, member)?;
+        let new_score = current.unwrap_or(0.0) + increment;
+        if !new_score.is_finite() {
+            return Err(crate::error::Error::Command(
+                "ERR increment would produce NaN or Infinity".into(),
+            ));
+        }
+        self.record_member(key, member, current, Some(new_score));
+        Ok(router::bulk(
+            crate::command::zset::helpers::format_score(new_score).into_bytes(),
+        ))
+    }
+
+    pub(crate) fn subkey_zpop(
+        &mut self,
+        storage: &dyn crate::storage::ScriptIo,
+        key: &[u8],
+        count: usize,
+        max: bool,
+    ) -> Result<RespValue> {
+        self.ensure_zset_delta(storage, key)?;
+        let map = self.materialize_zset_delta(storage, key)?;
+        let sorted = crate::command::zset::helpers::sorted_by_score(&map, max);
+        let n = count.min(sorted.len());
+        let mut items = Vec::with_capacity(n * 2);
+        for (member, score) in sorted.into_iter().take(n) {
+            items.push(router::bulk(member.clone()));
+            items.push(router::bulk(
+                crate::command::zset::helpers::format_score(score).into_bytes(),
+            ));
+            self.record_member(key, &member, Some(score), None);
+        }
+        Ok(RespValue::Array(Some(items)))
+    }
 }
 
 fn overlay_inflight_members(

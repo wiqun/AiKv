@@ -424,3 +424,89 @@ pub fn exec_json_arrappend(
     txn.set_string(key.to_vec(), json_bytes);
     Ok(router::integer(len))
 }
+
+pub fn exec_json_mset(
+    storage: &dyn ScriptIo,
+    txn: &mut ScriptTransaction,
+    args: &[Bytes],
+) -> Result<RespValue> {
+    if args.len() < 3 || !args.len().is_multiple_of(3) {
+        return Err(router::wrong_args("JSON.MSET", ""));
+    }
+    let engine = JsonPathEngine;
+    for chunk in args.chunks(3) {
+        let path = String::from_utf8_lossy(&chunk[1]).to_string();
+        let val_str = String::from_utf8_lossy(&chunk[2]).to_string();
+        let new_value: JsonValue = serde_json::from_str(&val_str).map_err(invalid_json)?;
+        let result_json = if path == "$" || path == "." {
+            new_value
+        } else {
+            let mut json_doc = match txn.get(storage, &chunk[0])? {
+                Some(existing) => serde_json::from_slice(&existing).map_err(invalid_json)?,
+                None => serde_json::json!({}),
+            };
+            engine.set(&mut json_doc, &path, new_value)?;
+            json_doc
+        };
+        let json_bytes = serde_json::to_vec(&result_json).map_err(invalid_json)?;
+        txn.set_string(chunk[0].to_vec(), json_bytes);
+    }
+    Ok(router::ok())
+}
+
+pub fn exec_json_update(
+    storage: &dyn ScriptIo,
+    txn: &mut ScriptTransaction,
+    args: &[Bytes],
+) -> Result<RespValue> {
+    if args.len() < 4 {
+        return Err(router::wrong_args("JSON.UPDATE", ""));
+    }
+    let key = &args[0];
+    let where_path = String::from_utf8_lossy(&args[1]).to_string();
+    if !txn.exists(storage, key)? {
+        let last = String::from_utf8_lossy(args.last().unwrap()).to_ascii_uppercase();
+        if last == "NN" {
+            return Ok(router::ok());
+        }
+        return Err(Error::Command("ERR Key does not exist".into()));
+    }
+    let raw = txn.get(storage, key)?.expect("exists");
+    let mut json_val: JsonValue = serde_json::from_slice(&raw).map_err(invalid_json)?;
+    if !where_path.is_empty() && !matches!(where_path.as_str(), "$" | "." | "$[*]") {
+        let engine = JsonPathEngine;
+        let matched = engine.extract(&json_val, &where_path)?;
+        match &matched {
+            JsonValue::Array(arr) if arr.is_empty() => {
+                let last = String::from_utf8_lossy(args.last().unwrap());
+                if last.to_ascii_uppercase() == "NN" {
+                    return Ok(router::ok());
+                }
+                return Err(Error::Command(
+                    "ERR No elements match the where condition".into(),
+                ));
+            }
+            JsonValue::Null => {
+                return Err(Error::Command(
+                    "ERR No elements match the where condition".into(),
+                ));
+            }
+            _ => {}
+        }
+    }
+    let last = String::from_utf8_lossy(args.last().unwrap());
+    let has_flag = last.is_empty() || last.to_ascii_uppercase() == "NN";
+    let end = if has_flag { args.len() - 1 } else { args.len() };
+    let engine = JsonPathEngine;
+    let mut i = 2;
+    while i + 1 < end {
+        let path_str = String::from_utf8_lossy(&args[i]).to_string();
+        let val_str = String::from_utf8_lossy(&args[i + 1]).to_string();
+        let val: JsonValue = serde_json::from_str(&val_str).map_err(invalid_json)?;
+        engine.set(&mut json_val, &path_str, val)?;
+        i += 2;
+    }
+    let json_bytes = serde_json::to_vec(&json_val).map_err(invalid_json)?;
+    txn.set_string(key.to_vec(), json_bytes);
+    Ok(router::ok())
+}

@@ -15,7 +15,7 @@ pub(crate) struct ScoreBound {
 }
 
 #[derive(Debug, Clone)]
-pub(super) enum LexBound {
+pub(crate) enum LexBound {
     NegInf,
     PosInf,
     Value(Vec<u8>, bool),
@@ -87,6 +87,25 @@ pub(crate) fn normalize_range(len: usize, start: i64, stop: i64) -> (usize, usiz
     (start_idx, stop_idx)
 }
 
+pub(crate) fn members_in_rank(
+    zset: &BTreeMap<Vec<u8>, f64>,
+    start: i64,
+    stop: i64,
+) -> Vec<Vec<u8>> {
+    let sorted = sorted_by_score(zset, false);
+    if sorted.is_empty() {
+        return Vec::new();
+    }
+    let (start_idx, stop_idx) = normalize_range(sorted.len(), start, stop);
+    if start_idx > stop_idx {
+        return Vec::new();
+    }
+    sorted[start_idx..=stop_idx]
+        .iter()
+        .map(|(member, _)| member.clone())
+        .collect()
+}
+
 pub(crate) fn members_to_resp(members: &[(Vec<u8>, f64)], withscores: bool) -> RespValue {
     let mut items = Vec::new();
     for (member, score) in members {
@@ -98,7 +117,7 @@ pub(crate) fn members_to_resp(members: &[(Vec<u8>, f64)], withscores: bool) -> R
     RespValue::Array(Some(items))
 }
 
-pub(super) fn scan_response(cursor: u64, page: &[(Vec<u8>, f64)]) -> RespValue {
+pub(crate) fn scan_response(cursor: u64, page: &[(Vec<u8>, f64)]) -> RespValue {
     let mut items = vec![RespValue::BulkString(Some(Bytes::from(cursor.to_string())))];
     let mut members = Vec::new();
     for (member, score) in page {
@@ -109,11 +128,11 @@ pub(super) fn scan_response(cursor: u64, page: &[(Vec<u8>, f64)]) -> RespValue {
     RespValue::Array(Some(items))
 }
 
-pub(super) fn array_of_bulk(items: Vec<Vec<u8>>) -> RespValue {
+pub(crate) fn array_of_bulk(items: Vec<Vec<u8>>) -> RespValue {
     RespValue::Array(Some(items.into_iter().map(router::bulk).collect()))
 }
 
-pub(super) fn format_score(score: f64) -> String {
+pub(crate) fn format_score(score: f64) -> String {
     if score.fract() == 0.0 && score.is_finite() {
         format!("{}", score as i64)
     } else {
@@ -121,7 +140,7 @@ pub(super) fn format_score(score: f64) -> String {
     }
 }
 
-pub(super) fn parse_score(b: &Bytes) -> Result<f64> {
+pub(crate) fn parse_score(b: &Bytes) -> Result<f64> {
     let s = bytes_to_str(b)?;
     let score = s
         .parse::<f64>()
@@ -172,7 +191,7 @@ pub(crate) fn score_in_range(score: f64, min: &ScoreBound, max: &ScoreBound) -> 
     above && below
 }
 
-pub(super) fn parse_lex_bound(s: &str) -> Result<LexBound> {
+pub(crate) fn parse_lex_bound(s: &str) -> Result<LexBound> {
     if s == "-" {
         return Ok(LexBound::NegInf);
     }
@@ -189,7 +208,7 @@ pub(super) fn parse_lex_bound(s: &str) -> Result<LexBound> {
     Ok(LexBound::Value(rest.as_bytes().to_vec(), inclusive))
 }
 
-pub(super) fn lex_in_range(member: &[u8], min: &LexBound, max: &LexBound) -> bool {
+pub(crate) fn lex_in_range(member: &[u8], min: &LexBound, max: &LexBound) -> bool {
     let above_min = match min {
         LexBound::NegInf => true,
         LexBound::PosInf => false,
@@ -236,20 +255,20 @@ pub(crate) fn eq_ignore_case(a: &Bytes, b: &[u8]) -> bool {
 // ---- ZINTER / ZUNION 辅助类型 ----
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(super) enum Aggregate {
+pub(crate) enum Aggregate {
     Sum,
     Min,
     Max,
 }
 
-pub(super) struct ZSetCombineArgs {
-    pub(super) keys: Vec<Bytes>,
-    pub(super) weights: Vec<f64>,
-    pub(super) aggregate: Aggregate,
-    pub(super) withscores: bool,
+pub(crate) struct ZSetCombineArgs {
+    pub(crate) keys: Vec<Bytes>,
+    pub(crate) weights: Vec<f64>,
+    pub(crate) aggregate: Aggregate,
+    pub(crate) withscores: bool,
 }
 
-pub(super) fn parse_zset_combine_args(cmd: &str, args: &[Bytes]) -> Result<ZSetCombineArgs> {
+pub(crate) fn parse_zset_combine_args(cmd: &str, args: &[Bytes]) -> Result<ZSetCombineArgs> {
     router::require_min_args(cmd, args, 2)?;
     let nkeys_str = bytes_to_str(&args[0])?;
     let numkeys: usize = nkeys_str
@@ -307,7 +326,7 @@ fn parse_aggregate(b: &Bytes) -> Result<Aggregate> {
     }
 }
 
-pub(super) fn aggregate_score(
+pub(crate) fn aggregate_score(
     zsets: &[BTreeMap<Vec<u8>, f64>],
     member: &[u8],
     weights: &[f64],
@@ -342,7 +361,7 @@ pub(super) fn aggregate_score(
     result
 }
 
-pub(super) fn sort_by_score_then_member(items: &mut [(Vec<u8>, f64)]) {
+pub(crate) fn sort_by_score_then_member(items: &mut [(Vec<u8>, f64)]) {
     items.sort_by(|a, b| {
         a.1.partial_cmp(&b.1)
             .unwrap_or(std::cmp::Ordering::Equal)

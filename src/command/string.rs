@@ -1,6 +1,6 @@
-//! String 命令: GET/SET/SETNX/SETEX/PSETEX/GETEX/GETDEL/MGET/MSET/STRLEN/GETRANGE/
-//! SETRANGE/SETBIT/GETBIT/BITCOUNT/BITFIELD/BITFIELD_RO/APPEND/INCR/DECR/INCRBY/DECRBY/INCRBYFLOAT,
-//! 以及 DEL/EXISTS.
+//! String 命令: GET/SET/GETSET/SETNX/SETEX/PSETEX/GETEX/GETDEL/MGET/MSET/MSETNX/STRLEN/GETRANGE/
+//! SUBSTR/SETRANGE/SETBIT/GETBIT/BITCOUNT/BITFIELD/BITFIELD_RO/APPEND/INCR/DECR/INCRBY/DECRBY/INCRBYFLOAT,
+//! 以及 DEL/UNLINK/EXISTS.
 //!
 //! # Invariant
 //!
@@ -8,7 +8,7 @@
 //!   `WRONGTYPE` (见 `storage/types.rs`).
 //! - MGET wrong-type: 对齐 Redis 7, 对非 String / missing key 返回 `nil`, 整命令不失败.
 //! - mutating 写 (SET NX/XX、INCR 等) 先 `key_lock.lock(key)` 再读改写.
-//! - DEL/EXISTS 位于本文件 (registry 中归 String 域).
+//! - DEL/UNLINK/EXISTS 位于本文件 (registry 中归 String 域). UNLINK 与 DEL 同语义.
 
 use std::sync::Arc;
 
@@ -42,6 +42,37 @@ impl StringCommands {
             None => Ok(router::nil_bulk()),
             Some(v) => Ok(router::bulk(v)),
         }
+    }
+
+    pub async fn getset(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
+        router::require_args("GETSET", args, 2)?;
+        let with_get = vec![args[0].clone(), args[1].clone(), Bytes::from_static(b"GET")];
+        self.set(db, &with_get).await
+    }
+
+    pub async fn substr(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
+        router::require_args("SUBSTR", args, 3)?;
+        self.getrange(db, args).await
+    }
+
+    pub async fn unlink(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
+        router::require_min_args("UNLINK", args, 1)?;
+        self.del(db, args).await
+    }
+
+    pub async fn msetnx(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
+        if args.len() < 2 || !args.len().is_multiple_of(2) {
+            return Err(router::wrong_args("MSETNX", ""));
+        }
+        let keys: Vec<&[u8]> = args.chunks(2).map(|chunk| chunk[0].as_ref()).collect();
+        let _guard = self.key_lock.lock_keys_sorted(&keys).await;
+        for key in &keys {
+            if self.storage.exists(db, key).await? {
+                return Ok(router::integer(0));
+            }
+        }
+        self.mset(db, args).await?;
+        Ok(router::integer(1))
     }
 
     pub async fn set(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
@@ -628,7 +659,7 @@ pub(crate) fn write_bit(data: &mut Vec<u8>, offset: u64, bit: u8) {
 }
 
 /// Redis GETRANGE inclusive byte range (negative indices count from end).
-fn string_range_slice(value: &[u8], start: i64, end: i64) -> Vec<u8> {
+pub(crate) fn string_range_slice(value: &[u8], start: i64, end: i64) -> Vec<u8> {
     let len = value.len() as i64;
     if len == 0 {
         return Vec::new();
@@ -652,7 +683,7 @@ fn string_range_slice(value: &[u8], start: i64, end: i64) -> Vec<u8> {
     }
 }
 
-fn parse_setrange_offset(b: &[u8]) -> Result<usize> {
+pub(crate) fn parse_setrange_offset(b: &[u8]) -> Result<usize> {
     let s =
         std::str::from_utf8(b).map_err(|_| Error::Command("ERR offset is out of range".into()))?;
     if s.starts_with('-') {

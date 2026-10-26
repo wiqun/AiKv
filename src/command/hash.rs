@@ -742,14 +742,14 @@ fn parse_i64_field(b: &[u8]) -> Result<i64> {
         .map_err(|_| Error::Command(WRONGTYPE.into()))
 }
 
-fn parse_f64_field_bytes(b: &[u8]) -> Result<f64> {
+pub(crate) fn parse_f64_field_bytes(b: &[u8]) -> Result<f64> {
     let s = std::str::from_utf8(b)
         .map_err(|_| Error::Command("ERR hash value is not a valid float".into()))?;
     s.parse::<f64>()
         .map_err(|_| Error::Command("ERR hash value is not a valid float".into()))
 }
 
-fn format_hash_float(v: f64) -> String {
+pub(crate) fn format_hash_float(v: f64) -> String {
     let s = v.to_string();
     if s.contains('.') {
         s.trim_end_matches('0').trim_end_matches('.').to_string()

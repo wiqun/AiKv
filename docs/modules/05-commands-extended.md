@@ -27,7 +27,7 @@ description: AiKv 扩展 Redis 命令 — JSON/JSONPath 引擎、Lua EVAL/SCRIPT
 | [`src/command/jsonpath/`](../../src/command/jsonpath/) | JSONPath 语法解析器与 AST 求值引擎 (支持 `$` 根路径、属性递归与切片) | `JsonPathEngine` (`extract` / `set` / `delete` / `incr` / `append` / `split_path_parts`) |
 | [`src/command/jsonpath_util.rs`](../../src/command/jsonpath_util.rs) | JSON 与 RESP 之间的类型转换辅助工具 | `json_to_resp`, `resp_to_json` |
 | [`src/command/script.rs`](../../src/command/script.rs) | Lua 脚本命令入口 (`EVAL`, `EVALSHA`, `SCRIPT LOAD`, `SCRIPT EXISTS`, `SCRIPT FLUSH`) | `script::dispatch` |
-| [`src/command/script/`](../../src/command/script/) | Lua 5.4 沙箱执行环境、`redis.call` 桥接与 `ScriptTransaction` 批处理 | `ScriptEngine`, `ScriptTransaction` |
+| [`src/command/script/`](../../src/command/script/) | Lua 5.1 沙箱执行环境、`redis.call` 桥接与 `ScriptTransaction` 批处理 | `ScriptEngine`, `ScriptTransaction` |
 | [`src/command/script/execute/`](../../src/command/script/execute/) | Lua `redis.call` / `redis.pcall` 同步执行: KEYS 校验与按类型 `exec_*` | `redis_call_async` |
 | [`src/command/blocking.rs`](../../src/command/blocking.rs) | `BlockingRegistry` 阻塞等待队列、超时管理与跨连接键写入唤醒机制 | `BlockingRegistry`, `block_on_keys`, `notify_keys` |
 | [`src/command/migrate.rs`](../../src/command/migrate.rs) | `MIGRATE` / `RESTORE` 命令, 槽位迁移数据网络传输与原子导入 | `migrate::dispatch` |
@@ -43,7 +43,7 @@ description: AiKv 扩展 Redis 命令 — JSON/JSONPath 引擎、Lua EVAL/SCRIPT
   - `JSON.SET` 针对不存在的 Key 创建新文档, 针对已有文档根据 Path 局部修改;
   - `JSON.GET` 支持多 Path 查询, 返回标准格式化 JSON 字符串.
 - **Lua 沙箱与原子事务提交 (`ScriptTransaction`)**:
-  - 采用 `mlua` 运行独立 Lua 5.4 虚拟机, 裁剪 `os`, `io`, `debug` 等不安全库;
+  - 采用 `mlua` 运行独立 Lua 5.1 虚拟机, 与 Redis 脚本语义一致. 提供 `cjson`、`bit`、`struct`、`cmsgpack` 和 `os.clock`, 裁掉 `os` 的其余函数以及 `io`、`debug`. 阻塞命令、`KEYS`/`FLUSH*`/`CONFIG` 这类管理和 `MIGRATE` 仍不能在 `redis.call` 里执行;
   - `EVAL` 执行前必须提取所有参数 Key, 并调用 `KeyLock::lock_keys_sorted_with_timeout(keys, 30s)` 获取锁;
   - 多线程运行时上, 脚本体在脚本线程池执行, `redis.call` 同步走 `ScriptIo`. 集群写入先进入在途缓冲再放开 key 锁, 入队在锁外, Raft 确认仍在其后.
   - `redis.call` 写操作收集在 `ScriptTransaction` 的 `WriteBatch` 中, 脚本成功时原子提交, 抛出异常或超时时丢弃修改实现回滚.
@@ -73,7 +73,7 @@ flowchart TD
 
     subgraph LuaFlow [Lua 脚本原子执行流程]
         EvalReq[EVAL script 2 k1 k2 arg1] --> LockKeys[KeyLock 字典序锁定 [k1, k2] 30s 超时]
-        LockKeys --> Sandbox[Lua 5.4 沙箱加载脚本与参数]
+        LockKeys --> Sandbox[Lua 5.1 沙箱加载脚本与参数]
         Sandbox --> ExecLoop[执行 Lua 字节码]
         ExecLoop -->|redis.call| TxBatch[ScriptTransaction 收集 WriteBatch]
         ExecLoop -->|执行成功| Commit[原子 Commit 至 KvStorage 并释放锁]

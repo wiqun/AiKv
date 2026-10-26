@@ -17,14 +17,23 @@ pub(super) fn exec_lpush(
     txn: &mut ScriptTransaction,
     args: &[Bytes],
     front: bool,
+    create: bool,
 ) -> Result<RespValue> {
+    let name = match (front, create) {
+        (true, true) => "LPUSH",
+        (false, true) => "RPUSH",
+        (true, false) => "LPUSHX",
+        (false, false) => "RPUSHX",
+    };
     if args.len() < 2 {
-        return Err(wrong_count("LPUSH"));
+        return Err(wrong_count(name));
     }
     let mut list = if let Some(stored) = txn.get_value(storage, &args[0])? {
         stored.as_list()?.clone()
-    } else {
+    } else if create {
         VecDeque::new()
+    } else {
+        return Ok(router::integer(0));
     };
     if front {
         for i in (1..args.len()).rev() {
