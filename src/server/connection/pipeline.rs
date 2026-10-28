@@ -1,4 +1,5 @@
-//! Connection Pipeline 并发优化: 将多笔安全命令并行执行并聚合写凑批.
+//! Connection Pipeline 批处理优化: 将流水线批次中的命令就地批量流式执行并聚合网络写回.
+//! 依据 ADR-001: 消除针对微秒级命令的逐个 Tokio Task 衍生与乱序重排开销.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -12,7 +13,7 @@ use crate::protocol::RespValue;
 use super::{Connection, ConnectionMode};
 
 impl Connection {
-    /// 尝试对同一批中的命令进行流水线并发执行.
+    /// 对同一批中的命令进行流水线批处理执行.
     /// 若包含事务、阻塞或状态敏感命令, 则回退到顺序执行.
     pub(super) async fn process_pipeline_batch(&mut self, batch: Vec<RespValue>) -> Result<()> {
         if let Some(timing) = self.pending_timing.take() {
@@ -33,7 +34,7 @@ impl Connection {
             parsed.push((cmd, args));
         }
 
-        self.execute_concurrent_pipeline(parsed).await
+        self.execute_in_place_pipeline(parsed).await
     }
 
     async fn process_sequential_batch(&mut self, batch: Vec<RespValue>) -> Result<()> {
@@ -53,30 +54,42 @@ impl Connection {
         Ok(())
     }
 
-    async fn execute_concurrent_pipeline(
+    /// 就地流式顺序批量执行流水线命令, 响应直接追加至当前连接响应缓冲, 批末统一一次性刷网.
+    async fn execute_in_place_pipeline(
         &mut self,
         commands: Vec<(String, Vec<Bytes>)>,
     ) -> Result<()> {
-        let router = self.state.router().clone();
-        let client_id = self.client_id;
-        let remote = self.remote;
-        let proto = self.protocol_version;
-        let current_db = self.current_db;
-        #[cfg(feature = "cluster")]
-        let cluster_state = self.cluster_state.clone();
+        let total = commands.len();
+        let t_enter = Instant::now();
 
         let gate = Arc::clone(&self.state.transaction_gate);
         let _guard = gate.read_owned().await;
 
-        let total = commands.len();
-        let t_enter = Instant::now();
-        let mut join_set = tokio::task::JoinSet::new();
+        let client_id = self.client_id;
+        let remote = self.remote;
+        let proto = self.protocol_version;
 
-        for (idx, (cmd, args)) in commands.into_iter().enumerate() {
-            let router = router.clone();
-            #[cfg(feature = "cluster")]
-            let cluster_state = cluster_state.clone();
+        for (cmd, args) in commands {
             let track = super::should_track_observability(&cmd);
+            let started = track.then(Instant::now);
+
+            let mut db = self.current_db;
+            let result = self
+                .state
+                .router()
+                .execute_with_client(
+                    &cmd,
+                    &args,
+                    &mut db,
+                    Some(client_id),
+                    Some(remote),
+                    proto,
+                    #[cfg(feature = "cluster")]
+                    Some(&self.cluster_state),
+                )
+                .await;
+            self.current_db = db;
+
             let arg_strings: Vec<String> = if track {
                 args.iter()
                     .map(|b| String::from_utf8_lossy(b).into_owned())
@@ -84,71 +97,25 @@ impl Connection {
             } else {
                 Vec::new()
             };
-            let started = track.then(Instant::now);
-            join_set.spawn(async move {
-                let mut db = current_db;
-                let result = router
-                    .execute_with_client(
-                        &cmd,
-                        &args,
-                        &mut db,
-                        Some(client_id),
-                        Some(remote),
-                        proto,
-                        #[cfg(feature = "cluster")]
-                        Some(&cluster_state),
-                    )
-                    .await;
-                (idx, cmd, args, arg_strings, started, result)
-            });
+
+            self.finish_immediate_command(&cmd, &args, arg_strings, started, result)
+                .await?;
         }
 
-        let mut results = Vec::with_capacity(total);
-        while let Some(res) = join_set.join_next().await {
-            match res {
-                Ok(item) => results.push(item),
-                Err(e) => {
-                    return Err(crate::error::Error::Command(format!(
-                        "pipeline task failed: {e}"
-                    )))
-                }
-            }
-        }
-        let t_join = Instant::now();
         drop(_guard);
+        self.flush_responses().await?;
 
-        results.sort_unstable_by_key(|(idx, ..)| *idx);
-        self.finish_pipeline_results(results).await?;
         let t_flushed = Instant::now();
-
         self.pending_timing = Some(PendingBatchTiming {
             cmds: total,
             t_enter,
             t_last_enq: None,
-            t_join,
+            t_join: t_flushed,
             t_flushed,
         });
         Ok(())
     }
-
-    async fn finish_pipeline_results(&mut self, results: Vec<PipelineTaskResult>) -> Result<()> {
-        for (_idx, cmd, args, arg_strings, started, result) in results {
-            self.finish_immediate_command(&cmd, &args, arg_strings, started, result)
-                .await?;
-        }
-        self.flush_responses().await?;
-        Ok(())
-    }
 }
-
-type PipelineTaskResult = (
-    usize,
-    String,
-    Vec<Bytes>,
-    Vec<String>,
-    Option<Instant>,
-    crate::error::Result<RespValue>,
-);
 
 fn parse_command_parts(frame: &RespValue) -> Option<(String, Vec<Bytes>)> {
     let RespValue::Array(Some(items)) = frame else {
