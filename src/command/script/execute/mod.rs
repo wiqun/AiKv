@@ -76,10 +76,16 @@ pub(super) fn key(b: &Bytes) -> Vec<u8> {
 pub struct DeclaredKeys {
     exact: HashSet<Vec<u8>>,
     tags: HashSet<Vec<u8>>,
+    single_key: Option<Vec<u8>>,
 }
 
 impl DeclaredKeys {
     pub fn new(keys: &[Bytes]) -> Self {
+        let single_key = if keys.len() == 1 {
+            Some(keys[0].to_vec())
+        } else {
+            None
+        };
         let mut exact = HashSet::with_capacity(keys.len());
         let mut tags = HashSet::with_capacity(keys.len());
         for k in keys {
@@ -89,10 +95,19 @@ impl DeclaredKeys {
                 tags.insert(tag.to_vec());
             }
         }
-        Self { exact, tags }
+        Self {
+            exact,
+            tags,
+            single_key,
+        }
     }
 
     pub fn is_declared(&self, k: &[u8]) -> bool {
+        if let Some(ref single) = self.single_key {
+            if single.as_slice() == k {
+                return true;
+            }
+        }
         if self.exact.contains(k) {
             return true;
         }
@@ -124,6 +139,129 @@ fn check_key(declared: &DeclaredKeys, k: &[u8]) -> Result<()> {
     }
 }
 
+fn with_arg_bytes<R>(val: &mlua::Value, f: impl FnOnce(&[u8]) -> R) -> Option<R> {
+    match val {
+        mlua::Value::String(s) => Some(f(s.as_bytes().as_ref())),
+        mlua::Value::Integer(i) => {
+            let mut buf = [0u8; 32];
+            let mut cur = std::io::Cursor::new(&mut buf[..]);
+            use std::io::Write;
+            let _ = write!(cur, "{i}");
+            let len = cur.position() as usize;
+            Some(f(&buf[..len]))
+        }
+        mlua::Value::Number(n) => {
+            let mut buf = [0u8; 32];
+            let mut cur = std::io::Cursor::new(&mut buf[..]);
+            use std::io::Write;
+            let _ = write!(cur, "{n}");
+            let len = cur.position() as usize;
+            Some(f(&buf[..len]))
+        }
+        mlua::Value::Boolean(b) => Some(f(if *b { b"1" } else { b"0" })),
+        _ => None,
+    }
+}
+
+pub fn try_fast_path(
+    lua: &mlua::Lua,
+    storage: &dyn ScriptIo,
+    txn: &mut ScriptTransaction,
+    declared: &DeclaredKeys,
+    args: &mlua::MultiValue,
+    throw_error: bool,
+) -> mlua::Result<Option<mlua::Value>> {
+    if args.is_empty() {
+        return Ok(None);
+    }
+    let Some(first_arg) = args.front() else {
+        return Ok(None);
+    };
+    let mlua::Value::String(cmd_str) = first_arg else {
+        return Ok(None);
+    };
+    let cmd_bytes = cmd_str.as_bytes();
+    let cmd_raw = cmd_bytes.as_ref();
+
+    // 1. GET key (仅当参数为 2 且为 GET 时走极速通道)
+    if cmd_raw.eq_ignore_ascii_case(b"GET") {
+        if args.len() != 2 {
+            return Ok(None);
+        }
+        let Some(second_arg) = args.get(1) else {
+            return Ok(None);
+        };
+        let get_res = with_arg_bytes(second_arg, |k| {
+            if let Err(e) = check_key(declared, k) {
+                let msg = e.to_string();
+                if throw_error {
+                    return Err(mlua::Error::RuntimeError(msg));
+                }
+                return pcall_error_table(lua, &msg).map(Some);
+            }
+            match txn.get(storage, k) {
+                Ok(Some(v)) => Ok(Some(mlua::Value::String(lua.create_string(&v)?))),
+                Ok(None) => {
+                    let resp3 =
+                        matches!(lua.named_registry_value::<i64>("aikv_script_resp"), Ok(3));
+                    if resp3 {
+                        Ok(Some(mlua::Value::Nil))
+                    } else {
+                        Ok(Some(mlua::Value::Boolean(false)))
+                    }
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    if throw_error {
+                        Err(mlua::Error::RuntimeError(msg))
+                    } else {
+                        pcall_error_table(lua, &msg).map(Some)
+                    }
+                }
+            }
+        });
+        match get_res {
+            Some(res) => res,
+            None => Ok(None),
+        }
+    }
+    // 2. SET key val (无额外选项的纯写入)
+    else if cmd_raw.eq_ignore_ascii_case(b"SET") {
+        if args.len() != 3 {
+            return Ok(None); // 若带参数 EX / PX / NX 等，回退通用逻辑
+        }
+        let Some(second_arg) = args.get(1) else {
+            return Ok(None);
+        };
+        let Some(third_arg) = args.get(2) else {
+            return Ok(None);
+        };
+        let set_res = with_arg_bytes(second_arg, |k| {
+            if let Err(e) = check_key(declared, k) {
+                let msg = e.to_string();
+                if throw_error {
+                    return Err(mlua::Error::RuntimeError(msg));
+                }
+                return pcall_error_table(lua, &msg).map(Some);
+            }
+            let inner_res = with_arg_bytes(third_arg, |v| {
+                txn.set_string(k.to_vec(), v.to_vec());
+                Ok(Some(mlua::Value::String(lua.create_string(b"OK")?)))
+            });
+            match inner_res {
+                Some(res) => res,
+                None => Ok(None),
+            }
+        });
+        match set_res {
+            Some(res) => res,
+            None => Ok(None),
+        }
+    } else {
+        Ok(None)
+    }
+}
+
 pub fn redis_call(
     lua: &mlua::Lua,
     storage: &dyn ScriptIo,
@@ -132,6 +270,9 @@ pub fn redis_call(
     args: mlua::MultiValue,
     throw_error: bool,
 ) -> mlua::Result<mlua::Value> {
+    if let Some(fast_val) = try_fast_path(lua, storage, txn, declared, &args, throw_error)? {
+        return Ok(fast_val);
+    }
     let mut prep = super::call_stats::CallTimer::start(super::call_stats::ScriptCallOp::Prep);
     let Some(cmd_args) = lua_args_to_bytes(args, throw_error)? else {
         return Ok(mlua::Value::Nil);
@@ -548,4 +689,103 @@ fn exec_expire(
         txn.set_expire_at(key(&args[0]), expire_seconds_to_at(seconds));
     }
     Ok(router::integer(1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::command::script::execute::DeclaredKeys;
+    use crate::command::script::transaction::ScriptTransaction;
+    use crate::storage::types::{RawPairVisitor, StorageEngineKind, StoredValue, WriteOp};
+    use crate::storage::ScriptIo;
+    use bytes::Bytes;
+    use mlua::Lua;
+
+    struct DummyIo;
+    impl ScriptIo for DummyIo {
+        fn engine_kind(&self) -> StorageEngineKind {
+            StorageEngineKind::AiDb
+        }
+        fn get_typed(&self, _db: usize, _key: &[u8]) -> Result<Option<StoredValue>> {
+            Ok(None)
+        }
+        fn ttl(&self, _db: usize, _key: &[u8]) -> Result<Option<i64>> {
+            Ok(None)
+        }
+        fn write_batch(&self, _db: usize, _ops: Vec<(Vec<u8>, WriteOp)>) -> Result<()> {
+            Ok(())
+        }
+        fn raw_prefix_last(&self, _prefix: Vec<u8>) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+            Ok(None)
+        }
+        fn raw_range_last(
+            &self,
+            _start: Vec<u8>,
+            _end: Vec<u8>,
+        ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+            Ok(None)
+        }
+        fn raw_subkey_get(&self, _db: usize, _encoded_key: Vec<u8>) -> Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        fn raw_subkey_for_each(
+            &self,
+            _db: usize,
+            _prefix: Vec<u8>,
+            _f: RawPairVisitor,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_fast_path_get_and_set() {
+        let lua = Lua::new();
+        let io = DummyIo;
+        let mut txn = ScriptTransaction::new(0);
+        let declared = DeclaredKeys::new(&[Bytes::from_static(b"k1")]);
+
+        // 1. SET k1 v1
+        let set_args = mlua::MultiValue::from_vec(vec![
+            mlua::Value::String(lua.create_string("set").unwrap()),
+            mlua::Value::String(lua.create_string("k1").unwrap()),
+            mlua::Value::String(lua.create_string("v1").unwrap()),
+        ]);
+        let res = try_fast_path(&lua, &io, &mut txn, &declared, &set_args, true).unwrap();
+        assert!(res.is_some(), "SET should be handled by fast_path");
+        let val = res.unwrap();
+        assert_eq!(val.as_string().unwrap().to_str().unwrap(), "OK");
+
+        // 2. GET k1
+        let get_args = mlua::MultiValue::from_vec(vec![
+            mlua::Value::String(lua.create_string("get").unwrap()),
+            mlua::Value::String(lua.create_string("k1").unwrap()),
+        ]);
+        let res = try_fast_path(&lua, &io, &mut txn, &declared, &get_args, true).unwrap();
+        assert!(res.is_some(), "GET should be handled by fast_path");
+        let val = res.unwrap();
+        assert_eq!(val.as_string().unwrap().to_str().unwrap(), "v1");
+
+        // 3. SET k1 v2 EX 10 (带选项应该返回 None, 回退到通用路径)
+        let set_opt_args = mlua::MultiValue::from_vec(vec![
+            mlua::Value::String(lua.create_string("set").unwrap()),
+            mlua::Value::String(lua.create_string("k1").unwrap()),
+            mlua::Value::String(lua.create_string("v2").unwrap()),
+            mlua::Value::String(lua.create_string("EX").unwrap()),
+            mlua::Value::Integer(10),
+        ]);
+        let res = try_fast_path(&lua, &io, &mut txn, &declared, &set_opt_args, true).unwrap();
+        assert!(
+            res.is_none(),
+            "SET with options should fallback to generic path"
+        );
+
+        // 4. GET k2 (未声明 key 必须拦截)
+        let get_k2 = mlua::MultiValue::from_vec(vec![
+            mlua::Value::String(lua.create_string("get").unwrap()),
+            mlua::Value::String(lua.create_string("k2").unwrap()),
+        ]);
+        let err = try_fast_path(&lua, &io, &mut txn, &declared, &get_k2, true);
+        assert!(err.is_err(), "undeclared key must error");
+    }
 }

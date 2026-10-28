@@ -56,8 +56,16 @@ impl ScriptJob {
 }
 
 pub(super) fn script_runs_off_worker() -> bool {
-    tokio::runtime::Handle::try_current()
-        .is_ok_and(|handle| handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
+    // 默认开启 In-Place 同步执行以达到极致吞吐并消除跨线程池调度税与全局 Mutex 争抢;
+    // 仅在显式配置 AIKV_SCRIPT_OFF_WORKER 时才派发到单独的工作池
+    static OFF_WORKER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        let enabled = std::env::var("AIKV_SCRIPT_OFF_WORKER")
+            .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+        OFF_WORKER.store(enabled, std::sync::atomic::Ordering::Relaxed);
+    });
+    OFF_WORKER.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 fn drive_script_body(job: ScriptJob) -> ScriptDrive {
@@ -167,5 +175,13 @@ mod rollback_tests {
         assert!(buffer.get(0, b"k").is_some());
         rollback_inserted(&buffer, Some((seq, keys)));
         assert!(buffer.get(0, b"k").is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_script_runs_in_place_by_default() {
+        assert!(
+            !super::script_runs_off_worker(),
+            "default should be in-place direct execution on worker thread"
+        );
     }
 }

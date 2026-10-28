@@ -201,6 +201,17 @@ struct Seg50Tracker {
     slots: [Seg50Slot; 64],
 }
 
+fn script_profiling_enabled() -> bool {
+    static PROFILING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        let enabled = std::env::var("AIKV_SCRIPT_PROFILING")
+            .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+        PROFILING.store(enabled, Ordering::Relaxed);
+    });
+    PROFILING.load(Ordering::Relaxed)
+}
+
 impl Seg50Tracker {
     const fn new() -> Self {
         Self {
@@ -210,6 +221,9 @@ impl Seg50Tracker {
     }
 
     fn on_start(&self) -> (usize, usize) {
+        if !script_profiling_enabled() {
+            return (0, 0);
+        }
         let req_id = self.req_counter.fetch_add(1, Ordering::Relaxed);
         let seg_id = req_id / 50;
         let slot_idx = seg_id % 64;
@@ -222,6 +236,9 @@ impl Seg50Tracker {
     }
 
     fn on_enqueued(&self, slot_idx: usize) {
+        if !script_profiling_enabled() {
+            return;
+        }
         let slot = &self.slots[slot_idx];
         let idx = slot.enq_count.fetch_add(1, Ordering::SeqCst);
         let now = Instant::now();
@@ -233,6 +250,9 @@ impl Seg50Tracker {
     }
 
     fn on_committed(&self, seg_id: usize, slot_idx: usize) {
+        if !script_profiling_enabled() {
+            return;
+        }
         let slot = &self.slots[slot_idx];
         *slot.last_commit.lock() = Some(Instant::now());
         let idx = slot.commit_count.fetch_add(1, Ordering::SeqCst);
@@ -462,32 +482,36 @@ impl ScriptCommands {
         };
         let drive = self.drive_script(job).await?;
         self.release_vm(drive.lua);
-        IO_SAMPLER.record(drive.io);
-        call_stats::record_script_calls(drive.calls);
-        let prepare_us = drive.result.as_ref().map_or(0, |body| {
-            phase_stats::micros_between(body.t_lua_done, body.t_prep_done)
-        });
-        phase_stats::record_script_phase(phase_stats::ScriptPhaseStats {
-            hop_us: phase_stats::micros_between(t_locked, drive.t_entered),
-            setup_us: drive.setup_us,
-            gap_us: phase_stats::gap_us(drive.call_wall_us, drive.calls),
-            teardown_us: drive.teardown_us,
-            prepare_us,
-        });
+        if script_profiling_enabled() {
+            IO_SAMPLER.record(drive.io);
+            call_stats::record_script_calls(drive.calls);
+            let prepare_us = drive.result.as_ref().map_or(0, |body| {
+                phase_stats::micros_between(body.t_lua_done, body.t_prep_done)
+            });
+            phase_stats::record_script_phase(phase_stats::ScriptPhaseStats {
+                hop_us: phase_stats::micros_between(t_locked, drive.t_entered),
+                setup_us: drive.setup_us,
+                gap_us: phase_stats::gap_us(drive.call_wall_us, drive.calls),
+                teardown_us: drive.teardown_us,
+                prepare_us,
+            });
+        }
         let body = drive.result?;
         let (commit_done, unlocked) = self
             .finish_pending_commit(body.pending, db, seg_id, slot_idx, keys, _guard)
             .await?;
         let t_done = commit_done.unwrap_or(body.t_local_done);
 
-        PERF_SAMPLER.record(
-            t_locked.duration_since(t_start).as_micros() as u64,
-            body.t_lua_done.duration_since(t_locked).as_micros() as u64,
-            body.t_prep_done.duration_since(body.t_lua_done).as_micros() as u64,
-            t_done.duration_since(body.t_prep_done).as_micros() as u64,
-            t_done.duration_since(t_start).as_micros() as u64,
-            unlocked.duration_since(t_locked).as_micros() as u64,
-        );
+        if script_profiling_enabled() {
+            PERF_SAMPLER.record(
+                t_locked.duration_since(t_start).as_micros() as u64,
+                body.t_lua_done.duration_since(t_locked).as_micros() as u64,
+                body.t_prep_done.duration_since(body.t_lua_done).as_micros() as u64,
+                t_done.duration_since(body.t_prep_done).as_micros() as u64,
+                t_done.duration_since(t_start).as_micros() as u64,
+                unlocked.duration_since(t_locked).as_micros() as u64,
+            );
+        }
         lua_to_resp(body.value)
     }
 
