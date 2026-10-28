@@ -155,70 +155,39 @@ impl StorageAdapter for AiDbEngine {
     }
 
     async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>> {
-        self.blocking(move |db| db.get(&key).map_err(|e| Error::Storage(e.to_string())))
-            .await
+        self.get_sync(key)
     }
 
     async fn set(&self, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
-        self.blocking(move |db| {
-            db.put(&key, &value)
-                .map_err(|e| Error::Storage(e.to_string()))
-        })
-        .await
+        self.db
+            .put(&key, &value)
+            .map_err(|e| Error::Storage(e.to_string()))
     }
 
     async fn delete(&self, key: Vec<u8>) -> Result<bool> {
-        self.blocking(move |db| {
-            let existed = db
-                .get(&key)
-                .map_err(|e| Error::Storage(e.to_string()))?
-                .is_some();
-            db.delete(&key).map_err(|e| Error::Storage(e.to_string()))?;
-            Ok(existed)
-        })
-        .await
+        let existed = self
+            .db
+            .get(&key)
+            .map_err(|e| Error::Storage(e.to_string()))?
+            .is_some();
+        self.db
+            .delete(&key)
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        Ok(existed)
     }
 
     async fn apply_writes(&self, ops: Vec<AdapterWriteOp>) -> Result<()> {
-        self.blocking(move |db| {
-            let mut wb = WriteBatch::new();
-            for op in ops {
-                match op {
-                    AdapterWriteOp::Put { key, value } => wb.put(key, value),
-                    AdapterWriteOp::Delete { key } => wb.delete(key),
-                }
-            }
-            db.write(&wb).map_err(|e| Error::Storage(e.to_string()))?;
-            Ok(())
-        })
-        .await
+        self.write_batch_sync(ops)
     }
 
     async fn exists(&self, key: Vec<u8>) -> Result<bool> {
-        self.blocking(move |db| {
-            db.key_exists(&key)
-                .map_err(|e| Error::Storage(e.to_string()))
-        })
-        .await
+        self.db
+            .key_exists(&key)
+            .map_err(|e| Error::Storage(e.to_string()))
     }
 
     async fn write_batch(&self, batch: Vec<AdapterWriteOp>) -> Result<()> {
-        self.blocking(move |db| {
-            let mut wb = WriteBatch::new();
-            for op in batch {
-                match op {
-                    AdapterWriteOp::Put { key, value } => {
-                        wb.put(key, value);
-                    }
-                    AdapterWriteOp::Delete { key } => {
-                        wb.delete(key);
-                    }
-                }
-            }
-            db.write(&wb).map_err(|e| Error::Storage(e.to_string()))?;
-            Ok(())
-        })
-        .await
+        self.write_batch_sync(batch)
     }
 
     async fn for_each_prefix(
