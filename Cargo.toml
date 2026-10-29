@@ -44,6 +44,7 @@ futures-util = "0.3"
 # Core primitives
 parking_lot = "0.12"
 dashmap = "6"
+rustc-hash = "2"
 bytes     = "1"
 thiserror = "2"
 serde     = { version = "1", features = ["derive"] }

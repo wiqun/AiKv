@@ -1,7 +1,7 @@
 //! 数据面写凑批 actor: 按 data group 将 PUT/DELETE 聚合成 `WriteBatch` 后 propose.
 //! 由 `ClusterDataAdapter` 按 group 懒创建.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -19,18 +19,6 @@ use crate::storage::types::BatchWriteHandle;
 
 const SET_BATCH_MAX_OPS: usize = 512;
 const ADAPTIVE_BATCH_TARGET_OPS: usize = 32;
-const DEFAULT_ADAPTIVE_BATCH_WAIT_US: u64 = 150;
-
-fn adaptive_batch_wait_duration() -> std::time::Duration {
-    static WAIT_US: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    let us = *WAIT_US.get_or_init(|| {
-        std::env::var("AIKV_BATCH_WAIT_US")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(DEFAULT_ADAPTIVE_BATCH_WAIT_US)
-    });
-    std::time::Duration::from_micros(us)
-}
 
 struct BatcherPerfSampler {
     batches: AtomicU64,
@@ -468,24 +456,14 @@ pub async fn collect_batch_items(
     // 第一轮快速抽取当前通道中的就绪项
     drain_ready_items(rx, &mut items, &mut op_count);
 
-    // 自适应微等待: 若当前收集数尚未达到微窗口阈值, 在预算时间内等待通道新项流入,
-    // 聚合并发客户端写请求, 避免高并发下退化为大量 1-op Raft propose (Issue #83).
-    let wait_dur = adaptive_batch_wait_duration();
-    if !wait_dur.is_zero() && op_count < ADAPTIVE_BATCH_TARGET_OPS {
-        let deadline = Instant::now() + wait_dur;
-        while op_count < ADAPTIVE_BATCH_TARGET_OPS {
-            let now = Instant::now();
-            if now >= deadline {
+    // 自适应微让步: 若当前收集数尚未达到微窗口阈值, 通过少量协程出让机会让并发上游入队,
+    // 零 timer 开销聚合并发写请求, 避免单 op 频繁触发 Raft propose (Issue #83).
+    if op_count < ADAPTIVE_BATCH_TARGET_OPS {
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+            drain_ready_items(rx, &mut items, &mut op_count);
+            if op_count >= ADAPTIVE_BATCH_TARGET_OPS {
                 break;
-            }
-            let remaining = deadline - now;
-            match tokio::time::timeout(remaining, rx.recv()).await {
-                Ok(Some(item)) => {
-                    op_count += item_op_count(&item);
-                    items.push(item);
-                    drain_ready_items(rx, &mut items, &mut op_count);
-                }
-                _ => break,
             }
         }
     }
@@ -600,28 +578,30 @@ pub(super) fn plan_reverse_dedup(items: Vec<PlannedOp>) -> (ThinWriteBatch, Vec<
         return (tb, indices);
     }
 
-    let mut tb = ThinWriteBatch::new();
-    let mut indices_rev = Vec::with_capacity(items.len());
-    let mut seen: HashSet<Vec<u8>> = HashSet::new();
+    let len = items.len();
+    let mut seen = rustc_hash::FxHashSet::with_capacity_and_hasher(len, Default::default());
+    let mut is_kept = vec![false; len];
 
-    for item in items.into_iter().rev() {
-        match item {
-            PlannedOp::Put { key, value } => {
-                if seen.insert(key.clone()) {
-                    indices_rev.push(Some(tb.ops.len()));
-                    tb.put(key, value);
-                } else {
-                    indices_rev.push(None);
-                }
+    for (i, item) in items.iter().enumerate().rev() {
+        let key = match item {
+            PlannedOp::Put { key, .. } | PlannedOp::Delete { key } => key.as_slice(),
+        };
+        if seen.insert(key) {
+            is_kept[i] = true;
+        }
+    }
+
+    let mut tb = ThinWriteBatch::new();
+    let mut indices_rev = Vec::with_capacity(len);
+    for (item, kept) in items.into_iter().zip(is_kept).rev() {
+        if kept {
+            indices_rev.push(Some(tb.ops.len()));
+            match item {
+                PlannedOp::Put { key, value } => tb.put(key, value),
+                PlannedOp::Delete { key } => tb.delete(key),
             }
-            PlannedOp::Delete { key } => {
-                if seen.insert(key.clone()) {
-                    indices_rev.push(Some(tb.ops.len()));
-                    tb.delete(key);
-                } else {
-                    indices_rev.push(None);
-                }
-            }
+        } else {
+            indices_rev.push(None);
         }
     }
     indices_rev.reverse();
