@@ -6,8 +6,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use parking_lot::Mutex;
-
 use crate::error::Result;
 use crate::storage::aidb::AiDbEngine;
 use crate::storage::types::{CollectionKind, KvStorage, StoredValue, ValueType, WriteOp};
@@ -197,6 +195,16 @@ pub async fn read_member_score(
 pub static LOAD_MEMBERS_CALLS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+#[derive(Clone, Copy)]
+struct UnsafeSyncMap(*mut BTreeMap<Vec<u8>, f64>);
+unsafe impl Send for UnsafeSyncMap {}
+
+impl UnsafeSyncMap {
+    unsafe fn insert(self, member: Vec<u8>, score: f64) {
+        (*self.0).insert(member, score);
+    }
+}
+
 pub async fn load_members(
     storage: &dyn KvStorage,
     db: usize,
@@ -207,8 +215,8 @@ pub async fn load_members(
     let encoded = AiDbEngine::encode_key(db, user_key);
     let prefix = member_prefix(&encoded);
     let prefix_len = prefix.len();
-    let map = Arc::new(Mutex::new(BTreeMap::new()));
-    let map_c = Arc::clone(&map);
+    let mut map = BTreeMap::new();
+    let map_ptr = UnsafeSyncMap(&mut map as *mut _);
     storage
         .raw_subkey_for_each(
             db,
@@ -218,15 +226,15 @@ pub async fn load_members(
                     return Ok(());
                 };
                 if let Some(score) = decode_score(&raw) {
-                    map_c.lock().insert(member, score);
+                    unsafe {
+                        map_ptr.insert(member, score);
+                    }
                 }
                 Ok(())
             }),
         )
         .await?;
-    Ok(Arc::try_unwrap(map)
-        .unwrap_or_else(|_| unreachable!("member map still shared"))
-        .into_inner())
+    Ok(map)
 }
 
 pub fn load_members_sync(
@@ -239,8 +247,8 @@ pub fn load_members_sync(
     let encoded = AiDbEngine::encode_key(db, user_key);
     let prefix = member_prefix(&encoded);
     let prefix_len = prefix.len();
-    let map = Arc::new(Mutex::new(BTreeMap::new()));
-    let map_c = Arc::clone(&map);
+    let mut map = BTreeMap::new();
+    let map_ptr = UnsafeSyncMap(&mut map as *mut _);
     storage.raw_subkey_for_each(
         db,
         prefix,
@@ -249,14 +257,15 @@ pub fn load_members_sync(
                 return Ok(());
             };
             if let Some(score) = decode_score(&raw) {
-                map_c.lock().insert(member, score);
+                // SAFETY: raw_subkey_for_each 在当前线程同步顺序执行，并在返回前结束，map 在调用栈期间有效
+                unsafe {
+                    map_ptr.insert(member, score);
+                }
             }
             Ok(())
         }),
     )?;
-    Ok(Arc::try_unwrap(map)
-        .unwrap_or_else(|_| unreachable!("member map still shared"))
-        .into_inner())
+    Ok(map)
 }
 
 pub fn read_member_score_sync(
