@@ -119,6 +119,35 @@ pub struct Connection {
 }
 
 impl Connection {
+    #[doc(hidden)]
+    pub fn new_for_test(
+        stream: TcpStream,
+        remote: SocketAddr,
+        state: Arc<ServerSharedState>,
+    ) -> Self {
+        let client_id = state.alloc_client_id();
+        state.register_client(client_id, remote);
+        Self {
+            stream,
+            remote,
+            parser: RespParser::new(),
+            write_buf: BytesMut::with_capacity(protocol::DEFAULT_WRITE_BUF_CAPACITY),
+            state,
+            protocol_version: ProtocolVersion::default(),
+            protocol_negotiated: false,
+            last_active: Instant::now(),
+            client_id,
+            current_db: 0,
+            quit: false,
+            mode: ConnectionMode::Normal,
+            monitor_rx: None,
+            #[cfg(feature = "cluster")]
+            cluster_state: crate::cluster::connection::ClusterConnectionState::new(),
+            tx_state: TransactionState::new(),
+            pending_timing: None,
+        }
+    }
+
     pub async fn handle(stream: TcpStream, remote: SocketAddr, state: Arc<ServerSharedState>) {
         let client_id = state.alloc_client_id();
         state.register_client(client_id, remote);
