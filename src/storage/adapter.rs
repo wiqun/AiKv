@@ -36,9 +36,9 @@ use crate::error::{Error, Result};
 use crate::storage::memory::glob_match;
 use crate::storage::observation::{PointReadCounter, StorageObservation};
 use crate::storage::types::{
-    now_ms, BatchWriteHandle, ExpiresCounters, ImmediateWriteHandle, KeyspaceStats, KvStorage,
-    RawPairVisitor, ScanResult, StorageEngineKind, StoredValue, ValueType, WriteOp, DB_COUNT,
-    TTL_NO_EXPIRY, WRONGTYPE,
+    is_wrongtype, now_ms, BatchWriteHandle, ExpiresCounters, ImmediateWriteHandle, KeyspaceStats,
+    KvStorage, RawPairVisitor, ScanResult, StorageEngineKind, StoredValue, ValueType, WriteOp,
+    DB_COUNT, TTL_NO_EXPIRY, WRONGTYPE,
 };
 use crate::storage::watch_registry::WatchRegistry;
 use crate::storage::watch_version::{
@@ -369,6 +369,69 @@ impl KvStorageAdapter {
         if self.storage.apply_writes(ops).await.is_ok() {
             self.expires.on_ttl_clear(db);
         }
+    }
+
+    async fn get_string_bytes_fast(&self, db: usize, key: &[u8]) -> Result<Option<bytes::Bytes>> {
+        let Some(raw) = self.get_raw_bytes(db, key).await? else {
+            if let Some(counter) = self.point_reads.get() {
+                counter.note(false);
+            }
+            return Ok(None);
+        };
+        match crate::storage::string_codec::decode_string_fast(&raw) {
+            crate::storage::string_codec::FastStringDecode::Valid(range, expires_at) => {
+                if let Some(exp) = expires_at {
+                    if now_ms() >= exp {
+                        if let Some(obs) = &self.observation {
+                            obs.record_expired_key();
+                        }
+                        self.try_lazy_expire_delete(db, key).await;
+                        if let Some(counter) = self.point_reads.get() {
+                            counter.note(false);
+                        }
+                        return Ok(None);
+                    }
+                }
+                if let Some(counter) = self.point_reads.get() {
+                    counter.note(true);
+                }
+                Ok(Some(raw.slice(range)))
+            }
+            crate::storage::string_codec::FastStringDecode::WrongType => {
+                Err(Error::Command(WRONGTYPE.into()))
+            }
+            crate::storage::string_codec::FastStringDecode::Fallback => {
+                let stored = self.get_typed(db, key).await?;
+                match stored {
+                    None => Ok(None),
+                    Some(s) => match s.value {
+                        ValueType::String(v) => Ok(Some(bytes::Bytes::from(v))),
+                        _ => Err(Error::Command(WRONGTYPE.into())),
+                    },
+                }
+            }
+        }
+    }
+
+    async fn set_string_fast(
+        &self,
+        db: usize,
+        key: &[u8],
+        value: &[u8],
+        expire_at: Option<u64>,
+    ) -> Result<()> {
+        self.check_db(db)?;
+        let encoded = Self::encode(db, key);
+        let bytes = crate::storage::string_codec::encode_string_fast(value, expire_at);
+        let mut ops = vec![(encoded, bytes)];
+        if let Some(meta) = self.next_watch_meta_put(db, key).await? {
+            ops.push(meta);
+        }
+        self.storage.put_many(ops).await?;
+        if expire_at.is_some() {
+            self.expires.on_ttl_write(db);
+        }
+        Ok(())
     }
 
     async fn keys_for_db(&self, db: usize, pattern: &[u8]) -> Result<Vec<Vec<u8>>> {
@@ -753,30 +816,15 @@ impl KvStorage for KvStorageAdapter {
     }
 
     async fn get(&self, db: usize, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        let stored = self.get_typed(db, key).await?;
-        match stored {
-            None => Ok(None),
-            Some(s) => match s.value {
-                ValueType::String(v) => Ok(Some(v)),
-                _ => Err(Error::Command(WRONGTYPE.into())),
-            },
-        }
+        self.get_bytes(db, key).await.map(|opt| opt.map(|b| b.to_vec()))
     }
 
     async fn get_bytes(&self, db: usize, key: &[u8]) -> Result<Option<bytes::Bytes>> {
-        let stored = self.get_typed(db, key).await?;
-        match stored {
-            None => Ok(None),
-            Some(s) => match s.value {
-                ValueType::String(v) => Ok(Some(bytes::Bytes::from(v))),
-                _ => Err(Error::Command(WRONGTYPE.into())),
-            },
-        }
+        self.get_string_bytes_fast(db, key).await
     }
 
     async fn set(&self, db: usize, key: &[u8], value: &[u8]) -> Result<()> {
-        self.set_typed(db, key, StoredValue::string(value.to_vec()))
-            .await
+        self.set_string_fast(db, key, value, None).await
     }
 
     async fn set_with_ttl(
@@ -786,15 +834,8 @@ impl KvStorage for KvStorageAdapter {
         value: &[u8],
         expire_at_ms: u64,
     ) -> Result<()> {
-        self.set_typed(
-            db,
-            key,
-            StoredValue {
-                value: ValueType::String(value.to_vec()),
-                expires_at: Some(expire_at_ms),
-            },
-        )
-        .await
+        self.set_string_fast(db, key, value, Some(expire_at_ms))
+            .await
     }
 
     async fn delete(&self, db: usize, key: &[u8]) -> Result<bool> {
@@ -830,14 +871,12 @@ impl KvStorage for KvStorageAdapter {
     async fn mget(&self, db: usize, keys: &[Vec<u8>]) -> Result<Vec<Option<Vec<u8>>>> {
         let mut out = Vec::with_capacity(keys.len());
         for key in keys {
-            let stored = self.load_typed(db, key).await?;
-            out.push(match stored {
-                None => None,
-                Some(s) => match s.value {
-                    ValueType::String(v) => Some(v),
-                    _ => None,
-                },
-            });
+            match self.get_bytes(db, key).await {
+                Ok(Some(bytes)) => out.push(Some(bytes.to_vec())),
+                Ok(None) => out.push(None),
+                Err(e) if is_wrongtype(&e) => out.push(None),
+                Err(e) => return Err(e),
+            }
         }
         Ok(out)
     }
@@ -1054,7 +1093,7 @@ impl KvStorage for KvStorageAdapter {
     async fn set_typed(&self, db: usize, key: &[u8], value: StoredValue) -> Result<()> {
         let bytes = Self::serialize(&value)?;
         let encoded = Self::encode(db, key);
-        let mut ops = vec![(encoded.clone(), bytes)];
+        let mut ops = vec![(encoded, bytes)];
         if let Some(meta) = self.next_watch_meta_put(db, key).await? {
             ops.push(meta);
         }

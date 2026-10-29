@@ -12,6 +12,7 @@ pub mod dump;
 pub mod memory;
 pub mod observation;
 pub mod script_io;
+pub mod string_codec;
 pub mod subkey;
 pub mod ttl_filter;
 pub mod types;
