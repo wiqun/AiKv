@@ -4,7 +4,9 @@
 //! 超过后, 用户 key 只留 `CollectionHeader`, 每个 member 和按 score 排序的索引各写一条 subkey.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 use crate::error::Result;
 use crate::storage::aidb::AiDbEngine;
@@ -216,7 +218,7 @@ pub async fn load_members(
                     return Ok(());
                 };
                 if let Some(score) = decode_score(&raw) {
-                    map_c.lock().expect("zset members").insert(member, score);
+                    map_c.lock().insert(member, score);
                 }
                 Ok(())
             }),
@@ -224,8 +226,7 @@ pub async fn load_members(
         .await?;
     Ok(Arc::try_unwrap(map)
         .unwrap_or_else(|_| unreachable!("member map still shared"))
-        .into_inner()
-        .expect("zset members"))
+        .into_inner())
 }
 
 pub fn load_members_sync(
@@ -248,15 +249,14 @@ pub fn load_members_sync(
                 return Ok(());
             };
             if let Some(score) = decode_score(&raw) {
-                map_c.lock().expect("zset members").insert(member, score);
+                map_c.lock().insert(member, score);
             }
             Ok(())
         }),
     )?;
     Ok(Arc::try_unwrap(map)
         .unwrap_or_else(|_| unreachable!("member map still shared"))
-        .into_inner()
-        .expect("zset members"))
+        .into_inner())
 }
 
 pub fn read_member_score_sync(

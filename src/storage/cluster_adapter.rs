@@ -526,6 +526,16 @@ impl StorageAdapter for ClusterDataAdapter {
             return self.local.for_each_prefix_sync(prefix, f);
         };
         let end = AiDbEngine::prefix_end(&prefix);
+        if let Ok(Some((_, ReadRoute::Single(gid)))) = Self::route_read(&prefix) {
+            let pairs = mgr
+                .multi_raft
+                .scan_local_pairs_in_range_sync(gid, &prefix, end.as_deref())
+                .map_err(Self::map_err)?;
+            for (key, value) in pairs {
+                f(key, value)?;
+            }
+            return Ok(());
+        }
         for gid in mgr.multi_raft.local_group_ids() {
             let pairs = mgr
                 .multi_raft
@@ -698,6 +708,17 @@ impl StorageAdapter for ClusterDataAdapter {
         match CLUSTER_STATE_MGR.get() {
             Some(mgr) => {
                 let end = AiDbEngine::prefix_end(&prefix);
+                if let Ok(Some((_, ReadRoute::Single(gid)))) = Self::route_read(&prefix) {
+                    let pairs = mgr
+                        .multi_raft
+                        .scan_local_pairs_in_range(gid, prefix, end)
+                        .await
+                        .map_err(Self::map_err)?;
+                    for (k, v) in pairs {
+                        f(k, v)?;
+                    }
+                    return Ok(());
+                }
                 for gid in mgr.multi_raft.local_group_ids() {
                     let pairs = mgr
                         .multi_raft
