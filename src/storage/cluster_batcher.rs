@@ -19,6 +19,18 @@ use crate::storage::types::BatchWriteHandle;
 
 const SET_BATCH_MAX_OPS: usize = 512;
 const ADAPTIVE_BATCH_TARGET_OPS: usize = 32;
+const DEFAULT_ADAPTIVE_BATCH_WAIT_US: u64 = 150;
+
+fn adaptive_batch_wait_duration() -> std::time::Duration {
+    static WAIT_US: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    let us = *WAIT_US.get_or_init(|| {
+        std::env::var("AIKV_BATCH_WAIT_US")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(DEFAULT_ADAPTIVE_BATCH_WAIT_US)
+    });
+    std::time::Duration::from_micros(us)
+}
 
 struct BatcherPerfSampler {
     batches: AtomicU64,
@@ -456,11 +468,26 @@ pub async fn collect_batch_items(
     // 第一轮快速抽取当前通道中的就绪项
     drain_ready_items(rx, &mut items, &mut op_count);
 
-    // 自适应微等待: 若当前收集数尚未达到微窗口阈值 (32 条), 主动让步一次执行权
-    // 给并发客户端协程注入通道的机会, 避免高并发下退化为大量 1-op Raft propose
-    if op_count < ADAPTIVE_BATCH_TARGET_OPS {
-        tokio::task::yield_now().await;
-        drain_ready_items(rx, &mut items, &mut op_count);
+    // 自适应微等待: 若当前收集数尚未达到微窗口阈值, 在预算时间内等待通道新项流入,
+    // 聚合并发客户端写请求, 避免高并发下退化为大量 1-op Raft propose (Issue #83).
+    let wait_dur = adaptive_batch_wait_duration();
+    if !wait_dur.is_zero() && op_count < ADAPTIVE_BATCH_TARGET_OPS {
+        let deadline = Instant::now() + wait_dur;
+        while op_count < ADAPTIVE_BATCH_TARGET_OPS {
+            let now = Instant::now();
+            if now >= deadline {
+                break;
+            }
+            let remaining = deadline - now;
+            match tokio::time::timeout(remaining, rx.recv()).await {
+                Ok(Some(item)) => {
+                    op_count += item_op_count(&item);
+                    items.push(item);
+                    drain_ready_items(rx, &mut items, &mut op_count);
+                }
+                _ => break,
+            }
+        }
     }
 
     items

@@ -651,7 +651,7 @@ impl KvStorageAdapter {
     }
 
     fn load_typed_for_script(&self, db: usize, key: &[u8]) -> Result<Option<StoredValue>> {
-        let Some(raw) = self.storage.get_sync(Self::encode(db, key))? else {
+        let Some(raw) = self.storage.get_bytes_sync(Self::encode(db, key))? else {
             return Ok(None);
         };
         let stored = Self::deserialize(&raw)?;
