@@ -303,5 +303,6 @@ fn db_write_op_to_adapter(op: DbWriteOp) -> AdapterWriteOp {
     match op {
         DbWriteOp::Put { key, value } => AdapterWriteOp::Put { key, value },
         DbWriteOp::Delete { key } => AdapterWriteOp::Delete { key },
+        DbWriteOp::DeleteRange { .. } => unimplemented!("delete range to adapter not supported"),
     }
 }
