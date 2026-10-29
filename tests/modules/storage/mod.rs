@@ -1,6 +1,8 @@
 pub mod aidb;
 pub mod aidb_blocking;
 pub mod aidb_integration_test;
+#[cfg(feature = "cluster")]
+pub mod cluster_batcher_test;
 pub mod compat;
 pub mod counters;
 pub mod memory;

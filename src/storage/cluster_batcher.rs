@@ -18,6 +18,7 @@ use crate::storage::cluster_adapter::{ClusterDataAdapter, WriteRoute};
 use crate::storage::types::BatchWriteHandle;
 
 const SET_BATCH_MAX_OPS: usize = 512;
+const ADAPTIVE_BATCH_TARGET_OPS: usize = 32;
 
 struct BatcherPerfSampler {
     batches: AtomicU64,
@@ -63,12 +64,12 @@ pub(super) struct GroupSetBatcher {
 
 /// reverse-dedup 规划用的轻量 op (与 `WriteBatchItem` 同语义, 无 ack).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum PlannedOp {
+pub enum PlannedOp {
     Put { key: Vec<u8>, value: Vec<u8> },
     Delete { key: Vec<u8> },
 }
 
-pub(super) enum WriteBatchItem {
+pub enum WriteBatchItem {
     Put {
         key: Vec<u8>,
         value: Vec<u8>,
@@ -439,12 +440,12 @@ pub(super) async fn run_set_batcher(
 ) {
     while let Some(first) = rx.recv().await {
         let t_start = Instant::now();
-        let items = collect_batch_items(&mut rx, first);
+        let items = collect_batch_items(&mut rx, first).await;
         dispatch_batch(&mgr, gid, items, t_start).await;
     }
 }
 
-fn collect_batch_items(
+pub async fn collect_batch_items(
     rx: &mut mpsc::Receiver<WriteBatchItem>,
     first: WriteBatchItem,
 ) -> Vec<WriteBatchItem> {
@@ -452,16 +453,33 @@ fn collect_batch_items(
     let mut op_count = item_op_count(&first);
     items.push(first);
 
-    while items.len() < SET_BATCH_MAX_OPS && op_count < SET_BATCH_MAX_OPS {
+    // 第一轮快速抽取当前通道中的就绪项
+    drain_ready_items(rx, &mut items, &mut op_count);
+
+    // 自适应微等待: 若当前收集数尚未达到微窗口阈值 (32 条), 主动让步一次执行权
+    // 给并发客户端协程注入通道的机会, 避免高并发下退化为大量 1-op Raft propose
+    if op_count < ADAPTIVE_BATCH_TARGET_OPS {
+        tokio::task::yield_now().await;
+        drain_ready_items(rx, &mut items, &mut op_count);
+    }
+
+    items
+}
+
+fn drain_ready_items(
+    rx: &mut mpsc::Receiver<WriteBatchItem>,
+    items: &mut Vec<WriteBatchItem>,
+    op_count: &mut usize,
+) {
+    while items.len() < SET_BATCH_MAX_OPS && *op_count < SET_BATCH_MAX_OPS {
         match rx.try_recv() {
             Ok(item) => {
-                op_count += item_op_count(&item);
+                *op_count += item_op_count(&item);
                 items.push(item);
             }
             Err(_) => break,
         }
     }
-    items
 }
 
 fn item_op_count(item: &WriteBatchItem) -> usize {

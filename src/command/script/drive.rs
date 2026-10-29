@@ -56,8 +56,13 @@ impl ScriptJob {
 }
 
 pub(super) fn script_runs_off_worker() -> bool {
-    // 默认开启 In-Place 同步执行以达到极致吞吐并消除跨线程池调度税与全局 Mutex 争抢;
-    // 仅在显式配置 AIKV_SCRIPT_OFF_WORKER 时才派发到单独的工作池
+    // 集群模式下必须派发到独立工作池以物理隔离 CPU 密集型 Lua 计算, 保证 OpenRaft 协程不被饿死;
+    // 单机模式下支持环境变量显式覆盖或默认就地执行.
+    #[cfg(feature = "cluster")]
+    if crate::server::info::is_cluster_initialized() {
+        return true;
+    }
+
     static OFF_WORKER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     static INIT: std::sync::Once = std::sync::Once::new();
     INIT.call_once(|| {
