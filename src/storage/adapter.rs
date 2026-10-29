@@ -92,6 +92,12 @@ pub trait StorageAdapter: Send + Sync {
         let _ = key;
         Err(Error::Storage("sync get not supported".into()))
     }
+    fn get_bytes_sync(&self, key: Vec<u8>) -> Result<Option<bytes::Bytes>> {
+        self.get_sync(key).map(|opt| opt.map(bytes::Bytes::from))
+    }
+    async fn get_bytes(&self, key: Vec<u8>) -> Result<Option<bytes::Bytes>> {
+        self.get(key).await.map(|opt| opt.map(bytes::Bytes::from))
+    }
     fn write_batch_sync(&self, batch: Vec<AdapterWriteOp>) -> Result<()> {
         let _ = batch;
         Err(Error::Storage("sync write_batch not supported".into()))
@@ -282,6 +288,11 @@ impl KvStorageAdapter {
         self.storage.get(Self::encode(db, key)).await
     }
 
+    async fn get_raw_bytes(&self, db: usize, key: &[u8]) -> Result<Option<bytes::Bytes>> {
+        self.check_db(db)?;
+        self.storage.get_bytes(Self::encode(db, key)).await
+    }
+
     fn deserialize(bytes: &[u8]) -> Result<StoredValue> {
         postcard::from_bytes(bytes).map_err(|e| Error::Storage(format!("postcard decode: {e}")))
     }
@@ -324,7 +335,7 @@ impl KvStorageAdapter {
     }
 
     async fn load_typed(&self, db: usize, key: &[u8]) -> Result<Option<StoredValue>> {
-        let Some(raw) = self.get_raw(db, key).await? else {
+        let Some(raw) = self.get_raw_bytes(db, key).await? else {
             return Ok(None);
         };
         let stored = Self::deserialize(&raw)?;
@@ -747,6 +758,17 @@ impl KvStorage for KvStorageAdapter {
             None => Ok(None),
             Some(s) => match s.value {
                 ValueType::String(v) => Ok(Some(v)),
+                _ => Err(Error::Command(WRONGTYPE.into())),
+            },
+        }
+    }
+
+    async fn get_bytes(&self, db: usize, key: &[u8]) -> Result<Option<bytes::Bytes>> {
+        let stored = self.get_typed(db, key).await?;
+        match stored {
+            None => Ok(None),
+            Some(s) => match s.value {
+                ValueType::String(v) => Ok(Some(bytes::Bytes::from(v))),
                 _ => Err(Error::Command(WRONGTYPE.into())),
             },
         }

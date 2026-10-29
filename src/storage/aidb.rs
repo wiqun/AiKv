@@ -108,6 +108,11 @@ impl StorageAdapter for AiDbEngine {
         self.db.get(&key).map_err(|e| Error::Storage(e.to_string()))
     }
 
+    fn get_bytes_sync(&self, key: Vec<u8>) -> Result<Option<bytes::Bytes>> {
+        let pinned = self.db.get_pinned(&key).map_err(|e| Error::Storage(e.to_string()))?;
+        Ok(pinned.map(|p| p.into_bytes()))
+    }
+
     fn write_batch_sync(&self, batch: Vec<AdapterWriteOp>) -> Result<()> {
         let mut wb = aidb::WriteBatch::new();
         for op in batch {
@@ -156,6 +161,10 @@ impl StorageAdapter for AiDbEngine {
 
     async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>> {
         self.get_sync(key)
+    }
+
+    async fn get_bytes(&self, key: Vec<u8>) -> Result<Option<bytes::Bytes>> {
+        self.get_bytes_sync(key)
     }
 
     async fn set(&self, key: Vec<u8>, value: Vec<u8>) -> Result<()> {

@@ -278,6 +278,9 @@ pub trait KvStorage: Send + Sync {
     }
 
     async fn get(&self, db: usize, key: &[u8]) -> Result<Option<Vec<u8>>>;
+    async fn get_bytes(&self, db: usize, key: &[u8]) -> Result<Option<bytes::Bytes>> {
+        self.get(db, key).await.map(|opt| opt.map(bytes::Bytes::from))
+    }
     async fn set(&self, db: usize, key: &[u8], value: &[u8]) -> Result<()>;
     async fn set_with_ttl(
         &self,

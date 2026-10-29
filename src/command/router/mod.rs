@@ -766,6 +766,10 @@ pub(crate) fn bulk(b: Vec<u8>) -> RespValue {
     RespValue::BulkString(Some(Bytes::from(b)))
 }
 
+pub(crate) fn bulk_bytes(b: Bytes) -> RespValue {
+    RespValue::BulkString(Some(b))
+}
+
 pub(crate) fn integer(n: i64) -> RespValue {
     RespValue::Integer(n)
 }

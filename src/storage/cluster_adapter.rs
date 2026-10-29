@@ -463,6 +463,18 @@ impl StorageAdapter for ClusterDataAdapter {
         }
     }
 
+    fn get_bytes_sync(&self, key: Vec<u8>) -> Result<Option<bytes::Bytes>> {
+        match Self::route_read(&key)? {
+            Some((mgr, ReadRoute::Single(gid))) => mgr
+                .multi_raft
+                .get_local_bytes_sync(gid, &key)
+                .map_err(Self::map_err),
+            Some(_) => Err(Error::Command(TRYAGAIN_MIGRATION.into())),
+            None if Self::should_use_local_engine(&key) => self.local.get_bytes_sync(key),
+            None => Err(Self::data_group_not_ready_err()),
+        }
+    }
+
     fn last_in_range_sync(
         &self,
         start: Vec<u8>,
@@ -519,6 +531,29 @@ impl StorageAdapter for ClusterDataAdapter {
                 },
             )) => Self::merge_read(&mgr, target_group, source_group, epoch, &key).await,
             None if Self::should_use_local_engine(&key) => self.local.get(key).await,
+            None => Err(Self::data_group_not_ready_err()),
+        }
+    }
+
+    async fn get_bytes(&self, key: Vec<u8>) -> Result<Option<bytes::Bytes>> {
+        match Self::route_read(&key)? {
+            Some((mgr, ReadRoute::Single(gid))) => {
+                mgr.multi_raft.get_local_bytes(gid, &key).await.map_err(|e| {
+                    tracing::warn!(gid = gid, error = %e, "get_local_bytes failed");
+                    Self::map_err(e)
+                })
+            }
+            Some((
+                mgr,
+                ReadRoute::Merge {
+                    target_group,
+                    source_group,
+                    epoch,
+                },
+            )) => Self::merge_read(&mgr, target_group, source_group, epoch, &key)
+                .await
+                .map(|opt| opt.map(bytes::Bytes::from)),
+            None if Self::should_use_local_engine(&key) => self.local.get_bytes(key).await,
             None => Err(Self::data_group_not_ready_err()),
         }
     }
