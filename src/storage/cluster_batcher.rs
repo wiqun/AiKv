@@ -19,6 +19,7 @@ use crate::storage::types::BatchWriteHandle;
 
 const SET_BATCH_MAX_OPS: usize = 512;
 const ADAPTIVE_BATCH_TARGET_OPS: usize = 32;
+const MAX_CONCURRENT_PROPOSALS: usize = 16;
 
 struct BatcherPerfSampler {
     batches: AtomicU64,
@@ -438,10 +439,22 @@ pub(super) async fn run_set_batcher(
     mut rx: mpsc::Receiver<WriteBatchItem>,
     _eager_flush: usize,
 ) {
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_PROPOSALS));
+
     while let Some(first) = rx.recv().await {
         let t_start = Instant::now();
         let items = collect_batch_items(&mut rx, first).await;
-        dispatch_batch(&mgr, gid, items, t_start).await;
+
+        let permit = match semaphore.clone().acquire_owned().await {
+            Ok(p) => p,
+            Err(_) => break,
+        };
+
+        let mgr_c = Arc::clone(&mgr);
+        tokio::spawn(async move {
+            let _permit = permit;
+            dispatch_batch(&mgr_c, gid, items, t_start).await;
+        });
     }
 }
 

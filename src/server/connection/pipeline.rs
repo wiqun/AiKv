@@ -34,6 +34,11 @@ impl Connection {
             parsed.push((cmd, args));
         }
 
+        #[cfg(feature = "cluster")]
+        if crate::server::info::is_cluster_initialized() {
+            return self.execute_cluster_concurrent_pipeline(parsed).await;
+        }
+
         self.execute_in_place_pipeline(parsed).await
     }
 
@@ -54,13 +59,102 @@ impl Connection {
         Ok(())
     }
 
-    /// 集群模式流水线命令直通执行, 严格按照输入顺序就地批量执行并刷网.
+    /// 集群模式并发分发流水线命令, 响应严格按照输入下标保序刷网.
     #[cfg(feature = "cluster")]
     pub async fn execute_cluster_concurrent_pipeline(
         &mut self,
         commands: Vec<(String, Vec<Bytes>)>,
     ) -> Result<()> {
-        self.execute_in_place_pipeline(commands).await
+        struct ExecutedPipelineItem {
+            idx: usize,
+            cmd: String,
+            args: Vec<Bytes>,
+            started: Option<Instant>,
+            result: Result<RespValue>,
+        }
+
+        let total = commands.len();
+        if total == 0 {
+            return Ok(());
+        }
+        let t_enter = Instant::now();
+
+        let gate = Arc::clone(&self.state.transaction_gate);
+        let _guard = gate.read_owned().await;
+
+        let client_id = self.client_id;
+        let remote = self.remote;
+        let proto = self.protocol_version;
+        let current_db = self.current_db;
+        let cluster_state = self.cluster_state.clone();
+
+        const MAX_CONCURRENT_PIPELINE: usize = 256;
+        let mut join_set = tokio::task::JoinSet::<ExecutedPipelineItem>::new();
+        let mut results: Vec<Option<ExecutedPipelineItem>> = (0..total).map(|_| None).collect();
+
+        for (idx, (cmd, args)) in commands.into_iter().enumerate() {
+            if join_set.len() >= MAX_CONCURRENT_PIPELINE {
+                if let Some(res) = join_set.join_next().await {
+                    let item = res.map_err(|e| crate::error::Error::Command(e.to_string()))?;
+                    let i = item.idx;
+                    results[i] = Some(item);
+                }
+            }
+
+            let state = Arc::clone(&self.state);
+            let conn_cluster_state = cluster_state.clone();
+            let track = super::should_track_observability(&cmd);
+            let started = track.then(Instant::now);
+
+            join_set.spawn(async move {
+                let mut db = current_db;
+                let result = state
+                    .router()
+                    .execute_with_client(
+                        &cmd,
+                        &args,
+                        &mut db,
+                        Some(client_id),
+                        Some(remote),
+                        proto,
+                        Some(&conn_cluster_state),
+                    )
+                    .await;
+
+                ExecutedPipelineItem {
+                    idx,
+                    cmd,
+                    args,
+                    started,
+                    result,
+                }
+            });
+        }
+
+        while let Some(res) = join_set.join_next().await {
+            let item = res.map_err(|e| crate::error::Error::Command(e.to_string()))?;
+            let i = item.idx;
+            results[i] = Some(item);
+        }
+
+        drop(_guard);
+
+        for item in results.into_iter().flatten() {
+            self.finish_immediate_command(&item.cmd, &item.args, item.started, item.result)
+                .await?;
+        }
+
+        self.flush_responses().await?;
+
+        let t_flushed = Instant::now();
+        self.pending_timing = Some(PendingBatchTiming {
+            cmds: total,
+            t_enter,
+            t_last_enq: None,
+            t_join: t_flushed,
+            t_flushed,
+        });
+        Ok(())
     }
 
     /// 就地流式顺序批量执行流水线命令, 响应直接追加至当前连接响应缓冲, 批末统一一次性刷网.
