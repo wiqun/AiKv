@@ -34,11 +34,6 @@ impl Connection {
             parsed.push((cmd, args));
         }
 
-        #[cfg(feature = "cluster")]
-        if crate::server::info::is_cluster_initialized() {
-            return self.execute_cluster_concurrent_pipeline(parsed).await;
-        }
-
         self.execute_in_place_pipeline(parsed).await
     }
 
@@ -59,110 +54,13 @@ impl Connection {
         Ok(())
     }
 
-    /// 集群模式并发分发流水线命令, 响应严格按照输入下标保序刷网.
+    /// 集群模式流水线命令直通执行, 严格按照输入顺序就地批量执行并刷网.
     #[cfg(feature = "cluster")]
     pub async fn execute_cluster_concurrent_pipeline(
         &mut self,
         commands: Vec<(String, Vec<Bytes>)>,
     ) -> Result<()> {
-        let total = commands.len();
-        if total == 0 {
-            return Ok(());
-        }
-        let t_enter = Instant::now();
-
-        let gate = Arc::clone(&self.state.transaction_gate);
-        let _guard = gate.read_owned().await;
-
-        let client_id = self.client_id;
-        let remote = self.remote;
-        let proto = self.protocol_version;
-        let current_db = self.current_db;
-        let cluster_state = self.cluster_state.clone();
-
-        // 有界 JoinSet 控制最大并发量 (256), 保证凑批充分同时避免协程开销无序膨胀
-        const MAX_CONCURRENT_PIPELINE: usize = 256;
-        let mut join_set = tokio::task::JoinSet::new();
-        let mut results: Vec<Option<PipelineCmdResult>> = (0..total).map(|_| None).collect();
-
-        for (idx, (cmd, args)) in commands.into_iter().enumerate() {
-            if join_set.len() >= MAX_CONCURRENT_PIPELINE {
-                if let Some(res) = join_set.join_next().await {
-                    let (i, cmd_res) =
-                        res.map_err(|e| crate::error::Error::Command(e.to_string()))?;
-                    results[i] = Some(cmd_res);
-                }
-            }
-
-            let state = Arc::clone(&self.state);
-            let conn_cluster_state = cluster_state.clone();
-            let track = super::should_track_observability(&cmd);
-            let started = track.then(Instant::now);
-            let arg_strings: Vec<String> = if track {
-                args.iter()
-                    .map(|b| String::from_utf8_lossy(b).into_owned())
-                    .collect()
-            } else {
-                Vec::new()
-            };
-
-            join_set.spawn(async move {
-                let mut db = current_db;
-                let result = state
-                    .router()
-                    .execute_with_client(
-                        &cmd,
-                        &args,
-                        &mut db,
-                        Some(client_id),
-                        Some(remote),
-                        proto,
-                        Some(&conn_cluster_state),
-                    )
-                    .await;
-
-                (
-                    idx,
-                    PipelineCmdResult {
-                        cmd,
-                        args,
-                        arg_strings,
-                        started,
-                        result,
-                    },
-                )
-            });
-        }
-
-        while let Some(res) = join_set.join_next().await {
-            let (i, cmd_res) = res.map_err(|e| crate::error::Error::Command(e.to_string()))?;
-            results[i] = Some(cmd_res);
-        }
-
-        drop(_guard);
-
-        for cmd_res in results.into_iter().flatten() {
-            self.finish_immediate_command(
-                &cmd_res.cmd,
-                &cmd_res.args,
-                cmd_res.arg_strings,
-                cmd_res.started,
-                cmd_res.result,
-            )
-            .await?;
-        }
-
-        self.flush_responses().await?;
-
-        let t_flushed = Instant::now();
-        self.pending_timing = Some(PendingBatchTiming {
-            cmds: total,
-            t_enter,
-            t_last_enq: None,
-            t_join: t_flushed,
-            t_flushed,
-        });
-        Ok(())
+        self.execute_in_place_pipeline(commands).await
     }
 
     /// 就地流式顺序批量执行流水线命令, 响应直接追加至当前连接响应缓冲, 批末统一一次性刷网.
@@ -171,6 +69,9 @@ impl Connection {
         commands: Vec<(String, Vec<Bytes>)>,
     ) -> Result<()> {
         let total = commands.len();
+        if total == 0 {
+            return Ok(());
+        }
         let t_enter = Instant::now();
 
         let gate = Arc::clone(&self.state.transaction_gate);
@@ -201,15 +102,7 @@ impl Connection {
                 .await;
             self.current_db = db;
 
-            let arg_strings: Vec<String> = if track {
-                args.iter()
-                    .map(|b| String::from_utf8_lossy(b).into_owned())
-                    .collect()
-            } else {
-                Vec::new()
-            };
-
-            self.finish_immediate_command(&cmd, &args, arg_strings, started, result)
+            self.finish_immediate_command(&cmd, &args, started, result)
                 .await?;
         }
 
@@ -226,15 +119,6 @@ impl Connection {
         });
         Ok(())
     }
-}
-
-#[cfg(feature = "cluster")]
-struct PipelineCmdResult {
-    cmd: String,
-    args: Vec<Bytes>,
-    arg_strings: Vec<String>,
-    started: Option<Instant>,
-    result: Result<RespValue>,
 }
 
 fn parse_command_parts(frame: &RespValue) -> Option<(String, Vec<Bytes>)> {
