@@ -42,6 +42,9 @@ mod list;
 mod set;
 mod string;
 mod zset;
+pub mod fast_path;
+
+pub use fast_path::try_fast_path;
 
 use self::hash::{
     exec_hdel, exec_hexists, exec_hget, exec_hgetall, exec_hincrby, exec_hlen, exec_hmget,
@@ -128,7 +131,7 @@ fn validate_keys(declared: &DeclaredKeys, cmd: &str, args: &[Bytes]) -> Result<(
     Ok(())
 }
 
-fn check_key(declared: &DeclaredKeys, k: &[u8]) -> Result<()> {
+pub(crate) fn check_key(declared: &DeclaredKeys, k: &[u8]) -> Result<()> {
     if declared.is_declared(k) {
         Ok(())
     } else {
@@ -136,129 +139,6 @@ fn check_key(declared: &DeclaredKeys, k: &[u8]) -> Result<()> {
             "ERR Script attempted to access undeclared key '{:?}'",
             String::from_utf8_lossy(k)
         )))
-    }
-}
-
-fn with_arg_bytes<R>(val: &mlua::Value, f: impl FnOnce(&[u8]) -> R) -> Option<R> {
-    match val {
-        mlua::Value::String(s) => Some(f(s.as_bytes().as_ref())),
-        mlua::Value::Integer(i) => {
-            let mut buf = [0u8; 32];
-            let mut cur = std::io::Cursor::new(&mut buf[..]);
-            use std::io::Write;
-            let _ = write!(cur, "{i}");
-            let len = cur.position() as usize;
-            Some(f(&buf[..len]))
-        }
-        mlua::Value::Number(n) => {
-            let mut buf = [0u8; 32];
-            let mut cur = std::io::Cursor::new(&mut buf[..]);
-            use std::io::Write;
-            let _ = write!(cur, "{n}");
-            let len = cur.position() as usize;
-            Some(f(&buf[..len]))
-        }
-        mlua::Value::Boolean(b) => Some(f(if *b { b"1" } else { b"0" })),
-        _ => None,
-    }
-}
-
-pub fn try_fast_path(
-    lua: &mlua::Lua,
-    storage: &dyn ScriptIo,
-    txn: &mut ScriptTransaction,
-    declared: &DeclaredKeys,
-    args: &mlua::MultiValue,
-    throw_error: bool,
-) -> mlua::Result<Option<mlua::Value>> {
-    if args.is_empty() {
-        return Ok(None);
-    }
-    let Some(first_arg) = args.front() else {
-        return Ok(None);
-    };
-    let mlua::Value::String(cmd_str) = first_arg else {
-        return Ok(None);
-    };
-    let cmd_bytes = cmd_str.as_bytes();
-    let cmd_raw = cmd_bytes.as_ref();
-
-    // 1. GET key (仅当参数为 2 且为 GET 时走极速通道)
-    if cmd_raw.eq_ignore_ascii_case(b"GET") {
-        if args.len() != 2 {
-            return Ok(None);
-        }
-        let Some(second_arg) = args.get(1) else {
-            return Ok(None);
-        };
-        let get_res = with_arg_bytes(second_arg, |k| {
-            if let Err(e) = check_key(declared, k) {
-                let msg = e.to_string();
-                if throw_error {
-                    return Err(mlua::Error::RuntimeError(msg));
-                }
-                return pcall_error_table(lua, &msg).map(Some);
-            }
-            match txn.get(storage, k) {
-                Ok(Some(v)) => Ok(Some(mlua::Value::String(lua.create_string(&v)?))),
-                Ok(None) => {
-                    let resp3 =
-                        matches!(lua.named_registry_value::<i64>("aikv_script_resp"), Ok(3));
-                    if resp3 {
-                        Ok(Some(mlua::Value::Nil))
-                    } else {
-                        Ok(Some(mlua::Value::Boolean(false)))
-                    }
-                }
-                Err(e) => {
-                    let msg = e.to_string();
-                    if throw_error {
-                        Err(mlua::Error::RuntimeError(msg))
-                    } else {
-                        pcall_error_table(lua, &msg).map(Some)
-                    }
-                }
-            }
-        });
-        match get_res {
-            Some(res) => res,
-            None => Ok(None),
-        }
-    }
-    // 2. SET key val (无额外选项的纯写入)
-    else if cmd_raw.eq_ignore_ascii_case(b"SET") {
-        if args.len() != 3 {
-            return Ok(None); // 若带参数 EX / PX / NX 等，回退通用逻辑
-        }
-        let Some(second_arg) = args.get(1) else {
-            return Ok(None);
-        };
-        let Some(third_arg) = args.get(2) else {
-            return Ok(None);
-        };
-        let set_res = with_arg_bytes(second_arg, |k| {
-            if let Err(e) = check_key(declared, k) {
-                let msg = e.to_string();
-                if throw_error {
-                    return Err(mlua::Error::RuntimeError(msg));
-                }
-                return pcall_error_table(lua, &msg).map(Some);
-            }
-            let inner_res = with_arg_bytes(third_arg, |v| {
-                txn.set_string(k.to_vec(), v.to_vec());
-                Ok(Some(mlua::Value::String(lua.create_string(b"OK")?)))
-            });
-            match inner_res {
-                Some(res) => res,
-                None => Ok(None),
-            }
-        });
-        match set_res {
-            Some(res) => res,
-            None => Ok(None),
-        }
-    } else {
-        Ok(None)
     }
 }
 

@@ -75,6 +75,21 @@ impl ScriptTransaction {
         Ok(router::integer(removed))
     }
 
+    pub(crate) fn subkey_zrem_single(
+        &mut self,
+        storage: &dyn crate::storage::ScriptIo,
+        key: &[u8],
+        member: &[u8],
+    ) -> Result<i64> {
+        self.ensure_zset_delta(storage, key)?;
+        let current = self.current_member_score(storage, key, member)?;
+        if current.is_none() {
+            return Ok(0);
+        }
+        self.record_member(key, member, current, None);
+        Ok(1)
+    }
+
     pub(crate) fn materialize_zset_delta(
         &self,
         storage: &dyn crate::storage::ScriptIo,
@@ -107,6 +122,11 @@ impl ScriptTransaction {
         for (key, delta) in &self.zset_deltas {
             let expires_at = self.resolve_expires_at(storage, key)?;
             push_delta(self.db_index, key, delta, expires_at, ops);
+            let changes = delta
+                .members
+                .iter()
+                .map(|(m, change)| (m.as_slice(), change.after));
+            zset_subkey::apply_cached_delta(self.db_index, key, changes, delta.count);
         }
         Ok(())
     }
@@ -117,11 +137,19 @@ impl ScriptTransaction {
         key: &[u8],
     ) -> Result<BTreeMap<Vec<u8>, f64>> {
         let _pin = self.in_flight.as_ref().map(|buf| buf.pin_reads());
-        let mut map = zset_subkey::load_members_sync(storage, self.db_index, key)?;
-        if let Some(buffer) = &self.in_flight {
-            overlay_inflight_members(&mut map, buffer, self.db_index, key);
+        if let Some(cached) = zset_subkey::get_cached_members(self.db_index, key) {
+            let mut map = (*cached).clone();
+            if let Some(buffer) = &self.in_flight {
+                overlay_inflight_members(&mut map, buffer, self.db_index, key);
+            }
+            return Ok(map);
         }
-        Ok(map)
+        let mut loaded = zset_subkey::load_members_sync(storage, self.db_index, key)?;
+        if let Some(buffer) = &self.in_flight {
+            overlay_inflight_members(&mut loaded, buffer, self.db_index, key);
+        }
+        zset_subkey::put_cached_members(self.db_index, key, loaded.clone());
+        Ok(loaded)
     }
 
     fn ensure_zset_delta(
@@ -449,5 +477,45 @@ mod tests {
         assert_eq!(kept.as_ref(), b"99");
         let scans = zset_subkey::LOAD_MEMBERS_CALLS.load(Ordering::Relaxed);
         assert_eq!(scans, 0, "ZSCORE scanned the member prefix {scans} times");
+    }
+
+    #[tokio::test]
+    async fn cache_overlays_inflight_and_propagates_changes() {
+        let dir = TempDir::new().unwrap();
+        let engine = AiDbEngine::open_for_testing(dir.path()).unwrap();
+        let storage: Arc<dyn KvStorage> = KvStorageAdapter::new(engine);
+        let router = CommandRouter::new(Arc::clone(&storage));
+        let mut db = 0;
+        zset_subkey::clear_cached_members();
+        for i in 0..5 {
+            router
+                .execute(
+                    "ZADD",
+                    &[
+                        Bytes::from_static(b"kz"),
+                        Bytes::from(format!("{}", i * 10)),
+                        Bytes::from(format!("m{i}")),
+                    ],
+                    &mut db,
+                )
+                .await
+                .unwrap();
+        }
+        let mut ops = zset_subkey::member_change_ops(0, b"kz", b"m0", Some(0.0), None);
+        let added = zset_subkey::member_key(&AiDbEngine::encode_key(0, b"kz"), b"m99");
+        ops.push((added, WriteOp::put_engine(zset_subkey::encode_score(99.0))));
+        ops.push((b"kz".to_vec(), WriteOp::put_stored(header(5, None))));
+        let inflight = InFlightBuffer::new();
+        inflight.insert_batch(0, &ops);
+
+        let txn1 = ScriptTransaction::with_in_flight(0, Some(Arc::new(inflight)));
+        let members1 = txn1.visible_subkey_members(storage.script_io(), b"kz").unwrap();
+        assert!(!members1.contains_key(b"m0".as_ref()), "m0 should be deleted by in_flight");
+        assert_eq!(members1.get(b"m99".as_ref()).copied(), Some(99.0), "m99 should be visible");
+
+        let txn2 = ScriptTransaction::new(0);
+        let members2 = txn2.visible_subkey_members(storage.script_io(), b"kz").unwrap();
+        assert!(!members2.contains_key(b"m0".as_ref()), "cached m0 must remain deleted");
+        assert_eq!(members2.get(b"m99".as_ref()).copied(), Some(99.0), "cached m99 must be present");
     }
 }

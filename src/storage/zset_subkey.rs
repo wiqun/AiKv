@@ -127,6 +127,7 @@ pub fn replace_ops(
     map: &BTreeMap<Vec<u8>, f64>,
     expires_at: Option<u64>,
 ) -> Vec<(Vec<u8>, WriteOp)> {
+    invalidate_cached_members(db, user_key);
     let encoded = AiDbEngine::encode_key(db, user_key);
     let mut ops = Vec::with_capacity(1 + map.len() * 2);
     ops.push((
@@ -307,6 +308,69 @@ fn push_member_put(
     ));
     let score_engine = score_key(encoded_user, score, member);
     ops.push((score_engine, WriteOp::put_engine(Vec::new())));
+}
+
+type CachedMembersMap =
+    std::collections::HashMap<(usize, Vec<u8>), Arc<BTreeMap<Vec<u8>, f64>>>;
+
+static MEMBERS_CACHE: parking_lot::RwLock<Option<CachedMembersMap>> =
+    parking_lot::RwLock::new(None);
+
+pub fn get_cached_members(db: usize, key: &[u8]) -> Option<Arc<BTreeMap<Vec<u8>, f64>>> {
+    let guard = MEMBERS_CACHE.read();
+    guard
+        .as_ref()
+        .and_then(|map| map.get(&(db, key.to_vec())).cloned())
+}
+
+pub fn put_cached_members(db: usize, key: &[u8], members: BTreeMap<Vec<u8>, f64>) {
+    let mut guard = MEMBERS_CACHE.write();
+    let map = guard.get_or_insert_with(std::collections::HashMap::new);
+    if map.len() >= 256 && !map.contains_key(&(db, key.to_vec())) {
+        map.clear();
+    }
+    map.insert((db, key.to_vec()), Arc::new(members));
+}
+
+pub fn apply_cached_delta<'a, I>(db: usize, key: &[u8], changes: I, count: u32)
+where
+    I: IntoIterator<Item = (&'a [u8], Option<f64>)>,
+{
+    let mut guard = MEMBERS_CACHE.write();
+    let Some(map) = guard.as_mut() else { return };
+    let cache_key = (db, key.to_vec());
+    if count == 0 {
+        map.remove(&cache_key);
+        return;
+    }
+    if let Some(entry) = map.get_mut(&cache_key) {
+        let m = Arc::make_mut(entry);
+        for (member, after) in changes {
+            match after {
+                Some(score) => {
+                    m.insert(member.to_vec(), score);
+                }
+                None => {
+                    m.remove(member);
+                }
+            }
+        }
+    }
+}
+
+pub fn invalidate_cached_members(db: usize, key: &[u8]) {
+    let mut guard = MEMBERS_CACHE.write();
+    if let Some(map) = guard.as_mut() {
+        map.remove(&(db, key.to_vec()));
+    }
+}
+
+#[cfg(test)]
+pub fn clear_cached_members() {
+    let mut guard = MEMBERS_CACHE.write();
+    if let Some(map) = guard.as_mut() {
+        map.clear();
+    }
 }
 
 #[cfg(test)]

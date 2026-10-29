@@ -107,7 +107,8 @@ pub(crate) fn members_in_rank(
 }
 
 pub(crate) fn members_to_resp(members: &[(Vec<u8>, f64)], withscores: bool) -> RespValue {
-    let mut items = Vec::new();
+    let cap = members.len() * if withscores { 2 } else { 1 };
+    let mut items = Vec::with_capacity(cap);
     for (member, score) in members {
         items.push(router::bulk(member.clone()));
         if withscores {
