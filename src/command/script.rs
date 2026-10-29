@@ -454,7 +454,8 @@ impl ScriptCommands {
         let (seg_id, slot_idx) = SEG_TRACKER.on_start();
         let t_start = Instant::now();
         let key_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_ref()).collect();
-        let _guard = if !keys.is_empty() {
+        let should_lock = !keys.is_empty() && !crate::server::info::is_cluster_initialized();
+        let _guard = if should_lock {
             Some(
                 self.key_lock
                     .lock_keys_sorted_with_timeout(&key_refs, DEFAULT_SCRIPT_LOCK_TIMEOUT)
