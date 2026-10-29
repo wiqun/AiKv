@@ -80,6 +80,9 @@ impl ScriptTransaction {
         storage: &dyn crate::storage::ScriptIo,
         key: &[u8],
     ) -> Result<BTreeMap<Vec<u8>, f64>> {
+        if let Some(view) = self.zset_views.lock().get(key) {
+            return Ok(view.clone());
+        }
         let mut map = self.visible_subkey_members(storage, key)?;
         let delta = &self.zset_deltas[key];
         for (member, change) in &delta.members {
@@ -92,6 +95,7 @@ impl ScriptTransaction {
                 }
             }
         }
+        self.zset_views.lock().insert(key.to_vec(), map.clone());
         Ok(map)
     }
 
@@ -156,6 +160,9 @@ impl ScriptTransaction {
         {
             return Ok(change.after);
         }
+        if let Some(view) = self.zset_views.lock().get(key) {
+            return Ok(view.get(member).copied());
+        }
         point_score(self.in_flight.as_ref(), storage, self.db_index, key, member)
     }
 
@@ -190,6 +197,16 @@ impl ScriptTransaction {
                 after,
             },
         );
+        if let Some(view) = self.zset_views.lock().get_mut(key) {
+            match after {
+                Some(score) => {
+                    view.insert(member.to_vec(), score);
+                }
+                None => {
+                    view.remove(member);
+                }
+            }
+        }
     }
 
     pub(crate) fn subkey_zincrby(
