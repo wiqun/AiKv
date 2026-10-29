@@ -456,13 +456,15 @@ pub async fn collect_batch_items(
     // 第一轮快速抽取当前通道中的就绪项
     drain_ready_items(rx, &mut items, &mut op_count);
 
-    // 自适应微让步: 若当前收集数尚未达到微窗口阈值, 通过少量协程出让机会让并发上游入队,
-    // 零 timer 开销聚合并发写请求, 避免单 op 频繁触发 Raft propose (Issue #83).
+    // 智能微窗口让步: 在最多 100 微秒预算内多次出让执行权,
+    // 允许排队中的并发 worker 完成 Lua 逻辑将批项推入通道,
+    // 无任何 timer 注册开销地将并发单写聚合成大批次 (Issue #83).
     if op_count < ADAPTIVE_BATCH_TARGET_OPS {
-        for _ in 0..4 {
+        let deadline = Instant::now() + std::time::Duration::from_micros(100);
+        while op_count < ADAPTIVE_BATCH_TARGET_OPS {
             tokio::task::yield_now().await;
             drain_ready_items(rx, &mut items, &mut op_count);
-            if op_count >= ADAPTIVE_BATCH_TARGET_OPS {
+            if Instant::now() >= deadline {
                 break;
             }
         }
