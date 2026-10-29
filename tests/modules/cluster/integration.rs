@@ -132,6 +132,8 @@ async fn create_cluster_mgr() -> ClusterStateManager {
         metrics: None,
         _watcher_shutdown: parking_lot::Mutex::new(None),
         _auto_save_shutdown: parking_lot::Mutex::new(None),
+        slot_groups: ClusterStateManager::new_slot_groups(),
+        has_active_migration: AtomicBool::new(false),
     }
 }
 

@@ -242,11 +242,23 @@ impl ClusterDataAdapter {
         let Some(mgr) = CLUSTER_STATE_MGR.get().cloned() else {
             return Ok(None);
         };
-        let Some((_, user_key)) = AiDbEngine::decode_key(key) else {
+        let Some((_, user_key)) = AiDbEngine::decode_key_ref(key) else {
             return Ok(None);
         };
-        let routing_key = Self::strip_subkey_suffix(&user_key);
+        let routing_key = Self::strip_subkey_suffix(user_key);
         let slot = key_to_slot(routing_key);
+        let fast_gid = mgr.fast_slot_group(slot);
+        if fast_gid > 0 {
+            return Ok(Some((mgr, ReadRoute::Single(fast_gid))));
+        }
+        Self::route_read_slow(mgr, routing_key, slot)
+    }
+
+    fn route_read_slow(
+        mgr: Arc<ClusterStateManager>,
+        routing_key: &[u8],
+        slot: u16,
+    ) -> Result<Option<(Arc<ClusterStateManager>, ReadRoute)>> {
         if let Some(route) = Self::migration_read_route(&mgr, slot)? {
             return Ok(Some((mgr, route)));
         }
@@ -263,8 +275,8 @@ impl ClusterDataAdapter {
 
     /// 写路径用的 slot. 子键与父键相同. 无法解码时返回 `None`.
     pub(super) fn routing_slot(key: &[u8]) -> Option<u16> {
-        let (_, user_key) = AiDbEngine::decode_key(key)?;
-        let routing_key = Self::strip_subkey_suffix(&user_key);
+        let (_, user_key) = AiDbEngine::decode_key_ref(key)?;
+        let routing_key = Self::strip_subkey_suffix(user_key);
         Some(key_to_slot(routing_key))
     }
 
@@ -277,12 +289,24 @@ impl ClusterDataAdapter {
         let Some(mgr) = CLUSTER_STATE_MGR.get().cloned() else {
             return Ok(None);
         };
-        let Some((_, user_key)) = AiDbEngine::decode_key(key) else {
+        let Some((_, user_key)) = AiDbEngine::decode_key_ref(key) else {
             return Ok(None);
         };
-        let routing_key = Self::strip_subkey_suffix(&user_key);
-        Self::reject_if_write_frozen(&mgr, routing_key)?;
+        let routing_key = Self::strip_subkey_suffix(user_key);
         let slot = key_to_slot(routing_key);
+        let fast_gid = mgr.fast_slot_group(slot);
+        if fast_gid > 0 && !mgr.has_active_migration() {
+            return Ok(Some((mgr, WriteRoute::Plain(fast_gid))));
+        }
+        Self::route_write_slow(mgr, routing_key, slot)
+    }
+
+    fn route_write_slow(
+        mgr: Arc<ClusterStateManager>,
+        routing_key: &[u8],
+        slot: u16,
+    ) -> Result<Option<(Arc<ClusterStateManager>, WriteRoute)>> {
+        Self::reject_if_write_frozen(&mgr, routing_key)?;
         let migration = Self::copying_migration_route(&mgr, slot)?;
         let gid = if let Some(gid) = Self::importing_write_group(&mgr, slot) {
             Some(gid)

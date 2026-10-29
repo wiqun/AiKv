@@ -86,6 +86,8 @@ fn cluster_info_redis88_fields_present() {
                 metrics: Some(Arc::new(aikv::server::metrics::ServerMetrics::default())),
                 _watcher_shutdown: parking_lot::Mutex::new(None),
                 _auto_save_shutdown: parking_lot::Mutex::new(None),
+                slot_groups: ClusterStateManager::new_slot_groups(),
+                has_active_migration: AtomicBool::new(false),
             };
             let _ = CLUSTER_STATE_MGR.set(Arc::new(mgr));
         });

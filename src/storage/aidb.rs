@@ -46,11 +46,15 @@ impl AiDbEngine {
         key
     }
 
-    pub fn decode_key(encoded: &[u8]) -> Option<(usize, Vec<u8>)> {
+    pub fn decode_key_ref(encoded: &[u8]) -> Option<(usize, &[u8])> {
         let pos = encoded.iter().position(|&b| b == b':')?;
         let db_str = std::str::from_utf8(&encoded[..pos]).ok()?;
         let db = db_str.parse().ok()?;
-        Some((db, encoded[pos + 1..].to_vec()))
+        Some((db, &encoded[pos + 1..]))
+    }
+
+    pub fn decode_key(encoded: &[u8]) -> Option<(usize, Vec<u8>)> {
+        Self::decode_key_ref(encoded).map(|(db, k)| (db, k.to_vec()))
     }
 
     pub(crate) fn prefix_end(prefix: &[u8]) -> Option<Vec<u8>> {

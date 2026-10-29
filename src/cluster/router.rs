@@ -203,6 +203,7 @@ fn refresh_router_cache(mgr: &ClusterStateManager) {
     }
     mgr.router
         .refresh_from_data(slot_table, group_nodes, node_addrs, group_leaders);
+    mgr.rebuild_slot_map();
 }
 
 /// 集群路由决策器
