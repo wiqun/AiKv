@@ -32,13 +32,20 @@ pub const DEFAULT_DATA_PORT_OFFSET: u16 = 10000;
 
 /// 收集 slot table 中负责 slot 的 group 集合 (Assigned / Migrating).
 pub(crate) fn groups_with_slots(slot_table: &SlotTable) -> HashSet<u64> {
-    slot_table
-        .iter()
-        .filter_map(|status| match status {
+    // slot 表按连续区间归属 group, 与上一个 slot 相同的 group 跳过, 避免对 16384 个 slot 逐个做 SipHash 插入.
+    let mut groups = HashSet::new();
+    let mut prev = None;
+    for status in slot_table {
+        let gid = match status {
             SlotStatus::Assigned(gid) | SlotStatus::Migrating(gid) => Some(*gid),
             SlotStatus::Unallocated => None,
-        })
-        .collect()
+        };
+        if gid != prev {
+            groups.extend(gid);
+            prev = gid;
+        }
+    }
+    groups
 }
 
 /// 本机视角集群健康派生 (纯函数): 负责 slot 的 group 中, 若有本节点作为
@@ -354,4 +361,33 @@ pub fn raft_export_views() -> Vec<(String, crate::server::export::RaftExportView
         ));
     }
     out
+}
+
+#[cfg(test)]
+mod groups_with_slots_tests {
+    use super::groups_with_slots;
+    use aidb::cluster::meta_types::SlotStatus::{Assigned, Migrating, Unallocated};
+    use std::collections::HashSet;
+
+    #[test]
+    fn collects_groups_across_ranges_gaps_and_interleaving() {
+        // 连续段, 未分配空洞, 同一 group 的非连续段, 以及 Migrating 都要被收集; Unallocated 不产生 group.
+        let table = vec![
+            Assigned(1),
+            Assigned(1),
+            Unallocated,
+            Assigned(1),
+            Migrating(2),
+            Assigned(3),
+            Assigned(2),
+            Unallocated,
+        ];
+        assert_eq!(groups_with_slots(&table), HashSet::from([1, 2, 3]));
+    }
+
+    #[test]
+    fn empty_and_all_unallocated_yield_no_groups() {
+        assert!(groups_with_slots(&Vec::new()).is_empty());
+        assert!(groups_with_slots(&vec![Unallocated; 16384]).is_empty());
+    }
 }
