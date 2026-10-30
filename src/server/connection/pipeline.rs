@@ -90,15 +90,22 @@ impl Connection {
         #[cfg(not(feature = "cluster"))]
         let defer_enabled = false;
         let mut pending: Vec<PendingWrite> = Vec::new();
+        // 与 `pending` 并行维护的种类列表, 避免每条命令都重新收集.
+        let mut kinds: Vec<DeferKind> = Vec::new();
 
         for (cmd, args) in commands {
             let track = super::should_track_observability(&cmd);
             let started = track.then(Instant::now);
 
-            // 盲写允许先入队后确认 (保持按序); 其余命令可能读到前序写的结果, 必须先等挂起的写全部确认.
-            let defer = defer_enabled && is_blind_write(&cmd, &args);
-            if !defer {
+            // 可延迟的命令先入队后确认 (保持按序); 其余命令可能读到前序写的结果, 必须先等挂起的写全部确认.
+            let kind = if defer_enabled {
+                defer_kind(&cmd, &args)
+            } else {
+                None
+            };
+            if needs_barrier(&kinds, kind) {
                 self.flush_pending(&mut pending).await?;
+                kinds.clear();
             }
 
             let mut db = self.current_db;
@@ -113,15 +120,15 @@ impl Connection {
                 #[cfg(feature = "cluster")]
                 Some(&self.cluster_state),
             );
-            let (result, handles) = if defer {
+            let (result, handles) = if kind.is_some() {
                 crate::storage::deferred::scope(exec).await
             } else {
                 (exec.await, Vec::new())
             };
             self.current_db = db;
 
-            match result {
-                Ok(resp) if !handles.is_empty() => {
+            match (result, kind) {
+                (Ok(resp), Some(kind)) if !handles.is_empty() => {
                     pending.push(PendingWrite {
                         cmd,
                         args,
@@ -129,13 +136,16 @@ impl Connection {
                         resp,
                         handles,
                     });
+                    kinds.push(kind);
                     if pending.len() >= MAX_PENDING_WRITES {
                         self.flush_pending(&mut pending).await?;
+                        kinds.clear();
                     }
                 }
-                result => {
+                (result, _) => {
                     // 保序: 先输出之前挂起的响应, 再输出当前命令的响应.
                     self.flush_pending(&mut pending).await?;
+                    kinds.clear();
                     self.finish_immediate_command(&cmd, &args, started, result)
                         .await?;
                 }
@@ -161,7 +171,7 @@ impl Connection {
 /// 单条流水线内最多挂起多少条写后强制确认一次, 限制内存与首条响应的等待时间.
 const MAX_PENDING_WRITES: usize = 256;
 
-/// 已执行 (写已入队) 但尚未确认的盲写命令, 响应暂存到确认之后再输出.
+/// 已执行 (写已入队) 但尚未确认的可延迟命令, 响应暂存到确认之后再输出.
 struct PendingWrite {
     cmd: String,
     args: Vec<Bytes>,
@@ -177,10 +187,35 @@ struct ResolvedWrite {
     result: Result<RespValue>,
 }
 
-/// 只写不读旧值的命令. 纯 `SET key value` 不读旧值, 可以先入队后确认; 带选项的 SET (NX/XX/GET/KEEPTTL 等)
-/// 与其他写命令 (INCR, DEL, HSET 等) 要读旧值, 必须先等前序写确认.
-fn is_blind_write(cmd: &str, args: &[Bytes]) -> bool {
-    cmd == "SET" && args.len() == 2
+/// 允许延迟确认的命令类型.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeferKind {
+    /// 纯 `SET key value`: 不读旧值.
+    PlainSet,
+    /// `EVAL` / `EVALSHA`: 会读数据, 但后续脚本经由在途覆盖层读到前序脚本未提交的写.
+    Script,
+}
+
+/// 命令是否可以先入队后确认. 带选项的 SET (NX/XX/GET/KEEPTTL 等) 与其他写命令 (INCR, DEL, HSET 等)
+/// 要读已应用的旧值, 不可延迟.
+fn defer_kind(cmd: &str, args: &[Bytes]) -> Option<DeferKind> {
+    match cmd {
+        "SET" if args.len() == 2 => Some(DeferKind::PlainSet),
+        "EVAL" | "EVALSHA" => Some(DeferKind::Script),
+        _ => None,
+    }
+}
+
+/// 执行 `next` 之前是否要先等挂起的写全部确认.
+/// - 不可延迟的命令可能读到前序写的结果, 必须等;
+/// - 脚本读的是已应用数据与脚本在途覆盖层, 读不到批处理器里排队的纯 SET, 前面有纯 SET 就必须等;
+/// - 脚本之后的脚本靠覆盖层读到前序写; 纯 SET 不读旧值, 入队顺序已保证先后, 都不必等.
+fn needs_barrier(pending: &[DeferKind], next: Option<DeferKind>) -> bool {
+    match next {
+        None => !pending.is_empty(),
+        Some(DeferKind::Script) => pending.contains(&DeferKind::PlainSet),
+        Some(DeferKind::PlainSet) => false,
+    }
 }
 
 /// 按原顺序等待每条命令的写确认; 任一 handle 失败则该条命令的结果为该错误, 其余命令不受影响.
@@ -389,16 +424,47 @@ mod defer_tests {
         }
     }
 
+    fn b(s: &str) -> Bytes {
+        Bytes::from(s.to_string())
+    }
+
     #[test]
-    fn only_plain_set_is_a_blind_write() {
-        let b = |s: &str| Bytes::from(s.to_string());
-        assert!(is_blind_write("SET", &[b("k"), b("v")]));
-        assert!(!is_blind_write("SET", &[b("k"), b("v"), b("NX")]));
-        assert!(!is_blind_write("SET", &[b("k"), b("v"), b("EX"), b("10")]));
-        assert!(!is_blind_write("SET", &[b("k")]));
-        for cmd in ["GET", "INCR", "DEL", "HSET", "MSET", "EVAL", "SETNX"] {
-            assert!(!is_blind_write(cmd, &[b("k"), b("v")]), "{cmd} 不是盲写");
+    fn defer_kind_classifies_plain_set_and_scripts_only() {
+        assert_eq!(
+            defer_kind("SET", &[b("k"), b("v")]),
+            Some(DeferKind::PlainSet)
+        );
+        assert_eq!(defer_kind("SET", &[b("k"), b("v"), b("NX")]), None);
+        assert_eq!(defer_kind("SET", &[b("k"), b("v"), b("EX"), b("10")]), None);
+        assert_eq!(defer_kind("SET", &[b("k")]), None);
+        for cmd in ["EVAL", "EVALSHA"] {
+            assert_eq!(
+                defer_kind(cmd, &[b("s"), b("1"), b("k")]),
+                Some(DeferKind::Script)
+            );
         }
+        for cmd in ["GET", "INCR", "DEL", "HSET", "MSET", "SETNX", "FCALL"] {
+            assert_eq!(defer_kind(cmd, &[b("k"), b("v")]), None, "{cmd} 不可延迟");
+        }
+    }
+
+    #[test]
+    fn barrier_rules_protect_reads_of_unapplied_writes() {
+        use DeferKind::{PlainSet, Script};
+        // 无挂起: 任何命令都不需要屏障.
+        assert!(!needs_barrier(&[], None));
+        assert!(!needs_barrier(&[], Some(Script)));
+        // 非可延迟命令 (读, 读改写) 必须等挂起的写全部确认.
+        assert!(needs_barrier(&[PlainSet], None));
+        assert!(needs_barrier(&[Script], None));
+        // 脚本读的是已应用数据 + 脚本在途覆盖层, 读不到批处理器里排队的纯 SET: 前面有纯 SET 必须等.
+        assert!(needs_barrier(&[PlainSet], Some(Script)));
+        assert!(needs_barrier(&[Script, PlainSet, Script], Some(Script)));
+        // 脚本之后的脚本靠在途覆盖层读到前序写, 不必等.
+        assert!(!needs_barrier(&[Script, Script], Some(Script)));
+        // 纯 SET 不读旧值, 入队顺序已保证先后, 不必等.
+        assert!(!needs_barrier(&[Script], Some(PlainSet)));
+        assert!(!needs_barrier(&[PlainSet, Script], Some(PlainSet)));
     }
 
     #[tokio::test]

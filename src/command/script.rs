@@ -6,6 +6,7 @@
 
 mod cache;
 mod call_stats;
+mod commit;
 mod convert;
 mod drive;
 mod enqueue_chain;
@@ -578,11 +579,22 @@ impl ScriptCommands {
         };
         publication.succeed();
         SEG_TRACKER.on_enqueued(slot_idx);
-        let write_res = handle.wait().await;
-        self.in_flight.remove_encoded(&inserted.1, inserted.0);
-        SEG_TRACKER.on_committed(seg_id, slot_idx);
-        write_res?;
-        Ok((Some(Instant::now()), unlocked))
+        let commit = commit::ScriptCommit::new(
+            handle,
+            Arc::clone(&self.in_flight),
+            inserted,
+            seg_id,
+            slot_idx,
+        );
+        // 流水线的延迟确认作用域内只登记句柄 (提交后的清理随句柄一起推迟), 由流水线按序统一等待;
+        // 其他调用方照旧在这里等待提交.
+        match crate::storage::deferred::defer(Box::new(commit)) {
+            Ok(()) => Ok((None, unlocked)),
+            Err(commit) => {
+                commit.wait().await?;
+                Ok((Some(Instant::now()), unlocked))
+            }
+        }
     }
 
     fn eval_lua_func(
