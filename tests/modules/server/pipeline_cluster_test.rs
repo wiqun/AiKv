@@ -1,4 +1,4 @@
-//! 集群模式流水线并发分流与保序写回测试
+//! 流水线按序执行与保序写回测试
 //! @component aikv-server
 
 use std::sync::Arc;
@@ -33,7 +33,7 @@ async fn create_connected_tcp_pair() -> (TcpStream, TcpStream) {
 }
 
 #[tokio::test]
-async fn test_cluster_concurrent_pipeline_in_order_delivery() {
+async fn test_pipeline_in_order_delivery() {
     let (client_stream, server_stream) = create_connected_tcp_pair().await;
     let remote = "127.0.0.1:6379".parse().unwrap();
     let state = create_test_state();
@@ -57,8 +57,8 @@ async fn test_cluster_concurrent_pipeline_in_order_delivery() {
         ));
     }
 
-    // 执行集群并发流水线分发
-    conn.execute_cluster_concurrent_pipeline(commands)
+    // 执行流水线
+    conn.execute_pipeline(commands)
         .await
         .expect("pipeline execution failed");
 
@@ -110,7 +110,7 @@ async fn test_cluster_concurrent_pipeline_in_order_delivery() {
 }
 
 #[tokio::test]
-async fn test_cluster_concurrent_pipeline_mixed_success_and_errors_order() {
+async fn test_pipeline_mixed_success_and_errors_order() {
     let (client_stream, server_stream) = create_connected_tcp_pair().await;
     let remote = "127.0.0.1:6379".parse().unwrap();
     let state = create_test_state();
@@ -132,7 +132,7 @@ async fn test_cluster_concurrent_pipeline_mixed_success_and_errors_order() {
         ("GET".to_string(), vec![Bytes::from("b")]),
     ];
 
-    conn.execute_cluster_concurrent_pipeline(commands)
+    conn.execute_pipeline(commands)
         .await
         .expect("pipeline execution failed");
 
@@ -162,4 +162,74 @@ async fn test_cluster_concurrent_pipeline_mixed_success_and_errors_order() {
     assert_eq!(responses[3], RespValue::BulkString(Some(Bytes::from("val_a"))));
     assert_eq!(responses[4], RespValue::BulkString(None));
     assert_eq!(responses[5], RespValue::BulkString(Some(Bytes::from("val_b"))));
+}
+
+async fn read_responses(client: &mut TcpStream, want: usize) -> Vec<RespValue> {
+    let mut parser = RespParser::new();
+    let mut responses = Vec::with_capacity(want);
+    let mut buf = vec![0u8; 8192];
+    while responses.len() < want {
+        let n = client.read(&mut buf).await.expect("read from client socket");
+        if n == 0 {
+            break;
+        }
+        parser.feed(&buf[..n]);
+        while let Ok(Some(resp)) = parser.parse() {
+            responses.push(resp);
+        }
+    }
+    responses
+}
+
+/// 回归 (集群流水线不按序): 同一连接流水线 `SET k v_i` 紧跟 `GET k`, GET 必须读到紧邻前一条 SET 的值,
+/// 且同一 key 连续 SET 的最终值必须是最后一条. 旧实现为每条命令 `spawn` 并发执行, 线上实测
+/// `SET k new` + `GET k` 3000/3000 次读到旧值, 连续 `SET k 0..19` 300/300 次最终值不是最后一条.
+/// 期望: 流水线内命令按到达顺序生效.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_cluster_pipeline_preserves_execution_order() {
+    const ROUNDS: usize = 150;
+    const PAIRS: usize = 8;
+    let state = create_test_state();
+    let remote = "127.0.0.1:6379".parse().unwrap();
+
+    for round in 0..ROUNDS {
+        let (mut client, server) = create_connected_tcp_pair().await;
+        let mut conn = Connection::new_for_test(server, remote, state.clone());
+        let key = format!("order_{round}");
+
+        // SET v0, GET, SET v1, GET, ..., 最后再连续 3 次写同一个 key, 再 GET.
+        let mut commands = Vec::new();
+        for j in 0..PAIRS {
+            commands.push((
+                "SET".to_string(),
+                vec![Bytes::from(key.clone()), Bytes::from(format!("v{j}"))],
+            ));
+            commands.push(("GET".to_string(), vec![Bytes::from(key.clone())]));
+        }
+        for tail in ["a", "b", "c"] {
+            commands.push((
+                "SET".to_string(),
+                vec![Bytes::from(key.clone()), Bytes::from(tail)],
+            ));
+        }
+        commands.push(("GET".to_string(), vec![Bytes::from(key.clone())]));
+        let total = commands.len();
+
+        conn.execute_pipeline(commands).await.expect("pipeline");
+        let responses = read_responses(&mut client, total).await;
+        assert_eq!(responses.len(), total);
+
+        for j in 0..PAIRS {
+            assert_eq!(
+                responses[2 * j + 1],
+                RespValue::BulkString(Some(Bytes::from(format!("v{j}")))),
+                "round {round}: 第 {j} 个 GET 必须读到紧邻前一条 SET 的值"
+            );
+        }
+        assert_eq!(
+            responses[total - 1],
+            RespValue::BulkString(Some(Bytes::from("c"))),
+            "round {round}: 连续 SET 的最终值必须是最后一条"
+        );
+    }
 }

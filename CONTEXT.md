@@ -12,7 +12,9 @@
 
 **ClusterRouter**: 在集群模式下, 根据 key 的 CRC16 哈希计算 slot, 将请求路由到正确的节点或返回 MOVED 错误.
 
-**脚本线程池**: 多线程运行时上执行 `EVAL` / `EVALSHA` 的线程池, 与 tokio worker 和 tokio 阻塞线程池分开. 脚本不占住 tokio worker.
+**脚本线程池**: 多线程运行时上承接重脚本 `EVAL` / `EVALSHA` 的线程池, 与 tokio worker 和 tokio 阻塞线程池分开, 重脚本不占住 tokio worker.
+
+**脚本路由**: 按脚本 sha 的执行耗时 EWMA 决定执行位置: 低于 1ms 的轻脚本在当前 worker 线程就地执行, 否则进脚本线程池; 首次出现的脚本就地执行. `AIKV_SCRIPT_OFF_WORKER` 可强制.
 
 ## 存储层
 
@@ -55,6 +57,8 @@
 **Batcher**: 将多个写入操作合并为一批, 减少 Raft 共识次数.
 
 **EagerFlush**: 批处理中的阈值, 当累计操作数达到此值时不等 timeout 立即 propose.
+
+**延迟确认**: 集群流水线内连续的纯 `SET key value` (盲写, 不读旧值) 按序入队后先不等 Raft 确认, 登记到 `storage::deferred` 作用域, 遇到非盲写命令, 挂起满 256 条或批末时按序等待并输出各自响应; 确认失败只让该条响应变为错误. 流水线内命令始终按到达顺序生效.
 
 ## 可观测性
 

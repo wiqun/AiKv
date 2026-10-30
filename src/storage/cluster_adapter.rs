@@ -623,7 +623,12 @@ impl StorageAdapter for ClusterDataAdapter {
     }
 
     async fn apply_writes(&self, ops: Vec<AdapterWriteOp>) -> Result<()> {
-        self.enqueue_batch(ops).await?.wait().await
+        let handle = self.enqueue_batch(ops).await?;
+        // 流水线内的盲写在延迟确认作用域里只登记 handle, 由流水线按序统一等待; 其余调用方照旧等待.
+        match crate::storage::deferred::defer(handle) {
+            Ok(()) => Ok(()),
+            Err(handle) => handle.wait().await,
+        }
     }
 
     async fn delete(&self, key: Vec<u8>) -> Result<bool> {

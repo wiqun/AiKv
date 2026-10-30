@@ -1,10 +1,13 @@
 //! 命令延迟统计 (Phase 10-ext Step 0, 内存版)
 
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 const MAX_LATENCY_HISTORY: usize = 128;
+/// 只有不低于该耗时 (微秒) 的调用才进入历史样本, 与 Redis latency-monitor 只记录超阈值事件一致.
+const HISTORY_MIN_US: u64 = 1_000;
 
 /// 直方图桶上界 (微秒), 与 Redis latency-tracking 对齐
 pub const LATENCY_BUCKET_BOUNDS: &[u64] = &[
@@ -39,66 +42,57 @@ impl CommandLatency {
     fn record(&self, usec: u64) {
         self.calls.fetch_add(1, Ordering::Relaxed);
         self.total_us.fetch_add(usec, Ordering::Relaxed);
-        loop {
-            let current = self.max_us.load(Ordering::Relaxed);
-            if usec <= current {
-                break;
+        self.max_us.fetch_max(usec, Ordering::Relaxed);
+        // 只累加一个桶 (首个上界 >= usec 的桶; 超出最大桶的样本计入最后一个桶), 累积值在快照时再求和.
+        let idx = LATENCY_BUCKET_BOUNDS
+            .partition_point(|&bound| bound < usec)
+            .min(LATENCY_BUCKET_BOUNDS.len() - 1);
+        self.buckets[idx].fetch_add(1, Ordering::Relaxed);
+        if usec >= HISTORY_MIN_US {
+            let ts_s = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let mut hist = self.history.lock();
+            if hist.len() >= MAX_LATENCY_HISTORY {
+                hist.pop_front();
             }
-            if self
-                .max_us
-                .compare_exchange(current, usec, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok()
-            {
-                break;
-            }
+            hist.push_back((ts_s, usec / 1000));
         }
-        for (i, &bound) in LATENCY_BUCKET_BOUNDS.iter().enumerate() {
-            if usec <= bound {
-                self.buckets[i].fetch_add(1, Ordering::Relaxed);
-            }
-        }
-        if let Some(&last_bound) = LATENCY_BUCKET_BOUNDS.last() {
-            if usec > last_bound {
-                let last_idx = LATENCY_BUCKET_BOUNDS.len() - 1;
-                self.buckets[last_idx].fetch_add(1, Ordering::Relaxed);
-            }
-        }
-        let ts_s = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let mut hist = self.history.lock();
-        if hist.len() >= MAX_LATENCY_HISTORY {
-            hist.pop_front();
-        }
-        hist.push_back((ts_s, usec / 1000));
+    }
+
+    /// 各桶的累积计数 (<= 对应上界的样本数), 与 Redis latency-tracking 的直方图语义一致.
+    fn cumulative_buckets(&self) -> Vec<u64> {
+        let mut running = 0u64;
+        self.buckets
+            .iter()
+            .map(|b| {
+                running += b.load(Ordering::Relaxed);
+                running
+            })
+            .collect()
     }
 
     fn snapshot(&self) -> CommandLatencySnapshot {
         let calls = self.calls.load(Ordering::Relaxed);
         let total_us = self.total_us.load(Ordering::Relaxed);
         let max_us = self.max_us.load(Ordering::Relaxed);
+        let cumulative = self.cumulative_buckets();
         let buckets = LATENCY_BUCKET_BOUNDS
             .iter()
-            .zip(self.buckets.iter())
-            .filter_map(|(&bound, counter)| {
-                let count = counter.load(Ordering::Relaxed);
-                if count > 0 {
-                    Some((bound, count))
-                } else {
-                    None
-                }
-            })
+            .zip(cumulative.iter())
+            .filter(|(_, &count)| count > 0)
+            .map(|(&bound, &count)| (bound, count))
             .collect();
         CommandLatencySnapshot {
             calls,
             total_us,
             max_us,
             buckets,
-            p50_us: percentile_from_buckets(&self.buckets, 0.50),
-            p95_us: percentile_from_buckets(&self.buckets, 0.95),
-            p99_us: percentile_from_buckets(&self.buckets, 0.99),
-            p999_us: percentile_from_buckets(&self.buckets, 0.999),
+            p50_us: percentile_from_buckets(&cumulative, 0.50),
+            p95_us: percentile_from_buckets(&cumulative, 0.95),
+            p99_us: percentile_from_buckets(&cumulative, 0.99),
+            p999_us: percentile_from_buckets(&cumulative, 0.999),
         }
     }
 
@@ -131,20 +125,30 @@ pub struct CommandLatencySnapshot {
 
 #[derive(Debug, Default)]
 pub struct LatencyStats {
-    by_command: Mutex<HashMap<String, CommandLatency>>,
+    by_command: RwLock<HashMap<String, Arc<CommandLatency>>>,
 }
 
 impl LatencyStats {
+    /// 热路径: 命令名已是大写 (调用方绝大多数如此) 时只取读锁并按 `&str` 查表, 不分配.
     pub fn record(&self, command: &str, duration_us: u64) {
+        if !command.bytes().any(|b| b.is_ascii_lowercase()) {
+            if let Some(lat) = self.by_command.read().get(command) {
+                lat.record(duration_us);
+                return;
+            }
+        }
         let key = command.to_ascii_uppercase();
-        let mut map = self.by_command.lock();
-        map.entry(key)
-            .or_insert_with(CommandLatency::new)
-            .record(duration_us);
+        let lat = Arc::clone(
+            self.by_command
+                .write()
+                .entry(key)
+                .or_insert_with(|| Arc::new(CommandLatency::new())),
+        );
+        lat.record(duration_us);
     }
 
     pub fn snapshot(&self, command: &str) -> Option<CommandLatencySnapshot> {
-        let map = self.by_command.lock();
+        let map = self.by_command.read();
         map.get(&command.to_ascii_uppercase()).map(|c| c.snapshot())
     }
 
@@ -152,7 +156,7 @@ impl LatencyStats {
         &self,
         filter: Option<&[&str]>,
     ) -> Vec<(String, CommandLatencySnapshot)> {
-        let map = self.by_command.lock();
+        let map = self.by_command.read();
         let filter_upper: Option<Vec<String>> =
             filter.map(|names| names.iter().map(|n| n.to_ascii_uppercase()).collect());
         let mut out = Vec::new();
@@ -173,7 +177,7 @@ impl LatencyStats {
     }
 
     pub fn history(&self, command: &str) -> Vec<(u64, u64)> {
-        let map = self.by_command.lock();
+        let map = self.by_command.read();
         match map.get(&command.to_ascii_uppercase()) {
             None => vec![],
             Some(lat) => lat.history_snapshot(),
@@ -181,7 +185,7 @@ impl LatencyStats {
     }
 
     pub fn reset(&self, filter: Option<&[&str]>) -> u64 {
-        let mut map = self.by_command.lock();
+        let mut map = self.by_command.write();
         match filter {
             None => {
                 let count = map.len() as u64;
@@ -203,18 +207,14 @@ impl LatencyStats {
     }
 }
 
-fn percentile_from_buckets(buckets: &[AtomicU64], quantile: f64) -> u64 {
-    let total = buckets
-        .last()
-        .map(|b| b.load(Ordering::Relaxed))
-        .unwrap_or(0);
+fn percentile_from_buckets(cumulative: &[u64], quantile: f64) -> u64 {
+    let total = cumulative.last().copied().unwrap_or(0);
     if total == 0 {
         return 0;
     }
     let target = ((total as f64) * quantile).ceil() as u64;
-    for (i, counter) in buckets.iter().enumerate() {
-        let cumulative = counter.load(Ordering::Relaxed);
-        if cumulative >= target {
+    for (i, &count) in cumulative.iter().enumerate() {
+        if count >= target {
             return LATENCY_BUCKET_BOUNDS[i];
         }
     }
@@ -245,5 +245,85 @@ mod tests {
 
         assert_eq!(stats.reset(None), 1);
         assert!(stats.snapshot("GET").is_none());
+    }
+
+    /// 旧实现的累积直方图算法 (每个 >= 样本的桶都 +1, 超出最大桶的样本只计入最后一个桶), 作为等价性参照.
+    fn reference_cumulative(samples: &[u64]) -> Vec<(u64, u64)> {
+        let mut cum = vec![0u64; LATENCY_BUCKET_BOUNDS.len()];
+        for &us in samples {
+            for (i, &b) in LATENCY_BUCKET_BOUNDS.iter().enumerate() {
+                if us <= b {
+                    cum[i] += 1;
+                }
+            }
+            if us > *LATENCY_BUCKET_BOUNDS.last().unwrap() {
+                *cum.last_mut().unwrap() += 1;
+            }
+        }
+        LATENCY_BUCKET_BOUNDS
+            .iter()
+            .zip(cum)
+            .filter(|(_, c)| *c > 0)
+            .map(|(&b, c)| (b, c))
+            .collect()
+    }
+
+    #[test]
+    fn histogram_buckets_match_reference_cumulative_semantics() {
+        // 确定性伪随机样本, 覆盖 0, 桶边界, 超出最大桶.
+        let mut x = 0x2545F4914F6CDD1Du64;
+        let mut samples = vec![0, 1, 2, 3, 1_048_576, 1_048_577, 5_000_000];
+        for _ in 0..2000 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            samples.push(x % 3_000_000);
+        }
+        let stats = LatencyStats::default();
+        for &us in &samples {
+            stats.record("SET", us);
+        }
+        let snap = stats.snapshot("set").unwrap();
+        assert_eq!(snap.calls, samples.len() as u64);
+        assert_eq!(snap.buckets, reference_cumulative(&samples));
+        assert_eq!(snap.max_us, *samples.iter().max().unwrap());
+    }
+
+    /// 历史样本只记录 >= 1ms 的慢调用 (与 Redis latency-monitor 只记录超阈值事件一致), 避免每条命令
+    /// 都读一次系统时钟并抢历史锁. 旧实现把每次调用 (绝大多数是 0ms) 都记入历史.
+    #[test]
+    fn history_records_only_slow_calls() {
+        let stats = LatencyStats::default();
+        stats.record("GET", 10);
+        stats.record("GET", 999);
+        assert!(stats.history("GET").is_empty(), "亚毫秒调用不应进入历史");
+        stats.record("GET", 2_500);
+        let hist = stats.history("get");
+        assert_eq!(hist.len(), 1);
+        assert_eq!(hist[0].1, 2, "历史样本以毫秒为单位");
+        assert_eq!(
+            stats.snapshot("GET").unwrap().calls,
+            3,
+            "计数仍包含全部调用"
+        );
+    }
+
+    #[test]
+    fn concurrent_records_are_all_counted() {
+        let stats = std::sync::Arc::new(LatencyStats::default());
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let stats = std::sync::Arc::clone(&stats);
+                std::thread::spawn(move || {
+                    for i in 0..10_000u64 {
+                        stats.record("GET", i % 50);
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_eq!(stats.snapshot("GET").unwrap().calls, 80_000);
     }
 }

@@ -9,6 +9,7 @@ use bytes::Bytes;
 
 use crate::error::Result;
 use crate::protocol::RespValue;
+use crate::storage::types::BatchWriteHandle;
 
 use super::{Connection, ConnectionMode};
 
@@ -34,12 +35,7 @@ impl Connection {
             parsed.push((cmd, args));
         }
 
-        #[cfg(feature = "cluster")]
-        if crate::server::info::is_cluster_initialized() {
-            return self.execute_cluster_concurrent_pipeline(parsed).await;
-        }
-
-        self.execute_in_place_pipeline(parsed).await
+        self.execute_pipeline(parsed).await
     }
 
     async fn process_sequential_batch(&mut self, batch: Vec<RespValue>) -> Result<()> {
@@ -59,109 +55,23 @@ impl Connection {
         Ok(())
     }
 
-    /// 集群模式并发分发流水线命令, 响应严格按照输入下标保序刷网.
-    #[cfg(feature = "cluster")]
-    pub async fn execute_cluster_concurrent_pipeline(
-        &mut self,
-        commands: Vec<(String, Vec<Bytes>)>,
-    ) -> Result<()> {
-        struct ExecutedPipelineItem {
-            idx: usize,
-            cmd: String,
-            args: Vec<Bytes>,
-            started: Option<Instant>,
-            result: Result<RespValue>,
-        }
-
-        let total = commands.len();
-        if total == 0 {
+    /// 等待挂起的写全部确认, 按原顺序输出各自的响应 (确认失败则该条响应变为错误).
+    async fn flush_pending(&mut self, pending: &mut Vec<PendingWrite>) -> Result<()> {
+        if pending.is_empty() {
             return Ok(());
         }
-        let t_enter = Instant::now();
-
-        let gate = Arc::clone(&self.state.transaction_gate);
-        let _guard = gate.read_owned().await;
-
-        let client_id = self.client_id;
-        let remote = self.remote;
-        let proto = self.protocol_version;
-        let current_db = self.current_db;
-        let cluster_state = self.cluster_state.clone();
-
-        const MAX_CONCURRENT_PIPELINE: usize = 256;
-        let mut join_set = tokio::task::JoinSet::<ExecutedPipelineItem>::new();
-        let mut results: Vec<Option<ExecutedPipelineItem>> = (0..total).map(|_| None).collect();
-
-        for (idx, (cmd, args)) in commands.into_iter().enumerate() {
-            if join_set.len() >= MAX_CONCURRENT_PIPELINE {
-                if let Some(res) = join_set.join_next().await {
-                    let item = res.map_err(|e| crate::error::Error::Command(e.to_string()))?;
-                    let i = item.idx;
-                    results[i] = Some(item);
-                }
-            }
-
-            let state = Arc::clone(&self.state);
-            let conn_cluster_state = cluster_state.clone();
-            let track = super::should_track_observability(&cmd);
-            let started = track.then(Instant::now);
-
-            join_set.spawn(async move {
-                let mut db = current_db;
-                let result = state
-                    .router()
-                    .execute_with_client(
-                        &cmd,
-                        &args,
-                        &mut db,
-                        Some(client_id),
-                        Some(remote),
-                        proto,
-                        Some(&conn_cluster_state),
-                    )
-                    .await;
-
-                ExecutedPipelineItem {
-                    idx,
-                    cmd,
-                    args,
-                    started,
-                    result,
-                }
-            });
-        }
-
-        while let Some(res) = join_set.join_next().await {
-            let item = res.map_err(|e| crate::error::Error::Command(e.to_string()))?;
-            let i = item.idx;
-            results[i] = Some(item);
-        }
-
-        drop(_guard);
-
-        for item in results.into_iter().flatten() {
-            self.finish_immediate_command(&item.cmd, &item.args, item.started, item.result)
+        for r in resolve_pending(std::mem::take(pending)).await {
+            self.finish_immediate_command(&r.cmd, &r.args, r.started, r.result)
                 .await?;
         }
-
-        self.flush_responses().await?;
-
-        let t_flushed = Instant::now();
-        self.pending_timing = Some(PendingBatchTiming {
-            cmds: total,
-            t_enter,
-            t_last_enq: None,
-            t_join: t_flushed,
-            t_flushed,
-        });
         Ok(())
     }
 
-    /// 就地流式顺序批量执行流水线命令, 响应直接追加至当前连接响应缓冲, 批末统一一次性刷网.
-    async fn execute_in_place_pipeline(
-        &mut self,
-        commands: Vec<(String, Vec<Bytes>)>,
-    ) -> Result<()> {
+    /// 按到达顺序逐条执行流水线命令, 响应直接追加至当前连接响应缓冲, 批末统一一次性刷网.
+    ///
+    /// 单机与集群共用: Redis 语义要求同一连接流水线内的命令按序生效 (`SET k v` 之后的 `GET k`
+    /// 必须读到 `v`). 曾为集群并发 `spawn` 每条命令以合并 Raft 提交, 但这会破坏读后写与写写顺序.
+    pub async fn execute_pipeline(&mut self, commands: Vec<(String, Vec<Bytes>)>) -> Result<()> {
         let total = commands.len();
         if total == 0 {
             return Ok(());
@@ -174,31 +84,64 @@ impl Connection {
         let client_id = self.client_id;
         let remote = self.remote;
         let proto = self.protocol_version;
+
+        #[cfg(feature = "cluster")]
+        let defer_enabled = crate::server::info::is_cluster_initialized();
+        #[cfg(not(feature = "cluster"))]
+        let defer_enabled = false;
+        let mut pending: Vec<PendingWrite> = Vec::new();
 
         for (cmd, args) in commands {
             let track = super::should_track_observability(&cmd);
             let started = track.then(Instant::now);
 
+            // 盲写允许先入队后确认 (保持按序); 其余命令可能读到前序写的结果, 必须先等挂起的写全部确认.
+            let defer = defer_enabled && is_blind_write(&cmd, &args);
+            if !defer {
+                self.flush_pending(&mut pending).await?;
+            }
+
             let mut db = self.current_db;
-            let result = self
-                .state
-                .router()
-                .execute_with_client(
-                    &cmd,
-                    &args,
-                    &mut db,
-                    Some(client_id),
-                    Some(remote),
-                    proto,
-                    #[cfg(feature = "cluster")]
-                    Some(&self.cluster_state),
-                )
-                .await;
+            let router = self.state.router();
+            let exec = router.execute_with_client(
+                &cmd,
+                &args,
+                &mut db,
+                Some(client_id),
+                Some(remote),
+                proto,
+                #[cfg(feature = "cluster")]
+                Some(&self.cluster_state),
+            );
+            let (result, handles) = if defer {
+                crate::storage::deferred::scope(exec).await
+            } else {
+                (exec.await, Vec::new())
+            };
             self.current_db = db;
 
-            self.finish_immediate_command(&cmd, &args, started, result)
-                .await?;
+            match result {
+                Ok(resp) if !handles.is_empty() => {
+                    pending.push(PendingWrite {
+                        cmd,
+                        args,
+                        started,
+                        resp,
+                        handles,
+                    });
+                    if pending.len() >= MAX_PENDING_WRITES {
+                        self.flush_pending(&mut pending).await?;
+                    }
+                }
+                result => {
+                    // 保序: 先输出之前挂起的响应, 再输出当前命令的响应.
+                    self.flush_pending(&mut pending).await?;
+                    self.finish_immediate_command(&cmd, &args, started, result)
+                        .await?;
+                }
+            }
         }
+        self.flush_pending(&mut pending).await?;
 
         drop(_guard);
         self.flush_responses().await?;
@@ -213,6 +156,55 @@ impl Connection {
         });
         Ok(())
     }
+}
+
+/// 单条流水线内最多挂起多少条写后强制确认一次, 限制内存与首条响应的等待时间.
+const MAX_PENDING_WRITES: usize = 256;
+
+/// 已执行 (写已入队) 但尚未确认的盲写命令, 响应暂存到确认之后再输出.
+struct PendingWrite {
+    cmd: String,
+    args: Vec<Bytes>,
+    started: Option<Instant>,
+    resp: RespValue,
+    handles: Vec<Box<dyn BatchWriteHandle>>,
+}
+
+struct ResolvedWrite {
+    cmd: String,
+    args: Vec<Bytes>,
+    started: Option<Instant>,
+    result: Result<RespValue>,
+}
+
+/// 只写不读旧值的命令. 纯 `SET key value` 不读旧值, 可以先入队后确认; 带选项的 SET (NX/XX/GET/KEEPTTL 等)
+/// 与其他写命令 (INCR, DEL, HSET 等) 要读旧值, 必须先等前序写确认.
+fn is_blind_write(cmd: &str, args: &[Bytes]) -> bool {
+    cmd == "SET" && args.len() == 2
+}
+
+/// 按原顺序等待每条命令的写确认; 任一 handle 失败则该条命令的结果为该错误, 其余命令不受影响.
+async fn resolve_pending(pending: Vec<PendingWrite>) -> Vec<ResolvedWrite> {
+    let mut out = Vec::with_capacity(pending.len());
+    for p in pending {
+        let mut failure = None;
+        for handle in p.handles {
+            if let Err(e) = handle.wait().await {
+                failure = Some(e);
+                break;
+            }
+        }
+        out.push(ResolvedWrite {
+            cmd: p.cmd,
+            args: p.args,
+            started: p.started,
+            result: match failure {
+                Some(e) => Err(e),
+                None => Ok(p.resp),
+            },
+        });
+    }
+    out
 }
 
 fn parse_command_parts(frame: &RespValue) -> Option<(String, Vec<Bytes>)> {
@@ -363,5 +355,67 @@ impl PendingBatchTiming {
             "[PIPELINE_TIMING] cmds={} enq_span_ms={:.2} tail_join_ms={:.2} server_total_ms={:.2} wait_read_ms={:.2} cycle_total_ms={:.2} buffered=true",
             self.cmds, enq_span_ms, tail_join_ms, server_total_ms, wait_read_ms, cycle_total_ms
         );
+    }
+}
+
+#[cfg(test)]
+mod defer_tests {
+    use super::*;
+    use crate::error::Error;
+
+    struct Fake(bool);
+
+    #[async_trait::async_trait]
+    impl BatchWriteHandle for Fake {
+        async fn wait(self: Box<Self>) -> Result<()> {
+            if self.0 {
+                Err(Error::Storage("commit failed".into()))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn pending(cmd: &str, fail: &[bool]) -> PendingWrite {
+        PendingWrite {
+            cmd: cmd.to_string(),
+            args: vec![Bytes::from(cmd.to_string())],
+            started: None,
+            resp: RespValue::SimpleString("OK".into()),
+            handles: fail
+                .iter()
+                .map(|&f| Box::new(Fake(f)) as Box<dyn BatchWriteHandle>)
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn only_plain_set_is_a_blind_write() {
+        let b = |s: &str| Bytes::from(s.to_string());
+        assert!(is_blind_write("SET", &[b("k"), b("v")]));
+        assert!(!is_blind_write("SET", &[b("k"), b("v"), b("NX")]));
+        assert!(!is_blind_write("SET", &[b("k"), b("v"), b("EX"), b("10")]));
+        assert!(!is_blind_write("SET", &[b("k")]));
+        for cmd in ["GET", "INCR", "DEL", "HSET", "MSET", "EVAL", "SETNX"] {
+            assert!(!is_blind_write(cmd, &[b("k"), b("v")]), "{cmd} 不是盲写");
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_writes_resolve_in_order_and_failure_only_affects_that_command() {
+        let resolved = resolve_pending(vec![
+            pending("a", &[false]),
+            pending("b", &[false, true]),
+            pending("c", &[false]),
+        ])
+        .await;
+        let cmds: Vec<_> = resolved.iter().map(|r| r.cmd.as_str()).collect();
+        assert_eq!(cmds, ["a", "b", "c"], "必须保持原顺序");
+        assert!(resolved[0].result.is_ok());
+        assert!(
+            resolved[1].result.is_err(),
+            "任一 handle 失败则该命令变为错误"
+        );
+        assert!(resolved[2].result.is_ok(), "失败不应波及其他命令");
     }
 }

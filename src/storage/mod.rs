@@ -7,6 +7,7 @@ pub mod aidb_options;
 pub mod cluster_adapter;
 #[cfg(feature = "cluster")]
 pub mod cluster_batcher;
+pub mod deferred;
 pub(crate) mod direct;
 pub mod dump;
 pub mod memory;

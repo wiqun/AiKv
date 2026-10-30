@@ -55,24 +55,6 @@ impl ScriptJob {
     }
 }
 
-pub(super) fn script_runs_off_worker() -> bool {
-    // 集群模式下必须派发到独立工作池以物理隔离 CPU 密集型 Lua 计算, 保证 OpenRaft 协程不被饿死;
-    // 单机模式下支持环境变量显式覆盖或默认就地执行.
-    #[cfg(feature = "cluster")]
-    if crate::server::info::is_cluster_initialized() {
-        return true;
-    }
-
-    static OFF_WORKER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    static INIT: std::sync::Once = std::sync::Once::new();
-    INIT.call_once(|| {
-        let enabled = std::env::var("AIKV_SCRIPT_OFF_WORKER")
-            .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
-        OFF_WORKER.store(enabled, std::sync::atomic::Ordering::Relaxed);
-    });
-    OFF_WORKER.load(std::sync::atomic::Ordering::Relaxed)
-}
-
 fn drive_script_body(job: ScriptJob) -> ScriptDrive {
     let t_entered = Instant::now();
     crate::storage::script_io::begin_script_io_sample();
@@ -180,13 +162,5 @@ mod rollback_tests {
         assert!(buffer.get(0, b"k").is_some());
         rollback_inserted(&buffer, Some((seq, keys)));
         assert!(buffer.get(0, b"k").is_none());
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_script_runs_in_place_by_default() {
-        assert!(
-            !super::script_runs_off_worker(),
-            "default should be in-place direct execution on worker thread"
-        );
     }
 }

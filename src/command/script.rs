@@ -15,6 +15,7 @@ pub(crate) mod json_exec;
 mod libs;
 mod phase_stats;
 mod pool;
+mod route;
 mod sandbox;
 mod transaction;
 mod zset_edit;
@@ -296,6 +297,7 @@ pub struct ScriptCommands {
     in_flight: Arc<InFlightBuffer>,
     enqueue_chain: enqueue_chain::EnqueueChain,
     pool: pool::ScriptWorkerPool,
+    router: route::ScriptRouter,
 }
 
 impl ScriptCommands {
@@ -328,6 +330,7 @@ impl ScriptCommands {
             in_flight: Arc::new(InFlightBuffer::new()),
             enqueue_chain: enqueue_chain::EnqueueChain::new(),
             pool: pool::ScriptWorkerPool::new(threads),
+            router: route::ScriptRouter::from_env(),
         }
     }
 
@@ -434,6 +437,7 @@ impl ScriptCommands {
 
     fn script_flush(&self) -> Result<RespValue> {
         self.cache.flush();
+        self.router.clear();
         Ok(RespValue::SimpleString("OK".into()))
     }
 
@@ -481,7 +485,15 @@ impl ScriptCommands {
             seg_id,
             slot_idx,
         };
-        let drive = self.drive_script(job).await?;
+        let use_pool = self.router.use_pool(sha1);
+        let drive = self.drive_script(job, use_pool).await?;
+        if let Ok(body) = &drive.result {
+            let cost_us = body
+                .t_local_done
+                .duration_since(drive.t_entered)
+                .as_micros() as u64;
+            self.router.record(sha1, cost_us);
+        }
         self.release_vm(drive.lua);
         if script_profiling_enabled() {
             IO_SAMPLER.record(drive.io);
@@ -516,8 +528,12 @@ impl ScriptCommands {
         lua_to_resp(body.value)
     }
 
-    async fn drive_script(&self, job: drive::ScriptJob) -> Result<drive::ScriptDrive> {
-        if !drive::script_runs_off_worker() {
+    async fn drive_script(
+        &self,
+        job: drive::ScriptJob,
+        use_pool: bool,
+    ) -> Result<drive::ScriptDrive> {
+        if !use_pool {
             return Ok(job.run());
         }
         self.pool.run(move || job.run()).await
