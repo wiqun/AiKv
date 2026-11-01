@@ -26,6 +26,11 @@ pub async fn scope<F: Future>(f: F) -> (F::Output, Vec<Box<dyn BatchWriteHandle>
         .await
 }
 
+/// 当前任务是否处在延迟确认作用域内 (即流水线里的可延迟命令).
+pub fn is_active() -> bool {
+    SCOPE.try_with(|_| ()).is_ok()
+}
+
 /// 作用域内登记 `handle` 并返回 `Ok(())`, 调用方不再等待; 作用域外把 `handle` 原样退回, 由调用方自己等待.
 pub fn defer(handle: Box<dyn BatchWriteHandle>) -> Result<(), Box<dyn BatchWriteHandle>> {
     let mut slot = Some(handle);
@@ -120,5 +125,12 @@ mod tests {
         assert!(second.is_empty(), "新作用域不应继承上一个作用域的 handle");
         // 退出作用域后恢复为「退回 handle」语义.
         assert!(defer(tagged(2, &seen, false)).is_err());
+    }
+    #[tokio::test]
+    async fn is_active_only_inside_a_scope() {
+        assert!(!is_active());
+        let (inside, _) = scope(async { is_active() }).await;
+        assert!(inside);
+        assert!(!is_active());
     }
 }

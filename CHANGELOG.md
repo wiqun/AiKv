@@ -25,7 +25,7 @@
 - 集群 EVAL 轻脚本不再每次跨线程往返, 并发 200/500 下 S4/S5 吞吐由约 6k~9k 提升到 16k~24k.
 - `groups_with_slots` 对连续相同 group 的 slot 跳过哈希插入, `derive_cluster_ok` 在 16384 slot 表上由约 80µs 降到约 14µs (本机 release 实测), 集群后台 tick 每 250ms 调用一次.
 - SET/DEL 热路径: 仅当本节点有 WATCH 时才写 watch meta, 并与用户写同一次 Raft propose; meta 使用相同 hash tag 同 slot (`#83`).
-
+- 流水线延迟确认下脚本提交路径不再 `yield_now`: 之前每条脚本在忙的运行时里平均白等约 38µs, 单连接深流水线 (`-P 128`) 脚本写在集群里只有约 8k QPS; 现在约 18k (家里测试机 S6 集群 8.2k → 18.0k, 单机 16.7k 不变). 非流水线路径保留让出 (去掉会让多连接单机 S4 由 19.9k 降到 11.7k).
 
 ### Fixed
 

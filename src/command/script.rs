@@ -565,7 +565,12 @@ impl ScriptCommands {
         let mut publication = self.enqueue_chain.publish(&key_refs);
         drop(guard);
         let unlocked = Instant::now();
-        tokio::task::yield_now().await;
+        // 顺序由 `publish` (key 锁内登记) 与 `wait_predecessors` 保证, 这里的让出只影响调度:
+        // 多连接 (非流水线) 下让出能让其他连接的脚本并行推进 (单机 S4 约 16.6k vs 11.1k);
+        // 流水线延迟确认下是同一连接的下一条脚本, 让出只会在忙的运行时里白等 (约 38µs/条, 集群 S6 约 8k vs 17k).
+        if !crate::storage::deferred::is_active() {
+            tokio::task::yield_now().await;
+        }
         if let Err(err) = publication.wait_predecessors().await {
             drive::rollback_inserted(&self.in_flight, Some(inserted));
             return Err(err);
