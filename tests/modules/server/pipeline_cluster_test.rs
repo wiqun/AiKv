@@ -1,8 +1,8 @@
 //! 流水线按序执行与保序写回测试
 //! @component aikv-server
 
-use std::sync::Arc;
 use bytes::Bytes;
+use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
 
@@ -25,7 +25,9 @@ fn create_test_state() -> Arc<ServerSharedState> {
 }
 
 async fn create_connected_tcp_pair() -> (TcpStream, TcpStream) {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind listener");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
     let addr = listener.local_addr().expect("local addr");
     let client = TcpStream::connect(addr).await.expect("connect client");
     let (server, _) = listener.accept().await.expect("accept server");
@@ -51,10 +53,7 @@ async fn test_pipeline_in_order_delivery() {
         ));
     }
     for i in 0..50 {
-        commands.push((
-            "GET".to_string(),
-            vec![Bytes::from(format!("k_{i:03}"))],
-        ));
+        commands.push(("GET".to_string(), vec![Bytes::from(format!("k_{i:03}"))]));
     }
 
     // 执行流水线
@@ -69,7 +68,10 @@ async fn test_pipeline_in_order_delivery() {
     let mut buf = vec![0u8; 4096];
 
     while responses.len() < 100 {
-        let n = reader.read(&mut buf).await.expect("read from client socket");
+        let n = reader
+            .read(&mut buf)
+            .await
+            .expect("read from client socket");
         if n == 0 {
             break;
         }
@@ -124,9 +126,15 @@ async fn test_pipeline_mixed_success_and_errors_order() {
     // 4: GET non_existent_key
     // 5: GET b
     let commands = vec![
-        ("SET".to_string(), vec![Bytes::from("a"), Bytes::from("val_a")]),
+        (
+            "SET".to_string(),
+            vec![Bytes::from("a"), Bytes::from("val_a")],
+        ),
         ("UNKNOWN_CMD_XYZ".to_string(), vec![]),
-        ("SET".to_string(), vec![Bytes::from("b"), Bytes::from("val_b")]),
+        (
+            "SET".to_string(),
+            vec![Bytes::from("b"), Bytes::from("val_b")],
+        ),
         ("GET".to_string(), vec![Bytes::from("a")]),
         ("GET".to_string(), vec![Bytes::from("non_existent_key")]),
         ("GET".to_string(), vec![Bytes::from("b")]),
@@ -142,7 +150,10 @@ async fn test_pipeline_mixed_success_and_errors_order() {
     let mut buf = vec![0u8; 1024];
 
     while responses.len() < 6 {
-        let n = reader.read(&mut buf).await.expect("read from client socket");
+        let n = reader
+            .read(&mut buf)
+            .await
+            .expect("read from client socket");
         if n == 0 {
             break;
         }
@@ -155,13 +166,21 @@ async fn test_pipeline_mixed_success_and_errors_order() {
     assert_eq!(responses.len(), 6);
     assert_eq!(responses[0], RespValue::SimpleString("OK".to_string()));
     match &responses[1] {
-        RespValue::Error(msg) => assert!(msg.contains("unknown command"), "预期未知命令错误: {msg}"),
+        RespValue::Error(msg) => {
+            assert!(msg.contains("unknown command"), "预期未知命令错误: {msg}")
+        }
         other => panic!("预期未知命令错误, 实际为: {other:?}"),
     }
     assert_eq!(responses[2], RespValue::SimpleString("OK".to_string()));
-    assert_eq!(responses[3], RespValue::BulkString(Some(Bytes::from("val_a"))));
+    assert_eq!(
+        responses[3],
+        RespValue::BulkString(Some(Bytes::from("val_a")))
+    );
     assert_eq!(responses[4], RespValue::BulkString(None));
-    assert_eq!(responses[5], RespValue::BulkString(Some(Bytes::from("val_b"))));
+    assert_eq!(
+        responses[5],
+        RespValue::BulkString(Some(Bytes::from("val_b")))
+    );
 }
 
 async fn read_responses(client: &mut TcpStream, want: usize) -> Vec<RespValue> {
@@ -169,7 +188,10 @@ async fn read_responses(client: &mut TcpStream, want: usize) -> Vec<RespValue> {
     let mut responses = Vec::with_capacity(want);
     let mut buf = vec![0u8; 8192];
     while responses.len() < want {
-        let n = client.read(&mut buf).await.expect("read from client socket");
+        let n = client
+            .read(&mut buf)
+            .await
+            .expect("read from client socket");
         if n == 0 {
             break;
         }

@@ -844,7 +844,9 @@ impl KvStorage for KvStorageAdapter {
     }
 
     async fn get(&self, db: usize, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        self.get_bytes(db, key).await.map(|opt| opt.map(|b| b.to_vec()))
+        self.get_bytes(db, key)
+            .await
+            .map(|opt| opt.map(|b| b.to_vec()))
     }
 
     async fn get_bytes(&self, db: usize, key: &[u8]) -> Result<Option<bytes::Bytes>> {

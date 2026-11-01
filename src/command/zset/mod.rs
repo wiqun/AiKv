@@ -47,9 +47,9 @@ pub(crate) mod range_scan;
 
 use self::helpers::{
     aggregate_score, apply_limit, array_of_bulk, bytes_to_str, eq_ignore_case, format_score,
-    lex_in_range, members_in_rank, members_to_resp, normalize_range, parse_i64, parse_lex_bound,
-    parse_limit_args, parse_score, parse_score_bound, parse_zset_combine_args, scan_response,
-    score_in_range, sort_by_score_then_member, sorted_by_score,
+    lex_in_range, members_in_rank, members_into_resp, members_to_resp, normalize_range, parse_i64,
+    parse_lex_bound, parse_limit_args, parse_score, parse_score_bound, parse_zset_combine_args,
+    scan_response, score_in_range, sort_by_score_then_member, sorted_by_score,
 };
 
 fn parse_zdiff_args(cmd: &str, args: &[Bytes], allow_withscores: bool) -> Result<(usize, bool)> {
@@ -251,7 +251,7 @@ impl ZSetCommands {
         if let Some(rows) =
             range_scan::by_index(self.storage.as_ref(), db, key, start, stop, reverse).await?
         {
-            return Ok(members_to_resp(&rows, withscores));
+            return Ok(members_into_resp(rows, withscores));
         }
         let zset = self.load_zset(db, key).await?;
         let Some(zset) = zset else {
@@ -325,7 +325,7 @@ impl ZSetCommands {
             count,
         };
         if let Some(rows) = range_scan::by_score(self.storage.as_ref(), db, key, &window).await? {
-            return Ok(members_to_resp(&rows, withscores));
+            return Ok(members_into_resp(rows, withscores));
         }
         let zset = self.load_zset(db, key).await?;
         let Some(zset) = zset else {

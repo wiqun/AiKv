@@ -38,8 +38,8 @@ pub struct AiDbEngine {
 
 impl AiDbEngine {
     const DB_PREFIXES: [&'static [u8]; 16] = [
-        b"0:", b"1:", b"2:", b"3:", b"4:", b"5:", b"6:", b"7:",
-        b"8:", b"9:", b"10:", b"11:", b"12:", b"13:", b"14:", b"15:",
+        b"0:", b"1:", b"2:", b"3:", b"4:", b"5:", b"6:", b"7:", b"8:", b"9:", b"10:", b"11:",
+        b"12:", b"13:", b"14:", b"15:",
     ];
 
     /// 构造真实 key: `{db_index}:{user_key}`
@@ -126,7 +126,10 @@ impl StorageAdapter for AiDbEngine {
     }
 
     fn get_bytes_sync(&self, key: Vec<u8>) -> Result<Option<bytes::Bytes>> {
-        let pinned = self.db.get_pinned(&key).map_err(|e| Error::Storage(e.to_string()))?;
+        let pinned = self
+            .db
+            .get_pinned(&key)
+            .map_err(|e| Error::Storage(e.to_string()))?;
         Ok(pinned.map(|p| p.into_bytes()))
     }
 

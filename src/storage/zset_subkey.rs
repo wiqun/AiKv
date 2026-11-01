@@ -322,8 +322,7 @@ fn push_member_put(
     ops.push((score_engine, WriteOp::put_engine(Vec::new())));
 }
 
-type CachedMembersMap =
-    std::collections::HashMap<(usize, Vec<u8>), Arc<BTreeMap<Vec<u8>, f64>>>;
+type CachedMembersMap = std::collections::HashMap<(usize, Vec<u8>), Arc<BTreeMap<Vec<u8>, f64>>>;
 
 static MEMBERS_CACHE: parking_lot::RwLock<Option<CachedMembersMap>> =
     parking_lot::RwLock::new(None);

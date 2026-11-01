@@ -67,6 +67,8 @@ pub fn try_fast_path(
         fast_zscore(lua, storage, txn, declared, args, throw_error)
     } else if cmd.eq_ignore_ascii_case(b"ZREM") {
         fast_zrem(lua, storage, txn, declared, args, throw_error)
+    } else if cmd.eq_ignore_ascii_case(b"ZRANGEBYSCORE") {
+        fast_zrangebyscore(lua, storage, txn, declared, args, throw_error)
     } else {
         Ok(None)
     }
@@ -291,7 +293,11 @@ fn build_hmget_table(
                 match val {
                     Some(v) => table.raw_set(i + 1, mlua::Value::String(lua.create_string(&v)?))?,
                     None => {
-                        let nil_or_false = if is_resp3 { mlua::Value::Nil } else { mlua::Value::Boolean(false) };
+                        let nil_or_false = if is_resp3 {
+                            mlua::Value::Nil
+                        } else {
+                            mlua::Value::Boolean(false)
+                        };
                         table.raw_set(i + 1, nil_or_false)?;
                     }
                 }
@@ -299,7 +305,11 @@ fn build_hmget_table(
         }
         None => {
             for i in 0..field_count {
-                let nil_or_false = if is_resp3 { mlua::Value::Nil } else { mlua::Value::Boolean(false) };
+                let nil_or_false = if is_resp3 {
+                    mlua::Value::Nil
+                } else {
+                    mlua::Value::Boolean(false)
+                };
                 table.raw_set(i + 1, nil_or_false)?;
             }
         }
@@ -578,6 +588,101 @@ fn fast_hdel(
         Some(res) => res,
         None => Ok(None),
     }
+}
+
+struct ScoreLimit {
+    key: Vec<u8>,
+    min: String,
+    max: String,
+    limit: Option<(usize, Option<usize>)>,
+}
+
+fn lua_text(val: &mlua::Value) -> Option<String> {
+    with_arg_bytes(val, |raw| String::from_utf8(raw.to_vec()).ok()).flatten()
+}
+
+fn lua_i64(val: &mlua::Value) -> Option<i64> {
+    lua_text(val)?.parse().ok()
+}
+
+/// 只接 `key min max` 和 `key min max LIMIT offset count`. 其他形态交回普通路径.
+fn parse_score_limit(args: &mlua::MultiValue) -> Option<ScoreLimit> {
+    let n = args.len();
+    if n != 4 && n != 7 {
+        return None;
+    }
+    let key = with_arg_bytes(args.get(1)?, |raw| raw.to_vec())?;
+    let min = lua_text(args.get(2)?)?;
+    let max = lua_text(args.get(3)?)?;
+    let limit = if n == 4 {
+        None
+    } else {
+        let flag = lua_text(args.get(4)?)?;
+        if !flag.eq_ignore_ascii_case("LIMIT") {
+            return None;
+        }
+        let offset = lua_i64(args.get(5)?)?;
+        let count = lua_i64(args.get(6)?)?;
+        if offset < 0 {
+            return None;
+        }
+        let count = (count >= 0).then_some(count as usize);
+        Some((offset as usize, count))
+    };
+    Some(ScoreLimit {
+        key,
+        min,
+        max,
+        limit,
+    })
+}
+
+fn script_fail(
+    lua: &mlua::Lua,
+    throw_error: bool,
+    msg: String,
+) -> mlua::Result<Option<mlua::Value>> {
+    if throw_error {
+        Err(mlua::Error::RuntimeError(msg))
+    } else {
+        pcall_error_table(lua, &msg).map(Some)
+    }
+}
+
+fn fast_zrangebyscore(
+    lua: &mlua::Lua,
+    storage: &dyn ScriptIo,
+    txn: &mut ScriptTransaction,
+    declared: &DeclaredKeys,
+    args: &mlua::MultiValue,
+    throw_error: bool,
+) -> mlua::Result<Option<mlua::Value>> {
+    let Some(parsed) = parse_score_limit(args) else {
+        return Ok(None);
+    };
+    if let Err(e) = check_key(declared, &parsed.key) {
+        return script_fail(lua, throw_error, e.to_string());
+    }
+    let Ok(min) = crate::command::zset::helpers::parse_score_bound(&parsed.min, true) else {
+        return Ok(None);
+    };
+    let Ok(max) = crate::command::zset::helpers::parse_score_bound(&parsed.max, false) else {
+        return Ok(None);
+    };
+    let (offset, count) = parsed.limit.unwrap_or((0, None));
+    let window = crate::command::zset::range_scan::ScoreWindow {
+        min,
+        max,
+        reverse: false,
+        offset,
+        count,
+    };
+    let rows = match super::zset_scan::by_score(storage, txn, &parsed.key, &window) {
+        Ok(Some(rows)) => rows,
+        Ok(None) => return Ok(None),
+        Err(e) => return script_fail(lua, throw_error, e.to_string()),
+    };
+    crate::command::script::convert::member_list_to_lua(lua, rows).map(Some)
 }
 
 fn fast_zscore(

@@ -601,12 +601,14 @@ impl StorageAdapter for ClusterDataAdapter {
 
     async fn get_bytes(&self, key: Vec<u8>) -> Result<Option<bytes::Bytes>> {
         match Self::route_read(&key)? {
-            Some((mgr, ReadRoute::Single(gid))) => {
-                mgr.multi_raft.get_local_bytes(gid, &key).await.map_err(|e| {
+            Some((mgr, ReadRoute::Single(gid))) => mgr
+                .multi_raft
+                .get_local_bytes(gid, &key)
+                .await
+                .map_err(|e| {
                     tracing::warn!(gid = gid, error = %e, "get_local_bytes failed");
                     Self::map_err(e)
-                })
-            }
+                }),
             Some((
                 mgr,
                 ReadRoute::Merge {

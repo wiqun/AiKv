@@ -118,6 +118,19 @@ pub(crate) fn members_to_resp(members: &[(Vec<u8>, f64)], withscores: bool) -> R
     RespValue::Array(Some(items))
 }
 
+/// `members_to_resp` 的消费版: 成员 `Vec<u8>` 直接移进 `Bytes`, 省掉每个成员一次分配与拷贝.
+pub(crate) fn members_into_resp(members: Vec<(Vec<u8>, f64)>, withscores: bool) -> RespValue {
+    let cap = members.len() * if withscores { 2 } else { 1 };
+    let mut items = Vec::with_capacity(cap);
+    for (member, score) in members {
+        items.push(router::bulk(member));
+        if withscores {
+            items.push(router::bulk(format_score(score).into_bytes()));
+        }
+    }
+    RespValue::Array(Some(items))
+}
+
 pub(crate) fn scan_response(cursor: u64, page: &[(Vec<u8>, f64)]) -> RespValue {
     let mut items = vec![RespValue::BulkString(Some(Bytes::from(cursor.to_string())))];
     let mut members = Vec::new();
@@ -368,4 +381,28 @@ pub(crate) fn sort_by_score_then_member(items: &mut [(Vec<u8>, f64)]) {
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.0.cmp(&b.0))
     });
+}
+
+#[cfg(test)]
+mod members_resp_tests {
+    use super::*;
+
+    #[test]
+    fn members_into_resp_matches_members_to_resp() {
+        let rows = vec![
+            (b"a".to_vec(), 1.0),
+            (b"bb".to_vec(), -2.5),
+            (Vec::new(), 0.0),
+        ];
+        for withscores in [false, true] {
+            assert_eq!(
+                members_into_resp(rows.clone(), withscores),
+                members_to_resp(&rows, withscores)
+            );
+        }
+        assert_eq!(
+            members_into_resp(Vec::new(), true),
+            RespValue::Array(Some(Vec::new()))
+        );
+    }
 }

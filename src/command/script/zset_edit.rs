@@ -509,13 +509,31 @@ mod tests {
         inflight.insert_batch(0, &ops);
 
         let txn1 = ScriptTransaction::with_in_flight(0, Some(Arc::new(inflight)));
-        let members1 = txn1.visible_subkey_members(storage.script_io(), b"kz").unwrap();
-        assert!(!members1.contains_key(b"m0".as_ref()), "m0 should be deleted by in_flight");
-        assert_eq!(members1.get(b"m99".as_ref()).copied(), Some(99.0), "m99 should be visible");
+        let members1 = txn1
+            .visible_subkey_members(storage.script_io(), b"kz")
+            .unwrap();
+        assert!(
+            !members1.contains_key(b"m0".as_ref()),
+            "m0 should be deleted by in_flight"
+        );
+        assert_eq!(
+            members1.get(b"m99".as_ref()).copied(),
+            Some(99.0),
+            "m99 should be visible"
+        );
 
         let txn2 = ScriptTransaction::new(0);
-        let members2 = txn2.visible_subkey_members(storage.script_io(), b"kz").unwrap();
-        assert!(!members2.contains_key(b"m0".as_ref()), "cached m0 must remain deleted");
-        assert_eq!(members2.get(b"m99".as_ref()).copied(), Some(99.0), "cached m99 must be present");
+        let members2 = txn2
+            .visible_subkey_members(storage.script_io(), b"kz")
+            .unwrap();
+        assert!(
+            !members2.contains_key(b"m0".as_ref()),
+            "cached m0 must remain deleted"
+        );
+        assert_eq!(
+            members2.get(b"m99".as_ref()).copied(),
+            Some(99.0),
+            "cached m99 must be present"
+        );
     }
 }

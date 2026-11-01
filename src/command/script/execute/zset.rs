@@ -142,12 +142,12 @@ pub(super) fn exec_zrank(
     Ok(res.unwrap_or(RespValue::Null))
 }
 
-use crate::command::zset::range_scan::ScoreWindow;
 use crate::command::zset::helpers::{
-    bytes_to_str, eq_ignore_case, lex_in_range, members_in_rank, members_to_resp, normalize_range,
-    parse_i64, parse_lex_bound, parse_limit_args, parse_score_bound, score_in_range,
-    sorted_by_score, ScoreBound,
+    bytes_to_str, eq_ignore_case, lex_in_range, members_in_rank, members_into_resp,
+    members_to_resp, normalize_range, parse_i64, parse_lex_bound, parse_limit_args,
+    parse_score_bound, score_in_range, sorted_by_score, ScoreBound,
 };
+use crate::command::zset::range_scan::ScoreWindow;
 use crate::storage::zset_subkey::{self, score_index_entry, score_prefix};
 use crate::storage::AiDbEngine;
 
@@ -188,7 +188,7 @@ fn range_by_index(
         }
     }
     if let Some(rows) = zset_scan::by_index(storage, txn, &args[0], start, stop, reverse)? {
-        return Ok(members_to_resp(&rows, with_scores));
+        return Ok(members_into_resp(rows, with_scores));
     }
     let res = txn.with_zset(storage, &args[0], |zset| {
         let sorted = sorted_by_score(zset, reverse);
@@ -278,7 +278,7 @@ fn range_by_score(
         count,
     };
     if let Some(rows) = zset_scan::by_score(storage, txn, &args[0], &window)? {
-        return Ok(members_to_resp(&rows, withscores));
+        return Ok(members_into_resp(rows, withscores));
     }
     let res = txn.with_zset(storage, &args[0], |zset| {
         let slice = filter_and_slice_zset(zset, &min, &max, reverse, limit);

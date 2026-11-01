@@ -360,4 +360,101 @@ mod tests {
             .unwrap()
             .is_none());
     }
+
+    fn lua_call(parts: &[mlua::Value]) -> mlua::MultiValue {
+        parts.iter().cloned().collect()
+    }
+
+    #[tokio::test]
+    async fn fast_zrangebyscore_returns_the_scan_page_as_a_lua_table() {
+        let dir = TempDir::new().unwrap();
+        let storage = seeded(&dir).await;
+        let io = storage.script_io();
+        let lua = mlua::Lua::new();
+        let mut txn = ScriptTransaction::with_in_flight(0, None);
+        let declared_keys = [Bytes::from_static(KEY)];
+        let declared = super::super::DeclaredKeys::new(&declared_keys);
+        let args = lua_call(&[
+            mlua::Value::String(lua.create_string("ZRANGEBYSCORE").unwrap()),
+            mlua::Value::String(lua.create_string(KEY).unwrap()),
+            mlua::Value::Integer(0),
+            mlua::Value::String(lua.create_string("+inf").unwrap()),
+            mlua::Value::String(lua.create_string("LIMIT").unwrap()),
+            mlua::Value::Integer(0),
+            mlua::Value::Integer(3),
+        ]);
+        let loads = THREAD_LOAD_CALLS.with(|c| c.get());
+        let value = super::super::try_fast_path(&lua, io, &mut txn, &declared, &args, true)
+            .unwrap()
+            .expect("header zset is handled");
+        let mlua::Value::Table(table) = value else {
+            panic!("expected a lua table");
+        };
+        let mut got = Vec::new();
+        for i in 1..=3 {
+            let member: mlua::String = table.raw_get(i).unwrap();
+            got.push(member.as_bytes().to_vec());
+        }
+        let window = ScoreWindow {
+            min: bound(0.0, true),
+            max: bound(f64::INFINITY, true),
+            reverse: false,
+            offset: 0,
+            count: Some(3),
+        };
+        let expected: Vec<_> = by_score(io, &txn, KEY, &window)
+            .unwrap()
+            .unwrap()
+            .into_iter()
+            .map(|(member, _)| member)
+            .collect();
+        assert_eq!(got, expected);
+        assert_eq!(THREAD_LOAD_CALLS.with(|c| c.get()), loads);
+    }
+
+    #[tokio::test]
+    async fn fast_zrangebyscore_leaves_withscores_and_edited_sets() {
+        let dir = TempDir::new().unwrap();
+        let storage = seeded(&dir).await;
+        let io = storage.script_io();
+        let lua = mlua::Lua::new();
+        let mut txn = ScriptTransaction::with_in_flight(0, None);
+        let declared_keys = [Bytes::from_static(KEY)];
+        let declared = super::super::DeclaredKeys::new(&declared_keys);
+        let withscores = lua_call(&[
+            mlua::Value::String(lua.create_string("ZRANGEBYSCORE").unwrap()),
+            mlua::Value::String(lua.create_string(KEY).unwrap()),
+            mlua::Value::String(lua.create_string("-inf").unwrap()),
+            mlua::Value::String(lua.create_string("+inf").unwrap()),
+            mlua::Value::String(lua.create_string("WITHSCORES").unwrap()),
+        ]);
+        assert!(
+            super::super::try_fast_path(&lua, io, &mut txn, &declared, &withscores, true)
+                .unwrap()
+                .is_none()
+        );
+        txn.subkey_zadd(
+            io,
+            &[
+                Bytes::from_static(KEY),
+                Bytes::from_static(b"5"),
+                Bytes::from_static(b"fresh"),
+            ],
+        )
+        .unwrap();
+        let plain = lua_call(&[
+            mlua::Value::String(lua.create_string("ZRANGEBYSCORE").unwrap()),
+            mlua::Value::String(lua.create_string(KEY).unwrap()),
+            mlua::Value::String(lua.create_string("-inf").unwrap()),
+            mlua::Value::String(lua.create_string("+inf").unwrap()),
+            mlua::Value::String(lua.create_string("LIMIT").unwrap()),
+            mlua::Value::String(lua.create_string("0").unwrap()),
+            mlua::Value::String(lua.create_string("3").unwrap()),
+        ]);
+        assert!(
+            super::super::try_fast_path(&lua, io, &mut txn, &declared, &plain, true)
+                .unwrap()
+                .is_none()
+        );
+    }
 }

@@ -167,8 +167,8 @@ pub fn decode_string_fast(raw: &[u8]) -> FastStringDecode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use crate::storage::types::{StoredValue, ValueType};
+    use std::collections::HashMap;
 
     #[test]
     fn test_encode_decode_roundtrip_with_postcard() {
@@ -196,7 +196,8 @@ mod tests {
             let postcard_bytes = postcard::to_allocvec(&stored).unwrap();
             let fast_bytes = encode_string_fast(val, exp);
             assert_eq!(
-                postcard_bytes, fast_bytes,
+                postcard_bytes,
+                fast_bytes,
                 "fast encode mismatch for len {}",
                 val.len()
             );
@@ -237,7 +238,10 @@ mod tests {
     fn test_corrupted_bytes_fallback() {
         assert_eq!(decode_string_fast(&[]), FastStringDecode::Fallback);
         assert_eq!(decode_string_fast(&[0x00]), FastStringDecode::Fallback);
-        assert_eq!(decode_string_fast(&[0x00, 0x05]), FastStringDecode::Fallback);
+        assert_eq!(
+            decode_string_fast(&[0x00, 0x05]),
+            FastStringDecode::Fallback
+        );
         assert_eq!(
             decode_string_fast(&[0x00, 0x05, b'a', b'b', 0x00]),
             FastStringDecode::Fallback

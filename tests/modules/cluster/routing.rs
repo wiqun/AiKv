@@ -786,5 +786,8 @@ fn test_flat_slot_map_fast_lookup() {
     let slot_groups = aikv::state::ClusterStateManager::new_slot_groups();
     assert_eq!(slot_groups[0].load(std::sync::atomic::Ordering::Relaxed), 0);
     slot_groups[100].store(2, std::sync::atomic::Ordering::Relaxed);
-    assert_eq!(slot_groups[100].load(std::sync::atomic::Ordering::Relaxed), 2);
+    assert_eq!(
+        slot_groups[100].load(std::sync::atomic::Ordering::Relaxed),
+        2
+    );
 }

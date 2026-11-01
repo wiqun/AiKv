@@ -37,13 +37,13 @@ use crate::protocol::RespValue;
 use crate::storage::ScriptIo;
 
 mod extra;
+pub mod fast_path;
 mod hash;
 mod list;
 mod set;
 mod string;
 mod zset;
 mod zset_scan;
-pub mod fast_path;
 
 pub use fast_path::try_fast_path;
 

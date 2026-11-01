@@ -3,9 +3,9 @@
 
 use std::sync::Arc;
 
+use aikv::storage::cluster_batcher::{collect_batch_items, WriteBatchItem};
 use bytes::Bytes;
 use tokio::sync::{mpsc, oneshot};
-use aikv::storage::cluster_batcher::{collect_batch_items, WriteBatchItem};
 
 #[tokio::test]
 async fn test_adaptive_batch_aggregation_under_concurrent_writes() {
@@ -155,7 +155,11 @@ async fn standalone_script_writes_work_through_the_cluster_adapter_stack() {
     let mut db = 0;
     let script = Bytes::from_static(b"local n=tonumber(redis.call('get',KEYS[1])) or 0; redis.call('set',KEYS[1],n+1); return n");
     for expect in 0..3 {
-        let args = [script.clone(), Bytes::from_static(b"1"), Bytes::from_static(b"k")];
+        let args = [
+            script.clone(),
+            Bytes::from_static(b"1"),
+            Bytes::from_static(b"k"),
+        ];
         let got = router.execute("EVAL", &args, &mut db).await.unwrap();
         assert_eq!(got, RespValue::Integer(expect));
     }
@@ -212,7 +216,11 @@ async fn mixed_sync_and_async_script_commits_do_not_lose_updates() {
     for round in 0..4 {
         for _ in 0..10 {
             let mut db = 0;
-            let args = [script.clone(), Bytes::from_static(b"1"), Bytes::from_static(b"hot")];
+            let args = [
+                script.clone(),
+                Bytes::from_static(b"1"),
+                Bytes::from_static(b"hot"),
+            ];
             router.execute("EVAL", &args, &mut db).await.unwrap();
         }
         let mut tasks = Vec::new();
@@ -222,7 +230,11 @@ async fn mixed_sync_and_async_script_commits_do_not_lose_updates() {
             tasks.push(tokio::spawn(async move {
                 for _ in 0..25 {
                     let mut db = 0;
-                    let args = [script.clone(), Bytes::from_static(b"1"), Bytes::from_static(b"hot")];
+                    let args = [
+                        script.clone(),
+                        Bytes::from_static(b"1"),
+                        Bytes::from_static(b"hot"),
+                    ];
                     router.execute("EVAL", &args, &mut db).await.unwrap();
                 }
             }));
