@@ -196,6 +196,18 @@ pub async fn read_member_score(
 pub static LOAD_MEMBERS_CALLS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+#[cfg(test)]
+thread_local! {
+    /// 当前线程的全量加载次数. 并行测试之间互不干扰, `#[tokio::test]` 的任务都跑在测试线程上.
+    pub static THREAD_LOAD_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn count_load_members() {
+    LOAD_MEMBERS_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    THREAD_LOAD_CALLS.with(|c| c.set(c.get() + 1));
+}
+
 #[derive(Clone, Copy)]
 struct UnsafeSyncMap(*mut BTreeMap<Vec<u8>, f64>);
 unsafe impl Send for UnsafeSyncMap {}
@@ -212,7 +224,7 @@ pub async fn load_members(
     user_key: &[u8],
 ) -> Result<BTreeMap<Vec<u8>, f64>> {
     #[cfg(test)]
-    LOAD_MEMBERS_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    count_load_members();
     let encoded = AiDbEngine::encode_key(db, user_key);
     let prefix = member_prefix(&encoded);
     let prefix_len = prefix.len();
@@ -244,7 +256,7 @@ pub fn load_members_sync(
     user_key: &[u8],
 ) -> Result<BTreeMap<Vec<u8>, f64>> {
     #[cfg(test)]
-    LOAD_MEMBERS_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    count_load_members();
     let encoded = AiDbEngine::encode_key(db, user_key);
     let prefix = member_prefix(&encoded);
     let prefix_len = prefix.len();

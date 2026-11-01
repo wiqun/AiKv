@@ -456,6 +456,18 @@ pub trait KvStorage: Send + Sync {
         Err(Error::Storage("raw subkey access not supported".into()))
     }
 
+    /// 半开区间 `[start, end)` 内至多 `limit` 条原始 KV, `reverse` 时从区间末尾向前取.
+    /// 大 ZSET 按 score 索引做 TopN / 分页读取, 不加载全部成员.
+    async fn raw_range_scan(
+        &self,
+        _start: Vec<u8>,
+        _end: Vec<u8>,
+        _limit: usize,
+        _reverse: bool,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        Err(Error::Storage("raw subkey access not supported".into()))
+    }
+
     /// 绕过 StoredValue 编解码, 扫描 subkey 前缀范围内的所有原始 KV 对.
     /// 仅持久化引擎实现; MemoryEngine 返回 Err.
     async fn raw_subkey_for_each(

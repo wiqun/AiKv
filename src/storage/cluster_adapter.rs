@@ -517,6 +517,26 @@ impl StorageAdapter for ClusterDataAdapter {
         }
     }
 
+    fn range_scan_sync(
+        &self,
+        start: Vec<u8>,
+        end: Vec<u8>,
+        limit: usize,
+        reverse: bool,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let Some(mgr) = CLUSTER_STATE_MGR.get().cloned() else {
+            return self.local.range_scan_sync(start, end, limit, reverse);
+        };
+        match Self::route_read(&start)? {
+            Some((_, ReadRoute::Single(gid))) => mgr
+                .multi_raft
+                .scan_local_user_pairs_limited_sync(gid, &start, &end, limit, reverse)
+                .map_err(Self::map_err),
+            Some(_) => Err(Error::Command(TRYAGAIN_MIGRATION.into())),
+            None => self.local.range_scan_sync(start, end, limit, reverse),
+        }
+    }
+
     fn for_each_prefix_sync(
         &self,
         prefix: Vec<u8>,
@@ -737,6 +757,27 @@ impl StorageAdapter for ClusterDataAdapter {
                 Ok(())
             }
             None => self.local.for_each_prefix(prefix, f).await,
+        }
+    }
+
+    async fn range_scan(
+        &self,
+        start: Vec<u8>,
+        end: Vec<u8>,
+        limit: usize,
+        reverse: bool,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let Some(mgr) = CLUSTER_STATE_MGR.get().cloned() else {
+            return self.local.range_scan(start, end, limit, reverse).await;
+        };
+        match Self::route_read(&start)? {
+            Some((_, ReadRoute::Single(gid))) => mgr
+                .multi_raft
+                .scan_local_user_pairs_limited(gid, start, end, limit, reverse)
+                .await
+                .map_err(Self::map_err),
+            Some(_) => Err(Error::Command(TRYAGAIN_MIGRATION.into())),
+            None => self.local.range_scan(start, end, limit, reverse).await,
         }
     }
 

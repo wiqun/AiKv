@@ -143,6 +143,16 @@ impl StorageAdapter for AiDbEngine {
             .map_err(|e| Error::Storage(e.to_string()))
     }
 
+    fn range_scan_sync(
+        &self,
+        start: Vec<u8>,
+        end: Vec<u8>,
+        limit: usize,
+        reverse: bool,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        scan_limited(&self.db, &start, &end, limit, reverse)
+    }
+
     fn last_in_range_sync(
         &self,
         start: Vec<u8>,
@@ -243,6 +253,17 @@ impl StorageAdapter for AiDbEngine {
         .await
     }
 
+    async fn range_scan(
+        &self,
+        start: Vec<u8>,
+        end: Vec<u8>,
+        limit: usize,
+        reverse: bool,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        self.blocking(move |db| scan_limited(&db, &start, &end, limit, reverse))
+            .await
+    }
+
     async fn last_in_range(
         &self,
         start: Vec<u8>,
@@ -331,4 +352,42 @@ fn db_write_op_to_adapter(op: DbWriteOp) -> AdapterWriteOp {
         DbWriteOp::Delete { key } => AdapterWriteOp::Delete { key },
         DbWriteOp::DeleteRange { .. } => unimplemented!("delete range to adapter not supported"),
     }
+}
+
+/// `[start, end)` 内至多 `limit` 条, `reverse` 时从末尾向前. 只读取需要的条数.
+fn scan_limited(
+    db: &DB,
+    start: &[u8],
+    end: &[u8],
+    limit: usize,
+    reverse: bool,
+) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+    let mut out = Vec::new();
+    if limit == 0 {
+        return Ok(out);
+    }
+    let mut iter = db
+        .scan(Some(start), Some(end))
+        .map_err(|e| Error::Storage(e.to_string()))?;
+    if reverse {
+        iter.seek_to_last();
+        while out.len() < limit {
+            let (Some(key), Some(value)) = (iter.key(), iter.value()) else {
+                break;
+            };
+            out.push((key.to_vec(), value.to_vec()));
+            if !iter.prev() {
+                break;
+            }
+        }
+        return Ok(out);
+    }
+    for item in iter {
+        let (key, value) = item.map_err(|e| Error::Storage(e.to_string()))?;
+        out.push((key, value));
+        if out.len() >= limit {
+            break;
+        }
+    }
+    Ok(out)
 }

@@ -110,6 +110,16 @@ pub trait StorageAdapter: Send + Sync {
         let _ = (start, end);
         Err(Error::Storage("sync last_in_range not supported".into()))
     }
+    fn range_scan_sync(
+        &self,
+        start: Vec<u8>,
+        end: Vec<u8>,
+        limit: usize,
+        reverse: bool,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let _ = (start, end, limit, reverse);
+        Err(Error::Storage("sync range_scan not supported".into()))
+    }
     fn for_each_prefix_sync(&self, prefix: Vec<u8>, f: RawPairVisitor) -> Result<()> {
         let _ = (prefix, f);
         Err(Error::Storage("sync for_each_prefix not supported".into()))
@@ -119,6 +129,18 @@ pub trait StorageAdapter: Send + Sync {
         Ok(Box::new(ImmediateWriteHandle))
     }
     async fn delete_range(&self, start: Vec<u8>, end: Vec<u8>) -> Result<()>;
+
+    /// 半开区间 `[start, end)` 内至多 `limit` 条 (`reverse` 时从末尾向前). 引擎需提供有界扫描.
+    async fn range_scan(
+        &self,
+        start: Vec<u8>,
+        end: Vec<u8>,
+        limit: usize,
+        reverse: bool,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let _ = (start, end, limit, reverse);
+        Err(Error::Storage("range_scan not supported".into()))
+    }
 
     /// 半开区间 `[start, end)` 里字典序最大的一条. 默认扫前缀后过滤.
     async fn last_in_range(
@@ -1219,6 +1241,17 @@ impl KvStorage for KvStorageAdapter {
         self.storage.last_in_range(start, end).await
     }
 
+    async fn raw_range_scan(
+        &self,
+        start: Vec<u8>,
+        end: Vec<u8>,
+        limit: usize,
+        reverse: bool,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        self.check_db(0)?;
+        self.storage.range_scan(start, end, limit, reverse).await
+    }
+
     async fn raw_subkey_get(&self, db: usize, encoded_key: Vec<u8>) -> Result<Option<Vec<u8>>> {
         self.check_db(db)?;
         self.storage.get(encoded_key).await
@@ -1290,6 +1323,19 @@ impl crate::storage::script_io::ScriptIo for KvStorageAdapter {
         crate::storage::script_io::time_script_io(
             crate::storage::script_io::ScriptIoOp::Range,
             || self.storage.last_in_range_sync(start, end),
+        )
+    }
+
+    fn raw_range_scan(
+        &self,
+        start: Vec<u8>,
+        end: Vec<u8>,
+        limit: usize,
+        reverse: bool,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        crate::storage::script_io::time_script_io(
+            crate::storage::script_io::ScriptIoOp::Range,
+            || self.storage.range_scan_sync(start, end, limit, reverse),
         )
     }
 

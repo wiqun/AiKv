@@ -42,6 +42,7 @@ mod list;
 mod set;
 mod string;
 mod zset;
+mod zset_scan;
 pub mod fast_path;
 
 pub use fast_path::try_fast_path;
@@ -604,6 +605,15 @@ mod tests {
             _end: Vec<u8>,
         ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
             Ok(None)
+        }
+        fn raw_range_scan(
+            &self,
+            _start: Vec<u8>,
+            _end: Vec<u8>,
+            _limit: usize,
+            _reverse: bool,
+        ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+            Ok(Vec::new())
         }
         fn raw_subkey_get(&self, _db: usize, _encoded_key: Vec<u8>) -> Result<Option<Vec<u8>>> {
             Ok(None)

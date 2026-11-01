@@ -3,7 +3,7 @@
 //! ZPOPMIN/ZPOPMAX/BZPOPMIN/BZPOPMAX/ZINCRBY/ZSCAN, 以及聚合
 //! ZINTER/ZUNION/ZDIFF (含 *STORE 变体).
 //!
-//! 子模块: `helpers` (范围边界 / LIMIT / 聚合解析).
+//! 子模块: `helpers` (范围边界 / LIMIT / 聚合解析), `range_scan` (大集合按 score / 序号的有界读).
 //!
 //! # 存储表示
 //!
@@ -14,7 +14,7 @@
 //!
 //! # 关键点
 //!
-//! - 有序访问: 按 score 排序用 `sorted_by_score` 临时排序; 按 lex 利用 BTreeMap 天然字典序
+//! - 有序访问: 大集合的 `ZRANGE*` / `ZRANGEBYSCORE` / `ZSCORE` 走 score 索引有界扫描 (`range_scan`), 小集合按 score 排序用 `sorted_by_score` 临时排序; 按 lex 利用 BTreeMap 天然字典序
 //!   (ZRANGEBYLEX/ZLEXCOUNT); rank 为排序后下标 (ZRANK/ZREVRANK).
 //! - 范围边界: score 用 `ScoreBound` (`-inf`/`+inf`, `(` 开区间, 见 `score_in_range`);
 //!   lex 用 `LexBound` (`-`/`+`, `(`/`[`, 见 `lex_in_range`).
@@ -43,6 +43,7 @@ use crate::storage::KvStorage;
 
 pub(crate) mod helpers;
 mod persist;
+pub(crate) mod range_scan;
 
 use self::helpers::{
     aggregate_score, apply_limit, array_of_bulk, bytes_to_str, eq_ignore_case, format_score,
@@ -179,13 +180,9 @@ impl ZSetCommands {
 
     pub async fn zscore(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_args("ZSCORE", args, 2)?;
-        let zset = self.load_zset(db, &args[0]).await?;
-        let Some(zset) = zset else {
-            return Ok(router::nil_bulk());
-        };
-        match zset.get(args[1].as_ref()) {
+        match persist::member_score(self.storage.as_ref(), db, &args[0], &args[1]).await? {
             None => Ok(router::nil_bulk()),
-            Some(score) => Ok(router::bulk(format_score(*score).into_bytes())),
+            Some(score) => Ok(router::bulk(format_score(score).into_bytes())),
         }
     }
 
@@ -251,6 +248,11 @@ impl ZSetCommands {
         let start = parse_i64(&args[1])?;
         let stop = parse_i64(&args[2])?;
         let withscores = args.iter().any(|a| eq_ignore_case(a, b"WITHSCORES"));
+        if let Some(rows) =
+            range_scan::by_index(self.storage.as_ref(), db, key, start, stop, reverse).await?
+        {
+            return Ok(members_to_resp(&rows, withscores));
+        }
         let zset = self.load_zset(db, key).await?;
         let Some(zset) = zset else {
             return Ok(RespValue::Array(Some(vec![])));
@@ -313,6 +315,17 @@ impl ZSetCommands {
             } else {
                 return Err(router::wrong_args("ZRANGEBYSCORE", ""));
             }
+        }
+        let (offset, count) = limit.unwrap_or((0, None));
+        let window = range_scan::ScoreWindow {
+            min: min.clone(),
+            max: max.clone(),
+            reverse,
+            offset,
+            count,
+        };
+        if let Some(rows) = range_scan::by_score(self.storage.as_ref(), db, key, &window).await? {
+            return Ok(members_to_resp(&rows, withscores));
         }
         let zset = self.load_zset(db, key).await?;
         let Some(zset) = zset else {

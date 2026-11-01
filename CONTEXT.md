@@ -28,7 +28,7 @@
 
 **ValueType**: Redis 数据类型的枚举 (String, List, Set, ZSet, Hash 等).
 
-**大 ZSet**: 成员数不超过 64 时仍是一整块 `ValueType::ZSet`. 超过后用户 key 只留 `CollectionHeader`, 每个 member 和按 score 排序的索引各写一条 subkey. 一次 `ZADD` 提交变动的 member, 旧 score 索引, 新 score 索引和 header 计数. 脚本范围读取先叠加上一笔尚未提交的 member subkey: 在途删除不再出现, 在途写入可见, 当前脚本自己的增量盖过这层. `MemoryEngine` 不拆 subkey.
+**大 ZSet**: 成员数不超过 64 时仍是一整块 `ValueType::ZSet`. 超过后用户 key 只留 `CollectionHeader`, 每个 member 和按 score 排序的索引各写一条 subkey. 一次 `ZADD` 提交变动的 member, 旧 score 索引, 新 score 索引和 header 计数. `ZSCORE`, `ZRANGE`, `ZREVRANGE`, `ZRANGEBYSCORE`, `ZREVRANGEBYSCORE` 只读 score 索引里需要的条数 (有界扫描), 不加载全部成员; 按序号读从离目标更近的一端扫. 脚本范围读取在扫描结果上叠加上一笔尚未提交的索引变更: 在途删除不再出现, 在途写入可见, 存储侧多取「区间内在途变更数」条以保证合并后前 N 条正确; 当前脚本自己改过的 ZSet (`ZSetDelta`) 回退全量视图. `MemoryEngine` 不拆 subkey.
 
 **ExpiresCounters**: 各逻辑 DB 的进程内 TTL 写入计数. 成功写入 `expires_at = Some` 时加 1, 包括没有读过旧值的覆盖写. 这次调用已经看到旧 TTL, 或惰性过期删掉带 TTL 的值时饱和减. compaction 不改它. 重启从 0 开始, 不扫库补存量.
 

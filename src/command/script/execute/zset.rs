@@ -10,7 +10,7 @@ use crate::error::Result;
 use crate::protocol::RespValue;
 use crate::storage::ScriptIo;
 
-use super::{key, wrong_count};
+use super::{key, wrong_count, zset_scan};
 
 pub(super) fn exec_zadd(
     storage: &dyn ScriptIo,
@@ -142,6 +142,7 @@ pub(super) fn exec_zrank(
     Ok(res.unwrap_or(RespValue::Null))
 }
 
+use crate::command::zset::range_scan::ScoreWindow;
 use crate::command::zset::helpers::{
     bytes_to_str, eq_ignore_case, lex_in_range, members_in_rank, members_to_resp, normalize_range,
     parse_i64, parse_lex_bound, parse_limit_args, parse_score_bound, score_in_range,
@@ -185,6 +186,9 @@ fn range_by_index(
         if let Some(resp) = revrange_top(storage, txn, &args[0], with_scores)? {
             return Ok(resp);
         }
+    }
+    if let Some(rows) = zset_scan::by_index(storage, txn, &args[0], start, stop, reverse)? {
+        return Ok(members_to_resp(&rows, with_scores));
     }
     let res = txn.with_zset(storage, &args[0], |zset| {
         let sorted = sorted_by_score(zset, reverse);
@@ -264,6 +268,17 @@ fn range_by_score(
         if let Some(resp) = revrangebyscore_top(storage, txn, &args[0], &min, &max, withscores)? {
             return Ok(resp);
         }
+    }
+    let (offset, count) = limit.unwrap_or((0, None));
+    let window = ScoreWindow {
+        min: min.clone(),
+        max: max.clone(),
+        reverse,
+        offset,
+        count,
+    };
+    if let Some(rows) = zset_scan::by_score(storage, txn, &args[0], &window)? {
+        return Ok(members_to_resp(&rows, withscores));
     }
     let res = txn.with_zset(storage, &args[0], |zset| {
         let slice = filter_and_slice_zset(zset, &min, &max, reverse, limit);

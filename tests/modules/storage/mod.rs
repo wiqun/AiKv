@@ -12,4 +12,5 @@ pub mod ttl_filter;
 pub mod types;
 pub mod watch_bump_batch;
 pub mod write_stats_batcher;
+pub mod zset_range_scan;
 pub mod zset_subkey;
