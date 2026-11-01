@@ -29,6 +29,7 @@
 
 ### Fixed
 
+- 修复单机并发脚本丢更新: 未路由到 data group 的写 (单机, 带 `cluster` feature 的构建里也走 `ClusterDataAdapter`) 在 `ClusterBatchWaitHandle::wait` 时才落本地引擎, 而 `enqueue_chain` 以 `enqueue_batch` 返回为同 key 写的顺序点, 两个脚本的写按 `wait` 先后落盘时旧值会覆盖新值 (`-c 50` 同 key 计数 20000 次约 3/8 轮丢 100+ 条). 现在 `enqueue_batch` 内完成本地写.
 - 集群启用时拒绝 `engine=memory`, 避免 `init_cluster` panic 与绕过 Raft 的内存写入 (`#77`).
 - 修复 `MULTI/EXEC` 跨 slot 部分执行与事务期间客户端命令插队问题, 并对齐 Redis 运行时错误不回滚语义 (`#78`).
 - WATCH 版本改为存储层 meta key (含 DB), 随写入 apply 递增, 支持跨连接冲突检测 (`#79`).

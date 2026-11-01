@@ -238,8 +238,6 @@ impl ClusterBatchSlots {
 pub struct ClusterBatchWaitHandle {
     slots: Vec<ClusterBatchSlots>,
     by_mig: Vec<(Arc<ClusterStateManager>, u64, u64, ThinWriteBatch)>,
-    fallback: Vec<AdapterWriteOp>,
-    local: Arc<dyn StorageAdapter>,
 }
 
 #[async_trait::async_trait]
@@ -257,9 +255,6 @@ impl BatchWriteHandle for ClusterBatchWaitHandle {
             .await?;
             ClusterDataAdapter::check_response(resp)?;
         }
-        if !self.fallback.is_empty() {
-            self.local.write_batch(self.fallback).await?;
-        }
         Ok(())
     }
 }
@@ -274,6 +269,12 @@ pub(super) async fn enqueue_cluster_batch(
         return Ok(Box::new(crate::storage::types::ImmediateWriteHandle));
     }
     let (by_gid, by_mig, fallback) = partition_cluster_batch_ops(ops)?;
+
+    // 未路由到 data group 的写 (单机, 或不受集群管理的 key) 在入队时就落本地引擎: 调用方以
+    // `enqueue_batch` 返回作为同 key 写的顺序点, 放到 `wait` 里会让先入队的旧值覆盖后入队的新值.
+    if !fallback.is_empty() {
+        local.write_batch(fallback).await?;
+    }
 
     let mut slots = Vec::with_capacity(by_gid.len());
     for (gid, (mgr, items)) in by_gid {
@@ -296,8 +297,6 @@ pub(super) async fn enqueue_cluster_batch(
     Ok(Box::new(ClusterBatchWaitHandle {
         slots,
         by_mig: mig_batches,
-        fallback,
-        local,
     }))
 }
 
