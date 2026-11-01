@@ -31,6 +31,7 @@
 
 ### Fixed
 
+- 修复脚本入队链 `EnqueueChain` 的内存增长: 每个写过的 key 都在 `tails` 里留一项且永不清理 (1 万个不同 key 之后仍有 1 万项). 现在发布完成且仍是该 key 的队尾时摘掉条目; 已订阅的后继不受影响.
 - 修复在线槽迁移期间同 key 脚本写可能乱序: 迁移期的 `MigrationWrite` 原先在 `BatchWriteHandle::wait` 时才 propose, 先入队的旧值会覆盖后入队的新值. 现在 `enqueue_batch` 内完成 propose (迁移窗口内这几笔写不参与流水线的延迟确认). 回归测试: `migration_merge_read_and_del_tombstone_lifecycle` 中的迁移期顺序点检查.
 - 修复单机并发脚本丢更新: 未路由到 data group 的写 (单机, 带 `cluster` feature 的构建里也走 `ClusterDataAdapter`) 在 `ClusterBatchWaitHandle::wait` 时才落本地引擎, 而 `enqueue_chain` 以 `enqueue_batch` 返回为同 key 写的顺序点, 两个脚本的写按 `wait` 先后落盘时旧值会覆盖新值 (`-c 50` 同 key 计数 20000 次约 3/8 轮丢 100+ 条). 现在 `enqueue_batch` 内完成本地写.
 - 修复集群并发脚本偶发丢更新: 批处理器为每个批次 `spawn` 并发 propose (最多 16 个), 同 key 先后两批可能以相反顺序进入 Raft (同 key 计数约每 16 轮丢 1 轮, 约 50 条). 现在同一 data group 同一时刻只有一个提案在途 (group commit), 提案按批次顺序进入 Raft; 代价是集群写吞吐小幅下降 (家里测试机 S1 约 -14%, S4/S5/S6 约 -6%~-7%).
