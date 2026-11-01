@@ -27,6 +27,8 @@
 - SET/DEL 热路径: 仅当本节点有 WATCH 时才写 watch meta, 并与用户写同一次 Raft propose; meta 使用相同 hash tag 同 slot (`#83`).
 - 流水线延迟确认下脚本提交路径不再 `yield_now`: 之前每条脚本在忙的运行时里平均白等约 38µs, 单连接深流水线 (`-P 128`) 脚本写在集群里只有约 8k QPS; 现在约 18k (家里测试机 S6 集群 8.2k → 18.0k, 单机 16.7k 不变). 非流水线路径保留让出 (去掉会让多连接单机 S4 由 19.9k 降到 11.7k).
 
+- 单机脚本独占执行时 (`ActiveScripts` 计数为 1 且在途覆盖层为空) 在脚本线程内同步落盘, 不再经 `ClusterDataAdapter` 的异步入队与 `spawn_blocking`; 有并发脚本时仍走异步路径 (无条件同步会让多连接 S4/S5 单机掉约 37%). 家里测试机 S6 单机 16.1k -> 约 19.7k QPS, S4/S5 单机与集群不变. 集群不受影响.
+
 ### Fixed
 
 - 修复单机并发脚本丢更新: 未路由到 data group 的写 (单机, 带 `cluster` feature 的构建里也走 `ClusterDataAdapter`) 在 `ClusterBatchWaitHandle::wait` 时才落本地引擎, 而 `enqueue_chain` 以 `enqueue_batch` 返回为同 key 写的顺序点, 两个脚本的写按 `wait` 先后落盘时旧值会覆盖新值 (`-c 50` 同 key 计数 20000 次约 3/8 轮丢 100+ 条). 现在 `enqueue_batch` 内完成本地写.

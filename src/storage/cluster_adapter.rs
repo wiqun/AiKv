@@ -487,6 +487,16 @@ impl StorageAdapter for ClusterDataAdapter {
         }
     }
 
+    fn write_batch_sync(&self, batch: Vec<AdapterWriteOp>) -> Result<()> {
+        // 只在集群未启用时可用 (脚本独占时的同步落盘); 集群启用后写必须经 Raft.
+        if CLUSTER_STATE_MGR.get().is_some() {
+            return Err(Error::Storage(
+                "sync write_batch not supported in cluster mode".into(),
+            ));
+        }
+        self.local.write_batch_sync(batch)
+    }
+
     fn get_bytes_sync(&self, key: Vec<u8>) -> Result<Option<bytes::Bytes>> {
         match Self::route_read(&key)? {
             Some((mgr, ReadRoute::Single(gid))) => mgr
@@ -911,6 +921,10 @@ impl StorageAdapter for ClusterDataAdapter {
 
     fn local_script_commit(&self) -> bool {
         false
+    }
+
+    fn local_script_commit_when_idle(&self) -> bool {
+        CLUSTER_STATE_MGR.get().is_none() && self.local.local_script_commit()
     }
 
     fn approximate_memory_bytes(&self) -> Option<u64> {

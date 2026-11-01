@@ -165,3 +165,81 @@ async fn standalone_script_writes_work_through_the_cluster_adapter_stack() {
         .unwrap();
     assert_eq!(got, RespValue::BulkString(Some(Bytes::from_static(b"3"))));
 }
+
+/// 集群未启用 (单机) 时, 脚本独占执行可以在脚本线程内同步落盘, 与普通构建一致.
+#[tokio::test]
+async fn standalone_cluster_adapter_offers_idle_sync_script_commit() {
+    use aikv::storage::cluster_adapter::ClusterDataAdapter;
+    use aikv::storage::{AdapterWriteOp, AiDbEngine, StorageAdapter};
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let engine = AiDbEngine::open_for_testing(dir.path()).unwrap();
+    let adapter = ClusterDataAdapter::new(engine, ClusterDataAdapter::DEFAULT_EAGER_FLUSH);
+    assert!(!adapter.local_script_commit(), "并发时仍走异步入队");
+    assert!(adapter.local_script_commit_when_idle());
+    adapter
+        .write_batch_sync(vec![AdapterWriteOp::Put {
+            key: b"k".to_vec(),
+            value: b"v".to_vec(),
+        }])
+        .expect("单机时同步写必须可用");
+    assert_eq!(
+        adapter.get_sync(b"k".to_vec()).unwrap().as_deref(),
+        Some(b"v".as_ref())
+    );
+}
+
+/// 独占 (同步落盘) 与并发 (异步入队) 两条路径混合时, 同 key 读改写不能丢更新.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mixed_sync_and_async_script_commits_do_not_lose_updates() {
+    use aikv::command::CommandRouter;
+    use aikv::protocol::RespValue;
+    use aikv::storage::cluster_adapter::ClusterDataAdapter;
+    use aikv::storage::{AiDbEngine, KvStorageAdapter, StorageAdapter};
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let engine = AiDbEngine::open_for_testing(dir.path()).unwrap();
+    let local: Arc<dyn StorageAdapter> = engine;
+    let adapter: Arc<dyn StorageAdapter> =
+        ClusterDataAdapter::new(local, ClusterDataAdapter::DEFAULT_EAGER_FLUSH);
+    let storage = KvStorageAdapter::open(adapter, None).await.unwrap();
+    let router = Arc::new(CommandRouter::new(storage));
+    let script = Bytes::from_static(
+        b"local n=tonumber(redis.call('get',KEYS[1])) or 0; redis.call('set',KEYS[1],n+1); return n",
+    );
+
+    // 先独占地跑几条 (同步路径), 再 16 个并发任务 (异步路径), 中间穿插独占与并发的切换.
+    for round in 0..4 {
+        for _ in 0..10 {
+            let mut db = 0;
+            let args = [script.clone(), Bytes::from_static(b"1"), Bytes::from_static(b"hot")];
+            router.execute("EVAL", &args, &mut db).await.unwrap();
+        }
+        let mut tasks = Vec::new();
+        for _ in 0..16 {
+            let router = Arc::clone(&router);
+            let script = script.clone();
+            tasks.push(tokio::spawn(async move {
+                for _ in 0..25 {
+                    let mut db = 0;
+                    let args = [script.clone(), Bytes::from_static(b"1"), Bytes::from_static(b"hot")];
+                    router.execute("EVAL", &args, &mut db).await.unwrap();
+                }
+            }));
+        }
+        for t in tasks {
+            t.await.unwrap();
+        }
+        let _ = round;
+    }
+    let mut db = 0;
+    let got = router
+        .execute("GET", &[Bytes::from_static(b"hot")], &mut db)
+        .await
+        .unwrap();
+    let expect = 4 * (10 + 16 * 25);
+    assert_eq!(
+        got,
+        RespValue::BulkString(Some(Bytes::from(expect.to_string())))
+    );
+}

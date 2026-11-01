@@ -382,6 +382,12 @@ pub trait KvStorage: Send + Sync {
         true
     }
 
+    /// 仅在没有其他脚本执行时才可用的同步落盘 (单机的 `ClusterDataAdapter`): 并发时同步写会占住
+    /// 有限的 tokio worker, 让异步入队的并行度更好; 独占时省掉入队与线程切换.
+    fn local_script_commit_when_idle(&self) -> bool {
+        false
+    }
+
     /// 脚本线程上的同步存储. 实现必须不调用 `spawn_blocking`.
     fn script_io(&self) -> &dyn crate::storage::script_io::ScriptIo;
 

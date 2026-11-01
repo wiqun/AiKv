@@ -231,6 +231,12 @@ pub trait StorageAdapter: Send + Sync {
         true
     }
 
+    /// 仅在没有其他脚本执行时才可用的同步落盘 (单机的 `ClusterDataAdapter`): 并发时同步写会占住
+    /// 有限的 tokio worker, 让异步入队的并行度更好; 独占时省掉入队与线程切换.
+    fn local_script_commit_when_idle(&self) -> bool {
+        false
+    }
+
     /// 近似进程内热数据内存 (字节); 仅持久化引擎实现.
     fn approximate_memory_bytes(&self) -> Option<u64> {
         None
@@ -1204,6 +1210,10 @@ impl KvStorage for KvStorageAdapter {
 
     fn local_script_commit(&self) -> bool {
         self.storage.local_script_commit()
+    }
+
+    fn local_script_commit_when_idle(&self) -> bool {
+        self.storage.local_script_commit_when_idle()
     }
 
     async fn flush_engine(&self) -> Result<()> {

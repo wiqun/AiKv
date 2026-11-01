@@ -4,6 +4,7 @@
 //! 集群先把写放进在途缓冲再放开 key 锁, 入队在锁外按 key 排队, Raft 确认仍在其后.
 //! 脚本内写进 `ScriptTransaction`, 成功才一次提交. EVAL 不写入 SCRIPT 缓存.
 
+mod active;
 mod cache;
 mod call_stats;
 mod commit;
@@ -299,6 +300,7 @@ pub struct ScriptCommands {
     enqueue_chain: enqueue_chain::EnqueueChain,
     pool: pool::ScriptWorkerPool,
     router: route::ScriptRouter,
+    active: active::ActiveScripts,
 }
 
 impl ScriptCommands {
@@ -332,6 +334,7 @@ impl ScriptCommands {
             enqueue_chain: enqueue_chain::EnqueueChain::new(),
             pool: pool::ScriptWorkerPool::new(threads),
             router: route::ScriptRouter::from_env(),
+            active: active::ActiveScripts::default(),
         }
     }
 
@@ -457,6 +460,7 @@ impl ScriptCommands {
         db: usize,
     ) -> Result<RespValue> {
         let (seg_id, slot_idx) = SEG_TRACKER.on_start();
+        let (_active, alone) = self.active.enter();
         let t_start = Instant::now();
         let key_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_ref()).collect();
         let should_lock = !keys.is_empty();
@@ -482,7 +486,10 @@ impl ScriptCommands {
             script: script.to_string(),
             keys: keys.to_vec(),
             argv: argv.to_vec(),
-            local_commit: self.storage.local_script_commit(),
+            local_commit: self.storage.local_script_commit()
+                || (alone
+                    && self.in_flight.is_empty()
+                    && self.storage.local_script_commit_when_idle()),
             seg_id,
             slot_idx,
         };
