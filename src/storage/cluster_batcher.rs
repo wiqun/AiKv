@@ -19,7 +19,6 @@ use crate::storage::types::BatchWriteHandle;
 
 const SET_BATCH_MAX_OPS: usize = 512;
 const ADAPTIVE_BATCH_TARGET_OPS: usize = 32;
-const MAX_CONCURRENT_PROPOSALS: usize = 16;
 
 struct BatcherPerfSampler {
     batches: AtomicU64,
@@ -438,22 +437,13 @@ pub(super) async fn run_set_batcher(
     mut rx: mpsc::Receiver<WriteBatchItem>,
     _eager_flush: usize,
 ) {
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_PROPOSALS));
-
+    // 同一 data group 同一时刻只有一个提案在途 (group commit): 提案按批次顺序进入 Raft, 同 key 先后两批
+    // 不会被并发的提案任务颠倒顺序 (`enqueue_chain` / 流水线都以入队顺序为准); 等上一个提案提交期间到达的
+    // 写会一起并进下一批.
     while let Some(first) = rx.recv().await {
         let t_start = Instant::now();
         let items = collect_batch_items(&mut rx, first).await;
-
-        let permit = match semaphore.clone().acquire_owned().await {
-            Ok(p) => p,
-            Err(_) => break,
-        };
-
-        let mgr_c = Arc::clone(&mgr);
-        tokio::spawn(async move {
-            let _permit = permit;
-            dispatch_batch(&mgr_c, gid, items, t_start).await;
-        });
+        dispatch_batch(&mgr, gid, items, t_start).await;
     }
 }
 
