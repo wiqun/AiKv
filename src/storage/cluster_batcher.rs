@@ -236,7 +236,6 @@ impl ClusterBatchSlots {
 
 pub struct ClusterBatchWaitHandle {
     slots: Vec<ClusterBatchSlots>,
-    by_mig: Vec<(Arc<ClusterStateManager>, u64, u64, ThinWriteBatch)>,
 }
 
 #[async_trait::async_trait]
@@ -244,15 +243,6 @@ impl BatchWriteHandle for ClusterBatchWaitHandle {
     async fn wait(self: Box<Self>) -> Result<()> {
         for slot in self.slots {
             slot.wait().await?;
-        }
-        for (mgr, gid, epoch, ops) in self.by_mig {
-            let resp = ClusterDataAdapter::propose_group_with_retry(
-                &mgr,
-                gid,
-                Request::MigrationWrite { epoch, ops },
-            )
-            .await?;
-            ClusterDataAdapter::check_response(resp)?;
         }
         Ok(())
     }
@@ -281,22 +271,25 @@ pub(super) async fn enqueue_cluster_batch(
         slots.push(slot);
     }
 
-    let mut mig_batches = Vec::with_capacity(by_mig.len());
+    // 迁移期的写同样在入队时就 propose (顺序点同上); 迁移窗口很短, 这几笔写不参与流水线的延迟确认.
     for (gid, (mgr, epoch, items)) in by_mig {
-        let mut tb = ThinWriteBatch::new();
+        let mut ops = ThinWriteBatch::new();
         for (key, value) in items {
             match value {
-                Some(v) => tb.put(key, v),
-                None => tb.delete(key),
+                Some(v) => ops.put(key, v),
+                None => ops.delete(key),
             }
         }
-        mig_batches.push((mgr, gid, epoch, tb));
+        let resp = ClusterDataAdapter::propose_group_with_retry(
+            &mgr,
+            gid,
+            Request::MigrationWrite { epoch, ops },
+        )
+        .await?;
+        ClusterDataAdapter::check_response(resp)?;
     }
 
-    Ok(Box::new(ClusterBatchWaitHandle {
-        slots,
-        by_mig: mig_batches,
-    }))
+    Ok(Box::new(ClusterBatchWaitHandle { slots }))
 }
 
 type GidBatches = HashMap<u64, (Arc<ClusterStateManager>, Vec<(Vec<u8>, Option<Vec<u8>>)>)>;
