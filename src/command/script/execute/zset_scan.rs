@@ -388,7 +388,7 @@ mod tests {
             mlua::Value::Integer(3),
         ]);
         let loads = THREAD_LOAD_CALLS.with(|c| c.get());
-        let value = super::super::try_fast_path(&lua, io, &mut txn, &declared, &args, true)
+        let value = super::super::try_fast_path(&lua, io, &mut txn, &declared, &args, true, false)
             .unwrap()
             .expect("header zset is handled");
         let mlua::Value::Table(table) = value else {
@@ -433,7 +433,7 @@ mod tests {
             mlua::Value::String(lua.create_string("WITHSCORES").unwrap()),
         ]);
         assert!(
-            super::super::try_fast_path(&lua, io, &mut txn, &declared, &withscores, true)
+            super::super::try_fast_path(&lua, io, &mut txn, &declared, &withscores, true, false)
                 .unwrap()
                 .is_none()
         );
@@ -456,7 +456,7 @@ mod tests {
             mlua::Value::String(lua.create_string("3").unwrap()),
         ]);
         assert!(
-            super::super::try_fast_path(&lua, io, &mut txn, &declared, &plain, true)
+            super::super::try_fast_path(&lua, io, &mut txn, &declared, &plain, true, false)
                 .unwrap()
                 .is_none()
         );

@@ -39,6 +39,7 @@ pub fn try_fast_path(
     declared: &DeclaredKeys,
     args: &mlua::MultiValue,
     throw_error: bool,
+    read_only: bool,
 ) -> mlua::Result<Option<mlua::Value>> {
     let Some(first_arg) = args.front() else {
         return Ok(None);
@@ -52,6 +53,9 @@ pub fn try_fast_path(
     if cmd.eq_ignore_ascii_case(b"GET") {
         fast_get(lua, storage, txn, declared, args, throw_error)
     } else if cmd.eq_ignore_ascii_case(b"SET") {
+        if read_only {
+            return write_rejected(lua, throw_error);
+        }
         fast_set(lua, txn, declared, args, throw_error)
     } else if cmd.eq_ignore_ascii_case(b"ZCARD") {
         fast_zcard(lua, storage, txn, declared, args, throw_error)
@@ -60,17 +64,35 @@ pub fn try_fast_path(
     } else if cmd.eq_ignore_ascii_case(b"HGET") {
         fast_hget(lua, storage, txn, declared, args, throw_error)
     } else if cmd.eq_ignore_ascii_case(b"HSET") {
+        if read_only {
+            return write_rejected(lua, throw_error);
+        }
         fast_hset(lua, storage, txn, declared, args, throw_error)
     } else if cmd.eq_ignore_ascii_case(b"HDEL") {
+        if read_only {
+            return write_rejected(lua, throw_error);
+        }
         fast_hdel(lua, storage, txn, declared, args, throw_error)
     } else if cmd.eq_ignore_ascii_case(b"ZSCORE") {
         fast_zscore(lua, storage, txn, declared, args, throw_error)
     } else if cmd.eq_ignore_ascii_case(b"ZREM") {
+        if read_only {
+            return write_rejected(lua, throw_error);
+        }
         fast_zrem(lua, storage, txn, declared, args, throw_error)
     } else if cmd.eq_ignore_ascii_case(b"ZRANGEBYSCORE") {
         fast_zrangebyscore(lua, storage, txn, declared, args, throw_error)
     } else {
         Ok(None)
+    }
+}
+
+fn write_rejected(lua: &mlua::Lua, throw_error: bool) -> mlua::Result<Option<mlua::Value>> {
+    let msg = "ERR Write commands not allowed in read-only script";
+    if throw_error {
+        Err(mlua::Error::RuntimeError(msg.to_string()))
+    } else {
+        pcall_error_table(lua, msg).map(Some)
     }
 }
 

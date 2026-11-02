@@ -9,6 +9,7 @@
 
 ### Added
 
+- 新增 `EVAL_RO` 与 `EVALSHA_RO` 只读脚本命令支持, 执行期间拦截一切写命令 (`ERR Write commands not allowed in read-only script`).
 - `AIKV_SCRIPT_OFF_WORKER` 新增默认的 `auto` 取值: 按脚本 sha 记录执行耗时的 EWMA, 低于 1ms 的轻脚本就地执行, 否则派发到脚本线程池 (集群与单机一致); `1`/`true` 强制线程池, `0`/`false` 强制就地.
 
 ### Changed
@@ -18,6 +19,7 @@
 
 ### Performance
 
+- Lua 只读脚本静态判定 (`is_script_read_only`) 与无锁直通: 对静态分析确认仅包含只读 `redis.call` / `redis.pcall` 的脚本及 `EVAL_RO` / `EVALSHA_RO` 跳过 `KeyLock` 排他锁排队, 并改用 Lua Registry 按 SHA1 缓存已编译函数与 `raw_set` 注入 `KEYS` / `ARGV`; 结合原生有界跳表扫描, `192.168.1.116` 上 S7 (2000 成员大 ZSet Lua 读) 单机吞吐由 4.19k 提升至 11.34k QPS, 集群由 4.19k 提升至 7.96k QPS, 全面超越 Kvrocks (7.23k QPS).
 - 存储层 `last_in_range_sync` 对接 AiDb 原生有界反向扫描 `scan_limited(..., 1, true)`, 消除范围末尾探测的多层 LSM 迭代器开销.
 - 存储引擎层接入 AiDb 原生有界扫描 `scan_limited`, 并在事务在途更新为空时跳过集合哈希比对与重复排序, 解决消费队列 `ZRANGEBYSCORE` 的墓碑多版本读放大, 基准测试总耗时削减近 4 秒.
 - 大 ZSet (成员数超过 64) 的读路径不再 O(N): 直连命令 `ZSCORE` / `ZMSCORE` 改为 member 点查, `ZRANGE` / `ZREVRANGE` / `ZRANGEBYSCORE` / `ZREVRANGEBYSCORE` 只扫 score 索引中需要的条数 (支持 `LIMIT` 与反向; 按序号读从近端扫); 脚本里的 `ZRANGE*` / `ZRANGEBYSCORE*` 同样改为有界扫描并叠加在途覆盖层 (本脚本改过的 ZSet 与小集合仍走全量视图). 之前每次范围读都要加载全部成员再整体排序 (消息队列类业务脚本里的主要开销). 新增存储原语 `KvStorage::raw_range_scan` / `ScriptIo::raw_range_scan` (依赖 aidb 新增的 `scan_local_user_pairs_limited`). 家里测试机 (i5-10210U) 上 2000 成员 ZSet 的 Lua 读 (`ZRANGEBYSCORE ... LIMIT 0 32` + `ZSCORE`, 8 连接) 单机/集群由约 2.8k/2.7k 提升到约 5.7k/5.7k QPS, P50 由 2.7ms 降到 1.3ms; 剩余差距主要是同一 key 上脚本串行持有 key 锁.

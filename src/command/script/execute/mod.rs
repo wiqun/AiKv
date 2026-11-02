@@ -150,8 +150,11 @@ pub fn redis_call(
     declared: &DeclaredKeys,
     args: mlua::MultiValue,
     throw_error: bool,
+    read_only: bool,
 ) -> mlua::Result<mlua::Value> {
-    if let Some(fast_val) = try_fast_path(lua, storage, txn, declared, &args, throw_error)? {
+    if let Some(fast_val) =
+        try_fast_path(lua, storage, txn, declared, &args, throw_error, read_only)?
+    {
         return Ok(fast_val);
     }
     let mut prep = super::call_stats::CallTimer::start(super::call_stats::ScriptCallOp::Prep);
@@ -162,6 +165,13 @@ pub fn redis_call(
     let mut cmd_owned = String::new();
     let command = ascii_command(cmd_args[0].as_ref(), &mut cmd_buf, &mut cmd_owned);
     let command_args = &cmd_args[1..];
+    if read_only && !crate::command::registry::is_readonly_command(command) {
+        let msg = "ERR Write commands not allowed in read-only script";
+        if throw_error {
+            return Err(mlua::Error::RuntimeError(msg.to_string()));
+        }
+        return pcall_error_table(lua, msg);
+    }
     if let Err(e) = validate_keys(declared, command, command_args) {
         if throw_error {
             return Err(mlua::Error::RuntimeError(e.to_string()));
@@ -641,7 +651,7 @@ mod tests {
             mlua::Value::String(lua.create_string("k1").unwrap()),
             mlua::Value::String(lua.create_string("v1").unwrap()),
         ]);
-        let res = try_fast_path(&lua, &io, &mut txn, &declared, &set_args, true).unwrap();
+        let res = try_fast_path(&lua, &io, &mut txn, &declared, &set_args, true, false).unwrap();
         assert!(res.is_some(), "SET should be handled by fast_path");
         let val = res.unwrap();
         assert_eq!(val.as_string().unwrap().to_str().unwrap(), "OK");
@@ -651,7 +661,7 @@ mod tests {
             mlua::Value::String(lua.create_string("get").unwrap()),
             mlua::Value::String(lua.create_string("k1").unwrap()),
         ]);
-        let res = try_fast_path(&lua, &io, &mut txn, &declared, &get_args, true).unwrap();
+        let res = try_fast_path(&lua, &io, &mut txn, &declared, &get_args, true, false).unwrap();
         assert!(res.is_some(), "GET should be handled by fast_path");
         let val = res.unwrap();
         assert_eq!(val.as_string().unwrap().to_str().unwrap(), "v1");
@@ -664,7 +674,7 @@ mod tests {
             mlua::Value::String(lua.create_string("EX").unwrap()),
             mlua::Value::Integer(10),
         ]);
-        let res = try_fast_path(&lua, &io, &mut txn, &declared, &set_opt_args, true).unwrap();
+        let res = try_fast_path(&lua, &io, &mut txn, &declared, &set_opt_args, true, false).unwrap();
         assert!(
             res.is_none(),
             "SET with options should fallback to generic path"
@@ -675,7 +685,7 @@ mod tests {
             mlua::Value::String(lua.create_string("get").unwrap()),
             mlua::Value::String(lua.create_string("k2").unwrap()),
         ]);
-        let err = try_fast_path(&lua, &io, &mut txn, &declared, &get_k2, true);
+        let err = try_fast_path(&lua, &io, &mut txn, &declared, &get_k2, true, false);
         assert!(err.is_err(), "undeclared key must error");
     }
 }

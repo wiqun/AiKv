@@ -47,6 +47,7 @@ pub(super) struct ScriptJob {
     pub(super) local_commit: bool,
     pub(super) seg_id: usize,
     pub(super) slot_idx: usize,
+    pub(super) read_only: bool,
 }
 
 impl ScriptJob {
@@ -65,7 +66,9 @@ fn drive_script_body(job: ScriptJob) -> ScriptDrive {
         Ok(parts) => parts,
         Err(err) => return failed_drive(job.lua, err, t_entered),
     };
-    let pending = if job.local_commit {
+    let pending = if job.read_only {
+        None
+    } else if job.local_commit {
         if let Err(err) = commit_local_batch(&job, batch_ops) {
             return failed_drive(job.lua, err, t_entered);
         }
@@ -102,6 +105,7 @@ fn prepare_script(lua: &mlua::Lua, job: &ScriptJob) -> Result<PreparedScript> {
         script: &job.script,
         keys: &job.keys,
         argv: &job.argv,
+        read_only: job.read_only,
     };
     let (value, txn) = ScriptCommands::eval_lua_func(lua, job.timeout, &args, txn, declared)?;
     let t_lua_done = Instant::now();

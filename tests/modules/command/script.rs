@@ -1213,3 +1213,58 @@ async fn eval_bitfield_is_callable() {
         RespValue::BulkString(Some(Bytes::from(vec![255])))
     );
 }
+
+#[tokio::test]
+async fn test_eval_ro_and_evalsha_ro() {
+    let r = router();
+    let mut db = 0;
+    r.execute("SET", &[b("ro_key"), b("hello")], &mut db)
+        .await
+        .unwrap();
+
+    // EVAL_RO 读取成功
+    let read_script = "return redis.call('GET', KEYS[1])";
+    let resp = r
+        .execute("EVAL_RO", &[b(read_script), b("1"), b("ro_key")], &mut db)
+        .await
+        .unwrap();
+    assert_eq!(resp, RespValue::BulkString(Some(b("hello"))));
+
+    // EVAL_RO 尝试写入被拦截 (fast path SET)
+    let write_script = "redis.call('SET', KEYS[1], 'new'); return 1";
+    let err = r
+        .execute(
+            "EVAL_RO",
+            &[b(write_script), b("1"), b("ro_key")],
+            &mut db,
+        )
+        .await
+        .unwrap_err();
+    assert_err_contains(err, "Write commands not allowed in read-only script");
+
+    // SCRIPT LOAD + EVALSHA_RO
+    let load_resp = r
+        .execute("SCRIPT", &[b("LOAD"), b(read_script)], &mut db)
+        .await
+        .unwrap();
+    let RespValue::BulkString(Some(sha1)) = load_resp else {
+        panic!("expected sha1 bulk string");
+    };
+    let sha_resp = r
+        .execute(
+            "EVALSHA_RO",
+            &[sha1.clone(), b("1"), b("ro_key")],
+            &mut db,
+        )
+        .await
+        .unwrap();
+    assert_eq!(sha_resp, RespValue::BulkString(Some(b("hello"))));
+
+    // 普通 EVAL 静态分析为只读时不锁 key
+    let s7_script = "local v = redis.call('GET', KEYS[1]); return v";
+    let eval_resp = r
+        .execute("EVAL", &[b(s7_script), b("1"), b("ro_key")], &mut db)
+        .await
+        .unwrap();
+    assert_eq!(eval_resp, RespValue::BulkString(Some(b("hello"))));
+}

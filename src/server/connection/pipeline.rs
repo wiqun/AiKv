@@ -201,7 +201,7 @@ enum DeferKind {
 fn defer_kind(cmd: &str, args: &[Bytes]) -> Option<DeferKind> {
     match cmd {
         "SET" if args.len() == 2 => Some(DeferKind::PlainSet),
-        "EVAL" | "EVALSHA" => Some(DeferKind::Script),
+        "EVAL" | "EVALSHA" | "EVAL_RO" | "EVALSHA_RO" => Some(DeferKind::Script),
         _ => None,
     }
 }

@@ -268,6 +268,7 @@ mod tests {
             &declared,
             call_args(&lua, &["SET", "k", "v"]),
             true,
+            false,
         )
         .unwrap();
         redis_call(
@@ -277,6 +278,7 @@ mod tests {
             &declared,
             call_args(&lua, &["GET", "k"]),
             true,
+            false,
         )
         .unwrap();
         redis_call(
@@ -286,6 +288,7 @@ mod tests {
             &declared,
             call_args(&lua, &["ZADD", "z", "1", "m"]),
             true,
+            false,
         )
         .unwrap();
         redis_call(
@@ -295,6 +298,7 @@ mod tests {
             &declared,
             call_args(&lua, &["ZREVRANGEBYSCORE", "z", "+inf", "-inf"]),
             true,
+            false,
         )
         .unwrap();
         redis_call(
@@ -304,6 +308,7 @@ mod tests {
             &declared,
             call_args(&lua, &["ZCARD", "z"]),
             true,
+            false,
         )
         .unwrap();
         let failed = redis_call(
@@ -313,6 +318,7 @@ mod tests {
             &declared,
             call_args(&lua, &["HGET"]),
             true,
+            false,
         );
         assert!(failed.is_err());
         let stats = take_script_call_stats();

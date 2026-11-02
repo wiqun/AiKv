@@ -97,6 +97,8 @@ static COMMAND_TABLE: &[CommandInfo] = &[
     // Lua
     cmd!("EVAL", -3, &["write", "denyoom", "noscript"], 2, 2, 1),
     cmd!("EVALSHA", -3, &["write", "denyoom", "noscript"], 2, 2, 1),
+    cmd!("EVAL_RO", -3, &["readonly", "noscript"], 2, 2, 1),
+    cmd!("EVALSHA_RO", -3, &["readonly", "noscript"], 2, 2, 1),
     cmd!("SCRIPT", -2, &["write", "noscript"], 0, 0, 0),
     // Hash
     cmd!("HSET", -4, &["write", "denyoom", "fast"], 1, 1, 1),
@@ -313,9 +315,13 @@ pub fn key_indices(info: &CommandInfo, argc: usize) -> Vec<usize> {
     out
 }
 
+pub fn is_readonly_command(name: &str) -> bool {
+    lookup(name).is_some_and(|info| info.flags.contains(&"readonly"))
+}
+
 pub fn command_keys<'a>(cmd: &str, args: &'a [Bytes]) -> Vec<&'a [u8]> {
     match cmd.to_ascii_uppercase().as_str() {
-        "EVAL" | "EVALSHA" => counted_keys(args, 1, 2),
+        "EVAL" | "EVALSHA" | "EVAL_RO" | "EVALSHA_RO" => counted_keys(args, 1, 2),
         "ZINTER" | "ZUNION" | "ZDIFF" => counted_keys(args, 0, 1),
         "SINTERCARD" => counted_keys(args, 0, 1),
         "ZINTERSTORE" | "ZUNIONSTORE" | "ZDIFFSTORE" => {

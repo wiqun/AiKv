@@ -55,6 +55,7 @@ const MAX_IDLE_VMS: usize = 64;
 struct ScriptExecutionContext {
     txn: RefCell<ScriptTransaction>,
     declared: Arc<DeclaredKeys>,
+    read_only: bool,
 }
 
 struct ScriptArgs<'a> {
@@ -62,6 +63,7 @@ struct ScriptArgs<'a> {
     script: &'a str,
     keys: &'a [Bytes],
     argv: &'a [Bytes],
+    read_only: bool,
 }
 
 struct ScriptPerfSampler {
@@ -383,8 +385,11 @@ impl ScriptCommands {
         let script = String::from_utf8_lossy(&args[0]).into_owned();
         let sha1 = Self::sha1(&script);
         self.cache.insert(sha1.clone(), script.clone());
+        let read_only = self.cache.is_read_only(&sha1);
         let (keys, argv) = parse_keys_argv(args)?;
-        let result = self.execute_script(&sha1, &script, &keys, &argv, db).await;
+        let result = self
+            .execute_script(&sha1, &script, &keys, &argv, db, read_only)
+            .await;
         self.record("eval", result.is_ok());
         result
     }
@@ -396,9 +401,40 @@ impl ScriptCommands {
             .cache
             .get(&sha1)
             .ok_or_else(|| Error::Command("NOSCRIPT No matching script. Use EVAL.".into()))?;
+        let read_only = self.cache.is_read_only(&sha1);
         let (keys, argv) = parse_keys_argv(args)?;
-        let result = self.execute_script(&sha1, &script, &keys, &argv, db).await;
+        let result = self
+            .execute_script(&sha1, &script, &keys, &argv, db, read_only)
+            .await;
         self.record("evalsha", result.is_ok());
+        result
+    }
+
+    pub async fn eval_ro(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
+        router::require_min_args("EVAL_RO", args, 2)?;
+        let script = String::from_utf8_lossy(&args[0]).into_owned();
+        let sha1 = Self::sha1(&script);
+        self.cache.insert(sha1.clone(), script.clone());
+        let (keys, argv) = parse_keys_argv(args)?;
+        let result = self
+            .execute_script(&sha1, &script, &keys, &argv, db, true)
+            .await;
+        self.record("eval_ro", result.is_ok());
+        result
+    }
+
+    pub async fn evalsha_ro(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
+        router::require_min_args("EVALSHA_RO", args, 2)?;
+        let sha1 = String::from_utf8_lossy(&args[0]).to_string();
+        let script = self
+            .cache
+            .get(&sha1)
+            .ok_or_else(|| Error::Command("NOSCRIPT No matching script. Use EVAL.".into()))?;
+        let (keys, argv) = parse_keys_argv(args)?;
+        let result = self
+            .execute_script(&sha1, &script, &keys, &argv, db, true)
+            .await;
+        self.record("evalsha_ro", result.is_ok());
         result
     }
 
@@ -458,12 +494,13 @@ impl ScriptCommands {
         keys: &[Bytes],
         argv: &[Bytes],
         db: usize,
+        read_only: bool,
     ) -> Result<RespValue> {
         let (seg_id, slot_idx) = SEG_TRACKER.on_start();
         let (_active, alone) = self.active.enter();
         let t_start = Instant::now();
         let key_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_ref()).collect();
-        let should_lock = !keys.is_empty();
+        let should_lock = !keys.is_empty() && !read_only;
         let _guard = if should_lock {
             Some(
                 self.key_lock
@@ -492,6 +529,7 @@ impl ScriptCommands {
                     && self.storage.local_script_commit_when_idle()),
             seg_id,
             slot_idx,
+            read_only,
         };
         let use_pool = self.router.use_pool(sha1);
         let drive = self.drive_script(job, use_pool).await?;
@@ -652,17 +690,14 @@ fn prepare_lua_call(
         },
     );
 
-    let func_name = format!("__aikv_script_{}", args.sha1);
-    let globals = lua.globals();
-    let func: mlua::Function = match globals.get(func_name.as_str()) {
+    let func: mlua::Function = match lua.named_registry_value(args.sha1) {
         Ok(f) => f,
         Err(_) => {
             let f: mlua::Function = lua
                 .load(args.script)
                 .into_function()
                 .map_err(|e| Error::Command(format!("ERR Error compiling script: {e}")))?;
-            globals
-                .set(func_name.as_str(), f.clone())
+            lua.set_named_registry_value(args.sha1, f.clone())
                 .map_err(|e| Error::Command(format!("ERR Error saving script: {e}")))?;
             f
         }
@@ -672,6 +707,7 @@ fn prepare_lua_call(
     lua.set_app_data(ScriptExecutionContext {
         txn: RefCell::new(txn),
         declared,
+        read_only: args.read_only,
     });
     Ok(func)
 }
@@ -692,13 +728,13 @@ fn lua_redis_entry(
     throw_error: bool,
 ) -> Result<mlua::Function> {
     lua.create_function(move |lua, args: MultiValue| {
-        let declared = {
+        let (declared, read_only) = {
             let ctx = lua
                 .app_data_ref::<ScriptExecutionContext>()
                 .ok_or_else(|| {
                     mlua::Error::RuntimeError("ERR missing script execution context".into())
                 })?;
-            Arc::clone(&ctx.declared)
+            (Arc::clone(&ctx.declared), ctx.read_only)
         };
         let ctx = lua
             .app_data_mut::<ScriptExecutionContext>()
@@ -713,6 +749,7 @@ fn lua_redis_entry(
             declared.as_ref(),
             args,
             throw_error,
+            read_only,
         )
     })
     .map_err(|e| Error::Command(format!("ERR {e}")))
@@ -729,10 +766,10 @@ fn create_sandbox_vm(storage: Arc<dyn KvStorage>, memory_limit: usize) -> Result
 fn clear_keys_argv(lua: &mlua::Lua) -> Result<()> {
     let globals = lua.globals();
     globals
-        .set("KEYS", mlua::Value::Nil)
+        .raw_set("KEYS", mlua::Value::Nil)
         .map_err(|e| Error::Command(format!("ERR {e}")))?;
     globals
-        .set("ARGV", mlua::Value::Nil)
+        .raw_set("ARGV", mlua::Value::Nil)
         .map_err(|e| Error::Command(format!("ERR {e}")))?;
     Ok(())
 }
@@ -761,11 +798,11 @@ fn populate_keys_argv(lua: &mlua::Lua, keys: &[Bytes], argv: &[Bytes]) -> Result
             .create_string(k.as_ref())
             .map_err(|e| Error::Command(format!("ERR {e}")))?;
         keys_table
-            .set(i + 1, s)
+            .raw_set(i + 1, s)
             .map_err(|e| Error::Command(format!("ERR {e}")))?;
     }
     globals
-        .set("KEYS", keys_table)
+        .raw_set("KEYS", keys_table)
         .map_err(|e| Error::Command(format!("ERR {e}")))?;
 
     let argv_table = lua
@@ -776,11 +813,11 @@ fn populate_keys_argv(lua: &mlua::Lua, keys: &[Bytes], argv: &[Bytes]) -> Result
             .create_string(a.as_ref())
             .map_err(|e| Error::Command(format!("ERR {e}")))?;
         argv_table
-            .set(i + 1, s)
+            .raw_set(i + 1, s)
             .map_err(|e| Error::Command(format!("ERR {e}")))?;
     }
     globals
-        .set("ARGV", argv_table)
+        .raw_set("ARGV", argv_table)
         .map_err(|e| Error::Command(format!("ERR {e}")))?;
     Ok(())
 }
