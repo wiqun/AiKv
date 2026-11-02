@@ -127,7 +127,6 @@ pub fn replace_ops(
     map: &BTreeMap<Vec<u8>, f64>,
     expires_at: Option<u64>,
 ) -> Vec<(Vec<u8>, WriteOp)> {
-    invalidate_cached_members(db, user_key);
     let encoded = AiDbEngine::encode_key(db, user_key);
     let mut ops = Vec::with_capacity(1 + map.len() * 2);
     ops.push((
@@ -138,10 +137,16 @@ pub fn replace_ops(
     let mut max_k: Option<Vec<u8>> = None;
     for (member, score) in map {
         let sk = score_key(&encoded, *score, member);
-        if min_k.as_ref().is_none_or(|cur| sk.as_slice() < cur.as_slice()) {
+        if min_k
+            .as_ref()
+            .is_none_or(|cur| sk.as_slice() < cur.as_slice())
+        {
             min_k = Some(sk.clone());
         }
-        if max_k.as_ref().is_none_or(|cur| sk.as_slice() > cur.as_slice()) {
+        if max_k
+            .as_ref()
+            .is_none_or(|cur| sk.as_slice() > cur.as_slice())
+        {
             max_k = Some(sk);
         }
         push_member_put(&mut ops, &encoded, member, *score);
@@ -333,18 +338,28 @@ fn push_member_put(
     ops.push((score_engine, WriteOp::put_engine(Vec::new())));
 }
 
-type ScoreBoundsPair = (Option<Vec<u8>>, Option<Vec<u8>>);
-type ScoreBoundsMap = std::collections::HashMap<Vec<u8>, ScoreBoundsPair>;
+#[derive(Clone, Default)]
+struct ScoreBoundsEntry {
+    min_k: Option<Vec<u8>>,
+    max_k: Option<Vec<u8>>,
+    version: u64,
+}
+
+type ScoreBoundsSnapshot = (Option<Vec<u8>>, Option<Vec<u8>>, u64);
+type ScoreBoundsMap = std::collections::HashMap<Vec<u8>, ScoreBoundsEntry>;
 
 static SCORE_BOUNDS_HINT: parking_lot::RwLock<Option<ScoreBoundsMap>> =
     parking_lot::RwLock::new(None);
 
-pub fn get_score_bounds_hint(prefix: &[u8]) -> ScoreBoundsPair {
+pub fn get_score_bounds_hint(prefix: &[u8]) -> ScoreBoundsSnapshot {
     let guard = SCORE_BOUNDS_HINT.read();
     guard
         .as_ref()
-        .and_then(|map| map.get(prefix).cloned())
-        .unwrap_or((None, None))
+        .and_then(|map| {
+            map.get(prefix)
+                .map(|e| (e.min_k.clone(), e.max_k.clone(), e.version))
+        })
+        .unwrap_or((None, None, 0))
 }
 
 fn set_score_bounds_hint(prefix: &[u8], min_k: Option<Vec<u8>>, max_k: Option<Vec<u8>>) {
@@ -353,141 +368,95 @@ fn set_score_bounds_hint(prefix: &[u8], min_k: Option<Vec<u8>>, max_k: Option<Ve
     if map.len() >= 1024 && !map.contains_key(prefix) {
         map.clear();
     }
-    map.insert(prefix.to_vec(), (min_k, max_k));
+    let entry = map.entry(prefix.to_vec()).or_default();
+    entry.min_k = min_k;
+    entry.max_k = max_k;
+    entry.version = entry.version.wrapping_add(1);
 }
 
-pub fn advance_min_score_hint(prefix: &[u8], new_min: Vec<u8>) {
+pub fn advance_min_score_hint(prefix: &[u8], new_min: Vec<u8>, expected_version: u64) {
     let mut guard = SCORE_BOUNDS_HINT.write();
     let map = guard.get_or_insert_with(std::collections::HashMap::new);
     if map.len() >= 1024 && !map.contains_key(prefix) {
         map.clear();
     }
-    let entry = map.entry(prefix.to_vec()).or_insert((None, None));
+    let entry = map.entry(prefix.to_vec()).or_default();
+    if entry.version != expected_version {
+        return;
+    }
     if entry
-        .0
+        .min_k
         .as_ref()
         .is_none_or(|cur| new_min.as_slice() > cur.as_slice())
     {
-        entry.0 = Some(new_min);
+        entry.min_k = Some(new_min);
     }
 }
 
-pub fn shrink_max_score_hint(prefix: &[u8], new_max: Vec<u8>) {
+pub fn shrink_max_score_hint(prefix: &[u8], new_max: Vec<u8>, expected_version: u64) {
     let mut guard = SCORE_BOUNDS_HINT.write();
     let map = guard.get_or_insert_with(std::collections::HashMap::new);
     if map.len() >= 1024 && !map.contains_key(prefix) {
         map.clear();
     }
-    let entry = map.entry(prefix.to_vec()).or_insert((None, None));
+    let entry = map.entry(prefix.to_vec()).or_default();
+    if entry.version != expected_version {
+        return;
+    }
     if entry
-        .1
+        .max_k
         .as_ref()
         .is_none_or(|cur| new_max.as_slice() < cur.as_slice())
     {
-        entry.1 = Some(new_max);
+        entry.max_k = Some(new_max);
     }
 }
 
 fn widen_score_bounds_hint(prefix: &[u8], score_engine: &[u8]) {
+    if SCORE_BOUNDS_HINT.read().is_none() {
+        return;
+    }
     let mut guard = SCORE_BOUNDS_HINT.write();
     let Some(map) = guard.as_mut() else { return };
     let Some(entry) = map.get_mut(prefix) else {
         return;
     };
-    if let Some(ref min_k) = entry.0 {
+    let mut widened = false;
+    if let Some(ref min_k) = entry.min_k {
         if score_engine < min_k.as_slice() {
-            entry.0 = Some(score_engine.to_vec());
+            entry.min_k = Some(score_engine.to_vec());
+            widened = true;
         }
     }
-    if let Some(ref max_k) = entry.1 {
+    if let Some(ref max_k) = entry.max_k {
         if score_engine > max_k.as_slice() {
-            entry.1 = Some(score_engine.to_vec());
+            entry.max_k = Some(score_engine.to_vec());
+            widened = true;
         }
+    }
+    if widened {
+        entry.version = entry.version.wrapping_add(1);
     }
 }
 
 pub fn invalidate_score_bounds_hint(db: usize, key: &[u8]) {
+    if SCORE_BOUNDS_HINT.read().is_none() {
+        return;
+    }
     let prefix = score_prefix(&AiDbEngine::encode_key(db, key));
     let mut guard = SCORE_BOUNDS_HINT.write();
     if let Some(map) = guard.as_mut() {
-        map.remove(&prefix);
+        if let Some(entry) = map.get_mut(&prefix) {
+            entry.min_k = None;
+            entry.max_k = None;
+            entry.version = entry.version.wrapping_add(1);
+        }
     }
 }
 
 pub fn clear_score_bounds_hint() {
     let mut guard = SCORE_BOUNDS_HINT.write();
     if let Some(map) = guard.as_mut() {
-        map.clear();
-    }
-}
-
-type CachedMembersMap = std::collections::HashMap<(usize, Vec<u8>), Arc<BTreeMap<Vec<u8>, f64>>>;
-
-static MEMBERS_CACHE: parking_lot::RwLock<Option<CachedMembersMap>> =
-    parking_lot::RwLock::new(None);
-
-pub fn get_cached_members(db: usize, key: &[u8]) -> Option<Arc<BTreeMap<Vec<u8>, f64>>> {
-    let guard = MEMBERS_CACHE.read();
-    guard
-        .as_ref()
-        .and_then(|map| map.get(&(db, key.to_vec())).cloned())
-}
-
-pub fn put_cached_members(db: usize, key: &[u8], members: BTreeMap<Vec<u8>, f64>) {
-    let mut guard = MEMBERS_CACHE.write();
-    let map = guard.get_or_insert_with(std::collections::HashMap::new);
-    if map.len() >= 256 && !map.contains_key(&(db, key.to_vec())) {
-        map.clear();
-    }
-    map.insert((db, key.to_vec()), Arc::new(members));
-}
-
-pub fn apply_cached_delta<'a, I>(db: usize, key: &[u8], changes: I, count: u32)
-where
-    I: IntoIterator<Item = (&'a [u8], Option<f64>)>,
-{
-    let mut guard = MEMBERS_CACHE.write();
-    let Some(map) = guard.as_mut() else { return };
-    let cache_key = (db, key.to_vec());
-    if count == 0 {
-        map.remove(&cache_key);
-        drop(guard);
-        invalidate_score_bounds_hint(db, key);
-        return;
-    }
-    if let Some(entry) = map.get_mut(&cache_key) {
-        let m = Arc::make_mut(entry);
-        for (member, after) in changes {
-            match after {
-                Some(score) => {
-                    m.insert(member.to_vec(), score);
-                }
-                None => {
-                    m.remove(member);
-                }
-            }
-        }
-    }
-}
-
-pub fn invalidate_cached_members(db: usize, key: &[u8]) {
-    let mut guard = MEMBERS_CACHE.write();
-    if let Some(map) = guard.as_mut() {
-        map.remove(&(db, key.to_vec()));
-    }
-    drop(guard);
-    invalidate_score_bounds_hint(db, key);
-}
-
-#[cfg(test)]
-pub fn clear_cached_members() {
-    let mut guard = MEMBERS_CACHE.write();
-    if let Some(map) = guard.as_mut() {
-        map.clear();
-    }
-    drop(guard);
-    let mut b_guard = SCORE_BOUNDS_HINT.write();
-    if let Some(map) = b_guard.as_mut() {
         map.clear();
     }
 }

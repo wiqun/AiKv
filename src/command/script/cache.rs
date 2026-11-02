@@ -57,11 +57,7 @@ impl ScriptCache {
     }
 
     pub fn is_read_only(&self, sha1: &str) -> bool {
-        self.inner
-            .read()
-            .map
-            .get(sha1)
-            .is_some_and(|c| c.read_only)
+        self.inner.read().map.get(sha1).is_some_and(|c| c.read_only)
     }
 
     pub fn exists(&self, sha1: &str) -> bool {
@@ -76,91 +72,161 @@ impl ScriptCache {
 }
 
 /// 静态分析 Lua 脚本是否为只读.
-/// 仅当脚本中所有 `redis.call` / `redis.pcall` 均为静态只读命令时返回 `true`.
-/// 若出现非只读命令, 动态拼接命令或未识别调用, 则保守判定为 `false`.
+/// 仅当脚本中所有 `redis` 访问均为静态只读命令调用时返回 `true`.
+/// 若出现非只读命令, 动态拼接, 别名引用 (`local r = redis`) 或未识别调用, 保守判定为 `false`.
 pub fn is_script_read_only(script: &str) -> bool {
-    let clean = strip_lua_comments(script);
-    let mut idx = 0;
-
-    while let Some(pos) = clean[idx..].find("redis.") {
-        let abs_pos = idx + pos;
-        let rest = &clean[abs_pos + 6..];
-        if rest.starts_with("call") || rest.starts_with("pcall") {
-            let offset = if rest.starts_with("call") { 4 } else { 5 };
-            let call_args = rest[offset..].trim_start();
-            if !call_args.starts_with('(') {
-                return false;
-            }
-            let inner = call_args[1..].trim_start();
-            let Some((cmd_name, _)) = parse_string_literal(inner) else {
+    let bytes = script.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        i = skip_ws_and_comments(bytes, i);
+        if i >= bytes.len() {
+            break;
+        }
+        if bytes[i] == b'"' || bytes[i] == b'\'' {
+            let Some((_, next)) = parse_quoted_string(bytes, i) else {
                 return false;
             };
-            if !crate::command::registry::is_readonly_command(&cmd_name) {
+            i = next;
+        } else if let Some(next) = skip_long_bracket(bytes, i) {
+            i = next;
+        } else if is_ident_start(bytes[i]) {
+            let end = scan_ident_end(bytes, i);
+            let ident = &bytes[i..end];
+            if matches!(ident, b"_G" | b"load" | b"loadstring") {
                 return false;
             }
-            idx = abs_pos + 6 + offset;
-        } else if rest.starts_with("log")
-            || rest.starts_with("sha1hex")
-            || rest.starts_with("status_reply")
-            || rest.starts_with("error_reply")
-        {
-            idx = abs_pos + 6;
+            if ident == b"redis" {
+                let Some(next) = check_redis_access(bytes, end) else {
+                    return false;
+                };
+                i = next;
+            } else {
+                i = end;
+            }
         } else {
-            return false;
+            i += 1;
         }
     }
     true
 }
 
-/// 去除 Lua 脚本中的注释 (支持 `--` 单行注释与 `--[[ ... ]]` 多行注释).
-fn strip_lua_comments(script: &str) -> String {
-    let mut out = String::with_capacity(script.len());
-    let bytes = script.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
-    while i < len {
-        if i + 1 < len && bytes[i] == b'-' && bytes[i + 1] == b'-' {
-            if i + 3 < len && bytes[i + 2] == b'[' && bytes[i + 3] == b'[' {
-                i += 4;
-                while i + 1 < len && !(bytes[i] == b']' && bytes[i + 1] == b']') {
-                    i += 1;
-                }
-                i = (i + 2).min(len);
+fn is_ident_start(b: u8) -> bool {
+    b.is_ascii_alphabetic() || b == b'_'
+}
+
+fn is_ident_continue(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+fn scan_ident_end(bytes: &[u8], mut i: usize) -> usize {
+    while i < bytes.len() && is_ident_continue(bytes[i]) {
+        i += 1;
+    }
+    i
+}
+
+fn check_redis_access(bytes: &[u8], after_redis: usize) -> Option<usize> {
+    let dot = skip_ws_and_comments(bytes, after_redis);
+    if bytes.get(dot) != Some(&b'.') {
+        return None;
+    }
+    let member_start = skip_ws_and_comments(bytes, dot + 1);
+    if member_start >= bytes.len() || !is_ident_start(bytes[member_start]) {
+        return None;
+    }
+    let member_end = scan_ident_end(bytes, member_start);
+    let member = &bytes[member_start..member_end];
+    let paren = skip_ws_and_comments(bytes, member_end);
+    if bytes.get(paren) != Some(&b'(') {
+        return None;
+    }
+    if member == b"call" || member == b"pcall" {
+        let arg_start = skip_ws_and_comments(bytes, paren + 1);
+        let (cmd_name, after_arg) = parse_quoted_string(bytes, arg_start)?;
+        if !crate::command::registry::is_readonly_command(&cmd_name) {
+            return None;
+        }
+        Some(after_arg)
+    } else if matches!(
+        member,
+        b"log" | b"sha1hex" | b"status_reply" | b"error_reply"
+    ) {
+        Some(paren + 1)
+    } else {
+        None
+    }
+}
+
+fn skip_ws_and_comments(bytes: &[u8], mut i: usize) -> usize {
+    while i < bytes.len() {
+        if bytes[i].is_ascii_whitespace() {
+            i += 1;
+        } else if i + 1 < bytes.len() && bytes[i] == b'-' && bytes[i + 1] == b'-' {
+            i += 2;
+            if let Some(next) = skip_long_bracket(bytes, i) {
+                i = next;
             } else {
-                i += 2;
-                while i < len && bytes[i] != b'\n' {
+                while i < bytes.len() && bytes[i] != b'\n' {
                     i += 1;
                 }
             }
         } else {
-            out.push(bytes[i] as char);
-            i += 1;
+            break;
         }
     }
-    out
+    i
 }
 
-/// 解析 Lua 字符串字面量 (`"..."` 或 `'...'`).
-fn parse_string_literal(input: &str) -> Option<(String, usize)> {
-    let mut chars = input.char_indices();
-    let quote = match chars.next()? {
-        (_, '"') => '"',
-        (_, '\'') => '\'',
-        _ => return None,
-    };
-    let mut val = String::new();
-    let mut escaped = false;
-    for (i, ch) in chars {
-        if escaped {
-            val.push(ch);
-            escaped = false;
-        } else if ch == '\\' {
-            escaped = true;
-        } else if ch == quote {
-            return Some((val, i + 1));
-        } else {
-            val.push(ch);
+fn skip_long_bracket(bytes: &[u8], start: usize) -> Option<usize> {
+    if bytes.get(start) != Some(&b'[') {
+        return None;
+    }
+    let mut i = start + 1;
+    let mut eq_count = 0usize;
+    while bytes.get(i) == Some(&b'=') {
+        eq_count += 1;
+        i += 1;
+    }
+    if bytes.get(i) != Some(&b'[') {
+        return None;
+    }
+    i += 1;
+    while i < bytes.len() {
+        if bytes[i] == b']' && matches_closing_bracket(bytes, i + 1, eq_count) {
+            return Some(i + 2 + eq_count);
         }
+        i += 1;
+    }
+    Some(bytes.len())
+}
+
+fn matches_closing_bracket(bytes: &[u8], start: usize, eq_count: usize) -> bool {
+    if start + eq_count >= bytes.len() || bytes[start + eq_count] != b']' {
+        return false;
+    }
+    bytes[start..start + eq_count].iter().all(|&b| b == b'=')
+}
+
+fn parse_quoted_string(bytes: &[u8], start: usize) -> Option<(String, usize)> {
+    let quote = *bytes.get(start)?;
+    if quote != b'"' && quote != b'\'' {
+        return None;
+    }
+    let mut out = Vec::new();
+    let mut i = start + 1;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'\\' {
+            i += 1;
+            out.push(*bytes.get(i)?);
+        } else if b == quote {
+            return Some((String::from_utf8_lossy(&out).into_owned(), i + 1));
+        } else if b == b'\n' || b == b'\r' {
+            return None;
+        } else {
+            out.push(b);
+        }
+        i += 1;
     }
     None
 }
@@ -169,6 +235,7 @@ fn parse_string_literal(input: &str) -> Option<(String, usize)> {
 mod tests {
     use super::*;
 
+    /// 回归测试 (Issue #93): 验证只读脚本静态词法判定, 确保 `local r = redis` 别名与字符串字面量内 `--` / `--[[` 不会绕过写命令检测.
     #[test]
     fn test_is_script_read_only() {
         // 无 redis 调用
@@ -206,5 +273,19 @@ mod tests {
         // 动态变量作为命令名保守判定为写
         let dynamic = "local c = 'GET'; return redis.call(c, KEYS[1])";
         assert!(!is_script_read_only(dynamic));
+
+        // 别名绕过与字符串内注释符号不得误判为只读
+        let aliased = "local r = redis; return r.call('SET', KEYS[1], ARGV[1])";
+        assert!(!is_script_read_only(aliased));
+
+        let bracket_call = "return redis['call']('SET', KEYS[1], ARGV[1])";
+        assert!(!is_script_read_only(bracket_call));
+
+        let dash_in_string = "local x = '-- '; redis.call('SET', KEYS[1], x); return x";
+        assert!(!is_script_read_only(dash_in_string));
+
+        let block_comment_in_string =
+            "local x = '--[['; redis.call('SET', KEYS[1], x); local y = ']]'; return y";
+        assert!(!is_script_read_only(block_comment_in_string));
     }
 }

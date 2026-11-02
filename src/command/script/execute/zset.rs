@@ -308,7 +308,7 @@ fn compute_base_top(
     prefix: &[u8],
 ) -> Option<Option<Vec<u8>>> {
     let _pin = txn.in_flight.as_ref().map(|buf| buf.pin_reads());
-    let (_, max_hint) = zset_subkey::get_score_bounds_hint(prefix);
+    let (_, max_hint, expected_epoch) = zset_subkey::get_score_bounds_hint(prefix);
     let prefix_end = AiDbEngine::prefix_end(prefix)?;
     let scan_end = match max_hint.as_deref().and_then(AiDbEngine::prefix_end) {
         Some(he) if he < prefix_end => he,
@@ -346,7 +346,7 @@ fn compute_base_top(
         (None, None) => None,
     };
     if let Some(ref b) = best {
-        zset_subkey::shrink_max_score_hint(prefix, b.clone());
+        zset_subkey::shrink_max_score_hint(prefix, b.clone(), expected_epoch);
     }
     Some(best)
 }
@@ -479,7 +479,7 @@ fn revrangebyscore_top(
         return Ok(Some(RespValue::Array(Some(Vec::new()))));
     };
     let _pin = txn.in_flight.as_ref().map(|buf| buf.pin_reads());
-    let (_, max_hint) = zset_subkey::get_score_bounds_hint(&prefix);
+    let (_, max_hint, _) = zset_subkey::get_score_bounds_hint(&prefix);
     let scan_end = match max_hint.as_deref().and_then(AiDbEngine::prefix_end) {
         Some(he) if he < end => he,
         _ => end.clone(),

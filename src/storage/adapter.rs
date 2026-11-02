@@ -385,6 +385,7 @@ impl KvStorageAdapter {
     /// nil. 先用 `allow_lazy_expire_delete` 判断是否值得尝试 (副本上直接跳过,
     /// 避免无意义的 propose), 再吞掉任何残余错误作为兜底.
     async fn try_lazy_expire_delete(&self, db: usize, key: &[u8]) {
+        crate::storage::zset_subkey::invalidate_score_bounds_hint(db, key);
         let encoded = Self::encode(db, key);
         if !self.storage.allow_lazy_expire_delete(&encoded) {
             return;
@@ -544,6 +545,7 @@ impl KvStorageAdapter {
 
     async fn clear_db(&self, db: usize) -> Result<()> {
         self.check_db(db)?;
+        crate::storage::zset_subkey::clear_score_bounds_hint();
         let prefix = Self::db_prefix(db);
         let end = AiDbEngine::prefix_end(&prefix).unwrap_or_else(|| {
             let mut max = prefix.clone();
@@ -685,6 +687,7 @@ impl KvStorageAdapter {
         user_key: &[u8],
         batch: &mut Vec<AdapterWriteOp>,
     ) -> Result<()> {
+        crate::storage::zset_subkey::invalidate_score_bounds_hint(db, user_key);
         let encoded = Self::encode(db, user_key);
         self.push_prefix_deletes_sync(crate::storage::zset_subkey::member_prefix(&encoded), batch)?;
         self.push_prefix_deletes_sync(crate::storage::zset_subkey::score_prefix(&encoded), batch)
@@ -751,6 +754,7 @@ impl KvStorageAdapter {
             if let Some(obs) = &self.observation {
                 obs.record_expired_key();
             }
+            crate::storage::zset_subkey::invalidate_score_bounds_hint(db, key);
             let encoded = Self::encode(db, key);
             if self.storage.allow_lazy_expire_delete(&encoded)
                 && self
@@ -804,7 +808,7 @@ impl KvStorageAdapter {
         user_key: &[u8],
         batch: &mut Vec<AdapterWriteOp>,
     ) -> Result<()> {
-        crate::storage::zset_subkey::invalidate_cached_members(db, user_key);
+        crate::storage::zset_subkey::invalidate_score_bounds_hint(db, user_key);
         let encoded = Self::encode(db, user_key);
         self.push_prefix_deletes(crate::storage::zset_subkey::member_prefix(&encoded), batch)
             .await?;
@@ -1123,6 +1127,7 @@ impl KvStorage for KvStorageAdapter {
     }
 
     async fn set_typed(&self, db: usize, key: &[u8], value: StoredValue) -> Result<()> {
+        crate::storage::zset_subkey::invalidate_score_bounds_hint(db, key);
         let bytes = Self::serialize(&value)?;
         let encoded = Self::encode(db, key);
         let mut ops = vec![(encoded, bytes)];
@@ -1273,6 +1278,7 @@ impl KvStorage for KvStorageAdapter {
 
     async fn raw_subkey_set(&self, db: usize, encoded_key: Vec<u8>, value: Vec<u8>) -> Result<()> {
         self.check_db(db)?;
+        crate::storage::zset_subkey::clear_score_bounds_hint();
         self.storage.set(encoded_key, value).await?;
         Ok(())
     }

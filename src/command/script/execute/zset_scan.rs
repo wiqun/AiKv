@@ -44,10 +44,16 @@ fn collect_inflight_updates(
     for (key, raw) in raw_updates {
         let is_put = raw.is_some();
         if is_put {
-            if min_put.as_ref().is_none_or(|m| key.as_slice() < m.as_slice()) {
+            if min_put
+                .as_ref()
+                .is_none_or(|m| key.as_slice() < m.as_slice())
+            {
                 min_put = Some(key.clone());
             }
-            if max_put.as_ref().is_none_or(|m| key.as_slice() > m.as_slice()) {
+            if max_put
+                .as_ref()
+                .is_none_or(|m| key.as_slice() > m.as_slice())
+            {
                 max_put = Some(key.clone());
             }
         }
@@ -58,43 +64,52 @@ fn collect_inflight_updates(
     (updates, min_put, max_put)
 }
 
-fn update_bounds_hint(
-    prefix: &[u8],
-    bounds: (&[u8], &[u8]),
-    hints: (&Option<Vec<u8>>, &Option<Vec<u8>>),
-    inflight_puts: (Option<&[u8]>, Option<&[u8]>),
-    stored_first: Option<&[u8]>,
-    scan_end: &[u8],
+struct HintUpdate<'a> {
+    prefix: &'a [u8],
+    bounds: (&'a [u8], &'a [u8]),
+    hints: (&'a Option<Vec<u8>>, &'a Option<Vec<u8>>),
+    inflight_puts: (Option<&'a [u8]>, Option<&'a [u8]>),
+    stored_first: Option<&'a [u8]>,
+    scan_end: &'a [u8],
     reverse: bool,
-) {
-    if !reverse {
-        let covers_bottom =
-            bounds.0 <= prefix || hints.0.as_ref().is_some_and(|h| bounds.0 <= h.as_slice());
+    expected_epoch: u64,
+}
+
+fn update_bounds_hint(upd: HintUpdate<'_>) {
+    let covers_bottom = upd.bounds.0 <= upd.prefix
+        || upd
+            .hints
+            .0
+            .as_ref()
+            .is_some_and(|h| upd.bounds.0 <= h.as_slice());
+    if !upd.reverse {
         if covers_bottom {
-            let floor = stored_first.unwrap_or(scan_end);
-            let new_min = match inflight_puts.0 {
+            let floor = upd.stored_first.unwrap_or(upd.scan_end);
+            let new_min = match upd.inflight_puts.0 {
                 Some(inf) if inf < floor => inf,
                 _ => floor,
             };
-            zset_subkey::advance_min_score_hint(prefix, new_min.to_vec());
+            zset_subkey::advance_min_score_hint(upd.prefix, new_min.to_vec(), upd.expected_epoch);
         }
         return;
     }
-    let covers_top = AiDbEngine::prefix_end(prefix).is_some_and(|pe| bounds.1 >= pe.as_slice())
-        || hints
+    let covers_top = AiDbEngine::prefix_end(upd.prefix)
+        .is_some_and(|pe| upd.bounds.1 >= pe.as_slice())
+        || upd
+            .hints
             .1
             .as_deref()
             .and_then(AiDbEngine::prefix_end)
-            .is_some_and(|he| bounds.1 >= he.as_slice());
+            .is_some_and(|he| upd.bounds.1 >= he.as_slice());
     if covers_top {
-        let new_max = match (stored_first, inflight_puts.1) {
+        let new_max = match (upd.stored_first, upd.inflight_puts.1) {
             (Some(s), Some(i)) => Some(if s >= i { s } else { i }),
             (Some(s), None) => Some(s),
-            (None, Some(i)) => Some(i),
-            (None, None) => None,
+            (None, Some(i)) if covers_bottom => Some(i),
+            _ => None,
         };
         if let Some(m) = new_max {
-            zset_subkey::shrink_max_score_hint(prefix, m.to_vec());
+            zset_subkey::shrink_max_score_hint(upd.prefix, m.to_vec(), upd.expected_epoch);
         }
     }
 }
@@ -111,7 +126,7 @@ fn merged_keys(
 ) -> Option<Vec<Vec<u8>>> {
     let (start, end) = bounds;
     let _pin = txn.in_flight.as_ref().map(|buf| buf.pin_reads());
-    let (min_hint, max_hint) = zset_subkey::get_score_bounds_hint(prefix);
+    let (min_hint, max_hint, expected_epoch) = zset_subkey::get_score_bounds_hint(prefix);
     let scan_start = match &min_hint {
         Some(h) if h.as_slice() > start.as_slice() => h.clone(),
         _ => start.clone(),
@@ -122,23 +137,25 @@ fn merged_keys(
     };
     let (updates, min_put, max_put) = collect_inflight_updates(txn, prefix, &start, &end);
     let limit = fetch.saturating_add(updates.len());
-    let stored = if scan_start < scan_end {
+    let scanned = scan_start < scan_end;
+    let stored = if scanned {
         storage
             .raw_range_scan(scan_start, scan_end.clone(), limit, reverse)
             .ok()?
     } else {
         Vec::new()
     };
-    if fetch > 0 {
-        update_bounds_hint(
+    if fetch > 0 && scanned {
+        update_bounds_hint(HintUpdate {
             prefix,
-            (&start, &end),
-            (&min_hint, &max_hint),
-            (min_put.as_deref(), max_put.as_deref()),
-            stored.first().map(|(k, _)| k.as_slice()),
-            &scan_end,
+            bounds: (&start, &end),
+            hints: (&min_hint, &max_hint),
+            inflight_puts: (min_put.as_deref(), max_put.as_deref()),
+            stored_first: stored.first().map(|(k, _)| k.as_slice()),
+            scan_end: &scan_end,
             reverse,
-        );
+            expected_epoch,
+        });
     }
     if updates.is_empty() {
         return Some(stored.into_iter().map(|(key, _)| key).collect());
@@ -394,10 +411,6 @@ mod tests {
             0,
             "有界读不应该加载全部成员"
         );
-        assert!(
-            zset_subkey::get_cached_members(0, KEY).is_none(),
-            "有界读不应该填充成员缓存"
-        );
     }
 
     #[tokio::test]
@@ -533,11 +546,17 @@ mod tests {
             mlua::Value::String(lua.create_string("+inf").unwrap()),
             mlua::Value::String(lua.create_string("WITHSCORES").unwrap()),
         ]);
-        assert!(
-            super::super::try_fast_path(&lua, io, &mut txn, &declared, &withscores, true, false)
-                .unwrap()
-                .is_none()
-        );
+        assert!(super::super::try_fast_path(
+            &lua,
+            io,
+            &mut txn,
+            &declared,
+            &withscores,
+            true,
+            false
+        )
+        .unwrap()
+        .is_none());
         txn.subkey_zadd(
             io,
             &[
@@ -560,6 +579,177 @@ mod tests {
             super::super::try_fast_path(&lua, io, &mut txn, &declared, &plain, true, false)
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    /// 回归测试 (Issue #93): 带下界的反向范围查询 (`reverse && !covers_bottom`) 当存储层在窗口内无数据且存在更低分数的 `in_flight` 写入时,
+    /// 不得将 `SCORE_BOUNDS_HINT` 的 `max_hint` 收缩到该低分 `in_flight` 项, 期望后续 `ZREVRANGE 0 0` 仍能读到存储层中的真实最大成员.
+    #[tokio::test]
+    async fn bounded_reverse_scan_does_not_corrupt_max_hint_with_lower_inflight_put() {
+        let dir = TempDir::new().unwrap();
+        let storage = seeded(&dir).await;
+        let io = storage.script_io();
+        let encoded = AiDbEngine::encode_key(0, KEY);
+        let inflight = Arc::new(InFlightBuffer::new());
+        let mut ops = Vec::new();
+        ops.extend(zset_subkey::member_change_ops(
+            0,
+            KEY,
+            b"inflight_low",
+            None,
+            Some(-10.0),
+        ));
+        let _ = encoded;
+        inflight.insert_batch(0, &ops);
+        let txn = ScriptTransaction::with_in_flight(0, Some(inflight));
+
+        // 1. 先执行一个下界高于所有已存储成员 (max=1190) 的反向范围查询 [5000, +inf)
+        let empty_high_window = ScoreWindow {
+            min: bound(5000.0, true),
+            max: bound(f64::INFINITY, true),
+            reverse: true,
+            offset: 0,
+            count: Some(5),
+        };
+        let high_res = by_score(io, &txn, KEY, &empty_high_window)
+            .unwrap()
+            .unwrap();
+        assert!(high_res.is_empty());
+
+        // 2. 紧接着查询全局最大元素, 不应被 in_flight 中的 -10.0 截断丢失 44.0
+        let top = by_index(io, &txn, KEY, 0, 0, true).unwrap().unwrap();
+        assert_eq!(top, vec![(b"m107".to_vec(), 44.0)]);
+    }
+
+    /// 回归测试 (Issue #93): 非脚本命令写 (`ZADD`) 与同步脚本 `DEL` 交错执行时,
+    /// 期望脚本内 `with_zset` (`ZRANK`) 立即看到外部写入的最新成员, 且 `DEL` 清理 `SCORE_BOUNDS_HINT` 后重建同名低分 ZSet 不会被旧下界截断.
+    #[tokio::test]
+    async fn sync_script_del_and_non_script_writes_do_not_leave_stale_cache_or_bounds() {
+        use crate::protocol::RespValue;
+
+        let dir = TempDir::new().unwrap();
+        let engine = AiDbEngine::open_for_testing(dir.path()).unwrap();
+        let storage: Arc<dyn KvStorage> = KvStorageAdapter::new(engine);
+        let router = CommandRouter::new(Arc::clone(&storage));
+        let mut db = 0;
+
+        for i in 0..70 {
+            router
+                .execute(
+                    "ZADD",
+                    &[
+                        Bytes::from_static(b"zmix"),
+                        Bytes::from(format!("{}", 100 + i * 10)),
+                        Bytes::from(format!("m{i:02}")),
+                    ],
+                    &mut db,
+                )
+                .await
+                .unwrap();
+        }
+
+        // 触发脚本内的 with_zset (ZRANK) 与范围扫描, 填充之前的全局缓存与边界
+        let read_all = Bytes::from(
+            "local a = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', '+inf', 'LIMIT', 0, 1)\n\
+             local r = redis.call('ZRANK', KEYS[1], 'm_new_low')\n\
+             return r or -1\n",
+        );
+        let rank_before = router
+            .execute(
+                "EVAL",
+                &[
+                    read_all.clone(),
+                    Bytes::from_static(b"1"),
+                    Bytes::from_static(b"zmix"),
+                ],
+                &mut db,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rank_before, RespValue::Integer(-1));
+
+        // 非脚本命令写入新成员, 脚本随后再次通过 with_zset (ZRANK) 读取必须立即可见 (rank=0)
+        router
+            .execute(
+                "ZADD",
+                &[
+                    Bytes::from_static(b"zmix"),
+                    Bytes::from_static(b"10"),
+                    Bytes::from_static(b"m_new_low"),
+                ],
+                &mut db,
+            )
+            .await
+            .unwrap();
+        let rank_after_zadd = router
+            .execute(
+                "EVAL",
+                &[
+                    read_all,
+                    Bytes::from_static(b"1"),
+                    Bytes::from_static(b"zmix"),
+                ],
+                &mut db,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rank_after_zadd, RespValue::Integer(0));
+
+        // 同步脚本执行 DEL 删除大 ZSet, 再写入新区间 [1, 70] 的成员, 不应被旧 min_hint=100 截断
+        let del_script = Bytes::from("return redis.call('DEL', KEYS[1])");
+        router
+            .execute(
+                "EVAL",
+                &[
+                    del_script,
+                    Bytes::from_static(b"1"),
+                    Bytes::from_static(b"zmix"),
+                ],
+                &mut db,
+            )
+            .await
+            .unwrap();
+        let zmix_prefix = zset_subkey::score_prefix(&AiDbEngine::encode_key(0, b"zmix"));
+        let (min_h, max_h, _) = zset_subkey::get_score_bounds_hint(&zmix_prefix);
+        assert_eq!(
+            (min_h, max_h),
+            (None, None),
+            "同步脚本 DEL 必须清除 SCORE_BOUNDS_HINT"
+        );
+        for i in 0..70 {
+            router
+                .execute(
+                    "ZADD",
+                    &[
+                        Bytes::from_static(b"zmix"),
+                        Bytes::from(format!("{}", i + 1)),
+                        Bytes::from(format!("n{i:02}")),
+                    ],
+                    &mut db,
+                )
+                .await
+                .unwrap();
+        }
+        let scan_low = Bytes::from(
+            "return redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', '+inf', 'LIMIT', 0, 1)",
+        );
+        let first = router
+            .execute(
+                "EVAL",
+                &[
+                    scan_low,
+                    Bytes::from_static(b"1"),
+                    Bytes::from_static(b"zmix"),
+                ],
+                &mut db,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            first,
+            RespValue::Array(Some(vec![RespValue::BulkString(Some(Bytes::from_static(
+                b"n00"
+            )))]))
         );
     }
 }

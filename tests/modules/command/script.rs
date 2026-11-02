@@ -1233,11 +1233,7 @@ async fn test_eval_ro_and_evalsha_ro() {
     // EVAL_RO 尝试写入被拦截 (fast path SET)
     let write_script = "redis.call('SET', KEYS[1], 'new'); return 1";
     let err = r
-        .execute(
-            "EVAL_RO",
-            &[b(write_script), b("1"), b("ro_key")],
-            &mut db,
-        )
+        .execute("EVAL_RO", &[b(write_script), b("1"), b("ro_key")], &mut db)
         .await
         .unwrap_err();
     assert_err_contains(err, "Write commands not allowed in read-only script");
@@ -1251,11 +1247,7 @@ async fn test_eval_ro_and_evalsha_ro() {
         panic!("expected sha1 bulk string");
     };
     let sha_resp = r
-        .execute(
-            "EVALSHA_RO",
-            &[sha1.clone(), b("1"), b("ro_key")],
-            &mut db,
-        )
+        .execute("EVALSHA_RO", &[sha1.clone(), b("1"), b("ro_key")], &mut db)
         .await
         .unwrap();
     assert_eq!(sha_resp, RespValue::BulkString(Some(b("hello"))));

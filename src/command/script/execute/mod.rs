@@ -674,7 +674,8 @@ mod tests {
             mlua::Value::String(lua.create_string("EX").unwrap()),
             mlua::Value::Integer(10),
         ]);
-        let res = try_fast_path(&lua, &io, &mut txn, &declared, &set_opt_args, true, false).unwrap();
+        let res =
+            try_fast_path(&lua, &io, &mut txn, &declared, &set_opt_args, true, false).unwrap();
         assert!(
             res.is_none(),
             "SET with options should fallback to generic path"
