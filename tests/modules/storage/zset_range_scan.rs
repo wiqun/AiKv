@@ -71,3 +71,28 @@ async fn raw_range_scan_is_bounded_ordered_and_reversible() {
     let names: Vec<_> = sync_tail.iter().map(|(k, _)| member_of(k, plen)).collect();
     assert_eq!(names, ["m099", "m098"]);
 }
+
+#[tokio::test]
+async fn test_tombstone_scan_fast_path() {
+    let dir = TempDir::new().unwrap();
+    let (router, storage) = setup(&dir);
+    let entries: Vec<(f64, String)> = (0..5000).map(|i| (i as f64, format!("m{i:04}"))).collect();
+    fill(&router, "z", &entries).await;
+    let (start, end) = index_bounds("z");
+    let plen = start.len();
+    let io = storage.script_io();
+    let res = io
+        .raw_range_scan(start.clone(), end.clone(), 32, false)
+        .unwrap();
+    assert_eq!(res.len(), 32);
+
+    let mut db = 0;
+    for i in 0..2500 {
+        let args = [Bytes::from_static(b"z"), Bytes::from(format!("m{i:04}"))];
+        router.execute("ZREM", &args, &mut db).await.unwrap();
+    }
+    let res = io.raw_range_scan(start, end, 32, false).unwrap();
+    assert_eq!(res.len(), 32);
+    let first = member_of(&res[0].0, plen);
+    assert_eq!(first, "m2500");
+}

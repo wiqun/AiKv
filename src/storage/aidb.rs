@@ -365,32 +365,6 @@ fn scan_limited(
     limit: usize,
     reverse: bool,
 ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-    let mut out = Vec::new();
-    if limit == 0 {
-        return Ok(out);
-    }
-    let mut iter = db
-        .scan(Some(start), Some(end))
-        .map_err(|e| Error::Storage(e.to_string()))?;
-    if reverse {
-        iter.seek_to_last();
-        while out.len() < limit {
-            let (Some(key), Some(value)) = (iter.key(), iter.value()) else {
-                break;
-            };
-            out.push((key.to_vec(), value.to_vec()));
-            if !iter.prev() {
-                break;
-            }
-        }
-        return Ok(out);
-    }
-    for item in iter {
-        let (key, value) = item.map_err(|e| Error::Storage(e.to_string()))?;
-        out.push((key, value));
-        if out.len() >= limit {
-            break;
-        }
-    }
-    Ok(out)
+    db.scan_limited(Some(start), Some(end), limit, reverse)
+        .map_err(|e| Error::Storage(e.to_string()))
 }

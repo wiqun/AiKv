@@ -46,6 +46,10 @@ fn merged_keys(
         .filter(|(key, _)| key.as_slice() >= start.as_slice() && key.as_slice() < end.as_slice())
         .map(|(key, raw)| (key, raw.is_some()))
         .collect();
+    if updates.is_empty() {
+        let stored = storage.raw_range_scan(start, end, fetch, reverse).ok()?;
+        return Some(stored.into_iter().map(|(key, _)| key).collect());
+    }
     let stored = storage
         .raw_range_scan(start, end, fetch.saturating_add(updates.len()), reverse)
         .ok()?;
