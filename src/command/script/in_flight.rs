@@ -96,14 +96,6 @@ impl InFlightBuffer {
         self.map.read().is_empty()
     }
 
-    /// 前缀下是否有在途删除. 有的话按 score 取最大值可能读到已经删掉的索引.
-    pub fn has_delete_with_prefix(&self, prefix: &[u8]) -> bool {
-        let map = self.map.read();
-        map.iter().any(|(key, (value, _))| {
-            key.starts_with(prefix) && matches!(value, InFlightValue::Deleted)
-        })
-    }
-
     /// 前缀下字典序最大的在途写入 key.
     pub fn last_key_with_prefix(&self, prefix: &[u8]) -> Option<Vec<u8>> {
         let map = self.map.read();

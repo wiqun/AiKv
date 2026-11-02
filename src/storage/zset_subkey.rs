@@ -134,9 +134,19 @@ pub fn replace_ops(
         user_key.to_vec(),
         WriteOp::put_stored(header(map.len() as u32, expires_at)),
     ));
+    let mut min_k: Option<Vec<u8>> = None;
+    let mut max_k: Option<Vec<u8>> = None;
     for (member, score) in map {
+        let sk = score_key(&encoded, *score, member);
+        if min_k.as_ref().is_none_or(|cur| sk.as_slice() < cur.as_slice()) {
+            min_k = Some(sk.clone());
+        }
+        if max_k.as_ref().is_none_or(|cur| sk.as_slice() > cur.as_slice()) {
+            max_k = Some(sk);
+        }
         push_member_put(&mut ops, &encoded, member, *score);
     }
+    set_score_bounds_hint(&score_prefix(&encoded), min_k, max_k);
     ops
 }
 
@@ -319,7 +329,96 @@ fn push_member_put(
         },
     ));
     let score_engine = score_key(encoded_user, score, member);
+    widen_score_bounds_hint(&score_prefix(encoded_user), &score_engine);
     ops.push((score_engine, WriteOp::put_engine(Vec::new())));
+}
+
+type ScoreBoundsPair = (Option<Vec<u8>>, Option<Vec<u8>>);
+type ScoreBoundsMap = std::collections::HashMap<Vec<u8>, ScoreBoundsPair>;
+
+static SCORE_BOUNDS_HINT: parking_lot::RwLock<Option<ScoreBoundsMap>> =
+    parking_lot::RwLock::new(None);
+
+pub fn get_score_bounds_hint(prefix: &[u8]) -> ScoreBoundsPair {
+    let guard = SCORE_BOUNDS_HINT.read();
+    guard
+        .as_ref()
+        .and_then(|map| map.get(prefix).cloned())
+        .unwrap_or((None, None))
+}
+
+fn set_score_bounds_hint(prefix: &[u8], min_k: Option<Vec<u8>>, max_k: Option<Vec<u8>>) {
+    let mut guard = SCORE_BOUNDS_HINT.write();
+    let map = guard.get_or_insert_with(std::collections::HashMap::new);
+    if map.len() >= 1024 && !map.contains_key(prefix) {
+        map.clear();
+    }
+    map.insert(prefix.to_vec(), (min_k, max_k));
+}
+
+pub fn advance_min_score_hint(prefix: &[u8], new_min: Vec<u8>) {
+    let mut guard = SCORE_BOUNDS_HINT.write();
+    let map = guard.get_or_insert_with(std::collections::HashMap::new);
+    if map.len() >= 1024 && !map.contains_key(prefix) {
+        map.clear();
+    }
+    let entry = map.entry(prefix.to_vec()).or_insert((None, None));
+    if entry
+        .0
+        .as_ref()
+        .is_none_or(|cur| new_min.as_slice() > cur.as_slice())
+    {
+        entry.0 = Some(new_min);
+    }
+}
+
+pub fn shrink_max_score_hint(prefix: &[u8], new_max: Vec<u8>) {
+    let mut guard = SCORE_BOUNDS_HINT.write();
+    let map = guard.get_or_insert_with(std::collections::HashMap::new);
+    if map.len() >= 1024 && !map.contains_key(prefix) {
+        map.clear();
+    }
+    let entry = map.entry(prefix.to_vec()).or_insert((None, None));
+    if entry
+        .1
+        .as_ref()
+        .is_none_or(|cur| new_max.as_slice() < cur.as_slice())
+    {
+        entry.1 = Some(new_max);
+    }
+}
+
+fn widen_score_bounds_hint(prefix: &[u8], score_engine: &[u8]) {
+    let mut guard = SCORE_BOUNDS_HINT.write();
+    let Some(map) = guard.as_mut() else { return };
+    let Some(entry) = map.get_mut(prefix) else {
+        return;
+    };
+    if let Some(ref min_k) = entry.0 {
+        if score_engine < min_k.as_slice() {
+            entry.0 = Some(score_engine.to_vec());
+        }
+    }
+    if let Some(ref max_k) = entry.1 {
+        if score_engine > max_k.as_slice() {
+            entry.1 = Some(score_engine.to_vec());
+        }
+    }
+}
+
+pub fn invalidate_score_bounds_hint(db: usize, key: &[u8]) {
+    let prefix = score_prefix(&AiDbEngine::encode_key(db, key));
+    let mut guard = SCORE_BOUNDS_HINT.write();
+    if let Some(map) = guard.as_mut() {
+        map.remove(&prefix);
+    }
+}
+
+pub fn clear_score_bounds_hint() {
+    let mut guard = SCORE_BOUNDS_HINT.write();
+    if let Some(map) = guard.as_mut() {
+        map.clear();
+    }
 }
 
 type CachedMembersMap = std::collections::HashMap<(usize, Vec<u8>), Arc<BTreeMap<Vec<u8>, f64>>>;
@@ -352,6 +451,8 @@ where
     let cache_key = (db, key.to_vec());
     if count == 0 {
         map.remove(&cache_key);
+        drop(guard);
+        invalidate_score_bounds_hint(db, key);
         return;
     }
     if let Some(entry) = map.get_mut(&cache_key) {
@@ -374,12 +475,19 @@ pub fn invalidate_cached_members(db: usize, key: &[u8]) {
     if let Some(map) = guard.as_mut() {
         map.remove(&(db, key.to_vec()));
     }
+    drop(guard);
+    invalidate_score_bounds_hint(db, key);
 }
 
 #[cfg(test)]
 pub fn clear_cached_members() {
     let mut guard = MEMBERS_CACHE.write();
     if let Some(map) = guard.as_mut() {
+        map.clear();
+    }
+    drop(guard);
+    let mut b_guard = SCORE_BOUNDS_HINT.write();
+    if let Some(map) = b_guard.as_mut() {
         map.clear();
     }
 }

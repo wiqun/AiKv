@@ -19,6 +19,7 @@
 
 ### Performance
 
+- 脚本内 `ZREVRANGE 0 0` (`revrange_top`) 增量合并快路径与 `SCORE_BOUNDS_HINT` 墓碑边界自适应推进: 在 `ScriptTransaction` 中缓存事务初始最大索引键 `zset_base_top` 并与 `zset_deltas` 增量做 $O(|\text{delta}|)$ 极值合并, 消除单脚本循环交替 `ZADD` + `ZREVRANGE 0 0` 触发的 31 次全量集合克隆与 $O(N \log N)$ 排序; 同时维护大 ZSet 的 `(min_score_key, max_score_key)` 提示边界以跳过头尾已删除的 `TypeDelete` 墓碑区, 使 `TL.Hauler` 的 `SendReceiveBenchmark` 稳定降至 6s ~ 7s, 集群 S7 提升至 9.94k QPS.
 - Lua 只读脚本静态判定 (`is_script_read_only`) 与无锁直通: 对静态分析确认仅包含只读 `redis.call` / `redis.pcall` 的脚本及 `EVAL_RO` / `EVALSHA_RO` 跳过 `KeyLock` 排他锁排队, 并改用 Lua Registry 按 SHA1 缓存已编译函数与 `raw_set` 注入 `KEYS` / `ARGV`; 结合原生有界跳表扫描, `192.168.1.116` 上 S7 (2000 成员大 ZSet Lua 读) 单机吞吐由 4.19k 提升至 11.34k QPS, 集群由 4.19k 提升至 7.96k QPS, 全面超越 Kvrocks (7.23k QPS).
 - 存储层 `last_in_range_sync` 对接 AiDb 原生有界反向扫描 `scan_limited(..., 1, true)`, 消除范围末尾探测的多层 LSM 迭代器开销.
 - 存储引擎层接入 AiDb 原生有界扫描 `scan_limited`, 并在事务在途更新为空时跳过集合哈希比对与重复排序, 解决消费队列 `ZRANGEBYSCORE` 的墓碑多版本读放大, 基准测试总耗时削减近 4 秒.

@@ -191,6 +191,21 @@ fn range_by_index(
         return Ok(members_into_resp(rows, with_scores));
     }
     let res = txn.with_zset(storage, &args[0], |zset| {
+        if start == 0 && stop == 0 {
+            let cmp = |a: &(&Vec<u8>, &f64), b: &(&Vec<u8>, &f64)| {
+                a.1.partial_cmp(b.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.0.cmp(b.0))
+            };
+            let best = if reverse {
+                zset.iter().max_by(cmp)
+            } else {
+                zset.iter().min_by(cmp)
+            };
+            let slice: Vec<(Vec<u8>, f64)> =
+                best.map(|(k, s)| vec![(k.clone(), *s)]).unwrap_or_default();
+            return Ok(members_to_resp(&slice, with_scores));
+        }
         let sorted = sorted_by_score(zset, reverse);
         let len = sorted.len();
         let (start_idx, stop_idx) = normalize_range(len, start, stop);
@@ -287,45 +302,116 @@ fn range_by_score(
     Ok(res.unwrap_or_else(|| RespValue::Array(Some(Vec::new()))))
 }
 
-fn revrange_top(
+fn compute_base_top(
     storage: &dyn ScriptIo,
     txn: &ScriptTransaction,
-    key: &[u8],
-    with_scores: bool,
-) -> Result<Option<RespValue>> {
-    if txn.zset_delta_count(key).is_some() {
-        return Ok(None);
-    }
-    let stored = txn.get_value(storage, key)?;
-    if stored
-        .as_ref()
-        .and_then(zset_subkey::is_zset_header)
-        .is_none()
-    {
-        return Ok(None);
-    }
-    let encoded = AiDbEngine::encode_key(txn.db_index, key);
-    let prefix = score_prefix(&encoded);
-    let members = zset_subkey::member_prefix(&encoded);
-    if txn.in_flight.as_ref().is_some_and(|buf| {
-        buf.has_delete_with_prefix(&prefix) || buf.has_delete_with_prefix(&members)
-    }) {
-        return Ok(None);
-    }
+    prefix: &[u8],
+) -> Option<Option<Vec<u8>>> {
+    let _pin = txn.in_flight.as_ref().map(|buf| buf.pin_reads());
+    let (_, max_hint) = zset_subkey::get_score_bounds_hint(prefix);
+    let prefix_end = AiDbEngine::prefix_end(prefix)?;
+    let scan_end = match max_hint.as_deref().and_then(AiDbEngine::prefix_end) {
+        Some(he) if he < prefix_end => he,
+        _ => prefix_end,
+    };
     let inflight = txn
         .in_flight
         .as_ref()
-        .and_then(|buf| buf.last_key_with_prefix(&prefix));
-    let stored_last = match storage.raw_prefix_last(prefix.clone()) {
-        Ok(pair) => pair.map(|(engine_key, _)| engine_key),
-        Err(_) => return Ok(None),
+        .and_then(|buf| buf.last_key_with_prefix(prefix));
+    let scan_start = match &inflight {
+        Some(inf_k) if inf_k.as_slice() > prefix => inf_k.clone(),
+        _ => prefix.to_vec(),
     };
+    let stored_last = if scan_start < scan_end {
+        storage
+            .raw_range_last(scan_start, scan_end)
+            .ok()?
+            .map(|(k, _)| k)
+    } else {
+        None
+    };
+    let stored_deleted = stored_last.as_ref().is_some_and(|k| {
+        txn.in_flight
+            .as_ref()
+            .is_some_and(|buf| buf.get_raw(k) == Some(None))
+    });
+    if stored_deleted {
+        return Some(zset_scan::top_score_key_without_delta(storage, txn, prefix));
+    }
     let best = match (inflight, stored_last) {
         (Some(left), Some(right)) if left > right => Some(left),
         (Some(_), Some(right)) => Some(right),
         (Some(left), None) => Some(left),
         (None, Some(right)) => Some(right),
         (None, None) => None,
+    };
+    if let Some(ref b) = best {
+        zset_subkey::shrink_max_score_hint(prefix, b.clone());
+    }
+    Some(best)
+}
+
+fn resolve_top_with_delta(
+    encoded: &[u8],
+    prefix: &[u8],
+    base_top: Option<Vec<u8>>,
+    delta: &crate::command::script::transaction::ZSetDelta,
+) -> Option<Option<Vec<u8>>> {
+    let delta_max = delta
+        .members
+        .iter()
+        .filter_map(|(m, c)| c.after.map(|s| zset_subkey::score_key(encoded, s, m)))
+        .max();
+    match (base_top, delta_max) {
+        (Some(bt), Some(dm)) if dm >= bt => Some(Some(dm)),
+        (None, dm) => Some(dm),
+        (Some(bt), delta_opt) => {
+            let (base_member, _) = score_index_entry(prefix, &bt)?;
+            if delta.members.contains_key(&base_member) {
+                None
+            } else {
+                Some(Some(bt.max(delta_opt.unwrap_or_default())))
+            }
+        }
+    }
+}
+
+fn revrange_top(
+    storage: &dyn ScriptIo,
+    txn: &ScriptTransaction,
+    key: &[u8],
+    with_scores: bool,
+) -> Result<Option<RespValue>> {
+    if txn.write_buffer.contains_key(key) {
+        return Ok(None);
+    }
+    if txn.zset_delta_count(key) == Some(0) {
+        return Ok(Some(RespValue::Array(Some(Vec::new()))));
+    }
+    if !txn.uses_subkey_zset(storage, key)? {
+        return Ok(None);
+    }
+    let encoded = AiDbEngine::encode_key(txn.db_index, key);
+    let prefix = score_prefix(&encoded);
+    let cached_top = txn.zset_base_top.lock().get(key).cloned();
+    let base_top = if let Some(cached) = cached_top {
+        cached
+    } else {
+        let Some(computed) = compute_base_top(storage, txn, &prefix) else {
+            return Ok(None);
+        };
+        txn.zset_base_top
+            .lock()
+            .insert(key.to_vec(), computed.clone());
+        computed
+    };
+    let best = if let Some(delta) = txn.zset_deltas.get(key) {
+        let Some(resolved) = resolve_top_with_delta(&encoded, &prefix, base_top, delta) else {
+            return Ok(None);
+        };
+        resolved
+    } else {
+        base_top
     };
     let Some(best) = best else {
         return Ok(Some(RespValue::Array(Some(Vec::new()))));
@@ -389,23 +475,38 @@ fn revrangebyscore_top(
     }
     let encoded = AiDbEngine::encode_key(txn.db_index, key);
     let prefix = score_prefix(&encoded);
-    let members = zset_subkey::member_prefix(&encoded);
-    if txn.in_flight.as_ref().is_some_and(|buf| {
-        buf.has_delete_with_prefix(&prefix) || buf.has_delete_with_prefix(&members)
-    }) {
-        return Ok(None);
-    }
     let Some((start, end)) = score_range_bounds(&prefix, min, max) else {
         return Ok(Some(RespValue::Array(Some(Vec::new()))));
+    };
+    let _pin = txn.in_flight.as_ref().map(|buf| buf.pin_reads());
+    let (_, max_hint) = zset_subkey::get_score_bounds_hint(&prefix);
+    let scan_end = match max_hint.as_deref().and_then(AiDbEngine::prefix_end) {
+        Some(he) if he < end => he,
+        _ => end.clone(),
     };
     let inflight = txn
         .in_flight
         .as_ref()
         .and_then(|buf| buf.last_key_in_range(&start, &end));
-    let stored_last = match storage.raw_range_last(start, end) {
-        Ok(pair) => pair.map(|(engine_key, _)| engine_key),
-        Err(_) => return Ok(None),
+    let scan_start = match &inflight {
+        Some(inf_k) if inf_k > &start => inf_k.clone(),
+        _ => start,
     };
+    let stored_last = if scan_start < scan_end {
+        match storage.raw_range_last(scan_start, scan_end) {
+            Ok(pair) => pair.map(|(engine_key, _)| engine_key),
+            Err(_) => return Ok(None),
+        }
+    } else {
+        None
+    };
+    if stored_last.as_ref().is_some_and(|k| {
+        txn.in_flight
+            .as_ref()
+            .is_some_and(|buf| buf.get_raw(k) == Some(None))
+    }) {
+        return Ok(None);
+    }
     let best = match (inflight, stored_last) {
         (Some(left), Some(right)) if left > right => Some(left),
         (Some(_), Some(right)) => Some(right),

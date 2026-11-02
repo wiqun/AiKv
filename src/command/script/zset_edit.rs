@@ -534,4 +534,58 @@ mod tests {
             "cached m99 must be present"
         );
     }
+
+    #[tokio::test]
+    async fn revrange_top_with_interleaved_zadd_does_not_load_all_members() {
+        use crate::protocol::RespValue;
+
+        let dir = TempDir::new().unwrap();
+        let engine = AiDbEngine::open_for_testing(dir.path()).unwrap();
+        let storage: Arc<dyn KvStorage> = KvStorageAdapter::new(engine);
+        let router = CommandRouter::new(Arc::clone(&storage));
+        let mut db = 0;
+        for i in 0..70 {
+            router
+                .execute(
+                    "ZADD",
+                    &[
+                        Bytes::from_static(b"ztop"),
+                        Bytes::from(format!("{}", i + 1)),
+                        Bytes::from(format!("m{i:02}")),
+                    ],
+                    &mut db,
+                )
+                .await
+                .unwrap();
+        }
+        zset_subkey::clear_cached_members();
+        zset_subkey::THREAD_LOAD_CALLS.with(|c| c.set(0));
+        let script = Bytes::from(
+            "local top1 = redis.call('ZREVRANGE', KEYS[1], 0, 0, 'WITHSCORES')\n\
+             redis.call('ZADD', KEYS[1], 500, 'm00')\n\
+             local top2 = redis.call('ZREVRANGE', KEYS[1], 0, 0, 'WITHSCORES')\n\
+             redis.call('ZADD', KEYS[1], 600, 'm01')\n\
+             local top3 = redis.call('ZREVRANGE', KEYS[1], 0, 0, 'WITHSCORES')\n\
+             return {top1[1], top1[2], top2[1], top2[2], top3[1], top3[2]}\n",
+        );
+        let resp = router
+            .execute(
+                "EVAL",
+                &[script, Bytes::from_static(b"1"), Bytes::from_static(b"ztop")],
+                &mut db,
+            )
+            .await
+            .unwrap();
+        let RespValue::Array(Some(items)) = resp else {
+            panic!("expected array");
+        };
+        assert_eq!(items[0], RespValue::BulkString(Some(Bytes::from_static(b"m69"))));
+        assert_eq!(items[1], RespValue::BulkString(Some(Bytes::from_static(b"70"))));
+        assert_eq!(items[2], RespValue::BulkString(Some(Bytes::from_static(b"m00"))));
+        assert_eq!(items[3], RespValue::BulkString(Some(Bytes::from_static(b"500"))));
+        assert_eq!(items[4], RespValue::BulkString(Some(Bytes::from_static(b"m01"))));
+        assert_eq!(items[5], RespValue::BulkString(Some(Bytes::from_static(b"600"))));
+        let scans = zset_subkey::THREAD_LOAD_CALLS.with(|c| c.get());
+        assert_eq!(scans, 0, "ZREVRANGE 0 0 loaded full ZSet {scans} times");
+    }
 }

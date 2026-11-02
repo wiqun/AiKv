@@ -11,7 +11,7 @@ use crate::command::zset::range_scan::{
     decode_page, score_scan_bounds, IndexPlan, ScoreWindow, ScoredMembers,
 };
 use crate::error::Result;
-use crate::storage::zset_subkey::{is_zset_header, score_index_entry, score_prefix};
+use crate::storage::zset_subkey::{self, is_zset_header, score_index_entry, score_prefix};
 use crate::storage::{AiDbEngine, ScriptIo};
 
 /// 本脚本没改过且已是 header 形式时返回成员数.
@@ -23,6 +23,80 @@ fn header_len(storage: &dyn ScriptIo, txn: &ScriptTransaction, key: &[u8]) -> Re
         .get_value(storage, key)?
         .as_ref()
         .and_then(is_zset_header))
+}
+
+type InflightScanInfo = (HashMap<Vec<u8>, bool>, Option<Vec<u8>>, Option<Vec<u8>>);
+
+fn collect_inflight_updates(
+    txn: &ScriptTransaction,
+    prefix: &[u8],
+    start: &[u8],
+    end: &[u8],
+) -> InflightScanInfo {
+    let raw_updates = txn
+        .in_flight
+        .as_ref()
+        .map(|buf| buf.prefix_raw_updates(prefix))
+        .unwrap_or_default();
+    let mut updates = HashMap::new();
+    let mut min_put: Option<Vec<u8>> = None;
+    let mut max_put: Option<Vec<u8>> = None;
+    for (key, raw) in raw_updates {
+        let is_put = raw.is_some();
+        if is_put {
+            if min_put.as_ref().is_none_or(|m| key.as_slice() < m.as_slice()) {
+                min_put = Some(key.clone());
+            }
+            if max_put.as_ref().is_none_or(|m| key.as_slice() > m.as_slice()) {
+                max_put = Some(key.clone());
+            }
+        }
+        if key.as_slice() >= start && key.as_slice() < end {
+            updates.insert(key, is_put);
+        }
+    }
+    (updates, min_put, max_put)
+}
+
+fn update_bounds_hint(
+    prefix: &[u8],
+    bounds: (&[u8], &[u8]),
+    hints: (&Option<Vec<u8>>, &Option<Vec<u8>>),
+    inflight_puts: (Option<&[u8]>, Option<&[u8]>),
+    stored_first: Option<&[u8]>,
+    scan_end: &[u8],
+    reverse: bool,
+) {
+    if !reverse {
+        let covers_bottom =
+            bounds.0 <= prefix || hints.0.as_ref().is_some_and(|h| bounds.0 <= h.as_slice());
+        if covers_bottom {
+            let floor = stored_first.unwrap_or(scan_end);
+            let new_min = match inflight_puts.0 {
+                Some(inf) if inf < floor => inf,
+                _ => floor,
+            };
+            zset_subkey::advance_min_score_hint(prefix, new_min.to_vec());
+        }
+        return;
+    }
+    let covers_top = AiDbEngine::prefix_end(prefix).is_some_and(|pe| bounds.1 >= pe.as_slice())
+        || hints
+            .1
+            .as_deref()
+            .and_then(AiDbEngine::prefix_end)
+            .is_some_and(|he| bounds.1 >= he.as_slice());
+    if covers_top {
+        let new_max = match (stored_first, inflight_puts.1) {
+            (Some(s), Some(i)) => Some(if s >= i { s } else { i }),
+            (Some(s), None) => Some(s),
+            (None, Some(i)) => Some(i),
+            (None, None) => None,
+        };
+        if let Some(m) = new_max {
+            zset_subkey::shrink_max_score_hint(prefix, m.to_vec());
+        }
+    }
 }
 
 /// 在途覆盖层叠加存储后, 区间 `[start, end)` 内按 `reverse` 方向的前 `fetch` 个索引 key.
@@ -37,22 +111,38 @@ fn merged_keys(
 ) -> Option<Vec<Vec<u8>>> {
     let (start, end) = bounds;
     let _pin = txn.in_flight.as_ref().map(|buf| buf.pin_reads());
-    let updates: HashMap<Vec<u8>, bool> = txn
-        .in_flight
-        .as_ref()
-        .map(|buf| buf.prefix_raw_updates(prefix))
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|(key, _)| key.as_slice() >= start.as_slice() && key.as_slice() < end.as_slice())
-        .map(|(key, raw)| (key, raw.is_some()))
-        .collect();
+    let (min_hint, max_hint) = zset_subkey::get_score_bounds_hint(prefix);
+    let scan_start = match &min_hint {
+        Some(h) if h.as_slice() > start.as_slice() => h.clone(),
+        _ => start.clone(),
+    };
+    let scan_end = match max_hint.as_deref().and_then(AiDbEngine::prefix_end) {
+        Some(he) if he.as_slice() < end.as_slice() => he,
+        _ => end.clone(),
+    };
+    let (updates, min_put, max_put) = collect_inflight_updates(txn, prefix, &start, &end);
+    let limit = fetch.saturating_add(updates.len());
+    let stored = if scan_start < scan_end {
+        storage
+            .raw_range_scan(scan_start, scan_end.clone(), limit, reverse)
+            .ok()?
+    } else {
+        Vec::new()
+    };
+    if fetch > 0 {
+        update_bounds_hint(
+            prefix,
+            (&start, &end),
+            (&min_hint, &max_hint),
+            (min_put.as_deref(), max_put.as_deref()),
+            stored.first().map(|(k, _)| k.as_slice()),
+            &scan_end,
+            reverse,
+        );
+    }
     if updates.is_empty() {
-        let stored = storage.raw_range_scan(start, end, fetch, reverse).ok()?;
         return Some(stored.into_iter().map(|(key, _)| key).collect());
     }
-    let stored = storage
-        .raw_range_scan(start, end, fetch.saturating_add(updates.len()), reverse)
-        .ok()?;
     let mut keys: Vec<Vec<u8>> = stored
         .into_iter()
         .map(|(key, _)| key)
@@ -70,6 +160,17 @@ fn merged_keys(
     }
     keys.truncate(fetch);
     Some(keys)
+}
+
+pub(super) fn top_score_key_without_delta(
+    storage: &dyn ScriptIo,
+    txn: &ScriptTransaction,
+    prefix: &[u8],
+) -> Option<Vec<u8>> {
+    let end = AiDbEngine::prefix_end(prefix)?;
+    merged_keys(storage, txn, prefix, (prefix.to_vec(), end), 1, true)?
+        .into_iter()
+        .next()
 }
 
 /// 按 score 范围读 (`ZRANGEBYSCORE` / `ZREVRANGEBYSCORE`). `Ok(None)` 表示不适用.

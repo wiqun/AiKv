@@ -279,6 +279,7 @@ impl KvStorageAdapter {
         storage: Arc<dyn StorageAdapter>,
         observation: Option<Arc<StorageObservation>>,
     ) -> Arc<Self> {
+        crate::storage::zset_subkey::clear_score_bounds_hint();
         Arc::new(Self {
             storage,
             db_count: DB_COUNT,
@@ -803,6 +804,7 @@ impl KvStorageAdapter {
         user_key: &[u8],
         batch: &mut Vec<AdapterWriteOp>,
     ) -> Result<()> {
+        crate::storage::zset_subkey::invalidate_cached_members(db, user_key);
         let encoded = Self::encode(db, user_key);
         self.push_prefix_deletes(crate::storage::zset_subkey::member_prefix(&encoded), batch)
             .await?;
