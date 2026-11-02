@@ -36,9 +36,9 @@ use crate::error::{Error, Result};
 use crate::storage::memory::glob_match;
 use crate::storage::observation::{PointReadCounter, StorageObservation};
 use crate::storage::types::{
-    now_ms, BatchWriteHandle, ExpiresCounters, ImmediateWriteHandle, KeyspaceStats, KvStorage,
-    RawPairVisitor, ScanResult, StorageEngineKind, StoredValue, ValueType, WriteOp, DB_COUNT,
-    TTL_NO_EXPIRY, WRONGTYPE,
+    is_wrongtype, now_ms, BatchWriteHandle, ExpiresCounters, ImmediateWriteHandle, KeyspaceStats,
+    KvStorage, RawPairVisitor, ScanResult, StorageEngineKind, StoredValue, ValueType, WriteOp,
+    DB_COUNT, TTL_NO_EXPIRY, WRONGTYPE,
 };
 use crate::storage::watch_registry::WatchRegistry;
 use crate::storage::watch_version::{
@@ -92,6 +92,12 @@ pub trait StorageAdapter: Send + Sync {
         let _ = key;
         Err(Error::Storage("sync get not supported".into()))
     }
+    fn get_bytes_sync(&self, key: Vec<u8>) -> Result<Option<bytes::Bytes>> {
+        self.get_sync(key).map(|opt| opt.map(bytes::Bytes::from))
+    }
+    async fn get_bytes(&self, key: Vec<u8>) -> Result<Option<bytes::Bytes>> {
+        self.get(key).await.map(|opt| opt.map(bytes::Bytes::from))
+    }
     fn write_batch_sync(&self, batch: Vec<AdapterWriteOp>) -> Result<()> {
         let _ = batch;
         Err(Error::Storage("sync write_batch not supported".into()))
@@ -104,6 +110,16 @@ pub trait StorageAdapter: Send + Sync {
         let _ = (start, end);
         Err(Error::Storage("sync last_in_range not supported".into()))
     }
+    fn range_scan_sync(
+        &self,
+        start: Vec<u8>,
+        end: Vec<u8>,
+        limit: usize,
+        reverse: bool,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let _ = (start, end, limit, reverse);
+        Err(Error::Storage("sync range_scan not supported".into()))
+    }
     fn for_each_prefix_sync(&self, prefix: Vec<u8>, f: RawPairVisitor) -> Result<()> {
         let _ = (prefix, f);
         Err(Error::Storage("sync for_each_prefix not supported".into()))
@@ -113,6 +129,18 @@ pub trait StorageAdapter: Send + Sync {
         Ok(Box::new(ImmediateWriteHandle))
     }
     async fn delete_range(&self, start: Vec<u8>, end: Vec<u8>) -> Result<()>;
+
+    /// 半开区间 `[start, end)` 内至多 `limit` 条 (`reverse` 时从末尾向前). 引擎需提供有界扫描.
+    async fn range_scan(
+        &self,
+        start: Vec<u8>,
+        end: Vec<u8>,
+        limit: usize,
+        reverse: bool,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let _ = (start, end, limit, reverse);
+        Err(Error::Storage("range_scan not supported".into()))
+    }
 
     /// 半开区间 `[start, end)` 里字典序最大的一条. 默认扫前缀后过滤.
     async fn last_in_range(
@@ -203,6 +231,12 @@ pub trait StorageAdapter: Send + Sync {
         true
     }
 
+    /// 仅在没有其他脚本执行时才可用的同步落盘 (单机的 `ClusterDataAdapter`): 并发时同步写会占住
+    /// 有限的 tokio worker, 让异步入队的并行度更好; 独占时省掉入队与线程切换.
+    fn local_script_commit_when_idle(&self) -> bool {
+        false
+    }
+
     /// 近似进程内热数据内存 (字节); 仅持久化引擎实现.
     fn approximate_memory_bytes(&self) -> Option<u64> {
         None
@@ -245,6 +279,7 @@ impl KvStorageAdapter {
         storage: Arc<dyn StorageAdapter>,
         observation: Option<Arc<StorageObservation>>,
     ) -> Arc<Self> {
+        crate::storage::zset_subkey::clear_score_bounds_hint();
         Arc::new(Self {
             storage,
             db_count: DB_COUNT,
@@ -280,6 +315,11 @@ impl KvStorageAdapter {
     async fn get_raw(&self, db: usize, key: &[u8]) -> Result<Option<Vec<u8>>> {
         self.check_db(db)?;
         self.storage.get(Self::encode(db, key)).await
+    }
+
+    async fn get_raw_bytes(&self, db: usize, key: &[u8]) -> Result<Option<bytes::Bytes>> {
+        self.check_db(db)?;
+        self.storage.get_bytes(Self::encode(db, key)).await
     }
 
     fn deserialize(bytes: &[u8]) -> Result<StoredValue> {
@@ -324,7 +364,7 @@ impl KvStorageAdapter {
     }
 
     async fn load_typed(&self, db: usize, key: &[u8]) -> Result<Option<StoredValue>> {
-        let Some(raw) = self.get_raw(db, key).await? else {
+        let Some(raw) = self.get_raw_bytes(db, key).await? else {
             return Ok(None);
         };
         let stored = Self::deserialize(&raw)?;
@@ -345,6 +385,7 @@ impl KvStorageAdapter {
     /// nil. 先用 `allow_lazy_expire_delete` 判断是否值得尝试 (副本上直接跳过,
     /// 避免无意义的 propose), 再吞掉任何残余错误作为兜底.
     async fn try_lazy_expire_delete(&self, db: usize, key: &[u8]) {
+        crate::storage::zset_subkey::invalidate_score_bounds_hint(db, key);
         let encoded = Self::encode(db, key);
         if !self.storage.allow_lazy_expire_delete(&encoded) {
             return;
@@ -358,6 +399,69 @@ impl KvStorageAdapter {
         if self.storage.apply_writes(ops).await.is_ok() {
             self.expires.on_ttl_clear(db);
         }
+    }
+
+    async fn get_string_bytes_fast(&self, db: usize, key: &[u8]) -> Result<Option<bytes::Bytes>> {
+        let Some(raw) = self.get_raw_bytes(db, key).await? else {
+            if let Some(counter) = self.point_reads.get() {
+                counter.note(false);
+            }
+            return Ok(None);
+        };
+        match crate::storage::string_codec::decode_string_fast(&raw) {
+            crate::storage::string_codec::FastStringDecode::Valid(range, expires_at) => {
+                if let Some(exp) = expires_at {
+                    if now_ms() >= exp {
+                        if let Some(obs) = &self.observation {
+                            obs.record_expired_key();
+                        }
+                        self.try_lazy_expire_delete(db, key).await;
+                        if let Some(counter) = self.point_reads.get() {
+                            counter.note(false);
+                        }
+                        return Ok(None);
+                    }
+                }
+                if let Some(counter) = self.point_reads.get() {
+                    counter.note(true);
+                }
+                Ok(Some(raw.slice(range)))
+            }
+            crate::storage::string_codec::FastStringDecode::WrongType => {
+                Err(Error::Command(WRONGTYPE.into()))
+            }
+            crate::storage::string_codec::FastStringDecode::Fallback => {
+                let stored = self.get_typed(db, key).await?;
+                match stored {
+                    None => Ok(None),
+                    Some(s) => match s.value {
+                        ValueType::String(v) => Ok(Some(bytes::Bytes::from(v))),
+                        _ => Err(Error::Command(WRONGTYPE.into())),
+                    },
+                }
+            }
+        }
+    }
+
+    async fn set_string_fast(
+        &self,
+        db: usize,
+        key: &[u8],
+        value: &[u8],
+        expire_at: Option<u64>,
+    ) -> Result<()> {
+        self.check_db(db)?;
+        let encoded = Self::encode(db, key);
+        let bytes = crate::storage::string_codec::encode_string_fast(value, expire_at);
+        let mut ops = vec![(encoded, bytes)];
+        if let Some(meta) = self.next_watch_meta_put(db, key).await? {
+            ops.push(meta);
+        }
+        self.storage.put_many(ops).await?;
+        if expire_at.is_some() {
+            self.expires.on_ttl_write(db);
+        }
+        Ok(())
     }
 
     async fn keys_for_db(&self, db: usize, pattern: &[u8]) -> Result<Vec<Vec<u8>>> {
@@ -441,6 +545,7 @@ impl KvStorageAdapter {
 
     async fn clear_db(&self, db: usize) -> Result<()> {
         self.check_db(db)?;
+        crate::storage::zset_subkey::clear_score_bounds_hint();
         let prefix = Self::db_prefix(db);
         let end = AiDbEngine::prefix_end(&prefix).unwrap_or_else(|| {
             let mut max = prefix.clone();
@@ -582,6 +687,7 @@ impl KvStorageAdapter {
         user_key: &[u8],
         batch: &mut Vec<AdapterWriteOp>,
     ) -> Result<()> {
+        crate::storage::zset_subkey::invalidate_score_bounds_hint(db, user_key);
         let encoded = Self::encode(db, user_key);
         self.push_prefix_deletes_sync(crate::storage::zset_subkey::member_prefix(&encoded), batch)?;
         self.push_prefix_deletes_sync(crate::storage::zset_subkey::score_prefix(&encoded), batch)
@@ -640,7 +746,7 @@ impl KvStorageAdapter {
     }
 
     fn load_typed_for_script(&self, db: usize, key: &[u8]) -> Result<Option<StoredValue>> {
-        let Some(raw) = self.storage.get_sync(Self::encode(db, key))? else {
+        let Some(raw) = self.storage.get_bytes_sync(Self::encode(db, key))? else {
             return Ok(None);
         };
         let stored = Self::deserialize(&raw)?;
@@ -648,6 +754,7 @@ impl KvStorageAdapter {
             if let Some(obs) = &self.observation {
                 obs.record_expired_key();
             }
+            crate::storage::zset_subkey::invalidate_score_bounds_hint(db, key);
             let encoded = Self::encode(db, key);
             if self.storage.allow_lazy_expire_delete(&encoded)
                 && self
@@ -701,6 +808,7 @@ impl KvStorageAdapter {
         user_key: &[u8],
         batch: &mut Vec<AdapterWriteOp>,
     ) -> Result<()> {
+        crate::storage::zset_subkey::invalidate_score_bounds_hint(db, user_key);
         let encoded = Self::encode(db, user_key);
         self.push_prefix_deletes(crate::storage::zset_subkey::member_prefix(&encoded), batch)
             .await?;
@@ -742,19 +850,17 @@ impl KvStorage for KvStorageAdapter {
     }
 
     async fn get(&self, db: usize, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        let stored = self.get_typed(db, key).await?;
-        match stored {
-            None => Ok(None),
-            Some(s) => match s.value {
-                ValueType::String(v) => Ok(Some(v)),
-                _ => Err(Error::Command(WRONGTYPE.into())),
-            },
-        }
+        self.get_bytes(db, key)
+            .await
+            .map(|opt| opt.map(|b| b.to_vec()))
+    }
+
+    async fn get_bytes(&self, db: usize, key: &[u8]) -> Result<Option<bytes::Bytes>> {
+        self.get_string_bytes_fast(db, key).await
     }
 
     async fn set(&self, db: usize, key: &[u8], value: &[u8]) -> Result<()> {
-        self.set_typed(db, key, StoredValue::string(value.to_vec()))
-            .await
+        self.set_string_fast(db, key, value, None).await
     }
 
     async fn set_with_ttl(
@@ -764,15 +870,8 @@ impl KvStorage for KvStorageAdapter {
         value: &[u8],
         expire_at_ms: u64,
     ) -> Result<()> {
-        self.set_typed(
-            db,
-            key,
-            StoredValue {
-                value: ValueType::String(value.to_vec()),
-                expires_at: Some(expire_at_ms),
-            },
-        )
-        .await
+        self.set_string_fast(db, key, value, Some(expire_at_ms))
+            .await
     }
 
     async fn delete(&self, db: usize, key: &[u8]) -> Result<bool> {
@@ -808,14 +907,12 @@ impl KvStorage for KvStorageAdapter {
     async fn mget(&self, db: usize, keys: &[Vec<u8>]) -> Result<Vec<Option<Vec<u8>>>> {
         let mut out = Vec::with_capacity(keys.len());
         for key in keys {
-            let stored = self.load_typed(db, key).await?;
-            out.push(match stored {
-                None => None,
-                Some(s) => match s.value {
-                    ValueType::String(v) => Some(v),
-                    _ => None,
-                },
-            });
+            match self.get_bytes(db, key).await {
+                Ok(Some(bytes)) => out.push(Some(bytes.to_vec())),
+                Ok(None) => out.push(None),
+                Err(e) if is_wrongtype(&e) => out.push(None),
+                Err(e) => return Err(e),
+            }
         }
         Ok(out)
     }
@@ -1030,9 +1127,10 @@ impl KvStorage for KvStorageAdapter {
     }
 
     async fn set_typed(&self, db: usize, key: &[u8], value: StoredValue) -> Result<()> {
+        crate::storage::zset_subkey::invalidate_score_bounds_hint(db, key);
         let bytes = Self::serialize(&value)?;
         let encoded = Self::encode(db, key);
-        let mut ops = vec![(encoded.clone(), bytes)];
+        let mut ops = vec![(encoded, bytes)];
         if let Some(meta) = self.next_watch_meta_put(db, key).await? {
             ops.push(meta);
         }
@@ -1123,6 +1221,10 @@ impl KvStorage for KvStorageAdapter {
         self.storage.local_script_commit()
     }
 
+    fn local_script_commit_when_idle(&self) -> bool {
+        self.storage.local_script_commit_when_idle()
+    }
+
     async fn flush_engine(&self) -> Result<()> {
         self.storage.flush().await
     }
@@ -1158,6 +1260,17 @@ impl KvStorage for KvStorageAdapter {
         self.storage.last_in_range(start, end).await
     }
 
+    async fn raw_range_scan(
+        &self,
+        start: Vec<u8>,
+        end: Vec<u8>,
+        limit: usize,
+        reverse: bool,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        self.check_db(0)?;
+        self.storage.range_scan(start, end, limit, reverse).await
+    }
+
     async fn raw_subkey_get(&self, db: usize, encoded_key: Vec<u8>) -> Result<Option<Vec<u8>>> {
         self.check_db(db)?;
         self.storage.get(encoded_key).await
@@ -1165,6 +1278,7 @@ impl KvStorage for KvStorageAdapter {
 
     async fn raw_subkey_set(&self, db: usize, encoded_key: Vec<u8>, value: Vec<u8>) -> Result<()> {
         self.check_db(db)?;
+        crate::storage::zset_subkey::clear_score_bounds_hint();
         self.storage.set(encoded_key, value).await?;
         Ok(())
     }
@@ -1229,6 +1343,19 @@ impl crate::storage::script_io::ScriptIo for KvStorageAdapter {
         crate::storage::script_io::time_script_io(
             crate::storage::script_io::ScriptIoOp::Range,
             || self.storage.last_in_range_sync(start, end),
+        )
+    }
+
+    fn raw_range_scan(
+        &self,
+        start: Vec<u8>,
+        end: Vec<u8>,
+        limit: usize,
+        reverse: bool,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        crate::storage::script_io::time_script_io(
+            crate::storage::script_io::ScriptIoOp::Range,
+            || self.storage.range_scan_sync(start, end, limit, reverse),
         )
     }
 

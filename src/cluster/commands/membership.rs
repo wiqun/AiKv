@@ -200,6 +200,7 @@ pub async fn cluster_failover(mode: &str) -> Result<String, String> {
                         .await
                         .map_err(|e| format!("ERR {e}"))?;
                     *mgr.role.write() = crate::cluster::state::ReplicationRole::Primary;
+                    crate::storage::zset_subkey::clear_score_bounds_hint();
                     if let Some(m) = &mgr.metrics {
                         m.on_failover();
                     }
@@ -224,6 +225,7 @@ pub async fn cluster_replicate(primary_id: u64) -> Result<String, String> {
         .get()
         .ok_or_else(|| "CLUSTERDOWN Cluster not initialized".to_string())?;
     *mgr.role.write() = crate::cluster::state::ReplicationRole::Replica { primary_id };
+    crate::storage::zset_subkey::clear_score_bounds_hint();
     Ok("OK".to_string())
 }
 // ---------------------------------------------------------------------------

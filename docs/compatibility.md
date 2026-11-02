@@ -48,7 +48,7 @@ description: AiKv Redis 兼容范围 — RESP2/RESP3 协议边界, 已实现命�
 
 ### Lua
 
-`EVAL` `EVALSHA` `SCRIPT`
+`EVAL` `EVALSHA` `EVAL_RO` `EVALSHA_RO` `SCRIPT`
 
 ### Hash
 

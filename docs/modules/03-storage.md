@@ -113,4 +113,4 @@ pub struct StoredValue {
   - 元数据: `{db}:{key}` -> `StoredValue { type: Hash, data: field_count }`
   - 字段数据: `{db}:{key}\x00f\x00{field}` -> `StoredValue { type: String, data: field_val }`
 - **List / Set**: 类似 Hash, 使用专有子前缀分隔符进行编码.
-- **ZSet**: 成员数不超过 64 时仍是整包 `ValueType::ZSet`. 超过后用户 key 只留 `CollectionHeader`, member 与 score 索引各写一条 subkey. 脚本范围读取要看见尚未提交的 member 变更. `MemoryEngine` 不拆.
+- **ZSet**: 成员数不超过 64 时仍是整包 `ValueType::ZSet`. 超过后用户 key 只留 `CollectionHeader`, member 与 score 索引各写一条 subkey. `ZSCORE` 与 `ZRANGE*` / `ZRANGEBYSCORE` 家族只做有界索引扫描 (`KvStorage::raw_range_scan` / `ScriptIo::raw_range_scan`, 支持 `limit` 与反向), 脚本读取在结果上叠加尚未提交的在途变更. `MemoryEngine` 不拆, 也不支持有界扫描 (调用方回退全量路径).

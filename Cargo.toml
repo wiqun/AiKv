@@ -44,6 +44,7 @@ futures-util = "0.3"
 # Core primitives
 parking_lot = "0.12"
 dashmap = "6"
+rustc-hash = "2"
 bytes     = "1"
 thiserror = "2"
 serde     = { version = "1", features = ["derive"] }
@@ -74,7 +75,7 @@ openraft = { version = "0.10.0-alpha.33", optional = true }
 openraft-rt-tokio = { version = "0.10.0-alpha.33", optional = true }
 
 # AiDb storage engine
-aidb = { git = "https://github.com/wiqun/AiDb.git", rev = "21c0d123997217a246eee77700b30c6957917191" }
+aidb = { git = "https://github.com/wiqun/AiDb.git", rev = "52733f2c6349d6400aceb643979245001aadc4ae" }
 
 # Monitoring (optional)
 # Metrics HTTP server (monitoring feature)

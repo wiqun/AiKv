@@ -110,7 +110,9 @@ MultiRaft 端口依次为 `26379`, `26380`, `26381`, `27379`, `27380`, `27381`.
 | `server.max_clients` | `AIKV_MAX_CLIENTS` | `--max-clients` |
 | `server.script_worker_threads` | `AIKV_SCRIPT_WORKER_THREADS` | (仅 env/TOML) |
 
-未配置 `server.script_worker_threads` 时, 取 `available_parallelism` 并夹到 2..=16; 探测失败为 8. 显式 `0` 使配置加载失败. 大于等于 1 的显式值不再夹取. 多线程运行时上 `EVAL` / `EVALSHA` 在这些线程里执行.
+未配置 `server.script_worker_threads` 时, 取 `available_parallelism * 4` 并夹到 8..=32; 探测失败为 8. 显式 `0` 使配置加载失败. 大于等于 1 的显式值不再夹取. 多线程运行时上 `EVAL` / `EVALSHA` 在这些线程里执行.
+
+`AIKV_SCRIPT_OFF_WORKER` (仅 env) 控制 `EVAL` / `EVALSHA` 在哪里执行. 默认 (`auto`, 未设置或其他值) 按脚本 sha 记录执行耗时的 EWMA: 低于 1ms 的轻脚本在当前 worker 线程就地执行 (省掉跨线程往返), 达到 1ms 的重脚本派发到上述脚本线程池 (隔离 CPU 密集计算, 避免占住 tokio worker 与 OpenRaft 协程); 首次出现的脚本先就地执行, 一次执行后即有记录. `1`/`true` 强制全部走线程池, `0`/`false` 强制全部就地. 最多记录 4096 个脚本, `SCRIPT FLUSH` 会清空记录.
 | `engine.kind` | `AIKV_ENGINE` | `--engine` |
 | `engine.data_dir` | `AIKV_DATA_DIR` | `--data-dir` |
 | `engine.sync_wal` | `AIKV_SYNC_WAL` | `--sync-wal` |

@@ -15,12 +15,13 @@ pub fn install(lua: &Lua) -> Result<()> {
     let null_value = lua
         .create_table()
         .map_err(|e| Error::Command(format!("ERR sandbox setup failed: {e}")))?;
+    let null_ptr = null_value.to_pointer() as usize;
     let map_err = |e: mlua::Error| Error::Command(format!("ERR sandbox setup failed: {e}"));
     cjson.set("null", null_value).map_err(map_err)?;
     cjson
         .set(
             "encode",
-            lua.create_function(|lua, value: Value| encode_value(lua, &value, 0))
+            lua.create_function(move |lua, value: Value| encode_value(lua, &value, null_ptr, 0))
                 .map_err(map_err)?,
         )
         .map_err(map_err)?;
@@ -37,17 +38,23 @@ pub fn install(lua: &Lua) -> Result<()> {
     Ok(())
 }
 
-fn encode_value(lua: &Lua, value: &Value, depth: usize) -> mlua::Result<String> {
+fn encode_value(lua: &Lua, value: &Value, null_ptr: usize, depth: usize) -> mlua::Result<String> {
     if depth > MAX_DEPTH {
         return Err(mlua::Error::runtime("Cannot serialise, excessive nesting"));
     }
-    let mut out = String::new();
-    write_value(lua, value, depth, &mut out)?;
+    let mut out = String::with_capacity(128);
+    write_value(lua, value, null_ptr, depth, &mut out)?;
     Ok(out)
 }
 
-fn write_value(lua: &Lua, value: &Value, depth: usize, out: &mut String) -> mlua::Result<()> {
-    if is_null(lua, value)? {
+fn write_value(
+    lua: &Lua,
+    value: &Value,
+    null_ptr: usize,
+    depth: usize,
+    out: &mut String,
+) -> mlua::Result<()> {
+    if is_null(value, null_ptr) {
         out.push_str("null");
         return Ok(());
     }
@@ -92,24 +99,26 @@ fn write_value(lua: &Lua, value: &Value, depth: usize, out: &mut String) -> mlua
             out.push('"');
             Ok(())
         }
-        Value::Table(table) => write_table(lua, table, depth, out),
+        Value::Table(table) => write_table(lua, table, null_ptr, depth, out),
         _ => Err(mlua::Error::runtime("Cannot serialise value")),
     }
 }
 
-fn is_null(lua: &Lua, value: &Value) -> mlua::Result<bool> {
+#[inline(always)]
+fn is_null(value: &Value, null_ptr: usize) -> bool {
     let Value::Table(table) = value else {
-        return Ok(false);
+        return false;
     };
-    let cjson: Table = lua.globals().get("cjson")?;
-    let null_value: Value = cjson.get("null")?;
-    let Value::Table(null_table) = null_value else {
-        return Ok(false);
-    };
-    Ok(table.to_pointer() == null_table.to_pointer())
+    (table.to_pointer() as usize) == null_ptr
 }
 
-fn write_table(lua: &Lua, table: &Table, depth: usize, out: &mut String) -> mlua::Result<()> {
+fn write_table(
+    lua: &Lua,
+    table: &Table,
+    null_ptr: usize,
+    depth: usize,
+    out: &mut String,
+) -> mlua::Result<()> {
     let mut object_keys = Vec::new();
     let mut max_index = 0i64;
     let mut count = 0i64;
@@ -139,7 +148,7 @@ fn write_table(lua: &Lua, table: &Table, depth: usize, out: &mut String) -> mlua
             }
             match table.get::<Value>(index)? {
                 Value::Nil => out.push_str("null"),
-                value => write_value(lua, &value, depth + 1, out)?,
+                value => write_value(lua, &value, null_ptr, depth + 1, out)?,
             }
         }
         out.push(']');
@@ -159,11 +168,12 @@ fn write_table(lua: &Lua, table: &Table, depth: usize, out: &mut String) -> mlua
         write_value(
             lua,
             &Value::String(lua.create_string(index.to_string())?),
+            null_ptr,
             depth + 1,
             out,
         )?;
         out.push(':');
-        write_value(lua, &value, depth + 1, out)?;
+        write_value(lua, &value, null_ptr, depth + 1, out)?;
     }
     for (key, value) in object_keys {
         if !first {
@@ -176,9 +186,9 @@ fn write_table(lua: &Lua, table: &Table, depth: usize, out: &mut String) -> mlua
             Value::Number(n) => lua.create_string(n.to_string())?,
             _ => return Err(mlua::Error::runtime("Cannot serialise table key")),
         };
-        write_value(lua, &Value::String(name), depth + 1, out)?;
+        write_value(lua, &Value::String(name), null_ptr, depth + 1, out)?;
         out.push(':');
-        write_value(lua, &value, depth + 1, out)?;
+        write_value(lua, &value, null_ptr, depth + 1, out)?;
     }
     out.push('}');
     Ok(())
@@ -385,4 +395,30 @@ impl<'a> Parser<'a> {
 fn null_value(lua: &Lua) -> mlua::Result<Value> {
     let cjson: Table = lua.globals().get("cjson")?;
     cjson.get("null")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cjson_encode_decode_null_and_roundtrip() {
+        let lua = Lua::new();
+        install(&lua).unwrap();
+
+        let script = r#"
+            local d = cjson.decode('{"v":1,"tag":"bench","empty":null}')
+            d.v = d.v + 1
+            return cjson.encode(d)
+        "#;
+        let res: String = lua.load(script).eval().unwrap();
+        assert!(
+            res.contains("\"v\":2"),
+            "result should contain updated v:2, got {res}"
+        );
+        assert!(
+            res.contains("\"empty\":null"),
+            "null should be serialized as null, got {res}"
+        );
+    }
 }

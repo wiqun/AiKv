@@ -23,9 +23,12 @@ pub enum ExtendedBatchOp {
     Delete,
 }
 
+pub type ZSetMap = BTreeMap<Vec<u8>, f64>;
+type ZSetViewCache = Mutex<HashMap<Vec<u8>, ZSetMap>>;
+
 pub struct ScriptTransaction {
     pub db_index: usize,
-    write_buffer: HashMap<Vec<u8>, ExtendedBatchOp>,
+    pub(crate) write_buffer: HashMap<Vec<u8>, ExtendedBatchOp>,
     /// 显式 TTL 更新: Some(ts) = 过期时间; None = 清除 TTL
     expire_at: HashMap<Vec<u8>, Option<u64>>,
     /// 脚本读操作缓存的原始 TTL，避免 commit 时产生额外的点查 RPC
@@ -35,6 +38,10 @@ pub struct ScriptTransaction {
     pub(crate) in_flight: Option<Arc<InFlightBuffer>>,
     /// 大 ZSET 的增量修改. 提交时写 subkey, 不把整份集合塞回 inline blob.
     pub(crate) zset_deltas: HashMap<Vec<u8>, ZSetDelta>,
+    /// 事务内大 ZSET 的内存视图缓存 (避免事务内循环查询/修改时反复全表扫描底层存储)
+    pub(crate) zset_views: ZSetViewCache,
+    /// 事务开始时大 ZSET (storage + in_flight) 的最大 score 索引 key 缓存
+    pub(crate) zset_base_top: Mutex<HashMap<Vec<u8>, Option<Vec<u8>>>>,
 }
 
 /// 一次脚本里某个大 ZSET member 的分数变化. `before` 是脚本开始前的分数.
@@ -66,6 +73,8 @@ impl ScriptTransaction {
             read_cache: Mutex::new(HashMap::new()),
             in_flight,
             zset_deltas: HashMap::new(),
+            zset_views: Mutex::new(HashMap::new()),
+            zset_base_top: Mutex::new(HashMap::new()),
         }
     }
 
@@ -110,6 +119,8 @@ impl ScriptTransaction {
 
     pub fn set_zset(&mut self, key: Vec<u8>, zset: BTreeMap<Vec<u8>, f64>) {
         self.read_cache.lock().remove(&key);
+        self.zset_views.lock().remove(&key);
+        self.zset_base_top.lock().remove(&key);
         self.orig_expires_at
             .lock()
             .entry(key.clone())
@@ -120,6 +131,8 @@ impl ScriptTransaction {
 
     pub fn delete(&mut self, key: Vec<u8>) {
         self.read_cache.lock().remove(&key);
+        self.zset_views.lock().remove(&key);
+        self.zset_base_top.lock().remove(&key);
         self.write_buffer.insert(key, ExtendedBatchOp::Delete);
     }
 
@@ -138,6 +151,8 @@ impl ScriptTransaction {
             }
         };
         self.read_cache.lock().remove(&key);
+        self.zset_views.lock().remove(&key);
+        self.zset_base_top.lock().remove(&key);
         self.orig_expires_at
             .lock()
             .entry(key.clone())
@@ -306,10 +321,6 @@ impl ScriptTransaction {
     where
         F: FnOnce(&BTreeMap<Vec<u8>, f64>) -> Result<R>,
     {
-        if self.zset_deltas.contains_key(key) {
-            let map = self.materialize_zset_delta(storage, key)?;
-            return f(&map).map(Some);
-        }
         if let Some(op) = self.write_buffer.get(key) {
             return match op {
                 ExtendedBatchOp::Delete => Ok(None),
@@ -317,12 +328,23 @@ impl ScriptTransaction {
                 _ => Err(Error::Command(WRONGTYPE.into())),
             };
         }
+        if let Some(view) = self.zset_views.lock().get(key) {
+            return f(view).map(Some);
+        }
+        if self.zset_deltas.contains_key(key) {
+            let map = self.materialize_zset_delta(storage, key)?;
+            let res = f(&map)?;
+            self.zset_views.lock().insert(key.to_vec(), map);
+            return Ok(Some(res));
+        }
         let stored = self.get_value(storage, key)?;
         match stored {
             None => Ok(None),
             Some(stored) if zset_subkey::is_zset_header(&stored).is_some() => {
                 let map = self.visible_subkey_members(storage, key)?;
-                f(&map).map(Some)
+                let res = f(&map)?;
+                self.zset_views.lock().insert(key.to_vec(), map);
+                Ok(Some(res))
             }
             Some(stored) => f(stored.as_zset()?).map(Some),
         }

@@ -12,7 +12,9 @@
 
 **ClusterRouter**: 在集群模式下, 根据 key 的 CRC16 哈希计算 slot, 将请求路由到正确的节点或返回 MOVED 错误.
 
-**脚本线程池**: 多线程运行时上执行 `EVAL` / `EVALSHA` 的线程池, 与 tokio worker 和 tokio 阻塞线程池分开. 脚本不占住 tokio worker.
+**脚本线程池**: 多线程运行时上承接重脚本 `EVAL` / `EVALSHA` 的线程池, 与 tokio worker 和 tokio 阻塞线程池分开, 重脚本不占住 tokio worker.
+
+**脚本路由**: 按脚本 sha 的执行耗时 EWMA 决定执行位置: 低于 1ms 的轻脚本在当前 worker 线程就地执行, 否则进脚本线程池; 首次出现的脚本就地执行. `AIKV_SCRIPT_OFF_WORKER` 可强制.
 
 ## 存储层
 
@@ -26,7 +28,7 @@
 
 **ValueType**: Redis 数据类型的枚举 (String, List, Set, ZSet, Hash 等).
 
-**大 ZSet**: 成员数不超过 64 时仍是一整块 `ValueType::ZSet`. 超过后用户 key 只留 `CollectionHeader`, 每个 member 和按 score 排序的索引各写一条 subkey. 一次 `ZADD` 提交变动的 member, 旧 score 索引, 新 score 索引和 header 计数. 脚本范围读取先叠加上一笔尚未提交的 member subkey: 在途删除不再出现, 在途写入可见, 当前脚本自己的增量盖过这层. `MemoryEngine` 不拆 subkey.
+**大 ZSet**: 成员数不超过 64 时仍是一整块 `ValueType::ZSet`. 超过后用户 key 只留 `CollectionHeader`, 每个 member 和按 score 排序的索引各写一条 subkey. 一次 `ZADD` 提交变动的 member, 旧 score 索引, 新 score 索引和 header 计数. `ZSCORE`, `ZRANGE`, `ZREVRANGE`, `ZRANGEBYSCORE`, `ZREVRANGEBYSCORE` 只读 score 索引里需要的条数 (有界扫描), 不加载全部成员; 按序号读从离目标更近的一端扫. 脚本范围读取在扫描结果上叠加上一笔尚未提交的索引变更: 在途删除不再出现, 在途写入可见, 存储侧多取「区间内在途变更数」条以保证合并后前 N 条正确; 当前脚本自己改过的 ZSet (`ZSetDelta`) 回退全量视图. `MemoryEngine` 不拆 subkey.
 
 **ExpiresCounters**: 各逻辑 DB 的进程内 TTL 写入计数. 成功写入 `expires_at = Some` 时加 1, 包括没有读过旧值的覆盖写. 这次调用已经看到旧 TTL, 或惰性过期删掉带 TTL 的值时饱和减. compaction 不改它. 重启从 0 开始, 不扫库补存量.
 
@@ -55,6 +57,8 @@
 **Batcher**: 将多个写入操作合并为一批, 减少 Raft 共识次数.
 
 **EagerFlush**: 批处理中的阈值, 当累计操作数达到此值时不等 timeout 立即 propose.
+
+**延迟确认**: 集群流水线内的纯 `SET key value` (盲写, 不读旧值) 与 `EVAL` / `EVALSHA` 按序执行到入队后先不等 Raft 确认, 登记到 `storage::deferred` 作用域. 遇到不可延迟的命令, 脚本之前存在挂起的纯 `SET`, 挂起满 256 条或批末时, 按序等待并输出各自响应; 确认失败只让该条响应变为错误. 脚本之间靠在途覆盖层读到前序脚本未提交的写. 流水线内命令始终按到达顺序生效.
 
 ## 可观测性
 

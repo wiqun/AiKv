@@ -75,11 +75,29 @@ impl ScriptTransaction {
         Ok(router::integer(removed))
     }
 
+    pub(crate) fn subkey_zrem_single(
+        &mut self,
+        storage: &dyn crate::storage::ScriptIo,
+        key: &[u8],
+        member: &[u8],
+    ) -> Result<i64> {
+        self.ensure_zset_delta(storage, key)?;
+        let current = self.current_member_score(storage, key, member)?;
+        if current.is_none() {
+            return Ok(0);
+        }
+        self.record_member(key, member, current, None);
+        Ok(1)
+    }
+
     pub(crate) fn materialize_zset_delta(
         &self,
         storage: &dyn crate::storage::ScriptIo,
         key: &[u8],
     ) -> Result<BTreeMap<Vec<u8>, f64>> {
+        if let Some(view) = self.zset_views.lock().get(key) {
+            return Ok(view.clone());
+        }
         let mut map = self.visible_subkey_members(storage, key)?;
         let delta = &self.zset_deltas[key];
         for (member, change) in &delta.members {
@@ -92,6 +110,7 @@ impl ScriptTransaction {
                 }
             }
         }
+        self.zset_views.lock().insert(key.to_vec(), map.clone());
         Ok(map)
     }
 
@@ -103,6 +122,9 @@ impl ScriptTransaction {
         for (key, delta) in &self.zset_deltas {
             let expires_at = self.resolve_expires_at(storage, key)?;
             push_delta(self.db_index, key, delta, expires_at, ops);
+            if delta.count == 0 {
+                zset_subkey::invalidate_score_bounds_hint(self.db_index, key);
+            }
         }
         Ok(())
     }
@@ -113,11 +135,11 @@ impl ScriptTransaction {
         key: &[u8],
     ) -> Result<BTreeMap<Vec<u8>, f64>> {
         let _pin = self.in_flight.as_ref().map(|buf| buf.pin_reads());
-        let mut map = zset_subkey::load_members_sync(storage, self.db_index, key)?;
+        let mut loaded = zset_subkey::load_members_sync(storage, self.db_index, key)?;
         if let Some(buffer) = &self.in_flight {
-            overlay_inflight_members(&mut map, buffer, self.db_index, key);
+            overlay_inflight_members(&mut loaded, buffer, self.db_index, key);
         }
-        Ok(map)
+        Ok(loaded)
     }
 
     fn ensure_zset_delta(
@@ -156,6 +178,9 @@ impl ScriptTransaction {
         {
             return Ok(change.after);
         }
+        if let Some(view) = self.zset_views.lock().get(key) {
+            return Ok(view.get(member).copied());
+        }
         point_score(self.in_flight.as_ref(), storage, self.db_index, key, member)
     }
 
@@ -190,6 +215,16 @@ impl ScriptTransaction {
                 after,
             },
         );
+        if let Some(view) = self.zset_views.lock().get_mut(key) {
+            match after {
+                Some(score) => {
+                    view.insert(member.to_vec(), score);
+                }
+                None => {
+                    view.remove(member);
+                }
+            }
+        }
     }
 
     pub(crate) fn subkey_zincrby(
@@ -378,8 +413,6 @@ mod tests {
 
     #[tokio::test]
     async fn script_zscore_reads_one_member_without_scanning_the_segment() {
-        use std::sync::atomic::Ordering;
-
         use crate::protocol::RespValue;
 
         let dir = TempDir::new().unwrap();
@@ -401,7 +434,7 @@ mod tests {
                 .await
                 .unwrap();
         }
-        zset_subkey::LOAD_MEMBERS_CALLS.store(0, Ordering::Relaxed);
+        zset_subkey::THREAD_LOAD_CALLS.with(|c| c.set(0));
         let script = Bytes::from(
             "local n = 0\n\
              for i = 0, 64 do\n\
@@ -430,7 +463,126 @@ mod tests {
             panic!("missing kept score");
         };
         assert_eq!(kept.as_ref(), b"99");
-        let scans = zset_subkey::LOAD_MEMBERS_CALLS.load(Ordering::Relaxed);
+        let scans = zset_subkey::THREAD_LOAD_CALLS.with(|c| c.get());
         assert_eq!(scans, 0, "ZSCORE scanned the member prefix {scans} times");
+    }
+
+    #[tokio::test]
+    async fn visible_subkey_members_overlays_inflight_without_cross_txn_leak() {
+        let dir = TempDir::new().unwrap();
+        let engine = AiDbEngine::open_for_testing(dir.path()).unwrap();
+        let storage: Arc<dyn KvStorage> = KvStorageAdapter::new(engine);
+        let router = CommandRouter::new(Arc::clone(&storage));
+        let mut db = 0;
+        for i in 0..70 {
+            router
+                .execute(
+                    "ZADD",
+                    &[
+                        Bytes::from_static(b"kz"),
+                        Bytes::from(format!("{}", i * 10)),
+                        Bytes::from(format!("m{i}")),
+                    ],
+                    &mut db,
+                )
+                .await
+                .unwrap();
+        }
+        let mut ops = zset_subkey::member_change_ops(0, b"kz", b"m0", Some(0.0), None);
+        let added = zset_subkey::member_key(&AiDbEngine::encode_key(0, b"kz"), b"m99");
+        ops.push((added, WriteOp::put_engine(zset_subkey::encode_score(99.0))));
+        ops.push((b"kz".to_vec(), WriteOp::put_stored(header(70, None))));
+        let inflight = Arc::new(InFlightBuffer::new());
+        inflight.insert_batch(0, &ops);
+
+        let txn1 = ScriptTransaction::with_in_flight(0, Some(Arc::clone(&inflight)));
+        let members1 = txn1
+            .visible_subkey_members(storage.script_io(), b"kz")
+            .unwrap();
+        assert!(
+            !members1.contains_key(b"m0".as_ref()),
+            "m0 should be deleted by in_flight"
+        );
+        assert_eq!(
+            members1.get(b"m99".as_ref()).copied(),
+            Some(99.0),
+            "m99 should be visible"
+        );
+    }
+
+    #[tokio::test]
+    async fn revrange_top_with_interleaved_zadd_does_not_load_all_members() {
+        use crate::protocol::RespValue;
+
+        let dir = TempDir::new().unwrap();
+        let engine = AiDbEngine::open_for_testing(dir.path()).unwrap();
+        let storage: Arc<dyn KvStorage> = KvStorageAdapter::new(engine);
+        let router = CommandRouter::new(Arc::clone(&storage));
+        let mut db = 0;
+        for i in 0..70 {
+            router
+                .execute(
+                    "ZADD",
+                    &[
+                        Bytes::from_static(b"ztop"),
+                        Bytes::from(format!("{}", i + 1)),
+                        Bytes::from(format!("m{i:02}")),
+                    ],
+                    &mut db,
+                )
+                .await
+                .unwrap();
+        }
+        zset_subkey::clear_score_bounds_hint();
+        zset_subkey::THREAD_LOAD_CALLS.with(|c| c.set(0));
+        let script = Bytes::from(
+            "local top1 = redis.call('ZREVRANGE', KEYS[1], 0, 0, 'WITHSCORES')\n\
+             redis.call('ZADD', KEYS[1], 500, 'm00')\n\
+             local top2 = redis.call('ZREVRANGE', KEYS[1], 0, 0, 'WITHSCORES')\n\
+             redis.call('ZADD', KEYS[1], 600, 'm01')\n\
+             local top3 = redis.call('ZREVRANGE', KEYS[1], 0, 0, 'WITHSCORES')\n\
+             return {top1[1], top1[2], top2[1], top2[2], top3[1], top3[2]}\n",
+        );
+        let resp = router
+            .execute(
+                "EVAL",
+                &[
+                    script,
+                    Bytes::from_static(b"1"),
+                    Bytes::from_static(b"ztop"),
+                ],
+                &mut db,
+            )
+            .await
+            .unwrap();
+        let RespValue::Array(Some(items)) = resp else {
+            panic!("expected array");
+        };
+        assert_eq!(
+            items[0],
+            RespValue::BulkString(Some(Bytes::from_static(b"m69")))
+        );
+        assert_eq!(
+            items[1],
+            RespValue::BulkString(Some(Bytes::from_static(b"70")))
+        );
+        assert_eq!(
+            items[2],
+            RespValue::BulkString(Some(Bytes::from_static(b"m00")))
+        );
+        assert_eq!(
+            items[3],
+            RespValue::BulkString(Some(Bytes::from_static(b"500")))
+        );
+        assert_eq!(
+            items[4],
+            RespValue::BulkString(Some(Bytes::from_static(b"m01")))
+        );
+        assert_eq!(
+            items[5],
+            RespValue::BulkString(Some(Bytes::from_static(b"600")))
+        );
+        let scans = zset_subkey::THREAD_LOAD_CALLS.with(|c| c.get());
+        assert_eq!(scans, 0, "ZREVRANGE 0 0 loaded full ZSet {scans} times");
     }
 }

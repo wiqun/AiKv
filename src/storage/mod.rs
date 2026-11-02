@@ -6,12 +6,14 @@ pub mod aidb_options;
 #[cfg(feature = "cluster")]
 pub mod cluster_adapter;
 #[cfg(feature = "cluster")]
-mod cluster_batcher;
+pub mod cluster_batcher;
+pub mod deferred;
 pub(crate) mod direct;
 pub mod dump;
 pub mod memory;
 pub mod observation;
 pub mod script_io;
+pub mod string_codec;
 pub mod subkey;
 pub mod ttl_filter;
 pub mod types;

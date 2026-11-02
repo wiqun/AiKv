@@ -107,6 +107,7 @@ pub struct Connection {
     last_active: Instant,
     client_id: usize,
     current_db: usize,
+    synced_client_db: usize,
     quit: bool,
     mode: ConnectionMode,
     monitor_rx: Option<broadcast::Receiver<String>>,
@@ -119,6 +120,36 @@ pub struct Connection {
 }
 
 impl Connection {
+    #[doc(hidden)]
+    pub fn new_for_test(
+        stream: TcpStream,
+        remote: SocketAddr,
+        state: Arc<ServerSharedState>,
+    ) -> Self {
+        let client_id = state.alloc_client_id();
+        state.register_client(client_id, remote);
+        Self {
+            stream,
+            remote,
+            parser: RespParser::new(),
+            write_buf: BytesMut::with_capacity(protocol::DEFAULT_WRITE_BUF_CAPACITY),
+            state,
+            protocol_version: ProtocolVersion::default(),
+            protocol_negotiated: false,
+            last_active: Instant::now(),
+            client_id,
+            current_db: 0,
+            synced_client_db: 0,
+            quit: false,
+            mode: ConnectionMode::Normal,
+            monitor_rx: None,
+            #[cfg(feature = "cluster")]
+            cluster_state: crate::cluster::connection::ClusterConnectionState::new(),
+            tx_state: TransactionState::new(),
+            pending_timing: None,
+        }
+    }
+
     pub async fn handle(stream: TcpStream, remote: SocketAddr, state: Arc<ServerSharedState>) {
         let client_id = state.alloc_client_id();
         state.register_client(client_id, remote);
@@ -133,6 +164,7 @@ impl Connection {
             last_active: Instant::now(),
             client_id,
             current_db: 0,
+            synced_client_db: 0,
             quit: false,
             mode: ConnectionMode::Normal,
             monitor_rx: None,
@@ -483,13 +515,6 @@ impl Connection {
         }
 
         let track = should_track_observability(cmd);
-        let arg_strings: Vec<String> = if track {
-            args.iter()
-                .map(|b| String::from_utf8_lossy(b).into_owned())
-                .collect()
-        } else {
-            Vec::new()
-        };
         let started = track.then(Instant::now);
         let result = self
             .state
@@ -507,28 +532,30 @@ impl Connection {
             .await;
         #[cfg(feature = "cluster")]
         self.cluster_state.reset_asking();
-        self.finish_immediate_command(cmd, args, arg_strings, started, result)
+        self.finish_immediate_command(cmd, args, started, result)
             .await
     }
 
     pub(super) async fn finish_immediate_command(
         &mut self,
         cmd: &str,
-        _args: &[Bytes],
-        arg_strings: Vec<String>,
+        args: &[Bytes],
         started: Option<Instant>,
         result: Result<RespValue>,
     ) -> Result<()> {
         match result {
             Ok(resp) => {
-                self.state.set_client_db(self.client_id, self.current_db);
+                if self.synced_client_db != self.current_db {
+                    self.state.set_client_db(self.client_id, self.current_db);
+                    self.synced_client_db = self.current_db;
+                }
                 if let Some(start) = started {
                     #[cfg(feature = "cluster")]
                     let skip_obs = is_cluster_redirect_response(&resp);
                     #[cfg(not(feature = "cluster"))]
                     let skip_obs = false;
                     if !skip_obs {
-                        self.record_command_observability(cmd, &arg_strings, start, true);
+                        self.record_command_observability(cmd, args, start, true);
                     }
                 }
                 self.write_response(resp).await?;
@@ -539,7 +566,7 @@ impl Connection {
             }
             Err(error) => {
                 if let Some(start) = started {
-                    self.record_command_observability(cmd, &arg_strings, start, false);
+                    self.record_command_observability(cmd, args, start, false);
                 }
                 tracing::error!(
                   command = cmd,
@@ -628,17 +655,22 @@ impl Connection {
         Ok(())
     }
 
-    fn record_command_observability(&self, cmd: &str, args: &[String], start: Instant, _ok: bool) {
+    fn record_command_observability(&self, cmd: &str, args: &[Bytes], start: Instant, _ok: bool) {
         let duration_us = start.elapsed().as_micros() as u64;
         self.state.latency_stats.record(cmd, duration_us);
-        self.state.slow_query_log.record(
-            cmd,
-            args,
-            duration_us,
-            &self.remote.to_string(),
-            self.current_db as u16,
-        );
-        if duration_us >= self.state.slow_query_log.threshold_us() {
+        let threshold = self.state.slow_query_log.threshold_us();
+        if duration_us >= threshold {
+            let arg_strings: Vec<String> = args
+                .iter()
+                .map(|b| String::from_utf8_lossy(b).into_owned())
+                .collect();
+            self.state.slow_query_log.record(
+                cmd,
+                &arg_strings,
+                duration_us,
+                &self.remote.to_string(),
+                self.current_db as u16,
+            );
             self.state.metrics().on_slowlog_command(cmd, duration_us);
             #[cfg(feature = "monitoring")]
             self.state.metrics().on_slow_query(cmd);

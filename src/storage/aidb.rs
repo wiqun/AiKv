@@ -37,20 +37,37 @@ pub struct AiDbEngine {
 }
 
 impl AiDbEngine {
+    const DB_PREFIXES: [&'static [u8]; 16] = [
+        b"0:", b"1:", b"2:", b"3:", b"4:", b"5:", b"6:", b"7:", b"8:", b"9:", b"10:", b"11:",
+        b"12:", b"13:", b"14:", b"15:",
+    ];
+
     /// 构造真实 key: `{db_index}:{user_key}`
     pub fn encode_key(db: usize, user_key: &[u8]) -> Vec<u8> {
-        let mut key = Vec::with_capacity(8 + user_key.len());
-        key.extend_from_slice(db.to_string().as_bytes());
-        key.push(b':');
-        key.extend_from_slice(user_key);
-        key
+        if db < 16 {
+            let prefix = Self::DB_PREFIXES[db];
+            let mut key = Vec::with_capacity(prefix.len() + user_key.len());
+            key.extend_from_slice(prefix);
+            key.extend_from_slice(user_key);
+            key
+        } else {
+            let mut key = Vec::with_capacity(8 + user_key.len());
+            key.extend_from_slice(db.to_string().as_bytes());
+            key.push(b':');
+            key.extend_from_slice(user_key);
+            key
+        }
     }
 
-    pub fn decode_key(encoded: &[u8]) -> Option<(usize, Vec<u8>)> {
+    pub fn decode_key_ref(encoded: &[u8]) -> Option<(usize, &[u8])> {
         let pos = encoded.iter().position(|&b| b == b':')?;
         let db_str = std::str::from_utf8(&encoded[..pos]).ok()?;
         let db = db_str.parse().ok()?;
-        Some((db, encoded[pos + 1..].to_vec()))
+        Some((db, &encoded[pos + 1..]))
+    }
+
+    pub fn decode_key(encoded: &[u8]) -> Option<(usize, Vec<u8>)> {
+        Self::decode_key_ref(encoded).map(|(db, k)| (db, k.to_vec()))
     }
 
     pub(crate) fn prefix_end(prefix: &[u8]) -> Option<Vec<u8>> {
@@ -108,6 +125,14 @@ impl StorageAdapter for AiDbEngine {
         self.db.get(&key).map_err(|e| Error::Storage(e.to_string()))
     }
 
+    fn get_bytes_sync(&self, key: Vec<u8>) -> Result<Option<bytes::Bytes>> {
+        let pinned = self
+            .db
+            .get_pinned(&key)
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        Ok(pinned.map(|p| p.into_bytes()))
+    }
+
     fn write_batch_sync(&self, batch: Vec<AdapterWriteOp>) -> Result<()> {
         let mut wb = aidb::WriteBatch::new();
         for op in batch {
@@ -121,20 +146,26 @@ impl StorageAdapter for AiDbEngine {
             .map_err(|e| Error::Storage(e.to_string()))
     }
 
+    fn range_scan_sync(
+        &self,
+        start: Vec<u8>,
+        end: Vec<u8>,
+        limit: usize,
+        reverse: bool,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        scan_limited(&self.db, &start, &end, limit, reverse)
+    }
+
     fn last_in_range_sync(
         &self,
         start: Vec<u8>,
         end: Vec<u8>,
     ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
-        let mut iter = self
+        let pairs = self
             .db
-            .scan(Some(start.as_slice()), Some(end.as_slice()))
+            .scan_limited(Some(&start), Some(&end), 1, true)
             .map_err(|e| Error::Storage(e.to_string()))?;
-        iter.seek_to_last();
-        match (iter.key(), iter.value()) {
-            (Some(key), Some(value)) => Ok(Some((key.to_vec(), value.to_vec()))),
-            _ => Ok(None),
-        }
+        Ok(pairs.into_iter().next())
     }
 
     fn for_each_prefix_sync(
@@ -155,70 +186,43 @@ impl StorageAdapter for AiDbEngine {
     }
 
     async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>> {
-        self.blocking(move |db| db.get(&key).map_err(|e| Error::Storage(e.to_string())))
-            .await
+        self.get_sync(key)
+    }
+
+    async fn get_bytes(&self, key: Vec<u8>) -> Result<Option<bytes::Bytes>> {
+        self.get_bytes_sync(key)
     }
 
     async fn set(&self, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
-        self.blocking(move |db| {
-            db.put(&key, &value)
-                .map_err(|e| Error::Storage(e.to_string()))
-        })
-        .await
+        self.db
+            .put(&key, &value)
+            .map_err(|e| Error::Storage(e.to_string()))
     }
 
     async fn delete(&self, key: Vec<u8>) -> Result<bool> {
-        self.blocking(move |db| {
-            let existed = db
-                .get(&key)
-                .map_err(|e| Error::Storage(e.to_string()))?
-                .is_some();
-            db.delete(&key).map_err(|e| Error::Storage(e.to_string()))?;
-            Ok(existed)
-        })
-        .await
+        let existed = self
+            .db
+            .get(&key)
+            .map_err(|e| Error::Storage(e.to_string()))?
+            .is_some();
+        self.db
+            .delete(&key)
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        Ok(existed)
     }
 
     async fn apply_writes(&self, ops: Vec<AdapterWriteOp>) -> Result<()> {
-        self.blocking(move |db| {
-            let mut wb = WriteBatch::new();
-            for op in ops {
-                match op {
-                    AdapterWriteOp::Put { key, value } => wb.put(key, value),
-                    AdapterWriteOp::Delete { key } => wb.delete(key),
-                }
-            }
-            db.write(&wb).map_err(|e| Error::Storage(e.to_string()))?;
-            Ok(())
-        })
-        .await
+        self.write_batch_sync(ops)
     }
 
     async fn exists(&self, key: Vec<u8>) -> Result<bool> {
-        self.blocking(move |db| {
-            db.key_exists(&key)
-                .map_err(|e| Error::Storage(e.to_string()))
-        })
-        .await
+        self.db
+            .key_exists(&key)
+            .map_err(|e| Error::Storage(e.to_string()))
     }
 
     async fn write_batch(&self, batch: Vec<AdapterWriteOp>) -> Result<()> {
-        self.blocking(move |db| {
-            let mut wb = WriteBatch::new();
-            for op in batch {
-                match op {
-                    AdapterWriteOp::Put { key, value } => {
-                        wb.put(key, value);
-                    }
-                    AdapterWriteOp::Delete { key } => {
-                        wb.delete(key);
-                    }
-                }
-            }
-            db.write(&wb).map_err(|e| Error::Storage(e.to_string()))?;
-            Ok(())
-        })
-        .await
+        self.write_batch_sync(batch)
     }
 
     async fn for_each_prefix(
@@ -246,6 +250,17 @@ impl StorageAdapter for AiDbEngine {
                 .map_err(|e| Error::Storage(e.to_string()))
         })
         .await
+    }
+
+    async fn range_scan(
+        &self,
+        start: Vec<u8>,
+        end: Vec<u8>,
+        limit: usize,
+        reverse: bool,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        self.blocking(move |db| scan_limited(&db, &start, &end, limit, reverse))
+            .await
     }
 
     async fn last_in_range(
@@ -334,5 +349,18 @@ fn db_write_op_to_adapter(op: DbWriteOp) -> AdapterWriteOp {
     match op {
         DbWriteOp::Put { key, value } => AdapterWriteOp::Put { key, value },
         DbWriteOp::Delete { key } => AdapterWriteOp::Delete { key },
+        DbWriteOp::DeleteRange { .. } => unimplemented!("delete range to adapter not supported"),
     }
+}
+
+/// `[start, end)` 内至多 `limit` 条, `reverse` 时从末尾向前. 只读取需要的条数.
+fn scan_limited(
+    db: &DB,
+    start: &[u8],
+    end: &[u8],
+    limit: usize,
+    reverse: bool,
+) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+    db.scan_limited(Some(start), Some(end), limit, reverse)
+        .map_err(|e| Error::Storage(e.to_string()))
 }

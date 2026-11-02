@@ -224,10 +224,10 @@ const DEFAULT_BIND: &str = "127.0.0.1:6379";
 const DEFAULT_MAX_CLIENTS: usize = 10000;
 const SCRIPT_WORKER_THREADS_FALLBACK: usize = 8;
 
-/// 未配置 `script_worker_threads` 时的线程数: 机器并行度夹到 2..=16, 探测失败为 8.
+/// 未配置 `script_worker_threads` 时的线程数: 兼顾 I/O 等待, 机器并行度*4 夹到 8..=32, 探测失败为 8.
 pub fn default_script_worker_threads() -> usize {
     match std::thread::available_parallelism() {
-        Ok(n) => n.get().clamp(2, 16),
+        Ok(n) => (n.get() * 4).clamp(8, 32),
         Err(_) => SCRIPT_WORKER_THREADS_FALLBACK,
     }
 }
@@ -717,7 +717,7 @@ mod tests {
     fn script_worker_threads_default_is_clamped() {
         let n = resolve(Settings::default()).script_worker_threads;
         assert_eq!(n, default_script_worker_threads());
-        assert!((2..=16).contains(&n));
+        assert!((8..=32).contains(&n));
     }
 
     #[test]

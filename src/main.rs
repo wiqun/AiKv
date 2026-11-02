@@ -349,6 +349,8 @@ async fn init_cluster(
 
     // 11. 启动 Lifecycle (数据 Group 自动创建/销毁)
     let mut data_raft_config = raft_config.clone();
+    data_raft_config.snapshot_logs_since_last = 50_000;
+    data_raft_config.max_payload_entries = 1000;
     data_raft_config.log_committer_config =
         Some(aidb::cluster::log_committer::LogCommitterConfig::default());
     let mut data_options = server_db_options_with_preset(settings.sync_wal, aidb_preset);

@@ -4,7 +4,7 @@
 //! 超过后, 用户 key 只留 `CollectionHeader`, 每个 member 和按 score 排序的索引各写一条 subkey.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::error::Result;
 use crate::storage::aidb::AiDbEngine;
@@ -133,9 +133,25 @@ pub fn replace_ops(
         user_key.to_vec(),
         WriteOp::put_stored(header(map.len() as u32, expires_at)),
     ));
+    let mut min_k: Option<Vec<u8>> = None;
+    let mut max_k: Option<Vec<u8>> = None;
     for (member, score) in map {
+        let sk = score_key(&encoded, *score, member);
+        if min_k
+            .as_ref()
+            .is_none_or(|cur| sk.as_slice() < cur.as_slice())
+        {
+            min_k = Some(sk.clone());
+        }
+        if max_k
+            .as_ref()
+            .is_none_or(|cur| sk.as_slice() > cur.as_slice())
+        {
+            max_k = Some(sk);
+        }
         push_member_put(&mut ops, &encoded, member, *score);
     }
+    set_score_bounds_hint(&score_prefix(&encoded), min_k, max_k);
     ops
 }
 
@@ -195,18 +211,40 @@ pub async fn read_member_score(
 pub static LOAD_MEMBERS_CALLS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+#[cfg(test)]
+thread_local! {
+    /// 当前线程的全量加载次数. 并行测试之间互不干扰, `#[tokio::test]` 的任务都跑在测试线程上.
+    pub static THREAD_LOAD_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn count_load_members() {
+    LOAD_MEMBERS_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    THREAD_LOAD_CALLS.with(|c| c.set(c.get() + 1));
+}
+
+#[derive(Clone, Copy)]
+struct UnsafeSyncMap(*mut BTreeMap<Vec<u8>, f64>);
+unsafe impl Send for UnsafeSyncMap {}
+
+impl UnsafeSyncMap {
+    unsafe fn insert(self, member: Vec<u8>, score: f64) {
+        (*self.0).insert(member, score);
+    }
+}
+
 pub async fn load_members(
     storage: &dyn KvStorage,
     db: usize,
     user_key: &[u8],
 ) -> Result<BTreeMap<Vec<u8>, f64>> {
     #[cfg(test)]
-    LOAD_MEMBERS_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    count_load_members();
     let encoded = AiDbEngine::encode_key(db, user_key);
     let prefix = member_prefix(&encoded);
     let prefix_len = prefix.len();
-    let map = Arc::new(Mutex::new(BTreeMap::new()));
-    let map_c = Arc::clone(&map);
+    let mut map = BTreeMap::new();
+    let map_ptr = UnsafeSyncMap(&mut map as *mut _);
     storage
         .raw_subkey_for_each(
             db,
@@ -216,16 +254,15 @@ pub async fn load_members(
                     return Ok(());
                 };
                 if let Some(score) = decode_score(&raw) {
-                    map_c.lock().expect("zset members").insert(member, score);
+                    unsafe {
+                        map_ptr.insert(member, score);
+                    }
                 }
                 Ok(())
             }),
         )
         .await?;
-    Ok(Arc::try_unwrap(map)
-        .unwrap_or_else(|_| unreachable!("member map still shared"))
-        .into_inner()
-        .expect("zset members"))
+    Ok(map)
 }
 
 pub fn load_members_sync(
@@ -234,12 +271,12 @@ pub fn load_members_sync(
     user_key: &[u8],
 ) -> Result<BTreeMap<Vec<u8>, f64>> {
     #[cfg(test)]
-    LOAD_MEMBERS_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    count_load_members();
     let encoded = AiDbEngine::encode_key(db, user_key);
     let prefix = member_prefix(&encoded);
     let prefix_len = prefix.len();
-    let map = Arc::new(Mutex::new(BTreeMap::new()));
-    let map_c = Arc::clone(&map);
+    let mut map = BTreeMap::new();
+    let map_ptr = UnsafeSyncMap(&mut map as *mut _);
     storage.raw_subkey_for_each(
         db,
         prefix,
@@ -248,15 +285,15 @@ pub fn load_members_sync(
                 return Ok(());
             };
             if let Some(score) = decode_score(&raw) {
-                map_c.lock().expect("zset members").insert(member, score);
+                // SAFETY: raw_subkey_for_each 在当前线程同步顺序执行，并在返回前结束，map 在调用栈期间有效
+                unsafe {
+                    map_ptr.insert(member, score);
+                }
             }
             Ok(())
         }),
     )?;
-    Ok(Arc::try_unwrap(map)
-        .unwrap_or_else(|_| unreachable!("member map still shared"))
-        .into_inner()
-        .expect("zset members"))
+    Ok(map)
 }
 
 pub fn read_member_score_sync(
@@ -297,7 +334,131 @@ fn push_member_put(
         },
     ));
     let score_engine = score_key(encoded_user, score, member);
+    widen_score_bounds_hint(&score_prefix(encoded_user), &score_engine);
     ops.push((score_engine, WriteOp::put_engine(Vec::new())));
+}
+
+#[derive(Clone, Default)]
+struct ScoreBoundsEntry {
+    min_k: Option<Vec<u8>>,
+    max_k: Option<Vec<u8>>,
+    version: u64,
+}
+
+type ScoreBoundsSnapshot = (Option<Vec<u8>>, Option<Vec<u8>>, u64);
+type ScoreBoundsMap = std::collections::HashMap<Vec<u8>, ScoreBoundsEntry>;
+
+static SCORE_BOUNDS_HINT: parking_lot::RwLock<Option<ScoreBoundsMap>> =
+    parking_lot::RwLock::new(None);
+
+pub fn get_score_bounds_hint(prefix: &[u8]) -> ScoreBoundsSnapshot {
+    let guard = SCORE_BOUNDS_HINT.read();
+    guard
+        .as_ref()
+        .and_then(|map| {
+            map.get(prefix)
+                .map(|e| (e.min_k.clone(), e.max_k.clone(), e.version))
+        })
+        .unwrap_or((None, None, 0))
+}
+
+fn set_score_bounds_hint(prefix: &[u8], min_k: Option<Vec<u8>>, max_k: Option<Vec<u8>>) {
+    let mut guard = SCORE_BOUNDS_HINT.write();
+    let map = guard.get_or_insert_with(std::collections::HashMap::new);
+    if map.len() >= 1024 && !map.contains_key(prefix) {
+        map.clear();
+    }
+    let entry = map.entry(prefix.to_vec()).or_default();
+    entry.min_k = min_k;
+    entry.max_k = max_k;
+    entry.version = entry.version.wrapping_add(1);
+}
+
+pub fn advance_min_score_hint(prefix: &[u8], new_min: Vec<u8>, expected_version: u64) {
+    let mut guard = SCORE_BOUNDS_HINT.write();
+    let map = guard.get_or_insert_with(std::collections::HashMap::new);
+    if map.len() >= 1024 && !map.contains_key(prefix) {
+        map.clear();
+    }
+    let entry = map.entry(prefix.to_vec()).or_default();
+    if entry.version != expected_version {
+        return;
+    }
+    if entry
+        .min_k
+        .as_ref()
+        .is_none_or(|cur| new_min.as_slice() > cur.as_slice())
+    {
+        entry.min_k = Some(new_min);
+    }
+}
+
+pub fn shrink_max_score_hint(prefix: &[u8], new_max: Vec<u8>, expected_version: u64) {
+    let mut guard = SCORE_BOUNDS_HINT.write();
+    let map = guard.get_or_insert_with(std::collections::HashMap::new);
+    if map.len() >= 1024 && !map.contains_key(prefix) {
+        map.clear();
+    }
+    let entry = map.entry(prefix.to_vec()).or_default();
+    if entry.version != expected_version {
+        return;
+    }
+    if entry
+        .max_k
+        .as_ref()
+        .is_none_or(|cur| new_max.as_slice() < cur.as_slice())
+    {
+        entry.max_k = Some(new_max);
+    }
+}
+
+fn widen_score_bounds_hint(prefix: &[u8], score_engine: &[u8]) {
+    if SCORE_BOUNDS_HINT.read().is_none() {
+        return;
+    }
+    let mut guard = SCORE_BOUNDS_HINT.write();
+    let Some(map) = guard.as_mut() else { return };
+    let Some(entry) = map.get_mut(prefix) else {
+        return;
+    };
+    let mut widened = false;
+    if let Some(ref min_k) = entry.min_k {
+        if score_engine < min_k.as_slice() {
+            entry.min_k = Some(score_engine.to_vec());
+            widened = true;
+        }
+    }
+    if let Some(ref max_k) = entry.max_k {
+        if score_engine > max_k.as_slice() {
+            entry.max_k = Some(score_engine.to_vec());
+            widened = true;
+        }
+    }
+    if widened {
+        entry.version = entry.version.wrapping_add(1);
+    }
+}
+
+pub fn invalidate_score_bounds_hint(db: usize, key: &[u8]) {
+    if SCORE_BOUNDS_HINT.read().is_none() {
+        return;
+    }
+    let prefix = score_prefix(&AiDbEngine::encode_key(db, key));
+    let mut guard = SCORE_BOUNDS_HINT.write();
+    if let Some(map) = guard.as_mut() {
+        if let Some(entry) = map.get_mut(&prefix) {
+            entry.min_k = None;
+            entry.max_k = None;
+            entry.version = entry.version.wrapping_add(1);
+        }
+    }
+}
+
+pub fn clear_score_bounds_hint() {
+    let mut guard = SCORE_BOUNDS_HINT.write();
+    if let Some(map) = guard.as_mut() {
+        map.clear();
+    }
 }
 
 #[cfg(test)]

@@ -108,6 +108,8 @@ async fn route_decision_all_branches() {
         metrics: Some(Arc::clone(&metrics)),
         _watcher_shutdown: parking_lot::Mutex::new(None),
         _auto_save_shutdown: parking_lot::Mutex::new(None),
+        slot_groups: ClusterStateManager::new_slot_groups(),
+        has_active_migration: AtomicBool::new(false),
     };
     let _ = CLUSTER_STATE_MGR.set(Arc::new(mgr));
     let mgr_ref = CLUSTER_STATE_MGR.get().unwrap();
@@ -777,4 +779,15 @@ fn key_to_slot_hash_tag_extraction() {
     let no_close = aidb::cluster::router::key_to_slot(b"{abc");
     let whole_key = aidb::cluster::router::key_to_slot(b"{abc");
     assert_eq!(no_close, whole_key);
+}
+
+#[test]
+fn test_flat_slot_map_fast_lookup() {
+    let slot_groups = aikv::state::ClusterStateManager::new_slot_groups();
+    assert_eq!(slot_groups[0].load(std::sync::atomic::Ordering::Relaxed), 0);
+    slot_groups[100].store(2, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(
+        slot_groups[100].load(std::sync::atomic::Ordering::Relaxed),
+        2
+    );
 }

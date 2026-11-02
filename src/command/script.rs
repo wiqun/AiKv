@@ -4,8 +4,10 @@
 //! 集群先把写放进在途缓冲再放开 key 锁, 入队在锁外按 key 排队, Raft 确认仍在其后.
 //! 脚本内写进 `ScriptTransaction`, 成功才一次提交. EVAL 不写入 SCRIPT 缓存.
 
+mod active;
 mod cache;
 mod call_stats;
+mod commit;
 mod convert;
 mod drive;
 mod enqueue_chain;
@@ -15,6 +17,7 @@ pub(crate) mod json_exec;
 mod libs;
 mod phase_stats;
 mod pool;
+mod route;
 mod sandbox;
 mod transaction;
 mod zset_edit;
@@ -52,6 +55,7 @@ const MAX_IDLE_VMS: usize = 64;
 struct ScriptExecutionContext {
     txn: RefCell<ScriptTransaction>,
     declared: Arc<DeclaredKeys>,
+    read_only: bool,
 }
 
 struct ScriptArgs<'a> {
@@ -59,6 +63,7 @@ struct ScriptArgs<'a> {
     script: &'a str,
     keys: &'a [Bytes],
     argv: &'a [Bytes],
+    read_only: bool,
 }
 
 struct ScriptPerfSampler {
@@ -201,6 +206,17 @@ struct Seg50Tracker {
     slots: [Seg50Slot; 64],
 }
 
+fn script_profiling_enabled() -> bool {
+    static PROFILING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        let enabled = std::env::var("AIKV_SCRIPT_PROFILING")
+            .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+        PROFILING.store(enabled, Ordering::Relaxed);
+    });
+    PROFILING.load(Ordering::Relaxed)
+}
+
 impl Seg50Tracker {
     const fn new() -> Self {
         Self {
@@ -210,6 +226,9 @@ impl Seg50Tracker {
     }
 
     fn on_start(&self) -> (usize, usize) {
+        if !script_profiling_enabled() {
+            return (0, 0);
+        }
         let req_id = self.req_counter.fetch_add(1, Ordering::Relaxed);
         let seg_id = req_id / 50;
         let slot_idx = seg_id % 64;
@@ -222,6 +241,9 @@ impl Seg50Tracker {
     }
 
     fn on_enqueued(&self, slot_idx: usize) {
+        if !script_profiling_enabled() {
+            return;
+        }
         let slot = &self.slots[slot_idx];
         let idx = slot.enq_count.fetch_add(1, Ordering::SeqCst);
         let now = Instant::now();
@@ -233,6 +255,9 @@ impl Seg50Tracker {
     }
 
     fn on_committed(&self, seg_id: usize, slot_idx: usize) {
+        if !script_profiling_enabled() {
+            return;
+        }
         let slot = &self.slots[slot_idx];
         *slot.last_commit.lock() = Some(Instant::now());
         let idx = slot.commit_count.fetch_add(1, Ordering::SeqCst);
@@ -276,6 +301,8 @@ pub struct ScriptCommands {
     in_flight: Arc<InFlightBuffer>,
     enqueue_chain: enqueue_chain::EnqueueChain,
     pool: pool::ScriptWorkerPool,
+    router: route::ScriptRouter,
+    active: active::ActiveScripts,
 }
 
 impl ScriptCommands {
@@ -308,6 +335,8 @@ impl ScriptCommands {
             in_flight: Arc::new(InFlightBuffer::new()),
             enqueue_chain: enqueue_chain::EnqueueChain::new(),
             pool: pool::ScriptWorkerPool::new(threads),
+            router: route::ScriptRouter::from_env(),
+            active: active::ActiveScripts::default(),
         }
     }
 
@@ -356,8 +385,11 @@ impl ScriptCommands {
         let script = String::from_utf8_lossy(&args[0]).into_owned();
         let sha1 = Self::sha1(&script);
         self.cache.insert(sha1.clone(), script.clone());
+        let read_only = self.cache.is_read_only(&sha1);
         let (keys, argv) = parse_keys_argv(args)?;
-        let result = self.execute_script(&sha1, &script, &keys, &argv, db).await;
+        let result = self
+            .execute_script(&sha1, &script, &keys, &argv, db, read_only)
+            .await;
         self.record("eval", result.is_ok());
         result
     }
@@ -369,9 +401,40 @@ impl ScriptCommands {
             .cache
             .get(&sha1)
             .ok_or_else(|| Error::Command("NOSCRIPT No matching script. Use EVAL.".into()))?;
+        let read_only = self.cache.is_read_only(&sha1);
         let (keys, argv) = parse_keys_argv(args)?;
-        let result = self.execute_script(&sha1, &script, &keys, &argv, db).await;
+        let result = self
+            .execute_script(&sha1, &script, &keys, &argv, db, read_only)
+            .await;
         self.record("evalsha", result.is_ok());
+        result
+    }
+
+    pub async fn eval_ro(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
+        router::require_min_args("EVAL_RO", args, 2)?;
+        let script = String::from_utf8_lossy(&args[0]).into_owned();
+        let sha1 = Self::sha1(&script);
+        self.cache.insert(sha1.clone(), script.clone());
+        let (keys, argv) = parse_keys_argv(args)?;
+        let result = self
+            .execute_script(&sha1, &script, &keys, &argv, db, true)
+            .await;
+        self.record("eval_ro", result.is_ok());
+        result
+    }
+
+    pub async fn evalsha_ro(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
+        router::require_min_args("EVALSHA_RO", args, 2)?;
+        let sha1 = String::from_utf8_lossy(&args[0]).to_string();
+        let script = self
+            .cache
+            .get(&sha1)
+            .ok_or_else(|| Error::Command("NOSCRIPT No matching script. Use EVAL.".into()))?;
+        let (keys, argv) = parse_keys_argv(args)?;
+        let result = self
+            .execute_script(&sha1, &script, &keys, &argv, db, true)
+            .await;
+        self.record("evalsha_ro", result.is_ok());
         result
     }
 
@@ -414,6 +477,7 @@ impl ScriptCommands {
 
     fn script_flush(&self) -> Result<RespValue> {
         self.cache.flush();
+        self.router.clear();
         Ok(RespValue::SimpleString("OK".into()))
     }
 
@@ -430,11 +494,14 @@ impl ScriptCommands {
         keys: &[Bytes],
         argv: &[Bytes],
         db: usize,
+        read_only: bool,
     ) -> Result<RespValue> {
         let (seg_id, slot_idx) = SEG_TRACKER.on_start();
+        let (_active, alone) = self.active.enter();
         let t_start = Instant::now();
         let key_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_ref()).collect();
-        let _guard = if !keys.is_empty() {
+        let should_lock = !keys.is_empty() && !read_only;
+        let _guard = if should_lock {
             Some(
                 self.key_lock
                     .lock_keys_sorted_with_timeout(&key_refs, DEFAULT_SCRIPT_LOCK_TIMEOUT)
@@ -456,43 +523,63 @@ impl ScriptCommands {
             script: script.to_string(),
             keys: keys.to_vec(),
             argv: argv.to_vec(),
-            local_commit: self.storage.local_script_commit(),
+            local_commit: self.storage.local_script_commit()
+                || (alone
+                    && self.in_flight.is_empty()
+                    && self.storage.local_script_commit_when_idle()),
             seg_id,
             slot_idx,
+            read_only,
         };
-        let drive = self.drive_script(job).await?;
+        let use_pool = self.router.use_pool(sha1);
+        let drive = self.drive_script(job, use_pool).await?;
+        if let Ok(body) = &drive.result {
+            let cost_us = body
+                .t_local_done
+                .duration_since(drive.t_entered)
+                .as_micros() as u64;
+            self.router.record(sha1, cost_us);
+        }
         self.release_vm(drive.lua);
-        IO_SAMPLER.record(drive.io);
-        call_stats::record_script_calls(drive.calls);
-        let prepare_us = drive.result.as_ref().map_or(0, |body| {
-            phase_stats::micros_between(body.t_lua_done, body.t_prep_done)
-        });
-        phase_stats::record_script_phase(phase_stats::ScriptPhaseStats {
-            hop_us: phase_stats::micros_between(t_locked, drive.t_entered),
-            setup_us: drive.setup_us,
-            gap_us: phase_stats::gap_us(drive.call_wall_us, drive.calls),
-            teardown_us: drive.teardown_us,
-            prepare_us,
-        });
+        if script_profiling_enabled() {
+            IO_SAMPLER.record(drive.io);
+            call_stats::record_script_calls(drive.calls);
+            let prepare_us = drive.result.as_ref().map_or(0, |body| {
+                phase_stats::micros_between(body.t_lua_done, body.t_prep_done)
+            });
+            phase_stats::record_script_phase(phase_stats::ScriptPhaseStats {
+                hop_us: phase_stats::micros_between(t_locked, drive.t_entered),
+                setup_us: drive.setup_us,
+                gap_us: phase_stats::gap_us(drive.call_wall_us, drive.calls),
+                teardown_us: drive.teardown_us,
+                prepare_us,
+            });
+        }
         let body = drive.result?;
         let (commit_done, unlocked) = self
             .finish_pending_commit(body.pending, db, seg_id, slot_idx, keys, _guard)
             .await?;
         let t_done = commit_done.unwrap_or(body.t_local_done);
 
-        PERF_SAMPLER.record(
-            t_locked.duration_since(t_start).as_micros() as u64,
-            body.t_lua_done.duration_since(t_locked).as_micros() as u64,
-            body.t_prep_done.duration_since(body.t_lua_done).as_micros() as u64,
-            t_done.duration_since(body.t_prep_done).as_micros() as u64,
-            t_done.duration_since(t_start).as_micros() as u64,
-            unlocked.duration_since(t_locked).as_micros() as u64,
-        );
+        if script_profiling_enabled() {
+            PERF_SAMPLER.record(
+                t_locked.duration_since(t_start).as_micros() as u64,
+                body.t_lua_done.duration_since(t_locked).as_micros() as u64,
+                body.t_prep_done.duration_since(body.t_lua_done).as_micros() as u64,
+                t_done.duration_since(body.t_prep_done).as_micros() as u64,
+                t_done.duration_since(t_start).as_micros() as u64,
+                unlocked.duration_since(t_locked).as_micros() as u64,
+            );
+        }
         lua_to_resp(body.value)
     }
 
-    async fn drive_script(&self, job: drive::ScriptJob) -> Result<drive::ScriptDrive> {
-        if !drive::script_runs_off_worker() {
+    async fn drive_script(
+        &self,
+        job: drive::ScriptJob,
+        use_pool: bool,
+    ) -> Result<drive::ScriptDrive> {
+        if !use_pool {
             return Ok(job.run());
         }
         self.pool.run(move || job.run()).await
@@ -523,7 +610,12 @@ impl ScriptCommands {
         let mut publication = self.enqueue_chain.publish(&key_refs);
         drop(guard);
         let unlocked = Instant::now();
-        tokio::task::yield_now().await;
+        // 顺序由 `publish` (key 锁内登记) 与 `wait_predecessors` 保证, 这里的让出只影响调度:
+        // 多连接 (非流水线) 下让出能让其他连接的脚本并行推进 (单机 S4 约 16.6k vs 11.1k);
+        // 流水线延迟确认下是同一连接的下一条脚本, 让出只会在忙的运行时里白等 (约 38µs/条, 集群 S6 约 8k vs 17k).
+        if !crate::storage::deferred::is_active() {
+            tokio::task::yield_now().await;
+        }
         if let Err(err) = publication.wait_predecessors().await {
             drive::rollback_inserted(&self.in_flight, Some(inserted));
             return Err(err);
@@ -537,11 +629,22 @@ impl ScriptCommands {
         };
         publication.succeed();
         SEG_TRACKER.on_enqueued(slot_idx);
-        let write_res = handle.wait().await;
-        self.in_flight.remove_encoded(&inserted.1, inserted.0);
-        SEG_TRACKER.on_committed(seg_id, slot_idx);
-        write_res?;
-        Ok((Some(Instant::now()), unlocked))
+        let commit = commit::ScriptCommit::new(
+            handle,
+            Arc::clone(&self.in_flight),
+            inserted,
+            seg_id,
+            slot_idx,
+        );
+        // 流水线的延迟确认作用域内只登记句柄 (提交后的清理随句柄一起推迟), 由流水线按序统一等待;
+        // 其他调用方照旧在这里等待提交.
+        match crate::storage::deferred::defer(Box::new(commit)) {
+            Ok(()) => Ok((None, unlocked)),
+            Err(commit) => {
+                commit.wait().await?;
+                Ok((Some(Instant::now()), unlocked))
+            }
+        }
     }
 
     fn eval_lua_func(
@@ -587,17 +690,14 @@ fn prepare_lua_call(
         },
     );
 
-    let func_name = format!("__aikv_script_{}", args.sha1);
-    let globals = lua.globals();
-    let func: mlua::Function = match globals.get(func_name.as_str()) {
+    let func: mlua::Function = match lua.named_registry_value(args.sha1) {
         Ok(f) => f,
         Err(_) => {
             let f: mlua::Function = lua
                 .load(args.script)
                 .into_function()
                 .map_err(|e| Error::Command(format!("ERR Error compiling script: {e}")))?;
-            globals
-                .set(func_name.as_str(), f.clone())
+            lua.set_named_registry_value(args.sha1, f.clone())
                 .map_err(|e| Error::Command(format!("ERR Error saving script: {e}")))?;
             f
         }
@@ -607,6 +707,7 @@ fn prepare_lua_call(
     lua.set_app_data(ScriptExecutionContext {
         txn: RefCell::new(txn),
         declared,
+        read_only: args.read_only,
     });
     Ok(func)
 }
@@ -627,13 +728,13 @@ fn lua_redis_entry(
     throw_error: bool,
 ) -> Result<mlua::Function> {
     lua.create_function(move |lua, args: MultiValue| {
-        let declared = {
+        let (declared, read_only) = {
             let ctx = lua
                 .app_data_ref::<ScriptExecutionContext>()
                 .ok_or_else(|| {
                     mlua::Error::RuntimeError("ERR missing script execution context".into())
                 })?;
-            Arc::clone(&ctx.declared)
+            (Arc::clone(&ctx.declared), ctx.read_only)
         };
         let ctx = lua
             .app_data_mut::<ScriptExecutionContext>()
@@ -648,6 +749,7 @@ fn lua_redis_entry(
             declared.as_ref(),
             args,
             throw_error,
+            read_only,
         )
     })
     .map_err(|e| Error::Command(format!("ERR {e}")))
@@ -664,10 +766,10 @@ fn create_sandbox_vm(storage: Arc<dyn KvStorage>, memory_limit: usize) -> Result
 fn clear_keys_argv(lua: &mlua::Lua) -> Result<()> {
     let globals = lua.globals();
     globals
-        .set("KEYS", mlua::Value::Nil)
+        .raw_set("KEYS", mlua::Value::Nil)
         .map_err(|e| Error::Command(format!("ERR {e}")))?;
     globals
-        .set("ARGV", mlua::Value::Nil)
+        .raw_set("ARGV", mlua::Value::Nil)
         .map_err(|e| Error::Command(format!("ERR {e}")))?;
     Ok(())
 }
@@ -696,11 +798,11 @@ fn populate_keys_argv(lua: &mlua::Lua, keys: &[Bytes], argv: &[Bytes]) -> Result
             .create_string(k.as_ref())
             .map_err(|e| Error::Command(format!("ERR {e}")))?;
         keys_table
-            .set(i + 1, s)
+            .raw_set(i + 1, s)
             .map_err(|e| Error::Command(format!("ERR {e}")))?;
     }
     globals
-        .set("KEYS", keys_table)
+        .raw_set("KEYS", keys_table)
         .map_err(|e| Error::Command(format!("ERR {e}")))?;
 
     let argv_table = lua
@@ -711,11 +813,11 @@ fn populate_keys_argv(lua: &mlua::Lua, keys: &[Bytes], argv: &[Bytes]) -> Result
             .create_string(a.as_ref())
             .map_err(|e| Error::Command(format!("ERR {e}")))?;
         argv_table
-            .set(i + 1, s)
+            .raw_set(i + 1, s)
             .map_err(|e| Error::Command(format!("ERR {e}")))?;
     }
     globals
-        .set("ARGV", argv_table)
+        .raw_set("ARGV", argv_table)
         .map_err(|e| Error::Command(format!("ERR {e}")))?;
     Ok(())
 }

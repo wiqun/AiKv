@@ -159,6 +159,9 @@ async fn remove_from_header(
     }
     push_header_or_delete(&mut ops, key, count, stored.expires_at);
     storage.write_batch(db, ops).await?;
+    if count == 0 {
+        zset_subkey::invalidate_score_bounds_hint(db, key);
+    }
     Ok(removed)
 }
 

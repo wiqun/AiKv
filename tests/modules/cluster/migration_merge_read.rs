@@ -31,13 +31,14 @@ use aikv::cluster::announce::AnnounceResolver;
 use aikv::cluster::state::{
     ClusterStateManager, ReplicationRole, CLUSTER_STATE_MGR, DEFAULT_DATA_PORT_OFFSET,
 };
-use aikv::storage::adapter::StorageAdapter;
+use aikv::storage::adapter::{AdapterWriteOp, StorageAdapter};
 use aikv::storage::aidb::AiDbEngine;
 use aikv::storage::cluster_adapter::ClusterDataAdapter;
 
 /// 所有测试 key 共用 hash tag `{m}`, 确保落在同一个被迁移的 slot.
 const PREPARE_KEY: &[u8] = b"prepare_key{m}";
 const DEL_KEY: &[u8] = b"del_key{m}";
+const ORDER_KEY: &[u8] = b"order_key{m}";
 
 /// 搭建单节点、两个真实数据 group (1=source, 2=target) 的最小集群, 返回
 /// 就绪的 `ClusterStateManager` (已注册进 `CLUSTER_STATE_MGR`).
@@ -194,6 +195,8 @@ async fn build_mgr() -> Arc<ClusterStateManager> {
         metrics: None,
         _watcher_shutdown: parking_lot::Mutex::new(None),
         _auto_save_shutdown: parking_lot::Mutex::new(None),
+        slot_groups: ClusterStateManager::new_slot_groups(),
+        has_active_migration: AtomicBool::new(false),
     };
     let _ = CLUSTER_STATE_MGR.set(Arc::new(mgr));
     let _dirs = (meta_dir, data_dir);
@@ -250,6 +253,29 @@ async fn migration_merge_read_and_del_tombstone_lifecycle() {
     // importing_slots 让写路径明确落到 target — 与生产环境 target 节点
     // `CLUSTER SETSLOT <slot> IMPORTING` 后的路由结果等价.
     mgr.importing_slots.write().insert(slot, 1);
+
+    // ═══════════════════════════════════════════════════════════════
+    // 迁移期写的顺序点: 调用方 (脚本的 `enqueue_chain`) 以 `enqueue_batch` 返回作为同 key 写的顺序点.
+    // 先入队旧值再入队新值, 即使先 wait 新值再 wait 旧值, 最终也必须是新值.
+    // ═══════════════════════════════════════════════════════════════
+    {
+        let order_key = AiDbEngine::encode_key(0, ORDER_KEY);
+        let put = |v: &[u8]| {
+            vec![AdapterWriteOp::Put {
+                key: order_key.clone(),
+                value: v.to_vec(),
+            }]
+        };
+        let first = adapter.enqueue_batch(put(b"old")).await.unwrap();
+        let second = adapter.enqueue_batch(put(b"new")).await.unwrap();
+        second.wait().await.unwrap();
+        first.wait().await.unwrap();
+        assert_eq!(
+            adapter.get(order_key.clone()).await.unwrap(),
+            Some(b"new".to_vec()),
+            "迁移期先入队的旧值在 wait 时才 propose, 覆盖了后入队的新值"
+        );
+    }
 
     // ═══════════════════════════════════════════════════════════════
     // 测试计划 #1: Prepare 期 SET 未拷贝完的 key, GET 立即可见新值.

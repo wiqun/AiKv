@@ -242,11 +242,23 @@ impl ClusterDataAdapter {
         let Some(mgr) = CLUSTER_STATE_MGR.get().cloned() else {
             return Ok(None);
         };
-        let Some((_, user_key)) = AiDbEngine::decode_key(key) else {
+        let Some((_, user_key)) = AiDbEngine::decode_key_ref(key) else {
             return Ok(None);
         };
-        let routing_key = Self::strip_subkey_suffix(&user_key);
+        let routing_key = Self::strip_subkey_suffix(user_key);
         let slot = key_to_slot(routing_key);
+        let fast_gid = mgr.fast_slot_group(slot);
+        if fast_gid > 0 {
+            return Ok(Some((mgr, ReadRoute::Single(fast_gid))));
+        }
+        Self::route_read_slow(mgr, routing_key, slot)
+    }
+
+    fn route_read_slow(
+        mgr: Arc<ClusterStateManager>,
+        routing_key: &[u8],
+        slot: u16,
+    ) -> Result<Option<(Arc<ClusterStateManager>, ReadRoute)>> {
         if let Some(route) = Self::migration_read_route(&mgr, slot)? {
             return Ok(Some((mgr, route)));
         }
@@ -263,8 +275,8 @@ impl ClusterDataAdapter {
 
     /// 写路径用的 slot. 子键与父键相同. 无法解码时返回 `None`.
     pub(super) fn routing_slot(key: &[u8]) -> Option<u16> {
-        let (_, user_key) = AiDbEngine::decode_key(key)?;
-        let routing_key = Self::strip_subkey_suffix(&user_key);
+        let (_, user_key) = AiDbEngine::decode_key_ref(key)?;
+        let routing_key = Self::strip_subkey_suffix(user_key);
         Some(key_to_slot(routing_key))
     }
 
@@ -277,12 +289,24 @@ impl ClusterDataAdapter {
         let Some(mgr) = CLUSTER_STATE_MGR.get().cloned() else {
             return Ok(None);
         };
-        let Some((_, user_key)) = AiDbEngine::decode_key(key) else {
+        let Some((_, user_key)) = AiDbEngine::decode_key_ref(key) else {
             return Ok(None);
         };
-        let routing_key = Self::strip_subkey_suffix(&user_key);
-        Self::reject_if_write_frozen(&mgr, routing_key)?;
+        let routing_key = Self::strip_subkey_suffix(user_key);
         let slot = key_to_slot(routing_key);
+        let fast_gid = mgr.fast_slot_group(slot);
+        if fast_gid > 0 && !mgr.has_active_migration() {
+            return Ok(Some((mgr, WriteRoute::Plain(fast_gid))));
+        }
+        Self::route_write_slow(mgr, routing_key, slot)
+    }
+
+    fn route_write_slow(
+        mgr: Arc<ClusterStateManager>,
+        routing_key: &[u8],
+        slot: u16,
+    ) -> Result<Option<(Arc<ClusterStateManager>, WriteRoute)>> {
+        Self::reject_if_write_frozen(&mgr, routing_key)?;
         let migration = Self::copying_migration_route(&mgr, slot)?;
         let gid = if let Some(gid) = Self::importing_write_group(&mgr, slot) {
             Some(gid)
@@ -463,6 +487,28 @@ impl StorageAdapter for ClusterDataAdapter {
         }
     }
 
+    fn write_batch_sync(&self, batch: Vec<AdapterWriteOp>) -> Result<()> {
+        // 只在集群未启用时可用 (脚本独占时的同步落盘); 集群启用后写必须经 Raft.
+        if CLUSTER_STATE_MGR.get().is_some() {
+            return Err(Error::Storage(
+                "sync write_batch not supported in cluster mode".into(),
+            ));
+        }
+        self.local.write_batch_sync(batch)
+    }
+
+    fn get_bytes_sync(&self, key: Vec<u8>) -> Result<Option<bytes::Bytes>> {
+        match Self::route_read(&key)? {
+            Some((mgr, ReadRoute::Single(gid))) => mgr
+                .multi_raft
+                .get_local_bytes_sync(gid, &key)
+                .map_err(Self::map_err),
+            Some(_) => Err(Error::Command(TRYAGAIN_MIGRATION.into())),
+            None if Self::should_use_local_engine(&key) => self.local.get_bytes_sync(key),
+            None => Err(Self::data_group_not_ready_err()),
+        }
+    }
+
     fn last_in_range_sync(
         &self,
         start: Vec<u8>,
@@ -481,6 +527,26 @@ impl StorageAdapter for ClusterDataAdapter {
         }
     }
 
+    fn range_scan_sync(
+        &self,
+        start: Vec<u8>,
+        end: Vec<u8>,
+        limit: usize,
+        reverse: bool,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let Some(mgr) = CLUSTER_STATE_MGR.get().cloned() else {
+            return self.local.range_scan_sync(start, end, limit, reverse);
+        };
+        match Self::route_read(&start)? {
+            Some((_, ReadRoute::Single(gid))) => mgr
+                .multi_raft
+                .scan_local_user_pairs_limited_sync(gid, &start, &end, limit, reverse)
+                .map_err(Self::map_err),
+            Some(_) => Err(Error::Command(TRYAGAIN_MIGRATION.into())),
+            None => self.local.range_scan_sync(start, end, limit, reverse),
+        }
+    }
+
     fn for_each_prefix_sync(
         &self,
         prefix: Vec<u8>,
@@ -490,6 +556,16 @@ impl StorageAdapter for ClusterDataAdapter {
             return self.local.for_each_prefix_sync(prefix, f);
         };
         let end = AiDbEngine::prefix_end(&prefix);
+        if let Ok(Some((_, ReadRoute::Single(gid)))) = Self::route_read(&prefix) {
+            let pairs = mgr
+                .multi_raft
+                .scan_local_pairs_in_range_sync(gid, &prefix, end.as_deref())
+                .map_err(Self::map_err)?;
+            for (key, value) in pairs {
+                f(key, value)?;
+            }
+            return Ok(());
+        }
         for gid in mgr.multi_raft.local_group_ids() {
             let pairs = mgr
                 .multi_raft
@@ -519,6 +595,31 @@ impl StorageAdapter for ClusterDataAdapter {
                 },
             )) => Self::merge_read(&mgr, target_group, source_group, epoch, &key).await,
             None if Self::should_use_local_engine(&key) => self.local.get(key).await,
+            None => Err(Self::data_group_not_ready_err()),
+        }
+    }
+
+    async fn get_bytes(&self, key: Vec<u8>) -> Result<Option<bytes::Bytes>> {
+        match Self::route_read(&key)? {
+            Some((mgr, ReadRoute::Single(gid))) => mgr
+                .multi_raft
+                .get_local_bytes(gid, &key)
+                .await
+                .map_err(|e| {
+                    tracing::warn!(gid = gid, error = %e, "get_local_bytes failed");
+                    Self::map_err(e)
+                }),
+            Some((
+                mgr,
+                ReadRoute::Merge {
+                    target_group,
+                    source_group,
+                    epoch,
+                },
+            )) => Self::merge_read(&mgr, target_group, source_group, epoch, &key)
+                .await
+                .map(|opt| opt.map(bytes::Bytes::from)),
+            None if Self::should_use_local_engine(&key) => self.local.get_bytes(key).await,
             None => Err(Self::data_group_not_ready_err()),
         }
     }
@@ -554,7 +655,12 @@ impl StorageAdapter for ClusterDataAdapter {
     }
 
     async fn apply_writes(&self, ops: Vec<AdapterWriteOp>) -> Result<()> {
-        self.enqueue_batch(ops).await?.wait().await
+        let handle = self.enqueue_batch(ops).await?;
+        // 流水线内的盲写在延迟确认作用域里只登记 handle, 由流水线按序统一等待; 其余调用方照旧等待.
+        match crate::storage::deferred::defer(handle) {
+            Ok(()) => Ok(()),
+            Err(handle) => handle.wait().await,
+        }
     }
 
     async fn delete(&self, key: Vec<u8>) -> Result<bool> {
@@ -639,6 +745,17 @@ impl StorageAdapter for ClusterDataAdapter {
         match CLUSTER_STATE_MGR.get() {
             Some(mgr) => {
                 let end = AiDbEngine::prefix_end(&prefix);
+                if let Ok(Some((_, ReadRoute::Single(gid)))) = Self::route_read(&prefix) {
+                    let pairs = mgr
+                        .multi_raft
+                        .scan_local_pairs_in_range(gid, prefix, end)
+                        .await
+                        .map_err(Self::map_err)?;
+                    for (k, v) in pairs {
+                        f(k, v)?;
+                    }
+                    return Ok(());
+                }
                 for gid in mgr.multi_raft.local_group_ids() {
                     let pairs = mgr
                         .multi_raft
@@ -652,6 +769,27 @@ impl StorageAdapter for ClusterDataAdapter {
                 Ok(())
             }
             None => self.local.for_each_prefix(prefix, f).await,
+        }
+    }
+
+    async fn range_scan(
+        &self,
+        start: Vec<u8>,
+        end: Vec<u8>,
+        limit: usize,
+        reverse: bool,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let Some(mgr) = CLUSTER_STATE_MGR.get().cloned() else {
+            return self.local.range_scan(start, end, limit, reverse).await;
+        };
+        match Self::route_read(&start)? {
+            Some((_, ReadRoute::Single(gid))) => mgr
+                .multi_raft
+                .scan_local_user_pairs_limited(gid, start, end, limit, reverse)
+                .await
+                .map_err(Self::map_err),
+            Some(_) => Err(Error::Command(TRYAGAIN_MIGRATION.into())),
+            None => self.local.range_scan(start, end, limit, reverse).await,
         }
     }
 
@@ -785,6 +923,10 @@ impl StorageAdapter for ClusterDataAdapter {
 
     fn local_script_commit(&self) -> bool {
         false
+    }
+
+    fn local_script_commit_when_idle(&self) -> bool {
+        CLUSTER_STATE_MGR.get().is_none() && self.local.local_script_commit()
     }
 
     fn approximate_memory_bytes(&self) -> Option<u64> {

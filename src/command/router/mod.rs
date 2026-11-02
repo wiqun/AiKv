@@ -572,6 +572,8 @@ impl CommandRouter {
             "JSON.MSET" => self.json.json_mset(*db, args).await,
             "EVAL" => self.script.eval(*db, args).await,
             "EVALSHA" => self.script.evalsha(*db, args).await,
+            "EVAL_RO" => self.script.eval_ro(*db, args).await,
+            "EVALSHA_RO" => self.script.evalsha_ro(*db, args).await,
             "SCRIPT" => self.script.script(args).await,
             "INFO" => self.require_server()?.info(*db, args).await,
             "TIME" => self.require_server()?.time(args).await,
@@ -764,6 +766,10 @@ pub(crate) fn nil_bulk() -> RespValue {
 
 pub(crate) fn bulk(b: Vec<u8>) -> RespValue {
     RespValue::BulkString(Some(Bytes::from(b)))
+}
+
+pub(crate) fn bulk_bytes(b: Bytes) -> RespValue {
+    RespValue::BulkString(Some(b))
 }
 
 pub(crate) fn integer(n: i64) -> RespValue {

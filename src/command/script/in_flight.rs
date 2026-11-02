@@ -91,12 +91,9 @@ impl InFlightBuffer {
         }
     }
 
-    /// 前缀下是否有在途删除. 有的话按 score 取最大值可能读到已经删掉的索引.
-    pub fn has_delete_with_prefix(&self, prefix: &[u8]) -> bool {
-        let map = self.map.read();
-        map.iter().any(|(key, (value, _))| {
-            key.starts_with(prefix) && matches!(value, InFlightValue::Deleted)
-        })
+    /// 是否没有任何未落盘 (或尚未清理) 的在途写.
+    pub fn is_empty(&self) -> bool {
+        self.map.read().is_empty()
     }
 
     /// 前缀下字典序最大的在途写入 key.
@@ -251,5 +248,15 @@ mod tests {
         );
         drop(pin);
         assert!(buf.get_raw(&key).is_none());
+    }
+
+    #[test]
+    fn is_empty_tracks_unfinished_writes() {
+        let buf = InFlightBuffer::new();
+        assert!(buf.is_empty());
+        let (seq, keys) = buf.insert_batch(0, &[(b"k".to_vec(), WriteOp::put(b"v".to_vec()))]);
+        assert!(!buf.is_empty(), "有未落盘的写");
+        buf.remove_encoded(&keys, seq);
+        assert!(buf.is_empty());
     }
 }

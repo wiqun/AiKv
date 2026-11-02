@@ -1,4 +1,5 @@
-//! Connection Pipeline 并发优化: 将多笔安全命令并行执行并聚合写凑批.
+//! Connection Pipeline 批处理优化: 将流水线批次中的命令就地批量流式执行并聚合网络写回.
+//! 依据 ADR-001: 消除针对微秒级命令的逐个 Tokio Task 衍生与乱序重排开销.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -8,11 +9,12 @@ use bytes::Bytes;
 
 use crate::error::Result;
 use crate::protocol::RespValue;
+use crate::storage::types::BatchWriteHandle;
 
 use super::{Connection, ConnectionMode};
 
 impl Connection {
-    /// 尝试对同一批中的命令进行流水线并发执行.
+    /// 对同一批中的命令进行流水线批处理执行.
     /// 若包含事务、阻塞或状态敏感命令, 则回退到顺序执行.
     pub(super) async fn process_pipeline_batch(&mut self, batch: Vec<RespValue>) -> Result<()> {
         if let Some(timing) = self.pending_timing.take() {
@@ -33,7 +35,7 @@ impl Connection {
             parsed.push((cmd, args));
         }
 
-        self.execute_concurrent_pipeline(parsed).await
+        self.execute_pipeline(parsed).await
     }
 
     async fn process_sequential_batch(&mut self, batch: Vec<RespValue>) -> Result<()> {
@@ -53,102 +55,192 @@ impl Connection {
         Ok(())
     }
 
-    async fn execute_concurrent_pipeline(
-        &mut self,
-        commands: Vec<(String, Vec<Bytes>)>,
-    ) -> Result<()> {
-        let router = self.state.router().clone();
-        let client_id = self.client_id;
-        let remote = self.remote;
-        let proto = self.protocol_version;
-        let current_db = self.current_db;
-        #[cfg(feature = "cluster")]
-        let cluster_state = self.cluster_state.clone();
+    /// 等待挂起的写全部确认, 按原顺序输出各自的响应 (确认失败则该条响应变为错误).
+    async fn flush_pending(&mut self, pending: &mut Vec<PendingWrite>) -> Result<()> {
+        if pending.is_empty() {
+            return Ok(());
+        }
+        for r in resolve_pending(std::mem::take(pending)).await {
+            self.finish_immediate_command(&r.cmd, &r.args, r.started, r.result)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// 按到达顺序逐条执行流水线命令, 响应直接追加至当前连接响应缓冲, 批末统一一次性刷网.
+    ///
+    /// 单机与集群共用: Redis 语义要求同一连接流水线内的命令按序生效 (`SET k v` 之后的 `GET k`
+    /// 必须读到 `v`). 曾为集群并发 `spawn` 每条命令以合并 Raft 提交, 但这会破坏读后写与写写顺序.
+    pub async fn execute_pipeline(&mut self, commands: Vec<(String, Vec<Bytes>)>) -> Result<()> {
+        let total = commands.len();
+        if total == 0 {
+            return Ok(());
+        }
+        let t_enter = Instant::now();
 
         let gate = Arc::clone(&self.state.transaction_gate);
         let _guard = gate.read_owned().await;
 
-        let total = commands.len();
-        let t_enter = Instant::now();
-        let mut join_set = tokio::task::JoinSet::new();
+        let client_id = self.client_id;
+        let remote = self.remote;
+        let proto = self.protocol_version;
 
-        for (idx, (cmd, args)) in commands.into_iter().enumerate() {
-            let router = router.clone();
-            #[cfg(feature = "cluster")]
-            let cluster_state = cluster_state.clone();
+        #[cfg(feature = "cluster")]
+        let defer_enabled = crate::server::info::is_cluster_initialized();
+        #[cfg(not(feature = "cluster"))]
+        let defer_enabled = false;
+        let mut pending: Vec<PendingWrite> = Vec::new();
+        // 与 `pending` 并行维护的种类列表, 避免每条命令都重新收集.
+        let mut kinds: Vec<DeferKind> = Vec::new();
+
+        for (cmd, args) in commands {
             let track = super::should_track_observability(&cmd);
-            let arg_strings: Vec<String> = if track {
-                args.iter()
-                    .map(|b| String::from_utf8_lossy(b).into_owned())
-                    .collect()
-            } else {
-                Vec::new()
-            };
             let started = track.then(Instant::now);
-            join_set.spawn(async move {
-                let mut db = current_db;
-                let result = router
-                    .execute_with_client(
-                        &cmd,
-                        &args,
-                        &mut db,
-                        Some(client_id),
-                        Some(remote),
-                        proto,
-                        #[cfg(feature = "cluster")]
-                        Some(&cluster_state),
-                    )
-                    .await;
-                (idx, cmd, args, arg_strings, started, result)
-            });
-        }
 
-        let mut results = Vec::with_capacity(total);
-        while let Some(res) = join_set.join_next().await {
-            match res {
-                Ok(item) => results.push(item),
-                Err(e) => {
-                    return Err(crate::error::Error::Command(format!(
-                        "pipeline task failed: {e}"
-                    )))
+            // 可延迟的命令先入队后确认 (保持按序); 其余命令可能读到前序写的结果, 必须先等挂起的写全部确认.
+            let kind = if defer_enabled {
+                defer_kind(&cmd, &args)
+            } else {
+                None
+            };
+            if needs_barrier(&kinds, kind) {
+                self.flush_pending(&mut pending).await?;
+                kinds.clear();
+            }
+
+            let mut db = self.current_db;
+            let router = self.state.router();
+            let exec = router.execute_with_client(
+                &cmd,
+                &args,
+                &mut db,
+                Some(client_id),
+                Some(remote),
+                proto,
+                #[cfg(feature = "cluster")]
+                Some(&self.cluster_state),
+            );
+            let (result, handles) = if kind.is_some() {
+                crate::storage::deferred::scope(exec).await
+            } else {
+                (exec.await, Vec::new())
+            };
+            self.current_db = db;
+
+            match (result, kind) {
+                (Ok(resp), Some(kind)) if !handles.is_empty() => {
+                    pending.push(PendingWrite {
+                        cmd,
+                        args,
+                        started,
+                        resp,
+                        handles,
+                    });
+                    kinds.push(kind);
+                    if pending.len() >= MAX_PENDING_WRITES {
+                        self.flush_pending(&mut pending).await?;
+                        kinds.clear();
+                    }
+                }
+                (result, _) => {
+                    // 保序: 先输出之前挂起的响应, 再输出当前命令的响应.
+                    self.flush_pending(&mut pending).await?;
+                    kinds.clear();
+                    self.finish_immediate_command(&cmd, &args, started, result)
+                        .await?;
                 }
             }
         }
-        let t_join = Instant::now();
+        self.flush_pending(&mut pending).await?;
+
         drop(_guard);
+        self.flush_responses().await?;
 
-        results.sort_unstable_by_key(|(idx, ..)| *idx);
-        self.finish_pipeline_results(results).await?;
         let t_flushed = Instant::now();
-
         self.pending_timing = Some(PendingBatchTiming {
             cmds: total,
             t_enter,
             t_last_enq: None,
-            t_join,
+            t_join: t_flushed,
             t_flushed,
         });
         Ok(())
     }
+}
 
-    async fn finish_pipeline_results(&mut self, results: Vec<PipelineTaskResult>) -> Result<()> {
-        for (_idx, cmd, args, arg_strings, started, result) in results {
-            self.finish_immediate_command(&cmd, &args, arg_strings, started, result)
-                .await?;
-        }
-        self.flush_responses().await?;
-        Ok(())
+/// 单条流水线内最多挂起多少条写后强制确认一次, 限制内存与首条响应的等待时间.
+const MAX_PENDING_WRITES: usize = 256;
+
+/// 已执行 (写已入队) 但尚未确认的可延迟命令, 响应暂存到确认之后再输出.
+struct PendingWrite {
+    cmd: String,
+    args: Vec<Bytes>,
+    started: Option<Instant>,
+    resp: RespValue,
+    handles: Vec<Box<dyn BatchWriteHandle>>,
+}
+
+struct ResolvedWrite {
+    cmd: String,
+    args: Vec<Bytes>,
+    started: Option<Instant>,
+    result: Result<RespValue>,
+}
+
+/// 允许延迟确认的命令类型.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeferKind {
+    /// 纯 `SET key value`: 不读旧值.
+    PlainSet,
+    /// `EVAL` / `EVALSHA`: 会读数据, 但后续脚本经由在途覆盖层读到前序脚本未提交的写.
+    Script,
+}
+
+/// 命令是否可以先入队后确认. 带选项的 SET (NX/XX/GET/KEEPTTL 等) 与其他写命令 (INCR, DEL, HSET 等)
+/// 要读已应用的旧值, 不可延迟.
+fn defer_kind(cmd: &str, args: &[Bytes]) -> Option<DeferKind> {
+    match cmd {
+        "SET" if args.len() == 2 => Some(DeferKind::PlainSet),
+        "EVAL" | "EVALSHA" | "EVAL_RO" | "EVALSHA_RO" => Some(DeferKind::Script),
+        _ => None,
     }
 }
 
-type PipelineTaskResult = (
-    usize,
-    String,
-    Vec<Bytes>,
-    Vec<String>,
-    Option<Instant>,
-    crate::error::Result<RespValue>,
-);
+/// 执行 `next` 之前是否要先等挂起的写全部确认.
+/// - 不可延迟的命令可能读到前序写的结果, 必须等;
+/// - 脚本读的是已应用数据与脚本在途覆盖层, 读不到批处理器里排队的纯 SET, 前面有纯 SET 就必须等;
+/// - 脚本之后的脚本靠覆盖层读到前序写; 纯 SET 不读旧值, 入队顺序已保证先后, 都不必等.
+fn needs_barrier(pending: &[DeferKind], next: Option<DeferKind>) -> bool {
+    match next {
+        None => !pending.is_empty(),
+        Some(DeferKind::Script) => pending.contains(&DeferKind::PlainSet),
+        Some(DeferKind::PlainSet) => false,
+    }
+}
+
+/// 按原顺序等待每条命令的写确认; 任一 handle 失败则该条命令的结果为该错误, 其余命令不受影响.
+async fn resolve_pending(pending: Vec<PendingWrite>) -> Vec<ResolvedWrite> {
+    let mut out = Vec::with_capacity(pending.len());
+    for p in pending {
+        let mut failure = None;
+        for handle in p.handles {
+            if let Err(e) = handle.wait().await {
+                failure = Some(e);
+                break;
+            }
+        }
+        out.push(ResolvedWrite {
+            cmd: p.cmd,
+            args: p.args,
+            started: p.started,
+            result: match failure {
+                Some(e) => Err(e),
+                None => Ok(p.resp),
+            },
+        });
+    }
+    out
+}
 
 fn parse_command_parts(frame: &RespValue) -> Option<(String, Vec<Bytes>)> {
     let RespValue::Array(Some(items)) = frame else {
@@ -298,5 +390,98 @@ impl PendingBatchTiming {
             "[PIPELINE_TIMING] cmds={} enq_span_ms={:.2} tail_join_ms={:.2} server_total_ms={:.2} wait_read_ms={:.2} cycle_total_ms={:.2} buffered=true",
             self.cmds, enq_span_ms, tail_join_ms, server_total_ms, wait_read_ms, cycle_total_ms
         );
+    }
+}
+
+#[cfg(test)]
+mod defer_tests {
+    use super::*;
+    use crate::error::Error;
+
+    struct Fake(bool);
+
+    #[async_trait::async_trait]
+    impl BatchWriteHandle for Fake {
+        async fn wait(self: Box<Self>) -> Result<()> {
+            if self.0 {
+                Err(Error::Storage("commit failed".into()))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn pending(cmd: &str, fail: &[bool]) -> PendingWrite {
+        PendingWrite {
+            cmd: cmd.to_string(),
+            args: vec![Bytes::from(cmd.to_string())],
+            started: None,
+            resp: RespValue::SimpleString("OK".into()),
+            handles: fail
+                .iter()
+                .map(|&f| Box::new(Fake(f)) as Box<dyn BatchWriteHandle>)
+                .collect(),
+        }
+    }
+
+    fn b(s: &str) -> Bytes {
+        Bytes::from(s.to_string())
+    }
+
+    #[test]
+    fn defer_kind_classifies_plain_set_and_scripts_only() {
+        assert_eq!(
+            defer_kind("SET", &[b("k"), b("v")]),
+            Some(DeferKind::PlainSet)
+        );
+        assert_eq!(defer_kind("SET", &[b("k"), b("v"), b("NX")]), None);
+        assert_eq!(defer_kind("SET", &[b("k"), b("v"), b("EX"), b("10")]), None);
+        assert_eq!(defer_kind("SET", &[b("k")]), None);
+        for cmd in ["EVAL", "EVALSHA"] {
+            assert_eq!(
+                defer_kind(cmd, &[b("s"), b("1"), b("k")]),
+                Some(DeferKind::Script)
+            );
+        }
+        for cmd in ["GET", "INCR", "DEL", "HSET", "MSET", "SETNX", "FCALL"] {
+            assert_eq!(defer_kind(cmd, &[b("k"), b("v")]), None, "{cmd} 不可延迟");
+        }
+    }
+
+    #[test]
+    fn barrier_rules_protect_reads_of_unapplied_writes() {
+        use DeferKind::{PlainSet, Script};
+        // 无挂起: 任何命令都不需要屏障.
+        assert!(!needs_barrier(&[], None));
+        assert!(!needs_barrier(&[], Some(Script)));
+        // 非可延迟命令 (读, 读改写) 必须等挂起的写全部确认.
+        assert!(needs_barrier(&[PlainSet], None));
+        assert!(needs_barrier(&[Script], None));
+        // 脚本读的是已应用数据 + 脚本在途覆盖层, 读不到批处理器里排队的纯 SET: 前面有纯 SET 必须等.
+        assert!(needs_barrier(&[PlainSet], Some(Script)));
+        assert!(needs_barrier(&[Script, PlainSet, Script], Some(Script)));
+        // 脚本之后的脚本靠在途覆盖层读到前序写, 不必等.
+        assert!(!needs_barrier(&[Script, Script], Some(Script)));
+        // 纯 SET 不读旧值, 入队顺序已保证先后, 不必等.
+        assert!(!needs_barrier(&[Script], Some(PlainSet)));
+        assert!(!needs_barrier(&[PlainSet, Script], Some(PlainSet)));
+    }
+
+    #[tokio::test]
+    async fn pending_writes_resolve_in_order_and_failure_only_affects_that_command() {
+        let resolved = resolve_pending(vec![
+            pending("a", &[false]),
+            pending("b", &[false, true]),
+            pending("c", &[false]),
+        ])
+        .await;
+        let cmds: Vec<_> = resolved.iter().map(|r| r.cmd.as_str()).collect();
+        assert_eq!(cmds, ["a", "b", "c"], "必须保持原顺序");
+        assert!(resolved[0].result.is_ok());
+        assert!(
+            resolved[1].result.is_err(),
+            "任一 handle 失败则该命令变为错误"
+        );
+        assert!(resolved[2].result.is_ok(), "失败不应波及其他命令");
     }
 }

@@ -11,3 +11,4 @@ deploy/loadgen/target/
 deploy/loadgen/loadgen.toml
 deploy/observability/config/prometheus/targets/*.yaml
 !deploy/observability/config/prometheus/targets/*.example.yaml
+.cargo/config.toml

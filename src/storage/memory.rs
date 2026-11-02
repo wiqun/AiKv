@@ -750,6 +750,22 @@ impl crate::storage::script_io::ScriptIo for MemoryEngine {
         )
     }
 
+    fn raw_range_scan(
+        &self,
+        start: Vec<u8>,
+        end: Vec<u8>,
+        limit: usize,
+        reverse: bool,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        crate::storage::script_io::time_script_io(
+            crate::storage::script_io::ScriptIoOp::Range,
+            || {
+                let _ = (start, end, limit, reverse);
+                Err(Error::Storage("raw subkey access not supported".into()))
+            },
+        )
+    }
+
     fn raw_subkey_get(&self, db: usize, encoded_key: Vec<u8>) -> Result<Option<Vec<u8>>> {
         crate::storage::script_io::time_script_io(
             crate::storage::script_io::ScriptIoOp::Get,

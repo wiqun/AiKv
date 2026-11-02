@@ -278,6 +278,11 @@ pub trait KvStorage: Send + Sync {
     }
 
     async fn get(&self, db: usize, key: &[u8]) -> Result<Option<Vec<u8>>>;
+    async fn get_bytes(&self, db: usize, key: &[u8]) -> Result<Option<bytes::Bytes>> {
+        self.get(db, key)
+            .await
+            .map(|opt| opt.map(bytes::Bytes::from))
+    }
     async fn set(&self, db: usize, key: &[u8], value: &[u8]) -> Result<()>;
     async fn set_with_ttl(
         &self,
@@ -379,6 +384,12 @@ pub trait KvStorage: Send + Sync {
         true
     }
 
+    /// 仅在没有其他脚本执行时才可用的同步落盘 (单机的 `ClusterDataAdapter`): 并发时同步写会占住
+    /// 有限的 tokio worker, 让异步入队的并行度更好; 独占时省掉入队与线程切换.
+    fn local_script_commit_when_idle(&self) -> bool {
+        false
+    }
+
     /// 脚本线程上的同步存储. 实现必须不调用 `spawn_blocking`.
     fn script_io(&self) -> &dyn crate::storage::script_io::ScriptIo;
 
@@ -450,6 +461,18 @@ pub trait KvStorage: Send + Sync {
         _start: Vec<u8>,
         _end: Vec<u8>,
     ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        Err(Error::Storage("raw subkey access not supported".into()))
+    }
+
+    /// 半开区间 `[start, end)` 内至多 `limit` 条原始 KV, `reverse` 时从区间末尾向前取.
+    /// 大 ZSET 按 score 索引做 TopN / 分页读取, 不加载全部成员.
+    async fn raw_range_scan(
+        &self,
+        _start: Vec<u8>,
+        _end: Vec<u8>,
+        _limit: usize,
+        _reverse: bool,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         Err(Error::Storage("raw subkey access not supported".into()))
     }
 

@@ -38,9 +38,9 @@ impl StringCommands {
 
     pub async fn get(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_args("GET", args, 1)?;
-        match self.storage.get(db, &args[0]).await? {
+        match self.storage.get_bytes(db, &args[0]).await? {
             None => Ok(router::nil_bulk()),
-            Some(v) => Ok(router::bulk(v)),
+            Some(v) => Ok(router::bulk_bytes(v)),
         }
     }
 

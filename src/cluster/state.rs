@@ -32,13 +32,20 @@ pub const DEFAULT_DATA_PORT_OFFSET: u16 = 10000;
 
 /// 收集 slot table 中负责 slot 的 group 集合 (Assigned / Migrating).
 pub(crate) fn groups_with_slots(slot_table: &SlotTable) -> HashSet<u64> {
-    slot_table
-        .iter()
-        .filter_map(|status| match status {
+    // slot 表按连续区间归属 group, 与上一个 slot 相同的 group 跳过, 避免对 16384 个 slot 逐个做 SipHash 插入.
+    let mut groups = HashSet::new();
+    let mut prev = None;
+    for status in slot_table {
+        let gid = match status {
             SlotStatus::Assigned(gid) | SlotStatus::Migrating(gid) => Some(*gid),
             SlotStatus::Unallocated => None,
-        })
-        .collect()
+        };
+        if gid != prev {
+            groups.extend(gid);
+            prev = gid;
+        }
+    }
+    groups
 }
 
 /// 本机视角集群健康派生 (纯函数): 负责 slot 的 group 中, 若有本节点作为
@@ -104,6 +111,11 @@ pub struct ClusterStateManager {
     pub data_port_offset: u16,
     /// 客户端地址通告 (CLUSTER SLOTS / MOVED; 仅进程 env, 不持久化).
     pub announce_resolver: AnnounceResolver,
+    /// 16384 槽位本地 Group ID 扁平直查表 (ADR-005, Task 8).
+    /// > 0: 本地 group_id, 0: 非本地 / 未分配 / 正在迁移 (回退慢路径).
+    pub slot_groups: Box<[AtomicU64; 16384]>,
+    /// 是否存在活跃的槽迁移.
+    pub has_active_migration: AtomicBool,
     /// Metrics (注入用于 gossip/failover 计数, 初始化时可 None).
     pub metrics: Option<std::sync::Arc<crate::server::metrics::ServerMetrics>>,
     /// Shutdown signal for LeaderChangeWatcher (held to keep sender alive).
@@ -135,13 +147,25 @@ impl ClusterStateManager {
             data_dir: None,
             data_port_offset: DEFAULT_DATA_PORT_OFFSET,
             announce_resolver: AnnounceResolver::new(announce_mode),
+            slot_groups: Self::new_slot_groups(),
+            has_active_migration: AtomicBool::new(false),
             importing_slots: parking_lot::RwLock::new(std::collections::HashMap::new()),
             metrics: None,
             _watcher_shutdown: parking_lot::Mutex::new(None),
             _auto_save_shutdown: parking_lot::Mutex::new(None),
         };
         mgr.refresh();
+        mgr.rebuild_slot_map();
         mgr
+    }
+
+    pub fn new_slot_groups() -> Box<[AtomicU64; 16384]> {
+        let v: Vec<AtomicU64> = (0..16384).map(|_| AtomicU64::new(0)).collect();
+        let boxed_slice = v.into_boxed_slice();
+        match boxed_slice.try_into() {
+            Ok(b) => b,
+            Err(_) => unreachable!(),
+        }
     }
 
     /// 注入 MembershipCoordinator (在集群初始化完成后调用).
@@ -154,7 +178,7 @@ impl ClusterStateManager {
         self.slot_migration_manager = Some(sm);
     }
 
-    /// 从 MetaRaft 刷新本地 Leader 缓存.
+    /// 从 MetaRaft 刷新本地 Leader 缓存并重建 slot 表.
     pub fn refresh(&self) {
         let meta = self.meta_raft.get_cluster_meta();
         if meta.groups.is_empty() {
@@ -168,6 +192,40 @@ impl ClusterStateManager {
                 .iter()
                 .any(|r| r.node_id == self.node_id && r.is_leader);
             leaders.insert(*gid, is_leader);
+        }
+        drop(leaders);
+        self.rebuild_slot_map();
+    }
+
+    #[inline]
+    pub fn fast_slot_group(&self, slot: u16) -> u64 {
+        if (slot as usize) < 16384 {
+            self.slot_groups[slot as usize].load(Ordering::Relaxed)
+        } else {
+            0
+        }
+    }
+
+    #[inline]
+    pub fn has_active_migration(&self) -> bool {
+        self.has_active_migration.load(Ordering::Relaxed)
+    }
+
+    /// 重建 16384 个槽位到本地 Group ID 的扁平映射 (ADR-005, Task 8).
+    pub fn rebuild_slot_map(&self) {
+        let has_mig = self.meta_raft.get_migration_state().is_some();
+        self.has_active_migration.store(has_mig, Ordering::Release);
+
+        let local_groups = self.multi_raft.local_group_ids();
+        let local_set: HashSet<u64> = local_groups.into_iter().collect();
+
+        for slot in 0..16384u16 {
+            let gid = match self.router.route_slot(slot) {
+                Ok((gid, SlotStatus::Assigned(_))) if local_set.contains(&gid) => gid,
+                Ok((gid, SlotStatus::Migrating(_))) if local_set.contains(&gid) && !has_mig => gid,
+                _ => 0,
+            };
+            self.slot_groups[slot as usize].store(gid, Ordering::Release);
         }
     }
 
@@ -303,4 +361,33 @@ pub fn raft_export_views() -> Vec<(String, crate::server::export::RaftExportView
         ));
     }
     out
+}
+
+#[cfg(test)]
+mod groups_with_slots_tests {
+    use super::groups_with_slots;
+    use aidb::cluster::meta_types::SlotStatus::{Assigned, Migrating, Unallocated};
+    use std::collections::HashSet;
+
+    #[test]
+    fn collects_groups_across_ranges_gaps_and_interleaving() {
+        // 连续段, 未分配空洞, 同一 group 的非连续段, 以及 Migrating 都要被收集; Unallocated 不产生 group.
+        let table = vec![
+            Assigned(1),
+            Assigned(1),
+            Unallocated,
+            Assigned(1),
+            Migrating(2),
+            Assigned(3),
+            Assigned(2),
+            Unallocated,
+        ];
+        assert_eq!(groups_with_slots(&table), HashSet::from([1, 2, 3]));
+    }
+
+    #[test]
+    fn empty_and_all_unallocated_yield_no_groups() {
+        assert!(groups_with_slots(&Vec::new()).is_empty());
+        assert!(groups_with_slots(&vec![Unallocated; 16384]).is_empty());
+    }
 }
