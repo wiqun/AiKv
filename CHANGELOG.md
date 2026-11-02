@@ -18,6 +18,7 @@
 
 ### Performance
 
+- 存储层 `last_in_range_sync` 对接 AiDb 原生有界反向扫描 `scan_limited(..., 1, true)`, 消除范围末尾探测的多层 LSM 迭代器开销.
 - 存储引擎层接入 AiDb 原生有界扫描 `scan_limited`, 并在事务在途更新为空时跳过集合哈希比对与重复排序, 解决消费队列 `ZRANGEBYSCORE` 的墓碑多版本读放大, 基准测试总耗时削减近 4 秒.
 - 大 ZSet (成员数超过 64) 的读路径不再 O(N): 直连命令 `ZSCORE` / `ZMSCORE` 改为 member 点查, `ZRANGE` / `ZREVRANGE` / `ZRANGEBYSCORE` / `ZREVRANGEBYSCORE` 只扫 score 索引中需要的条数 (支持 `LIMIT` 与反向; 按序号读从近端扫); 脚本里的 `ZRANGE*` / `ZRANGEBYSCORE*` 同样改为有界扫描并叠加在途覆盖层 (本脚本改过的 ZSet 与小集合仍走全量视图). 之前每次范围读都要加载全部成员再整体排序 (消息队列类业务脚本里的主要开销). 新增存储原语 `KvStorage::raw_range_scan` / `ScriptIo::raw_range_scan` (依赖 aidb 新增的 `scan_local_user_pairs_limited`). 家里测试机 (i5-10210U) 上 2000 成员 ZSet 的 Lua 读 (`ZRANGEBYSCORE ... LIMIT 0 32` + `ZSCORE`, 8 连接) 单机/集群由约 2.8k/2.7k 提升到约 5.7k/5.7k QPS, P50 由 2.7ms 降到 1.3ms; 剩余差距主要是同一 key 上脚本串行持有 key 锁.
 - 集群流水线内连续的纯 `SET key value` 先按序入队、批末统一等待 Raft 确认 (`storage::deferred`), 其余命令遇到时先等待前序写确认, 在保持按序的前提下恢复写吞吐 (`-P 16 -c 100` 集群 SET 约 132k QPS).

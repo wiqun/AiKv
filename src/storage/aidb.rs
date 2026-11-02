@@ -161,15 +161,11 @@ impl StorageAdapter for AiDbEngine {
         start: Vec<u8>,
         end: Vec<u8>,
     ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
-        let mut iter = self
+        let pairs = self
             .db
-            .scan(Some(start.as_slice()), Some(end.as_slice()))
+            .scan_limited(Some(&start), Some(&end), 1, true)
             .map_err(|e| Error::Storage(e.to_string()))?;
-        iter.seek_to_last();
-        match (iter.key(), iter.value()) {
-            (Some(key), Some(value)) => Ok(Some((key.to_vec(), value.to_vec()))),
-            _ => Ok(None),
-        }
+        Ok(pairs.into_iter().next())
     }
 
     fn for_each_prefix_sync(

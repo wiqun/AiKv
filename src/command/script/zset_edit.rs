@@ -423,8 +423,6 @@ mod tests {
 
     #[tokio::test]
     async fn script_zscore_reads_one_member_without_scanning_the_segment() {
-        use std::sync::atomic::Ordering;
-
         use crate::protocol::RespValue;
 
         let dir = TempDir::new().unwrap();
@@ -446,7 +444,7 @@ mod tests {
                 .await
                 .unwrap();
         }
-        zset_subkey::LOAD_MEMBERS_CALLS.store(0, Ordering::Relaxed);
+        zset_subkey::THREAD_LOAD_CALLS.with(|c| c.set(0));
         let script = Bytes::from(
             "local n = 0\n\
              for i = 0, 64 do\n\
@@ -475,7 +473,7 @@ mod tests {
             panic!("missing kept score");
         };
         assert_eq!(kept.as_ref(), b"99");
-        let scans = zset_subkey::LOAD_MEMBERS_CALLS.load(Ordering::Relaxed);
+        let scans = zset_subkey::THREAD_LOAD_CALLS.with(|c| c.get());
         assert_eq!(scans, 0, "ZSCORE scanned the member prefix {scans} times");
     }
 
