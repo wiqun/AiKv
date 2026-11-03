@@ -1,3 +1,5 @@
+//! @component aikv-storage
+
 //! 懒过期 mock 回归: 清理 delete 失败或禁止时, 过期读仍须 Ok(None).
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -58,6 +60,9 @@ impl StorageAdapter for MockAdapter {
                 }
                 AdapterWriteOp::Delete { key } => {
                     data.remove(&key);
+                }
+                AdapterWriteOp::DeleteRange { start, end } => {
+                    data.retain(|k, _| k < &start || k >= &end);
                 }
             }
         }

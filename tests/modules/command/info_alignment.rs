@@ -1,3 +1,5 @@
+//! @component aikv-command
+
 //! INFO 与 Redis 语义对齐 (Phase 1–2)
 
 use super::helpers::{b, router_with_shared};

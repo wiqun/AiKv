@@ -1,3 +1,5 @@
+//! @component aikv-cluster
+
 //! 集群可观测性 (Phase 3).
 
 #![cfg(feature = "cluster")]

@@ -1,3 +1,5 @@
+//! @component aikv-server
+
 //! 测试辅助: 启动 ephemeral server
 
 use std::sync::Arc;

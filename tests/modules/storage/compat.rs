@@ -1,3 +1,5 @@
+//! @component aikv-storage
+
 //! memory vs AiDb 双引擎行为一致性测试
 //!
 //! 同一命令序列分别在 MemoryEngine 和 KvStorageAdapter(AiDbEngine) 上执行,
@@ -357,6 +359,96 @@ async fn test_compat_scan_returns_all_keys() {
     }
 }
 
+#[tokio::test]
+async fn test_scan_streaming_pagination_and_invalid_cursor() {
+    let dir = TempDir::new().unwrap();
+    let storage = aidb(&dir);
+    // 写入 50 个 key: key:00 .. key:49
+    for i in 0..50 {
+        let key = format!("key:{i:02}");
+        storage.set(0, key.as_bytes(), b"val").await.unwrap();
+    }
+
+    let mut all_keys = Vec::new();
+    let mut cursor = 0u64;
+    let mut iterations = 0;
+    loop {
+        iterations += 1;
+        assert!(iterations <= 10, "流式迭代步数异常, 陷入死循环");
+        let res = storage.scan(0, cursor, b"", 10).await.unwrap();
+        all_keys.extend(res.keys);
+        cursor = res.cursor;
+        if cursor == 0 {
+            break;
+        }
+    }
+
+    all_keys.sort();
+    assert_eq!(all_keys.len(), 50, "必须不漏数据收集齐全部 50 个 key");
+    for (idx, k) in all_keys.iter().enumerate() {
+        assert_eq!(k, format!("key:{idx:02}").as_bytes());
+    }
+
+    // 验证无效游标明确报错 ERR invalid cursor (拒绝静默返回 0)
+    let invalid_res = storage.scan(0, 999999, b"", 10).await;
+    assert!(invalid_res.is_err(), "失效游标必须返回错误");
+    let err_str = invalid_res.err().unwrap().to_string();
+    assert!(
+        err_str.contains("ERR invalid cursor"),
+        "错误信息必须包含 ERR invalid cursor, 实际为: {err_str}"
+    );
+}
+
+#[tokio::test]
+async fn test_scan_collection_header_skips_subkeys() {
+    use aikv::storage::{CollectionKind, StoredValue, ValueType};
+
+    let dir = TempDir::new().unwrap();
+    let storage = aidb(&dir);
+
+    // 写入普通键 a_key 与 z_key
+    storage.set(0, b"a_key", b"v").await.unwrap();
+    storage.set(0, b"z_key", b"v").await.unwrap();
+
+    // 写入一个 CollectionHeader 大集合
+    let header = StoredValue {
+        value: ValueType::CollectionHeader {
+            kind: CollectionKind::Hash,
+            count: 2000,
+        },
+        expires_at: None,
+    };
+    storage.set_typed(0, b"m_big_hash", header).await.unwrap();
+
+    // 手工写入 2000 个 subkey (模拟真实大 Hash)
+    for i in 0..2000 {
+        let sub_k = format!("m_big_hash\x01Hf_{i:04}");
+        storage.set(0, sub_k.as_bytes(), b"sub_val").await.unwrap();
+    }
+
+    // 执行 SCAN 遍历
+    let mut collected = Vec::new();
+    let mut cursor = 0u64;
+    let mut iterations = 0;
+    loop {
+        iterations += 1;
+        assert!(iterations <= 5, "大集合 subkey 应被跳过, 不应多次空转");
+        let res = storage.scan(0, cursor, b"", 10).await.unwrap();
+        collected.extend(res.keys);
+        cursor = res.cursor;
+        if cursor == 0 {
+            break;
+        }
+    }
+
+    collected.sort();
+    assert_eq!(
+        collected,
+        vec![b"a_key".to_vec(), b"m_big_hash".to_vec(), b"z_key".to_vec()],
+        "SCAN 结果必须只包含主 key, 不得包含任何 subkey"
+    );
+}
+
 // ── DB isolation ─────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -384,5 +476,56 @@ async fn test_compat_db_isolation() {
         aidb_storage.get(0, b"k").await.unwrap(),
         Some(b"db1".to_vec()),
         "aidb: single-db raw key mode shares namespace"
+    );
+}
+
+#[tokio::test]
+async fn test_scan_does_not_skip_keys_after_collection_header_in_same_batch() {
+    use aikv::storage::{CollectionKind, StoredValue, ValueType};
+
+    let dir = TempDir::new().unwrap();
+    let storage = aidb(&dir);
+
+    // 1. 写入 key_1
+    storage.set(0, b"key_1", b"val_1").await.unwrap();
+
+    // 2. 写入 key_2_hash (CollectionHeader, 只有 2 个 subkey)
+    let header = StoredValue {
+        value: ValueType::CollectionHeader {
+            kind: CollectionKind::Hash,
+            count: 2,
+        },
+        expires_at: None,
+    };
+    storage.set_typed(0, b"key_2_hash", header).await.unwrap();
+    storage.set(0, b"key_2_hash\x01Hf_0", b"v0").await.unwrap();
+    storage.set(0, b"key_2_hash\x01Hf_1", b"v1").await.unwrap();
+
+    // 3. 写入 key_3 和 key_4
+    storage.set(0, b"key_3", b"val_3").await.unwrap();
+    storage.set(0, b"key_4", b"val_4").await.unwrap();
+
+    // 4. 执行 SCAN 遍历, 必须能够扫描到全部 4 个主键
+    let mut collected = Vec::new();
+    let mut cursor = 0u64;
+    loop {
+        let res = storage.scan(0, cursor, b"", 10).await.unwrap();
+        collected.extend(res.keys);
+        cursor = res.cursor;
+        if cursor == 0 {
+            break;
+        }
+    }
+
+    collected.sort();
+    assert_eq!(
+        collected,
+        vec![
+            b"key_1".to_vec(),
+            b"key_2_hash".to_vec(),
+            b"key_3".to_vec(),
+            b"key_4".to_vec()
+        ],
+        "CollectionHeader 之后的 key_3 和 key_4 绝不能被漏扫"
     );
 }

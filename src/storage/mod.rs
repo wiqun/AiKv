@@ -7,6 +7,7 @@ pub mod aidb_options;
 pub mod cluster_adapter;
 #[cfg(feature = "cluster")]
 pub mod cluster_batcher;
+pub mod cursor;
 pub mod deferred;
 pub(crate) mod direct;
 pub mod dump;
@@ -26,6 +27,7 @@ pub use aidb::AiDbEngine;
 pub use aidb_options::{
     server_db_options, server_db_options_with_preset, testing_db_options, DbPreset,
 };
+pub use cursor::{CursorManager, ScanKind};
 pub use dump::{decode as dump_decode, encode as dump_encode, DUMP_VERSION};
 pub use memory::MemoryEngine;
 pub use observation::StorageObservation;

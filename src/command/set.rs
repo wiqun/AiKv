@@ -27,11 +27,8 @@ use crate::command::scan_util;
 use crate::error::{Error, Result};
 use crate::protocol::RespValue;
 use crate::storage::memory::glob_match;
-use crate::storage::subkey;
+use crate::storage::subkey::{self, SET_MAX_INLINE_MEMBERS};
 use crate::storage::{AiDbEngine, CollectionKind, KvStorage, StoredValue, ValueType};
-
-/// 小集合 inline 编码于 StoredValue; 超过此阈值自动切到 subkey 格式.
-const SET_MAX_INLINE_MEMBERS: usize = 64;
 
 pub struct SetCommands {
     storage: Arc<dyn KvStorage>,
@@ -491,7 +488,7 @@ impl SetCommands {
             return Ok(scan_util::scan_response_bulk(0, &[]));
         };
 
-        let members: Vec<Vec<u8>> = match stored.value {
+        match stored.value {
             ValueType::Set(set) => {
                 let mut m: Vec<Vec<u8>> = set
                     .into_iter()
@@ -502,24 +499,98 @@ impl SetCommands {
                     })
                     .collect();
                 m.sort();
-                m
+                let (next_cursor, page) = scan_util::paginate_slice(&m, cursor, opts.count)?;
+                Ok(scan_util::scan_response_bulk(next_cursor, page))
             }
             ValueType::CollectionHeader {
                 kind: CollectionKind::Set,
                 ..
             } => {
-                let encoded_user_key = AiDbEngine::encode_key(db, &args[0]);
-                let mut m = self
-                    .scan_set_subkeys(db, &encoded_user_key, opts.pattern.as_deref())
-                    .await?;
-                m.sort();
-                m
-            }
-            _ => return Err(router::wrongtype()),
-        };
+                if let Some(cursor_mgr) = self.storage.cursor_mgr() {
+                    let encoded_user_key = AiDbEngine::encode_key(db, &args[0]);
+                    let prefix = subkey::set_subkey_prefix(&encoded_user_key);
+                    let end_prefix = AiDbEngine::prefix_end(&prefix).unwrap_or_default();
 
-        let (next_cursor, page) = scan_util::paginate_slice(&members, cursor, opts.count);
-        Ok(scan_util::scan_response_bulk(next_cursor, page))
+                    let start_member = cursor_mgr
+                        .get(cursor, db, crate::storage::ScanKind::Set)
+                        .map_err(|e| Error::Command(e.into()))?
+                        .map(|(m, _)| m);
+
+                    let current_seek = match start_member {
+                        None => prefix.clone(),
+                        Some(last_mem) => {
+                            let mut k = subkey::encode_set_member_key(&encoded_user_key, &last_mem);
+                            k.push(0);
+                            k
+                        }
+                    };
+
+                    let budget = (opts.count * 10).clamp(100, 2000);
+                    let mut members = Vec::with_capacity(opts.count);
+                    let mut raw_read_count = 0;
+                    let mut last_seen_member = None;
+                    let mut seek_pos = current_seek;
+                    let mut reached_end = false;
+
+                    while members.len() < opts.count && raw_read_count < budget {
+                        let batch_size = ((opts.count - members.len()) * 2).clamp(16, 256);
+                        let raw_entries = self
+                            .storage
+                            .raw_range_scan(seek_pos.clone(), end_prefix.clone(), batch_size, false)
+                            .await?;
+                        if raw_entries.is_empty() {
+                            reached_end = true;
+                            break;
+                        }
+                        let is_eof = raw_entries.len() < batch_size;
+
+                        for (raw_k, _) in raw_entries {
+                            raw_read_count += 1;
+                            seek_pos = raw_k.clone();
+                            seek_pos.push(0);
+
+                            if let Some((kind, member)) = subkey::decode_subkey(&raw_k) {
+                                if kind != CollectionKind::Set {
+                                    continue;
+                                }
+                                if opts.pattern.as_ref().is_none_or(|p| glob_match(p, &member)) {
+                                    members.push(member.clone());
+                                }
+                                last_seen_member = Some(member);
+                            }
+
+                            if members.len() >= opts.count || raw_read_count >= budget {
+                                break;
+                            }
+                        }
+
+                        if is_eof && (members.len() < opts.count && raw_read_count < budget) {
+                            reached_end = true;
+                            break;
+                        }
+                    }
+
+                    let next_cursor = if reached_end {
+                        0
+                    } else if let Some(last_mem) = last_seen_member {
+                        cursor_mgr.put(db, crate::storage::ScanKind::Set, last_mem, false)
+                    } else {
+                        0
+                    };
+
+                    Ok(scan_util::scan_response_bulk(next_cursor, &members))
+                } else {
+                    let encoded_user_key = AiDbEngine::encode_key(db, &args[0]);
+                    let mut m = self
+                        .scan_set_subkeys(db, &encoded_user_key, opts.pattern.as_deref())
+                        .await?;
+                    m.sort();
+                    let (next_cursor, page) = scan_util::paginate_slice(&m, cursor, opts.count)?;
+                    Ok(scan_util::scan_response_bulk(next_cursor, page))
+                }
+            }
+            _ => Err(router::wrongtype()),
+        }
     }
 
     // ---- helpers ----

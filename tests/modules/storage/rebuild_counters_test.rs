@@ -1,3 +1,5 @@
+//! @component aikv-storage
+
 use tempfile::TempDir;
 
 use aikv::storage::types::{now_ms, KvStorage};

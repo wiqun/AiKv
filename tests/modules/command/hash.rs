@@ -225,3 +225,138 @@ async fn hset_on_ttl_hash_does_not_grow_expires() {
         .unwrap();
     assert_eq!(shared.storage.expires(0).await.unwrap(), 1);
 }
+
+fn bulk_str(resp: &RespValue) -> Option<bytes::Bytes> {
+    match resp {
+        RespValue::BulkString(Some(b)) => Some(b.clone()),
+        _ => None,
+    }
+}
+
+#[tokio::test]
+async fn test_hscan_inline_and_invalid_cursor() {
+    let r = router();
+    let mut db = 0;
+    for i in 0..5 {
+        r.execute(
+            "HSET",
+            &[b("myhash"), b(&format!("f{i}")), b(&format!("v{i}"))],
+            &mut db,
+        )
+        .await
+        .unwrap();
+    }
+
+    let mut seen = std::collections::HashMap::new();
+    let mut cursor = b("0");
+    loop {
+        let resp = r
+            .execute("HSCAN", &[b("myhash"), cursor, b("COUNT"), b("2")], &mut db)
+            .await
+            .unwrap();
+        let RespValue::Array(Some(parts)) = resp else {
+            panic!("expected array");
+        };
+        let RespValue::BulkString(Some(next)) = &parts[0] else {
+            panic!("expected cursor");
+        };
+        cursor = next.clone();
+        let RespValue::Array(Some(entries)) = &parts[1] else {
+            panic!("expected entries");
+        };
+        assert_eq!(entries.len() % 2, 0);
+        for chunk in entries.chunks(2) {
+            let k = bulk_str(&chunk[0]).unwrap();
+            let v = bulk_str(&chunk[1]).unwrap();
+            seen.insert(k, v);
+        }
+        if cursor == "0" {
+            break;
+        }
+    }
+    assert_eq!(seen.len(), 5);
+
+    // 验证内联集合游标越界优雅返回 ["0", []] (兼容边扫边删工作流)
+    let res = r
+        .execute("HSCAN", &[b("myhash"), b("999999")], &mut db)
+        .await
+        .unwrap();
+    let RespValue::Array(Some(arr)) = res else {
+        panic!("expected array response");
+    };
+    assert_eq!(bulk_str(&arr[0]).unwrap(), "0");
+    let RespValue::Array(Some(items)) = &arr[1] else {
+        panic!("expected items array");
+    };
+    assert!(items.is_empty());
+}
+
+#[tokio::test]
+async fn test_hscan_large_subkey_streaming() {
+    use aikv::command::CommandRouter;
+    use aikv::storage::{AiDbEngine, KvStorageAdapter};
+    use tempfile::TempDir;
+
+    let dir = TempDir::new().unwrap();
+    let engine = AiDbEngine::open_for_testing(dir.path()).unwrap();
+    let storage = KvStorageAdapter::new(engine);
+    let r = CommandRouter::new(storage);
+    let mut db = 0;
+
+    // 写入 100 个字段, 超过 HASH_MAX_INLINE_FIELDS(64) 触发转 Subkey
+    for i in 0..100 {
+        r.execute(
+            "HSET",
+            &[
+                b("largehash"),
+                b(&format!("field_{i:03}")),
+                b(&format!("val_{i:03}")),
+            ],
+            &mut db,
+        )
+        .await
+        .unwrap();
+    }
+
+    let mut seen = std::collections::HashMap::new();
+    let mut cursor = b("0");
+    let mut iterations = 0;
+    loop {
+        iterations += 1;
+        assert!(iterations <= 25, "HSCAN 流式迭代陷入死循环");
+        let resp = r
+            .execute(
+                "HSCAN",
+                &[b("largehash"), cursor, b("COUNT"), b("10")],
+                &mut db,
+            )
+            .await
+            .unwrap();
+        let RespValue::Array(Some(parts)) = resp else {
+            panic!("expected array");
+        };
+        let RespValue::BulkString(Some(next)) = &parts[0] else {
+            panic!("expected cursor");
+        };
+        cursor = next.clone();
+        let RespValue::Array(Some(entries)) = &parts[1] else {
+            panic!("expected entries");
+        };
+        for chunk in entries.chunks(2) {
+            let k = bulk_str(&chunk[0]).unwrap();
+            let v = bulk_str(&chunk[1]).unwrap();
+            seen.insert(k, v);
+        }
+        if cursor == "0" {
+            break;
+        }
+    }
+    assert_eq!(seen.len(), 100, "必须不漏数据收集齐 100 个字段");
+
+    // 验证非法游标报错
+    let err = r
+        .execute("HSCAN", &[b("largehash"), b("888888")], &mut db)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("ERR invalid cursor"));
+}

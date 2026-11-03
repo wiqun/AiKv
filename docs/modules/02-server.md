@@ -1,6 +1,6 @@
 ---
 name: aikv-server
-description: AiKv Server 运行时与连接管理 — TCP Listener、Connection 读写循环、HELLO 协议协商、ATOM 事务 (MULTI/EXEC/WATCH)、MONITOR 广播与 max_clients 门控. 修改 src/server/{listener,connection/,config} 时查阅.
+description: AiKv Server 运行时与连接管理 — TCP Listener, Connection 读写循环, HELLO 协议协商, ATOM 事务 (MULTI/EXEC/WATCH), MONITOR 广播与 max_clients 门控. 修改 src/server/{listener,connection/,config} 时查阅.
 ---
 
 # AiKv Server (服务运行时与连接管理)
@@ -8,7 +8,7 @@ description: AiKv Server 运行时与连接管理 — TCP Listener、Connection 
 ## 何时读本文
 
 - 修改 `src/server/{listener.rs, connection/, config.rs, mod.rs}` 源码;
-- 排查 TCP 连接建立/关闭、Pipeline 批读、`HELLO` 协议协商、ATOM 事务原子性、MONITOR 模式、`max_clients` 拒绝与优雅停机;
+- 排查 TCP 连接建立/关闭, Pipeline 批读, `HELLO` 协议协商, ATOM 事务原子性, MONITOR 模式, `max_clients` 拒绝与优雅停机;
 - **不覆盖**: RESP 帧流式解析与 Limits 校验 → [protocol.md](01-protocol.md);
 - **不覆盖**: 命令具体业务分发与 KeyLock 并发锁 → [commands-core.md](04-commands-core.md) / [commands-extended.md](05-commands-extended.md);
 - **不覆盖**: 集群 MOVED/ASK 重定向 → [cluster.md](06-cluster.md);
@@ -21,8 +21,8 @@ description: AiKv Server 运行时与连接管理 — TCP Listener、Connection 
 | 文件路径 | 模块核心职责 | 公共接口与核心入口 |
 | :--- | :--- | :--- |
 | [`src/server/mod.rs`](../../src/server/mod.rs) | Server 模块根; 子模块组织与类型导出 | `Server`, `Connection`, `ServerSharedState` |
-| [`src/server/listener.rs`](../../src/server/listener.rs) | TCP Server accept 循环、`max_clients` 并发门控与优雅停机联动 | `Server::run`, `Server::run_with_listener` |
-| [`src/server/connection/`](../../src/server/connection/) | 单连接状态机: Pipeline 循环、内联命令、`HELLO`、ATOM、MONITOR、Null 适配 | `Connection::handle`, `Connection::process_command` |
+| [`src/server/listener.rs`](../../src/server/listener.rs) | TCP Server accept 循环, `max_clients` 并发门控与优雅停机联动 | `Server::run`, `Server::run_with_listener` |
+| [`src/server/connection/`](../../src/server/connection/) | 单连接状态机: Pipeline 循环, 内联命令, `HELLO`, ATOM, MONITOR, Null 适配 | `Connection::handle`, `Connection::process_command` |
 | [`src/server/config.rs`](../../src/server/config.rs) | 服务器全局共享状态 (`ServerSharedState`) 与每连接配置定义 | `ServerSharedState`, `ConnectionConfig` |
 
 ---
@@ -31,6 +31,8 @@ description: AiKv Server 运行时与连接管理 — TCP Listener、Connection 
 
 - **每连接独立 Task**: 每个客户端连接通过 `tokio::spawn(Connection::handle)` 派发至独立异步任务处理, 连接级状态 (`current_db`, `parser`, `tx_state`, `cluster_state`) 绝对隔离, 不跨连接共享.
 - **Pipeline 批量写聚合与缓冲复用**: 单次从 TCP 读取数据后调用 `parser.feed()`, 并在内层循环中连续解析与执行命令, 响应流式写入独占连接缓冲区 `write_buf: BytesMut` (初始 8 KiB), 在批次末尾或遇到立即 flush 命令 (`QUIT`/`MONITOR`/`EXEC`/`ATOM.EXEC`/`SHUTDOWN`) 时统一单次 `write_all` 写出; 带 `blocking` flag 的命令 (如 `BLPOP`) 在 await 前先 flush 同批已排队响应; MONITOR 内 `QUIT` 断连前也必须 flush. 偶发大响应导致容量超过 64 KiB 时在 flush 后自动收缩回 8 KiB, 消除逐命令堆分配与多余系统调用.
+- **TransactionGate 独占事务门闩**: 所有普通命令在执行前获取 `TransactionGate` 读锁 (`acquire_shared()`), `EXEC` / `ATOM.EXEC` 在执行前获取其独占写锁 (`acquire_exclusive()`). 这保证事务队列执行期间无任何普通命令插队交叉写入, 彻底杜绝数据竞争.
+- **synced_client_db 锁争用优化**: 连接内部缓存 `synced_client_db`, 仅当客户端执行 `SELECT` 导致 db 变更时才短暂获取全局客户端映射锁更新状态, 避免热路径无谓的锁竞争.
 - **Buffer 溢出断连**: 当接收数据与缓冲区现有数据之和超过 `max_buffer_size` (64 MiB) 时, 直接中断连接循环并关闭 Socket, 不向客户端写错误响应.
 - **协议协商与 Null 适配 (`adapt_for_protocol`)**:
   - 内部业务层统一生成 RESP3 AST (如 `RespValue::Null`);

@@ -130,6 +130,17 @@ impl ServerCommands {
         Ok(router::ok())
     }
 
+    pub async fn config_rewrite(&self) -> Result<RespValue> {
+        Err(Error::Command(
+            "ERR The server is running without a config file".into(),
+        ))
+    }
+
+    pub async fn config_resetstat(&self) -> Result<RespValue> {
+        self.shared.metrics.reset_stats();
+        Ok(router::ok())
+    }
+
     pub async fn slowlog(&self, args: &[Bytes]) -> Result<RespValue> {
         if args.is_empty() {
             return Err(router::wrong_args("SLOWLOG", ""));

@@ -1,3 +1,5 @@
+//! @component aikv-storage
+
 use aidb::engine::compaction::{CompactionFilter, FilterDecision};
 use aikv::storage::adapter::KvStorageAdapter;
 use aikv::storage::ttl_filter::TtlExpireFilter;

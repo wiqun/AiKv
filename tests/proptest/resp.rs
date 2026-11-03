@@ -1,3 +1,5 @@
+//! @component aikv-resp
+
 //! RESP 协议 parser/encoder 的 property-based 测试.
 
 use bytes::Bytes;

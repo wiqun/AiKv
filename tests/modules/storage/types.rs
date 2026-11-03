@@ -1,3 +1,5 @@
+//! @component aikv-storage
+
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aikv::storage::{StoredValue, ValueType};

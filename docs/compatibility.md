@@ -118,7 +118,7 @@ description: AiKv Redis 兼容范围 — RESP2/RESP3 协议边界, 已实现命�
 | `CLUSTER ADDSLOTS` | 支持 | 分配槽位 |
 | `CLUSTER DELSLOTS` | 支持 | 回收槽位 |
 | `CLUSTER SETSLOT` | 支持 | 迁移 / 稳定 / 取消 |
-| `CLUSTER FAILOVER` | 支持 | 手动 failover |
+| `CLUSTER FAILOVER` | 部分支持 | 手动 failover (支持 FORCE 强选模式; 无参协同模式因需跨节点 RPC 协议当前返回明确错误引导使用 FORCE; TAKEOVER 明确拒绝) |
 | `CLUSTER REPLICATE` | 支持 | 配置副本 |
 | `CLUSTER REPLICAS` | 支持 | 列出副本 |
 | `CLUSTER SAVECONFIG` | 支持 | 持久化 nodes.conf |
@@ -131,6 +131,18 @@ description: AiKv Redis 兼容范围 — RESP2/RESP3 协议边界, 已实现命�
 | `CLUSTER DEL_REPLICA` | 支持 | AiKv 扩展: 移除副本 |
 | `CLUSTER GROUPSTATUS` | 支持 | AiKv 扩展: 组状态 |
 | `CLUSTER RESET` | **不支持** | MetaRaft 保护元数据; 需停服清 `data_dir` 重搭 |
+
+---
+
+## 运维与扫描命令行为规范
+
+- **SCAN 族流式有界游标**:
+  - `SCAN` / `HSCAN` / `SSCAN`: 基于服务端轻量 `CursorManager` (FIFO + 60s TTL) 实现真流式有界迭代, 内存占用严格 $O(count)$, 杜绝千万级全量拉取引发 OOM.
+  - **Subkey 穿透防御与步长预算**: 单次底层原始读取上限为 `budget = (count * 10).clamp(100, 2000)`, 遇到 `CollectionHeader` 大键主动 Seek 跳过所属 subkey 范围, 彻底杜绝空转卡死; 普通键恢复仅前移单步, 避免误跳二进制键.
+  - **严格游标失效防御**: Subkey 大集合与全局游标失效或过期明确返回 `ERR invalid cursor`, 严禁返回 `0` 误导客户端导致静默漏数据; 内联小集合越界优雅返回 `["0", []]` 契约, 兼容边扫边删工作流.
+- **CONFIG 运维规范**:
+  - `CONFIG RESETSTAT`: 支持重置 `INFO stats` 统计指标 (命中/未命中、调用量、直方图等).
+  - `CONFIG REWRITE`: 无配置文件启动时按 Redis 规范统一返回 `ERR The server is running without a config file`.
 
 ---
 

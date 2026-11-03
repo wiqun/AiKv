@@ -44,10 +44,11 @@ description: AiKv 存储适配层 — KvStorage Trait、MemoryEngine、AiDbEngin
 - **单 `DB` 裸 Key 与多库兼容**:
   - 底层 AiDb 对齐 Kvrocks 单库模式, 直接使用裸 `user_key` 存储, 移除 `{db_index}:` 物理前缀以消除键编码堆开销; `SELECT` 指令垫片兼容归一至 db 0;
   - `MemoryEngine` 保留独立内存 Map 用于单元测试.
-- **Subkey 编码隔离**:
-  - 元数据键: `{db}:{user_key}` (记录类型标记、版本号与元素数量);
-  - 数据键: `{db}:{user_key}:{field/index}` (记录单字段或元素值);
-  - 集合删除时同时清理元数据与对应前缀的 Subkey 数据键.
+- **Subkey 编码与 \x01 隔离**:
+  - 底层使用 `\x01` 作为 user key 与 subkey 之间的专有分隔符 (`src/storage/subkey.rs`);
+  - 元数据键: 裸 `{user_key}` (小集合存储内联数据, 大集合存储 `CollectionHeader` 类型与数量);
+  - 数据键: `{user_key}\x01{tag}{len:2B}{payload}` (如 Hash 字段 `\x01H`, Set 成员 `\x01S`, ZSet 成员 `\x01Z`, ZSet 分数索引 `\x01Y`);
+  - 集合删除时原子清理元数据键与该前缀下的所有 Subkey 数据键.
 - **集群写必须走 Raft (`ClusterDataAdapter`)**:
   - 当集群已初始化且 Key 属于已分配 Slot 时, 写操作**必须**经过 `propose_group` 提交 MultiRaft, **严禁**绕过 Raft 回退本地写 (避免 SET 成功后读 Raft 为空);
   - 仅在单机模式或 Slot 未分配时写入本地存储.
@@ -106,11 +107,46 @@ pub struct StoredValue {
 
 `DUMP` / `RESTORE` 使用内部格式 `[u8 version=1][postcard(StoredValue)]`, 非 Redis DUMP 兼容. 开发期无旧 `DUMP_VERSION=0` 载荷兼容义务.
 
-### 3. Subkey 编码规范
+### 3. Subkey 编码规范与 String 快速旁路
 
-- **String / JSON**: 直接写入 `{db}:{key}` 作为完整 `StoredValue`;
-- **Hash**:
-  - 元数据: `{db}:{key}` -> `StoredValue { type: Hash, data: field_count }`
-  - 字段数据: `{db}:{key}\x00f\x00{field}` -> `StoredValue { type: String, data: field_val }`
-- **List / Set**: 类似 Hash, 使用专有子前缀分隔符进行编码.
-- **ZSet**: 成员数不超过 64 时仍是整包 `ValueType::ZSet`. 超过后用户 key 只留 `CollectionHeader`, member 与 score 索引各写一条 subkey. `ZSCORE` 与 `ZRANGE*` / `ZRANGEBYSCORE` 家族只做有界索引扫描 (`KvStorage::raw_range_scan` / `ScriptIo::raw_range_scan`, 支持 `limit` 与反向), 脚本读取在结果上叠加尚未提交的在途变更. `MemoryEngine` 不拆, 也不支持有界扫描 (调用方回退全量路径).
+- **String / JSON (裸 Key)**:
+  - 直接写入 `{user_key}` 作为完整 `StoredValue`;
+  - 引入 `string_codec` 模块, 在热路径提供与 `postcard(StoredValue)` 严格双向兼容的紧凑编码与零拷贝切片提取, 消除反射反序列化与内存分配;
+  - 接入 `KvStorage::get_bytes` 与底层 `PinnableSlice` 零拷贝直通.
+- **大集合 Subkey 规范 (`src/storage/subkey.rs`)**:
+  - **Inline 小集合 (≤ 64 元素)**: 直接以 `ValueType::{Hash, Set, ZSet}` 内联在 `{user_key}` 的 `StoredValue` 中;
+  - **大集合元数据**: `{user_key}` 存储 `ValueType::CollectionHeader { kind, count }`;
+  - **Hash 字段**: `{user_key}\x01H{field_len:2B}{field}` -> 字段原始 Value 切片;
+  - **Set 成员**: `{user_key}\x01S{member_len:2B}{member}` -> 空字节 (仅靠 Key 存在性标识成员);
+  - **ZSet 成员与索引**:
+    - Member 数据: `{user_key}\x01Z{member_len:2B}{member}` -> Score 的 f64 小端浮点字节;
+    - Score 排序索引: `{user_key}\x01Y{sortable_score:8B}{member}` -> 空字节, 供原生有界双向跳表范围扫描 (`raw_range_scan`).
+  - `MemoryEngine` 用于单测时不拆分子键, 集合均以内存 Map 保存在对应逻辑 DB 中.
+
+### 4. 级联范围删除与 Subkey 生命周期管理
+
+- **底层范围删除与分批**:
+  - `AdapterWriteOp::DeleteRange { start, end }`: 单机引擎通过 AiDb 的 `delete_range` 原生原子执行;
+  - 集群模式通过 `route_read` 定向路由至目标 Group, 并采用 512 步长批次 (`BATCH_DELETE_RANGE_LIMIT`) propose 状态机清理, 杜绝全表扫描与 OOM;
+  - 在删除复合集合时, 统一通过 `push_collection_subkey_deletes` 级联删除全部关联 Subkey; 读路径上的惰性过期同样级联清理.
+
+### 5. 大集合 DUMP / RESTORE / MIGRATE 序列化与流式保护
+
+- **32MB 累加流式保护**:
+  - `DUMP` / `MIGRATE` 打包时, 通过 `hydrate_stored_value` 边遍历 Subkey 边累加体积;
+  - 若单 Key 聚合大小超过 `MAX_DUMP_AGGREGATE_BYTES` (32MB), 立即报错中止, 严格杜绝内存爆炸;
+  - `MIGRATE` 在超限报错退出时绝不执行源端删除, 保证源端数据完整.
+- **RESTORE 格式自适应**:
+  - `RESTORE` 恢复超过 64 项 (与 `HASH_MAX_INLINE_FIELDS`, `SET_MAX_INLINE_MEMBERS`, `ZSET_MAX_INLINE` 一致) 的集合时, 自动拆分为 Subkey + `CollectionHeader` 结构写入, 杜绝大内联对象.
+
+### 6. CompactionFilter 孤儿 Subkey 兜底回收
+
+- **点查校验与反向保护**:
+  - `TtlExpireFilter` 实现 `filter_with_reader`, 结合 `parse_strict_subkey` 严格检验 Subkey 键长度规范 (2B 字段长度与 8B Score 索引长度);
+  - 接入普通数据 `StoredValue` 结构防线: 若能够反序列化为非 Header 的合法 `StoredValue`, 保守保留为独立用户 Key, 绝不误删形如 `foo\x01Hbar` 的用户自定义 Key;
+  - 对满足 Subkey 规范的条目, 通过 `reader` 点查其父 Header; 仅在 Header 缺失, 已过期或类型不匹配时判定为孤儿并回收;
+  - 自动适配单机 Key 与集群状态机 Key (`\x01sm/{gid}/`, 借助 `split_cluster_sm_prefix`), 支持集群环境下的孤儿兜底清理.
+- **已知边界与权衡 (Trade-offs)**:
+  - **极端同形 Header 风险**: 若用户 Key 本身命名恰好严格满足 `foo\x01H{len:2B}{field}` 编码规范, 且其 Value 恰好是一个 `CollectionHeader` (非普通数据), 在父 Key `foo` 不存在时仍会被判成孤儿删除 (概率极低, 需同时满足 Subkey 严格编码与 Postcard 编码的 Header 枚举);
+  - **保守保留策略下的安全泄漏**: 若 Hash 字段的原始 Payload 恰好能被反序列化为合法的普通 `StoredValue` (非 `CollectionHeader`), 该孤儿 subkey 在 Header 丢失后也会被保守保留, 不会引发数据丢失 (以空间换安全的保守设计);
+  - **同名重建窗口**: 应用层 DEL 负责主动范围删除 Subkey, CompactionFilter 负责针对中途崩溃或异常残留的孤儿兜底回收.

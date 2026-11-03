@@ -276,7 +276,7 @@ pub(super) fn exec_hscan(
     else {
         return Ok(field_scan_response(0, &[]));
     };
-    let (next, page) = scan_util::paginate_slice(&pairs, cursor, opts.count);
+    let (next, page) = scan_util::paginate_slice(&pairs, cursor, opts.count)?;
     Ok(field_scan_response(next, page))
 }
 
@@ -918,7 +918,7 @@ pub(super) fn exec_zscan(
     else {
         return Ok(helpers::scan_response(0, &[]));
     };
-    let (next, page) = scan_util::paginate_slice(&entries, cursor, opts.count);
+    let (next, page) = scan_util::paginate_slice(&entries, cursor, opts.count)?;
     Ok(helpers::scan_response(next, page))
 }
 

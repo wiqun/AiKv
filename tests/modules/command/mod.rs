@@ -1,3 +1,5 @@
+//! @component aikv-command
+
 pub mod atom;
 pub mod atom_json_batch;
 pub mod compat_aliases;

@@ -25,11 +25,15 @@
 use crate::storage::types::CollectionKind;
 
 /// Subkey 键编码相关常量.
-const SUBKEY_SEPARATOR: u8 = 0x01;
+pub const SUBKEY_SEPARATOR: u8 = 0x01;
 const HASH_TAG: u8 = b'H';
 const SET_TAG: u8 = b'S';
 /// Subkey 中 field/member 长度字段的字节数 (u16).
 const SUBKEY_LEN_BYTES: usize = 2;
+
+/// 单集合内联存储上限阈值 (超过后自动拆分为 Subkey 格式存储).
+pub const HASH_MAX_INLINE_FIELDS: usize = 64;
+pub const SET_MAX_INLINE_MEMBERS: usize = 64;
 
 // ---- 编码函数 ----
 
@@ -114,6 +118,45 @@ pub fn extract_user_key_from_subkey(encoded_key: &[u8]) -> Option<Vec<u8>> {
     let tag = encoded_key[sep_pos + 1];
     match tag {
         HASH_TAG | SET_TAG | b'Z' | b'Y' => Some(encoded_key[..sep_pos].to_vec()),
+        _ => None,
+    }
+}
+
+/// 严格解析 Subkey 的 parent key 与集合种类 (严格校验 2B 长度或 8B score 索引长度规范).
+///
+/// 若 key 仅仅是偶然包含 `\x01H/S/Z/Y`, 但后续长度不满足协议规范, 返回 `None`.
+pub fn parse_strict_subkey(encoded_key: &[u8]) -> Option<(Vec<u8>, CollectionKind)> {
+    let sep_pos = encoded_key.iter().position(|&b| b == SUBKEY_SEPARATOR)?;
+    if sep_pos + 1 >= encoded_key.len() {
+        return None;
+    }
+    let tag = encoded_key[sep_pos + 1];
+    let parent = encoded_key[..sep_pos].to_vec();
+
+    match tag {
+        HASH_TAG | SET_TAG | b'Z' => {
+            if encoded_key.len() < sep_pos + 4 {
+                return None;
+            }
+            let len =
+                u16::from_be_bytes([encoded_key[sep_pos + 2], encoded_key[sep_pos + 3]]) as usize;
+            let actual_sub_len = encoded_key.len() - (sep_pos + 4);
+            if actual_sub_len != len {
+                return None;
+            }
+            let kind = match tag {
+                HASH_TAG => CollectionKind::Hash,
+                SET_TAG => CollectionKind::Set,
+                _ => CollectionKind::ZSet,
+            };
+            Some((parent, kind))
+        }
+        b'Y' => {
+            if encoded_key.len() < sep_pos + 10 {
+                return None;
+            }
+            Some((parent, CollectionKind::ZSet))
+        }
         _ => None,
     }
 }

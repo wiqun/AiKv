@@ -1,3 +1,5 @@
+//! @component aikv-command
+
 use super::helpers::{b, router_with_shared};
 
 #[tokio::test]
@@ -50,6 +52,94 @@ async fn test_config_get_set() {
 
     let map = shared.config_map.read();
     assert_eq!(map.get("port").map(String::as_str), Some("6380"));
+}
+
+#[tokio::test]
+async fn test_config_rewrite_returns_error_without_config_file() {
+    let (router, _shared) = router_with_shared();
+    let mut db = 0;
+    let err = router
+        .execute("CONFIG", &[b("REWRITE")], &mut db)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("ERR The server is running without a config file"),
+        "unexpected error message: {err}"
+    );
+}
+
+#[tokio::test]
+async fn test_config_resetstat_clears_metrics() {
+    let (router, shared) = router_with_shared();
+    let mut db = 0;
+
+    // 产生一次 hit 与一次 miss
+    router
+        .execute("SET", &[b("foo"), b("bar")], &mut db)
+        .await
+        .unwrap();
+    router.execute("GET", &[b("foo")], &mut db).await.unwrap(); // hit
+    router
+        .execute("GET", &[b("not_found_key")], &mut db)
+        .await
+        .unwrap(); // miss
+    shared.metrics.on_rejected_connection();
+
+    assert!(shared.metrics.keyspace_hits() > 0, "keyspace_hits 应 > 0");
+    assert!(
+        shared.metrics.keyspace_misses() > 0,
+        "keyspace_misses 应 > 0"
+    );
+    assert_eq!(
+        shared.metrics.rejected_connections(),
+        1,
+        "rejected_connections 应为 1"
+    );
+
+    let resp = router
+        .execute("CONFIG", &[b("RESETSTAT")], &mut db)
+        .await
+        .unwrap();
+    assert_eq!(resp, aikv::protocol::RespValue::SimpleString("OK".into()));
+
+    assert_eq!(
+        shared.metrics.keyspace_hits(),
+        0,
+        "resetstat 后 keyspace_hits 应归零"
+    );
+    assert_eq!(
+        shared.metrics.keyspace_misses(),
+        0,
+        "resetstat 后 keyspace_misses 应归零"
+    );
+    assert_eq!(
+        shared.metrics.rejected_connections(),
+        0,
+        "resetstat 后 rejected_connections 应归零"
+    );
+
+    // 校验 INFO stats 渲染输出
+    let info_resp = router
+        .execute("INFO", &[b("stats")], &mut db)
+        .await
+        .unwrap();
+    let aikv::protocol::RespValue::BulkString(Some(info_bytes)) = info_resp else {
+        panic!("expected bulk string from INFO");
+    };
+    let info_str = String::from_utf8_lossy(&info_bytes);
+    assert!(
+        info_str.contains("keyspace_hits:0"),
+        "INFO stats keyspace_hits 应为 0"
+    );
+    assert!(
+        info_str.contains("keyspace_misses:0"),
+        "INFO stats keyspace_misses 应为 0"
+    );
+    assert!(
+        info_str.contains("rejected_connections:0"),
+        "INFO stats rejected_connections 应为 0"
+    );
 }
 
 #[tokio::test]

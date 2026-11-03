@@ -396,7 +396,7 @@ impl ZSetCommands {
             })
             .map(|(m, s)| (m.clone(), *s))
             .collect();
-        let (next_cursor, page) = scan_util::paginate_slice(&entries, cursor, opts.count);
+        let (next_cursor, page) = scan_util::paginate_slice(&entries, cursor, opts.count)?;
         Ok(scan_response(next_cursor, page))
     }
 

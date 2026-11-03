@@ -1,3 +1,5 @@
+//! @component aikv-server
+
 //! Step 3: listener + accept
 
 use super::helpers::{connect, start_server};

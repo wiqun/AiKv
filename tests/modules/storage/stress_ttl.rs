@@ -1,3 +1,5 @@
+//! @component aikv-storage
+
 //! TTL + concurrent write 压力测试.
 //!
 //! 验证 TTL filter 在并发写入和 compaction 下不会崩溃或丢数据.

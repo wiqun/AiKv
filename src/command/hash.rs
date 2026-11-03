@@ -26,11 +26,8 @@ use crate::command::scan_util;
 use crate::error::{Error, Result};
 use crate::protocol::RespValue;
 use crate::storage::memory::glob_match;
-use crate::storage::subkey;
+use crate::storage::subkey::{self, HASH_MAX_INLINE_FIELDS};
 use crate::storage::{AiDbEngine, CollectionKind, KvStorage, StoredValue, ValueType, WRONGTYPE};
-
-/// 小集合 inline 编码于 StoredValue; 超过此阈值自动切到 subkey 格式.
-const HASH_MAX_INLINE_FIELDS: usize = 64;
 
 pub struct HashCommands {
     storage: Arc<dyn KvStorage>,
@@ -196,8 +193,6 @@ impl HashCommands {
                 }
                 let new_count = count.saturating_sub(removed as u32);
                 if new_count == 0 {
-                    // 清理所有 subkey (防御性: 理论上上面已删除)
-                    self.delete_all_hash_subkeys(db, &encoded_user_key).await;
                     self.storage.delete(db, key).await?;
                 } else {
                     stored.value = ValueType::CollectionHeader {
@@ -390,7 +385,7 @@ impl HashCommands {
             return Ok(hscan_response(0, &[]));
         };
 
-        let pairs: Vec<(Vec<u8>, Vec<u8>)> = match stored.value {
+        match stored.value {
             ValueType::Hash(map) => {
                 let mut p: Vec<_> = map
                     .into_iter()
@@ -401,24 +396,99 @@ impl HashCommands {
                     })
                     .collect();
                 p.sort_by(|a, b| a.0.cmp(&b.0));
-                p
+                let (next_cursor, page) = scan_util::paginate_slice(&p, cursor, opts.count)?;
+                Ok(hscan_response(next_cursor, page))
             }
             ValueType::CollectionHeader {
                 kind: CollectionKind::Hash,
                 ..
             } => {
-                let encoded_user_key = AiDbEngine::encode_key(db, &args[0]);
-                let mut p = self
-                    .scan_hash_subkeys(db, &encoded_user_key, opts.pattern.as_deref())
-                    .await?;
-                p.sort_by(|a, b| a.0.cmp(&b.0));
-                p
-            }
-            _ => return Err(router::wrongtype()),
-        };
+                if let Some(cursor_mgr) = self.storage.cursor_mgr() {
+                    let encoded_user_key = AiDbEngine::encode_key(db, &args[0]);
+                    let prefix = subkey::hash_subkey_prefix(&encoded_user_key);
+                    let end_prefix = AiDbEngine::prefix_end(&prefix).unwrap_or_default();
 
-        let (next_cursor, page) = scan_util::paginate_slice(&pairs, cursor, opts.count);
-        Ok(hscan_response(next_cursor, page))
+                    let start_field = cursor_mgr
+                        .get(cursor, db, crate::storage::ScanKind::Hash)
+                        .map_err(|e| Error::Command(e.into()))?
+                        .map(|(f, _)| f);
+
+                    let current_seek = match start_field {
+                        None => prefix.clone(),
+                        Some(last_field) => {
+                            let mut k =
+                                subkey::encode_hash_field_key(&encoded_user_key, &last_field);
+                            k.push(0);
+                            k
+                        }
+                    };
+
+                    let budget = (opts.count * 10).clamp(100, 2000);
+                    let mut pairs = Vec::with_capacity(opts.count);
+                    let mut raw_read_count = 0;
+                    let mut last_seen_field = None;
+                    let mut seek_pos = current_seek;
+                    let mut reached_end = false;
+
+                    while pairs.len() < opts.count && raw_read_count < budget {
+                        let batch_size = ((opts.count - pairs.len()) * 2).clamp(16, 256);
+                        let raw_entries = self
+                            .storage
+                            .raw_range_scan(seek_pos.clone(), end_prefix.clone(), batch_size, false)
+                            .await?;
+                        if raw_entries.is_empty() {
+                            reached_end = true;
+                            break;
+                        }
+                        let is_eof = raw_entries.len() < batch_size;
+
+                        for (raw_k, raw_v) in raw_entries {
+                            raw_read_count += 1;
+                            seek_pos = raw_k.clone();
+                            seek_pos.push(0);
+
+                            if let Some((kind, field)) = subkey::decode_subkey(&raw_k) {
+                                if kind != CollectionKind::Hash {
+                                    continue;
+                                }
+                                if opts.pattern.as_ref().is_none_or(|p| glob_match(p, &field)) {
+                                    pairs.push((field.clone(), raw_v));
+                                }
+                                last_seen_field = Some(field);
+                            }
+
+                            if pairs.len() >= opts.count || raw_read_count >= budget {
+                                break;
+                            }
+                        }
+
+                        if is_eof && (pairs.len() < opts.count && raw_read_count < budget) {
+                            reached_end = true;
+                            break;
+                        }
+                    }
+
+                    let next_cursor = if reached_end {
+                        0
+                    } else if let Some(last_field) = last_seen_field {
+                        cursor_mgr.put(db, crate::storage::ScanKind::Hash, last_field, false)
+                    } else {
+                        0
+                    };
+
+                    Ok(hscan_response(next_cursor, &pairs))
+                } else {
+                    let encoded_user_key = AiDbEngine::encode_key(db, &args[0]);
+                    let mut p = self
+                        .scan_hash_subkeys(db, &encoded_user_key, opts.pattern.as_deref())
+                        .await?;
+                    p.sort_by(|a, b| a.0.cmp(&b.0));
+                    let (next_cursor, page) = scan_util::paginate_slice(&p, cursor, opts.count)?;
+                    Ok(hscan_response(next_cursor, page))
+                }
+            }
+            _ => Err(router::wrongtype()),
+        }
     }
 
     pub async fn hincrbyfloat(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
@@ -705,19 +775,6 @@ impl HashCommands {
             expires_at: *expires_at,
         };
         self.storage.rewrite_stored(db, key, metadata).await
-    }
-
-    /// 删除某个 key 下的所有 hash subkey entries.
-    async fn delete_all_hash_subkeys(&self, _db: usize, encoded_user_key: &[u8]) {
-        // 收集并删除所有 subkey entries.
-        // 注意: raw_subkey_for_each 不能被 await 在 &mut dyn FnMut 闭包中, 所以先收集.
-        // 这里简化: 依赖引擎的 delete_range 可行, 但如果 prefix 跨越非 subkey keys 则有风险.
-        // 当前 subkey 都位于 encoded_user_key\x01H 前缀下, 相对独立.
-        //
-        // 对于 StorageAdapter 没有 delete_range 只适用于前缀范围内的场景,
-        // 在调用处 (hdel count==0) 我们已经逐字段删除了, 此函数作为防御性保险.
-        // 暂留空实现; 清理由调用方逐个 delete 完成.
-        let _ = encoded_user_key;
     }
 }
 

@@ -1,3 +1,5 @@
+//! @component aikv-storage
+
 pub mod aidb;
 pub mod aidb_blocking;
 pub mod aidb_integration_test;

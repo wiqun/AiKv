@@ -1,3 +1,5 @@
+//! @component aikv-command
+
 use aikv::protocol::RespValue;
 use bytes::Bytes;
 use std::sync::Arc;

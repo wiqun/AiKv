@@ -1,3 +1,5 @@
+//! @component aikv-command
+
 //! Redis 7 INFO 字段存在性 golden 测试 (Phase 4).
 //!
 //! 注意: 本模块所在的 `tests/commands.rs` binary 内禁止任何测试调用

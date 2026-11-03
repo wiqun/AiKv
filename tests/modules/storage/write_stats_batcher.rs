@@ -1,3 +1,5 @@
+//! @component aikv-storage
+
 //! 集群写批不得在 propose 前用 exists/get_local 做键计数.
 
 #[test]

@@ -1,3 +1,5 @@
+//! @component aikv-server
+
 //! 可观测性测试
 
 use std::time::Duration;

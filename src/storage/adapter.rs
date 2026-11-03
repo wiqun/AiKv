@@ -1,25 +1,22 @@
 //! `StorageAdapter` trait 与 `KvStorage` 适配层: 把扁平 KV 抽象 (`StorageAdapter`,
-//! 底层为 `AiDbEngine` 或 `ClusterDataAdapter`) 包装为命令层多 DB 语义
+//! 底层为 `AiDbEngine` 或 `ClusterDataAdapter`) 包装为命令层存储语义
 //! (`KvStorageAdapter`, 实现 `KvStorage`).
 //!
-//! # Key 布局 (扁平 KV → 多 DB)
+//! # Key 布局 (Kvrocks 模式裸 Key + Subkey 编码)
 //!
 //! ```text
-//! 物理 key: {db_index}:{user_key}          # ASCII, 例 b"0:mykey"
-//!   ├─ db_prefix(db) = encode_key(db, "")  # 每 DB 的扫描前缀
-//!   ├─ prefix_end    = 前缀进位            # 范围扫描上界
-//!   └─ 值: postcard(StoredValue)            # 类型 + expires_at
-//! subkey:  {db_index}:{user_key}\x01H|S|Z|Y... # 大 Hash/Set/ZSet 的 field/member, raw bytes
+//! 物理 key: user_key                         # 裸 Key 直通存储, 零额外堆分配
+//!   └─ 值: postcard(StoredValue)            # 类型 + expires_at / version
+//! subkey:  \x01H|S|Z|Y{user_key}\x00{version:8BE}{field/member} # 大集合扁平化字段
 //! ```
 //!
-//! 多 DB 完全靠 key 前缀隔离 (`clear`/`keys`/`scan` 依赖 `db_prefix` + `prefix_end`).
+//! 对齐 Kvrocks 单库存储架构, 彻底移除 `{db_index}:` 物理前缀; `SELECT` 指令经合法性校验后垫片化归一至 db 0.
 //!
 //! # Invariant
 //!
 //! - 两套 WriteOp: `storage::WriteOp` (命令/Lua batch) ≠ `AdapterWriteOp` (扁平 KV);
 //!   转换在 `KvStorageAdapter::write_batch` (Put → postcard `StoredValue`).
-//! - AiDb key 编码: 物理 key = `{db_index}:{user_key}` (ASCII); `clear`/`keys`/`scan`
-//!   依赖 `db_prefix` + `prefix_end`.
+//! - AiDb key 编码: 裸 Key 直通存储; `encode_key` 返回原始 `user_key`, `decode_key_ref` 返回 `(0, user_key)`.
 //! - String `get`/`set` 仅 String; 非 String → `WRONGTYPE`; Hash/List/Set/ZSet
 //!   必须 `get_typed`/`set_typed`.
 //! - 惰性 TTL: 读路径 (`load_typed`) 遇过期返回"不存在"并尽力物理删除
@@ -35,10 +32,11 @@ use async_trait::async_trait;
 use crate::error::{Error, Result};
 use crate::storage::memory::glob_match;
 use crate::storage::observation::{PointReadCounter, StorageObservation};
+use crate::storage::subkey;
 use crate::storage::types::{
-    is_wrongtype, now_ms, BatchWriteHandle, ExpiresCounters, ImmediateWriteHandle, KeyspaceStats,
-    KvStorage, RawPairVisitor, ScanResult, StorageEngineKind, StoredValue, ValueType, WriteOp,
-    DB_COUNT, TTL_NO_EXPIRY, WRONGTYPE,
+    is_wrongtype, now_ms, BatchWriteHandle, CollectionKind, ExpiresCounters, ImmediateWriteHandle,
+    KeyspaceStats, KvStorage, RawPairVisitor, ScanResult, StorageEngineKind, StoredValue,
+    ValueType, WriteOp, DB_COUNT, TTL_NO_EXPIRY, WRONGTYPE,
 };
 use crate::storage::watch_registry::WatchRegistry;
 use crate::storage::watch_version::{
@@ -51,6 +49,7 @@ use crate::storage::AiDbEngine;
 pub enum AdapterWriteOp {
     Put { key: Vec<u8>, value: Vec<u8> },
     Delete { key: Vec<u8> },
+    DeleteRange { start: Vec<u8>, end: Vec<u8> },
 }
 
 #[async_trait]
@@ -71,6 +70,9 @@ pub trait StorageAdapter: Send + Sync {
                 AdapterWriteOp::Put { key, value } => self.set(key, value).await?,
                 AdapterWriteOp::Delete { key } => {
                     self.delete(key).await?;
+                }
+                AdapterWriteOp::DeleteRange { start, end } => {
+                    self.delete_range(start, end).await?;
                 }
             }
         }
@@ -261,6 +263,7 @@ pub struct KvStorageAdapter {
     point_reads: OnceLock<Arc<PointReadCounter>>,
     expires: Arc<ExpiresCounters>,
     watchers: Arc<WatchRegistry>,
+    cursor_mgr: Arc<crate::storage::CursorManager>,
 }
 
 impl KvStorageAdapter {
@@ -287,7 +290,12 @@ impl KvStorageAdapter {
             point_reads: OnceLock::new(),
             expires: Arc::new(ExpiresCounters::new()),
             watchers: WatchRegistry::new(),
+            cursor_mgr: Arc::new(crate::storage::CursorManager::default()),
         })
+    }
+
+    pub fn cursor_mgr(&self) -> &Arc<crate::storage::CursorManager> {
+        &self.cursor_mgr
     }
 
     fn check_db(&self, db: usize) -> Result<()> {
@@ -390,9 +398,16 @@ impl KvStorageAdapter {
         if !self.storage.allow_lazy_expire_delete(&encoded) {
             return;
         }
+        let stored = self
+            .get_raw(db, key)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|r| Self::deserialize(&r).ok());
         let mut ops = vec![AdapterWriteOp::Delete {
             key: encoded.clone(),
         }];
+        Self::push_collection_subkey_deletes(db, key, &encoded, stored.as_ref(), &mut ops);
         if let Ok(Some((mk, mv))) = self.next_watch_meta_put(db, key).await {
             ops.push(AdapterWriteOp::Put { key: mk, value: mv });
         }
@@ -594,9 +609,14 @@ impl KvStorageAdapter {
                 WriteOp::Delete => {
                     let encoded = Self::encode(db, &key);
                     touched.push(encoded.clone());
-                    if self.is_zset_header_key(db, &key).await? {
-                        self.push_zset_subkey_deletes(db, &key, &mut batch).await?;
-                    }
+                    let stored = self.get_typed(db, &key).await.ok().flatten();
+                    Self::push_collection_subkey_deletes(
+                        db,
+                        &key,
+                        &encoded,
+                        stored.as_ref(),
+                        &mut batch,
+                    );
                     batch.push(AdapterWriteOp::Delete { key: encoded });
                 }
             }
@@ -651,9 +671,16 @@ impl KvStorageAdapter {
                 WriteOp::Delete => {
                     let encoded = Self::encode(db, &key);
                     touched.push(encoded.clone());
-                    if self.is_zset_header_key_sync(db, &key)? {
-                        self.push_zset_subkey_deletes_sync(db, &key, &mut batch)?;
-                    }
+                    let stored = crate::storage::script_io::ScriptIo::get_typed(self, db, &key)
+                        .ok()
+                        .flatten();
+                    Self::push_collection_subkey_deletes(
+                        db,
+                        &key,
+                        &encoded,
+                        stored.as_ref(),
+                        &mut batch,
+                    );
                     batch.push(AdapterWriteOp::Delete { key: encoded });
                 }
             }
@@ -667,50 +694,6 @@ impl KvStorageAdapter {
             }
         }
         Ok(batch)
-    }
-
-    fn is_zset_header_key_sync(&self, db: usize, key: &[u8]) -> Result<bool> {
-        let stored = crate::storage::script_io::ScriptIo::get_typed(self, db, key)?;
-        Ok(stored
-            .as_ref()
-            .and_then(crate::storage::zset_subkey::is_zset_header)
-            .is_some())
-    }
-
-    fn push_zset_subkey_deletes_sync(
-        &self,
-        db: usize,
-        user_key: &[u8],
-        batch: &mut Vec<AdapterWriteOp>,
-    ) -> Result<()> {
-        crate::storage::zset_subkey::invalidate_score_bounds_hint(db, user_key);
-        let encoded = Self::encode(db, user_key);
-        self.push_prefix_deletes_sync(crate::storage::zset_subkey::member_prefix(&encoded), batch)?;
-        self.push_prefix_deletes_sync(crate::storage::zset_subkey::score_prefix(&encoded), batch)
-    }
-
-    fn push_prefix_deletes_sync(
-        &self,
-        prefix: Vec<u8>,
-        batch: &mut Vec<AdapterWriteOp>,
-    ) -> Result<()> {
-        let keys = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let keys_c = std::sync::Arc::clone(&keys);
-        self.storage.for_each_prefix_sync(
-            prefix,
-            Box::new(move |key, _| {
-                keys_c.lock().expect("prefix deletes").push(key);
-                Ok(())
-            }),
-        )?;
-        let keys = std::sync::Arc::try_unwrap(keys)
-            .unwrap_or_else(|_| unreachable!("prefix delete keys still shared"))
-            .into_inner()
-            .expect("prefix deletes");
-        for key in keys {
-            batch.push(AdapterWriteOp::Delete { key });
-        }
-        Ok(())
     }
 
     fn read_watch_version_sync(&self, db: usize, user_key: &[u8]) -> Result<u64> {
@@ -790,57 +773,76 @@ impl KvStorageAdapter {
         self.storage.last_in_range_sync(prefix, end)
     }
 
-    async fn is_zset_header_key(&self, db: usize, key: &[u8]) -> Result<bool> {
-        let stored = self.get_typed(db, key).await?;
-        Ok(stored
-            .as_ref()
-            .and_then(crate::storage::zset_subkey::is_zset_header)
-            .is_some())
-    }
-
-    async fn push_zset_subkey_deletes(
-        &self,
+    fn push_collection_subkey_deletes(
         db: usize,
-        user_key: &[u8],
-        batch: &mut Vec<AdapterWriteOp>,
-    ) -> Result<()> {
-        crate::storage::zset_subkey::invalidate_score_bounds_hint(db, user_key);
-        let encoded = Self::encode(db, user_key);
-        self.push_prefix_deletes(crate::storage::zset_subkey::member_prefix(&encoded), batch)
-            .await?;
-        self.push_prefix_deletes(crate::storage::zset_subkey::score_prefix(&encoded), batch)
-            .await
-    }
-
-    async fn push_prefix_deletes(
-        &self,
-        prefix: Vec<u8>,
-        batch: &mut Vec<AdapterWriteOp>,
-    ) -> Result<()> {
-        let keys = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let keys_c = std::sync::Arc::clone(&keys);
-        self.storage
-            .for_each_prefix(
-                prefix,
-                Box::new(move |key, _| {
-                    keys_c.lock().expect("prefix deletes").push(key);
-                    Ok(())
-                }),
-            )
-            .await?;
-        let keys = std::sync::Arc::try_unwrap(keys)
-            .unwrap_or_else(|_| unreachable!("prefix delete keys still shared"))
-            .into_inner()
-            .expect("prefix deletes");
-        for key in keys {
-            batch.push(AdapterWriteOp::Delete { key });
+        key: &[u8],
+        encoded: &[u8],
+        stored: Option<&StoredValue>,
+        ops: &mut Vec<AdapterWriteOp>,
+    ) {
+        let Some(stored_val) = stored else {
+            return;
+        };
+        match &stored_val.value {
+            ValueType::CollectionHeader { kind, .. } => match kind {
+                CollectionKind::Hash => {
+                    let prefix = subkey::hash_subkey_prefix(encoded);
+                    if let Some(end) = AiDbEngine::prefix_end(&prefix) {
+                        ops.push(AdapterWriteOp::DeleteRange { start: prefix, end });
+                    }
+                }
+                CollectionKind::Set => {
+                    let prefix = subkey::set_subkey_prefix(encoded);
+                    if let Some(end) = AiDbEngine::prefix_end(&prefix) {
+                        ops.push(AdapterWriteOp::DeleteRange { start: prefix, end });
+                    }
+                }
+                CollectionKind::ZSet => {
+                    crate::storage::zset_subkey::invalidate_score_bounds_hint(db, key);
+                    let m_prefix = crate::storage::zset_subkey::member_prefix(encoded);
+                    if let Some(end) = AiDbEngine::prefix_end(&m_prefix) {
+                        ops.push(AdapterWriteOp::DeleteRange {
+                            start: m_prefix,
+                            end,
+                        });
+                    }
+                    let s_prefix = crate::storage::zset_subkey::score_prefix(encoded);
+                    if let Some(end) = AiDbEngine::prefix_end(&s_prefix) {
+                        ops.push(AdapterWriteOp::DeleteRange {
+                            start: s_prefix,
+                            end,
+                        });
+                    }
+                }
+            },
+            _ if crate::storage::zset_subkey::is_zset_header(stored_val).is_some() => {
+                crate::storage::zset_subkey::invalidate_score_bounds_hint(db, key);
+                let m_prefix = crate::storage::zset_subkey::member_prefix(encoded);
+                if let Some(end) = AiDbEngine::prefix_end(&m_prefix) {
+                    ops.push(AdapterWriteOp::DeleteRange {
+                        start: m_prefix,
+                        end,
+                    });
+                }
+                let s_prefix = crate::storage::zset_subkey::score_prefix(encoded);
+                if let Some(end) = AiDbEngine::prefix_end(&s_prefix) {
+                    ops.push(AdapterWriteOp::DeleteRange {
+                        start: s_prefix,
+                        end,
+                    });
+                }
+            }
+            _ => {}
         }
-        Ok(())
     }
 }
 
 #[async_trait]
 impl KvStorage for KvStorageAdapter {
+    fn cursor_mgr(&self) -> Option<&Arc<crate::storage::CursorManager>> {
+        Some(&self.cursor_mgr)
+    }
+
     fn aidb_statistics(&self) -> Option<std::sync::Arc<aidb::Statistics>> {
         self.storage.aidb_statistics()
     }
@@ -878,13 +880,7 @@ impl KvStorage for KvStorageAdapter {
         let saw_ttl = stored.as_ref().and_then(|value| value.expires_at).is_some();
         let encoded = Self::encode(db, key);
         let mut ops = Vec::new();
-        if stored
-            .as_ref()
-            .and_then(crate::storage::zset_subkey::is_zset_header)
-            .is_some()
-        {
-            self.push_zset_subkey_deletes(db, key, &mut ops).await?;
-        }
+        Self::push_collection_subkey_deletes(db, key, &encoded, stored.as_ref(), &mut ops);
         ops.push(AdapterWriteOp::Delete { key: encoded });
         if let Some((mk, mv)) = self.next_watch_meta_put(db, key).await? {
             ops.push(AdapterWriteOp::Put { key: mk, value: mv });
@@ -947,15 +943,134 @@ impl KvStorage for KvStorageAdapter {
         pattern: &[u8],
         count: usize,
     ) -> Result<ScanResult> {
-        let mut valid = self.keys_for_db(db, pattern).await?;
-        valid.sort();
-        let skip = cursor as usize;
-        let end = (skip + count).min(valid.len());
-        let keys = valid[skip..end].to_vec();
-        let next_cursor = if end < valid.len() { end as u64 } else { 0 };
+        self.check_db(db)?;
+        let count = if count == 0 { 10 } else { count };
+        // 单次扫描最多从底层读取的原始记录条数 (预算防御, 杜绝 Subkey 空转长尾)
+        let budget = (count * 10).clamp(100, 2000);
+
+        // 检索游标. 若失效或过期, 明确返回 ERR invalid cursor (拒绝静默返回 0 导致漏数据)
+        let start_key = self
+            .cursor_mgr
+            .get(cursor, db, crate::storage::ScanKind::Global)
+            .map_err(|e| Error::Command(e.into()))?;
+
+        let db_prefix = Self::db_prefix(db);
+        let db_end = AiDbEngine::prefix_end(&db_prefix).unwrap_or_default();
+
+        let mut current_seek = match start_key {
+            None => db_prefix,
+            Some((last_key, is_coll)) => {
+                let encoded = Self::encode(db, &last_key);
+                if is_coll {
+                    let mut subkey_prefix = encoded.clone();
+                    subkey_prefix.push(subkey::SUBKEY_SEPARATOR);
+                    if let Some(skip_to) = AiDbEngine::prefix_end(&subkey_prefix) {
+                        skip_to
+                    } else {
+                        let mut s = encoded;
+                        s.push(0);
+                        s
+                    }
+                } else {
+                    let mut s = encoded;
+                    s.push(0);
+                    s
+                }
+            }
+        };
+
+        let mut collected = Vec::with_capacity(count);
+        let mut raw_read_count = 0;
+        let mut last_seen_user_key: Option<Vec<u8>> = None;
+        let mut last_seen_is_coll = false;
+        let mut reached_end = false;
+
+        while collected.len() < count && raw_read_count < budget {
+            let batch_size = ((count - collected.len()) * 2).clamp(16, 256);
+            let pairs = self.storage.range_scan_sync(
+                current_seek.clone(),
+                db_end.clone(),
+                batch_size,
+                false,
+            )?;
+            if pairs.is_empty() {
+                reached_end = true;
+                break;
+            }
+            let is_batch_eof = pairs.len() < batch_size;
+            let mut broken_by_header = false;
+
+            for (raw_k, raw_v) in pairs {
+                raw_read_count += 1;
+                // 更新当前游标进度
+                current_seek = raw_k.clone();
+                current_seek.push(0);
+
+                let Some(user_key) = Self::decode_user_key(&raw_k) else {
+                    continue;
+                };
+                if is_watch_meta_user_key(&user_key) {
+                    continue;
+                }
+
+                // 尝试反序列化 StoredValue, 跳过非合法 StoredValue (如 subkey)
+                let Ok(stored) = Self::deserialize(&raw_v) else {
+                    continue;
+                };
+                if stored.is_expired() {
+                    continue;
+                }
+
+                if pattern.is_empty() || glob_match(pattern, &user_key) {
+                    collected.push(user_key.clone());
+                }
+                last_seen_user_key = Some(user_key);
+                let is_coll = matches!(stored.value, ValueType::CollectionHeader { .. });
+                last_seen_is_coll = is_coll;
+
+                // 若遇到 CollectionHeader, 主动 Seek 跳过其所属的全部 subkey 区间 (格式为 {raw_k}\x01...)
+                if is_coll {
+                    let mut subkey_prefix = raw_k.clone();
+                    subkey_prefix.push(subkey::SUBKEY_SEPARATOR);
+                    if let Some(skip_to) = AiDbEngine::prefix_end(&subkey_prefix) {
+                        current_seek = skip_to;
+                        broken_by_header = true;
+                        // 立即跳出当前内存 batch, 下一轮直接从 skip_to 进行 Seek, 杜绝在 subkey 空间空转
+                        break;
+                    }
+                }
+
+                if collected.len() >= count || raw_read_count >= budget {
+                    break;
+                }
+            }
+
+            // 只有当未因 CollectionHeader 主动跳出, 且底层确实已返回短批次时, 才标记全库扫描结束
+            if !broken_by_header
+                && is_batch_eof
+                && (collected.len() < count && raw_read_count < budget)
+            {
+                reached_end = true;
+                break;
+            }
+        }
+
+        let next_cursor = if reached_end {
+            0
+        } else if let Some(last_key) = last_seen_user_key {
+            self.cursor_mgr.put(
+                db,
+                crate::storage::ScanKind::Global,
+                last_key,
+                last_seen_is_coll,
+            )
+        } else {
+            0
+        };
+
         Ok(ScanResult {
             cursor: next_cursor,
-            keys,
+            keys: collected,
         })
     }
 

@@ -98,7 +98,7 @@ impl JsonPathEngine {
 
                 if inner.starts_with('\'') {
                     // Field selector: ['field1','field2'] - flatten values in order
-                    // TL.KvDoc expects this to return [val1, val2, ...] not [{field1:val1, field2:val2}, ...]
+                    // Flatten values into [val1, val2, ...] instead of [{field1:val1, field2:val2}, ...]
                     let inner_str: &str = inner;
                     let fields: Vec<&str> = inner_str
                         .trim_start_matches('\'')

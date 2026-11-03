@@ -268,6 +268,11 @@ pub trait KvStorage: Send + Sync {
         None
     }
 
+    /// 暴露增量游标管理器 (若支持)
+    fn cursor_mgr(&self) -> Option<&Arc<crate::storage::CursorManager>> {
+        None
+    }
+
     /// 键计数器全库重扫耗时 (微秒). 重扫已去掉, 固定返回 0.
     fn rebuild_counters_duration_us(&self) -> u64 {
         0

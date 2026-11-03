@@ -1,3 +1,5 @@
+//! @component aikv-command
+
 use aikv::command::KeyLock;
 use aikv::error::Error;
 use aikv::protocol::RespValue;

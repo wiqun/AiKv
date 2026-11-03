@@ -1,3 +1,5 @@
+//! @component aikv-storage
+
 //! TTL 过期边界与 TtlExpireFilter 的 property-based 测试.
 
 use proptest::prelude::*;
