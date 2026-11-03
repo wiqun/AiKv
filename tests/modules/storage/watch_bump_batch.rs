@@ -66,6 +66,9 @@ impl StorageAdapter for CountingAdapter {
                 AdapterWriteOp::Delete { key } => {
                     self.delete(key).await?;
                 }
+                AdapterWriteOp::DeleteRange { start, end } => {
+                    self.delete_range(start, end).await?;
+                }
             }
         }
         Ok(())

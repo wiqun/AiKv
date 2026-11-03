@@ -22,7 +22,13 @@ use crate::command::migrate;
 use crate::command::router::{self, KeyLock};
 use crate::error::{Error, Result};
 use crate::protocol::RespValue;
+use crate::storage::aidb::AiDbEngine;
+use crate::storage::subkey::{self, HASH_MAX_INLINE_FIELDS, SET_MAX_INLINE_MEMBERS};
+use crate::storage::types::{CollectionKind, StorageEngineKind, StoredValue, ValueType, WriteOp};
+use crate::storage::zset_subkey::{self, ZSET_MAX_INLINE};
 use crate::storage::{dump_decode, dump_encode, now_ms, KvStorage, TTL_NO_EXPIRY};
+
+pub const MAX_DUMP_AGGREGATE_BYTES: usize = 32 * 1024 * 1024;
 
 pub struct KeyCommands {
     storage: Arc<dyn KvStorage>,
@@ -227,10 +233,17 @@ impl KeyCommands {
     /// DUMP — AiKv 内部格式 `[version: u8=1][postcard(StoredValue)]`, 非 Redis 兼容.
     pub async fn dump(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_args("DUMP", args, 1)?;
-        match self.storage.get_typed(db, &args[0]).await? {
+        let key = &args[0];
+        match self.storage.get_typed(db, key).await? {
             None => Ok(router::nil_bulk()),
             Some(stored) => {
-                let payload = dump_encode(&stored)?;
+                let hydrated = hydrate_stored_value(&self.storage, db, key, stored).await?;
+                let payload = dump_encode(&hydrated)?;
+                if payload.len() > MAX_DUMP_AGGREGATE_BYTES {
+                    return Err(Error::Command(
+                        "ERR DUMP payload exceeds maximum allowed size (32MB)".into(),
+                    ));
+                }
                 Ok(router::bulk(payload))
             }
         }
@@ -277,6 +290,70 @@ impl KeyCommands {
                 ));
             }
         }
+
+        // 大集合自动转 Subkey 格式存储
+        if self.storage.engine_kind() != StorageEngineKind::Memory {
+            match stored.value {
+                ValueType::Hash(ref map) if map.len() > HASH_MAX_INLINE_FIELDS => {
+                    let encoded_user_key = AiDbEngine::encode_key(db, key);
+                    let mut ops = Vec::with_capacity(1 + map.len());
+                    ops.push((
+                        key.to_vec(),
+                        WriteOp::put_stored(StoredValue {
+                            value: ValueType::CollectionHeader {
+                                kind: CollectionKind::Hash,
+                                count: map.len() as u32,
+                            },
+                            expires_at: stored.expires_at,
+                        }),
+                    ));
+                    for (field, val) in map {
+                        let sk = subkey::encode_hash_field_key(&encoded_user_key, field);
+                        ops.push((
+                            sk,
+                            WriteOp::PutEngine {
+                                value: Arc::new(val.clone()),
+                            },
+                        ));
+                    }
+                    self.storage.write_batch(db, ops).await?;
+                    return Ok(router::ok());
+                }
+                ValueType::Set(ref set) if set.len() > SET_MAX_INLINE_MEMBERS => {
+                    let encoded_user_key = AiDbEngine::encode_key(db, key);
+                    let mut ops = Vec::with_capacity(1 + set.len());
+                    ops.push((
+                        key.to_vec(),
+                        WriteOp::put_stored(StoredValue {
+                            value: ValueType::CollectionHeader {
+                                kind: CollectionKind::Set,
+                                count: set.len() as u32,
+                            },
+                            expires_at: stored.expires_at,
+                        }),
+                    ));
+                    let empty_val = Arc::new(Vec::new());
+                    for member in set {
+                        let sk = subkey::encode_set_member_key(&encoded_user_key, member);
+                        ops.push((
+                            sk,
+                            WriteOp::PutEngine {
+                                value: empty_val.clone(),
+                            },
+                        ));
+                    }
+                    self.storage.write_batch(db, ops).await?;
+                    return Ok(router::ok());
+                }
+                ValueType::ZSet(ref zset) if zset.len() > ZSET_MAX_INLINE => {
+                    let ops = zset_subkey::replace_ops(db, key, zset, stored.expires_at);
+                    self.storage.write_batch(db, ops).await?;
+                    return Ok(router::ok());
+                }
+                _ => {}
+            }
+        }
+
         let set_result = self.storage.set_typed(db, key, stored).await;
         if let Err(e) = &set_result {
             tracing::error!(key = %String::from_utf8_lossy(key), error = %e, "RESTORE set_typed failed");
@@ -348,8 +425,14 @@ impl KeyCommands {
                 let Some(stored) = self.storage.get_typed(db, key).await? else {
                     continue;
                 };
-                let payload = dump_encode(&stored)?;
-                let ttl_ms = migrate_ttl_ms(&stored);
+                let hydrated = hydrate_stored_value(&self.storage, db, key, stored).await?;
+                let payload = dump_encode(&hydrated)?;
+                if payload.len() > MAX_DUMP_AGGREGATE_BYTES {
+                    return Err(Error::Command(
+                        "ERR DUMP payload exceeds maximum allowed size (32MB)".into(),
+                    ));
+                }
+                let ttl_ms = migrate_ttl_ms(&hydrated);
                 migrate::send_restore(migrate::RestoreTarget {
                     host,
                     port,
@@ -374,8 +457,14 @@ impl KeyCommands {
             return Ok(router::ok());
         };
 
-        let payload = dump_encode(&stored)?;
-        let ttl_ms = migrate_ttl_ms(&stored);
+        let hydrated = hydrate_stored_value(&self.storage, db, key, stored).await?;
+        let payload = dump_encode(&hydrated)?;
+        if payload.len() > MAX_DUMP_AGGREGATE_BYTES {
+            return Err(Error::Command(
+                "ERR DUMP payload exceeds maximum allowed size (32MB)".into(),
+            ));
+        }
+        let ttl_ms = migrate_ttl_ms(&hydrated);
 
         migrate::send_restore(migrate::RestoreTarget {
             host,
@@ -394,6 +483,142 @@ impl KeyCommands {
             self.storage.delete(db, key).await?;
         }
         Ok(router::ok())
+    }
+}
+
+/// 将 CollectionHeader 还原为包含完整字段/成员的 StoredValue.
+/// 边读边累加体积, 超过 32MB 提前中止并报错.
+pub async fn hydrate_stored_value(
+    storage: &Arc<dyn KvStorage>,
+    db: usize,
+    user_key: &[u8],
+    stored: StoredValue,
+) -> Result<StoredValue> {
+    match stored.value {
+        ValueType::CollectionHeader { kind, count: _ } => {
+            let encoded_user_key = AiDbEngine::encode_key(db, user_key);
+            match kind {
+                CollectionKind::Hash => {
+                    let prefix = subkey::hash_subkey_prefix(&encoded_user_key);
+                    let map = std::collections::HashMap::new();
+                    let state = Arc::new(std::sync::Mutex::new((map, 0usize)));
+                    let state_c = state.clone();
+
+                    storage
+                        .raw_subkey_for_each(
+                            db,
+                            prefix,
+                            Box::new(move |encoded, raw| {
+                                if let Some((k, field)) = subkey::decode_subkey(&encoded) {
+                                    if k != CollectionKind::Hash {
+                                        return Ok(());
+                                    }
+                                    let mut guard = state_c.lock().unwrap();
+                                    guard.1 = guard.1.saturating_add(field.len() + raw.len());
+                                    if guard.1 > MAX_DUMP_AGGREGATE_BYTES {
+                                        return Err(Error::Command(
+                                            "ERR DUMP payload exceeds maximum allowed size (32MB)"
+                                                .into(),
+                                        ));
+                                    }
+                                    guard.0.insert(field, raw);
+                                }
+                                Ok(())
+                            }),
+                        )
+                        .await?;
+
+                    let (map, _) = Arc::try_unwrap(state).unwrap().into_inner().unwrap();
+                    Ok(StoredValue {
+                        value: ValueType::Hash(map),
+                        expires_at: stored.expires_at,
+                    })
+                }
+                CollectionKind::Set => {
+                    let prefix = subkey::set_subkey_prefix(&encoded_user_key);
+                    let set = std::collections::HashSet::new();
+                    let state = Arc::new(std::sync::Mutex::new((set, 0usize)));
+                    let state_c = state.clone();
+
+                    storage
+                        .raw_subkey_for_each(
+                            db,
+                            prefix,
+                            Box::new(move |encoded, _raw| {
+                                if let Some((k, member)) = subkey::decode_subkey(&encoded) {
+                                    if k != CollectionKind::Set {
+                                        return Ok(());
+                                    }
+                                    let mut guard = state_c.lock().unwrap();
+                                    guard.1 = guard.1.saturating_add(member.len());
+                                    if guard.1 > MAX_DUMP_AGGREGATE_BYTES {
+                                        return Err(Error::Command(
+                                            "ERR DUMP payload exceeds maximum allowed size (32MB)"
+                                                .into(),
+                                        ));
+                                    }
+                                    guard.0.insert(member);
+                                }
+                                Ok(())
+                            }),
+                        )
+                        .await?;
+
+                    let (set, _) = Arc::try_unwrap(state).unwrap().into_inner().unwrap();
+                    Ok(StoredValue {
+                        value: ValueType::Set(set),
+                        expires_at: stored.expires_at,
+                    })
+                }
+                CollectionKind::ZSet => {
+                    let prefix = zset_subkey::member_prefix(&encoded_user_key);
+                    let prefix_len = prefix.len();
+                    let map = std::collections::BTreeMap::new();
+                    let state = Arc::new(std::sync::Mutex::new((map, 0usize)));
+                    let state_c = state.clone();
+
+                    storage
+                        .raw_subkey_for_each(
+                            db,
+                            prefix,
+                            Box::new(move |enc, raw| {
+                                let Some(member) =
+                                    zset_subkey::member_from_encoded(&enc, prefix_len)
+                                else {
+                                    return Ok(());
+                                };
+                                if let Some(score) = zset_subkey::decode_score(&raw) {
+                                    let mut guard = state_c.lock().unwrap();
+                                    guard.1 = guard.1.saturating_add(member.len() + 8);
+                                    if guard.1 > MAX_DUMP_AGGREGATE_BYTES {
+                                        return Err(Error::Command(
+                                            "ERR DUMP payload exceeds maximum allowed size (32MB)"
+                                                .into(),
+                                        ));
+                                    }
+                                    guard.0.insert(member, score);
+                                }
+                                Ok(())
+                            }),
+                        )
+                        .await?;
+
+                    let (map, _) = Arc::try_unwrap(state).unwrap().into_inner().unwrap();
+                    Ok(StoredValue {
+                        value: ValueType::ZSet(map),
+                        expires_at: stored.expires_at,
+                    })
+                }
+            }
+        }
+        _ => {
+            if stored.approximate_heap_bytes() > MAX_DUMP_AGGREGATE_BYTES as u64 {
+                return Err(Error::Command(
+                    "ERR DUMP payload exceeds maximum allowed size (32MB)".into(),
+                ));
+            }
+            Ok(stored)
+        }
     }
 }
 

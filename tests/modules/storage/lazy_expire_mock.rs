@@ -61,6 +61,9 @@ impl StorageAdapter for MockAdapter {
                 AdapterWriteOp::Delete { key } => {
                     data.remove(&key);
                 }
+                AdapterWriteOp::DeleteRange { start, end } => {
+                    data.retain(|k, _| k < &start || k >= &end);
+                }
             }
         }
         Ok(())

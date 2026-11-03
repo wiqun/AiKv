@@ -26,11 +26,8 @@ use crate::command::scan_util;
 use crate::error::{Error, Result};
 use crate::protocol::RespValue;
 use crate::storage::memory::glob_match;
-use crate::storage::subkey;
+use crate::storage::subkey::{self, HASH_MAX_INLINE_FIELDS};
 use crate::storage::{AiDbEngine, CollectionKind, KvStorage, StoredValue, ValueType, WRONGTYPE};
-
-/// 小集合 inline 编码于 StoredValue; 超过此阈值自动切到 subkey 格式.
-const HASH_MAX_INLINE_FIELDS: usize = 64;
 
 pub struct HashCommands {
     storage: Arc<dyn KvStorage>,
@@ -196,8 +193,6 @@ impl HashCommands {
                 }
                 let new_count = count.saturating_sub(removed as u32);
                 if new_count == 0 {
-                    // 清理所有 subkey (防御性: 理论上上面已删除)
-                    self.delete_all_hash_subkeys(db, &encoded_user_key).await;
                     self.storage.delete(db, key).await?;
                 } else {
                     stored.value = ValueType::CollectionHeader {
@@ -705,19 +700,6 @@ impl HashCommands {
             expires_at: *expires_at,
         };
         self.storage.rewrite_stored(db, key, metadata).await
-    }
-
-    /// 删除某个 key 下的所有 hash subkey entries.
-    async fn delete_all_hash_subkeys(&self, _db: usize, encoded_user_key: &[u8]) {
-        // 收集并删除所有 subkey entries.
-        // 注意: raw_subkey_for_each 不能被 await 在 &mut dyn FnMut 闭包中, 所以先收集.
-        // 这里简化: 依赖引擎的 delete_range 可行, 但如果 prefix 跨越非 subkey keys 则有风险.
-        // 当前 subkey 都位于 encoded_user_key\x01H 前缀下, 相对独立.
-        //
-        // 对于 StorageAdapter 没有 delete_range 只适用于前缀范围内的场景,
-        // 在调用处 (hdel count==0) 我们已经逐字段删除了, 此函数作为防御性保险.
-        // 暂留空实现; 清理由调用方逐个 delete 完成.
-        let _ = encoded_user_key;
     }
 }
 

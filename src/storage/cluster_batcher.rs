@@ -313,6 +313,10 @@ fn partition_cluster_batch_ops(
     for op in ops {
         let key_ref = match &op {
             AdapterWriteOp::Put { key, .. } | AdapterWriteOp::Delete { key } => key.as_slice(),
+            AdapterWriteOp::DeleteRange { .. } => {
+                fallback.push(op);
+                continue;
+            }
         };
         match route_cached(key_ref, &mut route_cache)? {
             Some((mgr, WriteRoute::Plain(gid))) => {
@@ -385,6 +389,7 @@ fn op_tuple(op: AdapterWriteOp) -> (Vec<u8>, Option<Vec<u8>>) {
     match op {
         AdapterWriteOp::Put { key, value } => (key, Some(value)),
         AdapterWriteOp::Delete { key } => (key, None),
+        AdapterWriteOp::DeleteRange { .. } => unreachable!("DeleteRange handled in fallback"),
     }
 }
 

@@ -27,11 +27,8 @@ use crate::command::scan_util;
 use crate::error::{Error, Result};
 use crate::protocol::RespValue;
 use crate::storage::memory::glob_match;
-use crate::storage::subkey;
+use crate::storage::subkey::{self, SET_MAX_INLINE_MEMBERS};
 use crate::storage::{AiDbEngine, CollectionKind, KvStorage, StoredValue, ValueType};
-
-/// 小集合 inline 编码于 StoredValue; 超过此阈值自动切到 subkey 格式.
-const SET_MAX_INLINE_MEMBERS: usize = 64;
 
 pub struct SetCommands {
     storage: Arc<dyn KvStorage>,

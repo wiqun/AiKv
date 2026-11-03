@@ -122,3 +122,31 @@ pub struct StoredValue {
     - Member 数据: `{user_key}\x01Z{member_len:2B}{member}` -> Score 的 f64 小端浮点字节;
     - Score 排序索引: `{user_key}\x01Y{sortable_score:8B}{member}` -> 空字节, 供原生有界双向跳表范围扫描 (`raw_range_scan`).
   - `MemoryEngine` 用于单测时不拆分子键, 集合均以内存 Map 保存在对应逻辑 DB 中.
+
+### 4. 级联范围删除与 Subkey 生命周期管理
+
+- **底层范围删除与分批**:
+  - `AdapterWriteOp::DeleteRange { start, end }`: 单机引擎通过 AiDb 的 `delete_range` 原生原子执行;
+  - 集群模式通过 `route_read` 定向路由至目标 Group, 并采用 512 步长批次 (`BATCH_DELETE_RANGE_LIMIT`) propose 状态机清理, 杜绝全表扫描与 OOM;
+  - 在删除复合集合时, 统一通过 `push_collection_subkey_deletes` 级联删除全部关联 Subkey; 读路径上的惰性过期同样级联清理.
+
+### 5. 大集合 DUMP / RESTORE / MIGRATE 序列化与流式保护
+
+- **32MB 累加流式保护**:
+  - `DUMP` / `MIGRATE` 打包时, 通过 `hydrate_stored_value` 边遍历 Subkey 边累加体积;
+  - 若单 Key 聚合大小超过 `MAX_DUMP_AGGREGATE_BYTES` (32MB), 立即报错中止, 严格杜绝内存爆炸;
+  - `MIGRATE` 在超限报错退出时绝不执行源端删除, 保证源端数据完整.
+- **RESTORE 格式自适应**:
+  - `RESTORE` 恢复超过 64 项 (与 `HASH_MAX_INLINE_FIELDS`, `SET_MAX_INLINE_MEMBERS`, `ZSET_MAX_INLINE` 一致) 的集合时, 自动拆分为 Subkey + `CollectionHeader` 结构写入, 杜绝大内联对象.
+
+### 6. CompactionFilter 孤儿 Subkey 兜底回收
+
+- **点查校验与反向保护**:
+  - `TtlExpireFilter` 实现 `filter_with_reader`, 结合 `parse_strict_subkey` 严格检验 Subkey 键长度规范 (2B 字段长度与 8B Score 索引长度);
+  - 接入普通数据 `StoredValue` 结构防线: 若能够反序列化为非 Header 的合法 `StoredValue`, 保守保留为独立用户 Key, 绝不误删形如 `foo\x01Hbar` 的用户自定义 Key;
+  - 对满足 Subkey 规范的条目, 通过 `reader` 点查其父 Header; 仅在 Header 缺失, 已过期或类型不匹配时判定为孤儿并回收;
+  - 自动适配单机 Key 与集群状态机 Key (`\x01sm/{gid}/`, 借助 `split_cluster_sm_prefix`), 支持集群环境下的孤儿兜底清理.
+- **已知边界与权衡 (Trade-offs)**:
+  - **极端同形 Header 风险**: 若用户 Key 本身命名恰好严格满足 `foo\x01H{len:2B}{field}` 编码规范, 且其 Value 恰好是一个 `CollectionHeader` (非普通数据), 在父 Key `foo` 不存在时仍会被判成孤儿删除 (概率极低, 需同时满足 Subkey 严格编码与 Postcard 编码的 Header 枚举);
+  - **保守保留策略下的安全泄漏**: 若 Hash 字段的原始 Payload 恰好能被反序列化为合法的普通 `StoredValue` (非 `CollectionHeader`), 该孤儿 subkey 在 Header 丢失后也会被保守保留, 不会引发数据丢失 (以空间换安全的保守设计);
+  - **同名重建窗口**: 应用层 DEL 负责主动范围删除 Subkey, CompactionFilter 负责针对中途崩溃或异常残留的孤儿兜底回收.

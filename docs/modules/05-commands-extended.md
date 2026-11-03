@@ -55,6 +55,9 @@ description: AiKv 扩展 Redis 命令 — JSON/JSONPath 引擎、Lua EVAL/SCRIPT
   - `SAVE`: 同步执行 MemTable Flush 并调用底层 AiDb `DB::create_checkpoint()`, 成功后返回 `+OK`;
   - `BGSAVE`: 异步 `tokio::task::spawn_blocking` 执行 Checkpoint, 成功后更新 `LASTSAVE` 时间戳, 避免阻塞主处理流程;
   - `MemoryEngine` 模式下执行 `SAVE` / `BGSAVE` 必须明确报错 `ERR Persistence not supported on memory engine`.
+- **MIGRATE / DUMP / RESTORE 序列化与保护**:
+  - `DUMP` 与 `MIGRATE` 打包前流式水合 Subkey, 单 Key 聚合上限阈值 32MB (`MAX_DUMP_AGGREGATE_BYTES`), 超限立即返回错误且 `MIGRATE` 失败时源端绝不执行删除;
+  - `RESTORE` 恢复项数大于 64 的集合时, 自动拆分为 Subkey + `CollectionHeader` 格式存储, 避免内联大对象.
 
 ---
 

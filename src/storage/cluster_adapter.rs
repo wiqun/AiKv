@@ -812,27 +812,43 @@ impl StorageAdapter for ClusterDataAdapter {
     }
 
     async fn delete_range(&self, start: Vec<u8>, end: Vec<u8>) -> Result<()> {
+        const BATCH_DELETE_RANGE_LIMIT: usize = 512;
         match CLUSTER_STATE_MGR.get() {
             Some(mgr) => {
-                for gid in mgr.multi_raft.local_group_ids() {
-                    let pairs = mgr
-                        .multi_raft
-                        .scan_local_pairs(gid)
-                        .await
-                        .map_err(Self::map_err)?;
-                    let mut tb = ThinWriteBatch::new();
-                    for (k, _) in pairs {
-                        if k.as_slice() >= start.as_slice() && k.as_slice() < end.as_slice() {
+                let target_gids: Vec<u64> = match Self::route_read(&start)? {
+                    Some((_, ReadRoute::Single(gid))) => vec![gid],
+                    _ => mgr.multi_raft.local_group_ids(),
+                };
+                for gid in target_gids {
+                    loop {
+                        let pairs = mgr
+                            .multi_raft
+                            .scan_local_user_pairs_limited(
+                                gid,
+                                start.clone(),
+                                end.clone(),
+                                BATCH_DELETE_RANGE_LIMIT,
+                                false,
+                            )
+                            .await
+                            .map_err(Self::map_err)?;
+                        if pairs.is_empty() {
+                            break;
+                        }
+                        let count = pairs.len();
+                        let mut tb = ThinWriteBatch::new();
+                        for (k, _) in pairs {
                             tb.delete(k);
                         }
-                    }
-                    if !tb.ops.is_empty() {
                         let resp = mgr
                             .multi_raft
                             .propose_group(gid, Request::WriteBatch(tb))
                             .await
                             .map_err(Self::map_err)?;
                         Self::check_response(resp)?;
+                        if count < BATCH_DELETE_RANGE_LIMIT {
+                            break;
+                        }
                     }
                 }
                 Ok(())
@@ -990,5 +1006,55 @@ mod tests {
         let restored =
             aidb::DB::open(backup_dir.join("group_1"), Options::for_testing()).expect("restore");
         assert_eq!(restored.get(b"k1").expect("get"), Some(b"v1".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_cluster_data_adapter_local_delete_range_fallback() {
+        let dir = tempdir().expect("tempdir");
+        let engine = AiDbEngine::open_for_testing(dir.path()).expect("open engine");
+        let adapter = ClusterDataAdapter::new(engine, ClusterDataAdapter::DEFAULT_EAGER_FLUSH);
+
+        for i in 0..10 {
+            adapter
+                .set(format!("item_{i:02}").into_bytes(), b"val".to_vec())
+                .await
+                .expect("set");
+        }
+
+        // 删除 [item_02, item_07)
+        adapter
+            .delete_range(b"item_02".to_vec(), b"item_07".to_vec())
+            .await
+            .expect("delete range");
+
+        // 验证 item_00, item_01 存在
+        assert_eq!(
+            adapter.get(b"item_00".to_vec()).await.unwrap(),
+            Some(b"val".to_vec())
+        );
+        assert_eq!(
+            adapter.get(b"item_01".to_vec()).await.unwrap(),
+            Some(b"val".to_vec())
+        );
+        // 验证 item_02..item_06 已被删除
+        for i in 2..7 {
+            assert_eq!(
+                adapter
+                    .get(format!("item_{i:02}").into_bytes())
+                    .await
+                    .unwrap(),
+                None
+            );
+        }
+        // 验证 item_07..item_09 存在
+        for i in 7..10 {
+            assert_eq!(
+                adapter
+                    .get(format!("item_{i:02}").into_bytes())
+                    .await
+                    .unwrap(),
+                Some(b"val".to_vec())
+            );
+        }
     }
 }

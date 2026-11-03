@@ -7,7 +7,7 @@ mod hash;
 mod json;
 mod jsonpath;
 mod jsonpath_util;
-mod key;
+pub mod key;
 mod list;
 mod migrate;
 mod persistence;

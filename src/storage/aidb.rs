@@ -51,7 +51,7 @@ impl AiDbEngine {
         Some((0, encoded.to_vec()))
     }
 
-    pub(crate) fn prefix_end(prefix: &[u8]) -> Option<Vec<u8>> {
+    pub fn prefix_end(prefix: &[u8]) -> Option<Vec<u8>> {
         if prefix.is_empty() {
             return None;
         }
@@ -123,6 +123,7 @@ impl StorageAdapter for AiDbEngine {
             match op {
                 AdapterWriteOp::Put { key, value } => wb.put(key, value),
                 AdapterWriteOp::Delete { key } => wb.delete(key),
+                AdapterWriteOp::DeleteRange { start, end } => wb.delete_range(start, end),
             }
         }
         self.db
@@ -333,7 +334,7 @@ fn db_write_op_to_adapter(op: DbWriteOp) -> AdapterWriteOp {
     match op {
         DbWriteOp::Put { key, value } => AdapterWriteOp::Put { key, value },
         DbWriteOp::Delete { key } => AdapterWriteOp::Delete { key },
-        DbWriteOp::DeleteRange { .. } => unimplemented!("delete range to adapter not supported"),
+        DbWriteOp::DeleteRange { start, end } => AdapterWriteOp::DeleteRange { start, end },
     }
 }
 
