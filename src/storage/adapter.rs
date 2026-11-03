@@ -547,9 +547,7 @@ impl KvStorageAdapter {
         self.check_db(db)?;
         crate::storage::zset_subkey::clear_score_bounds_hint();
         let prefix = Self::db_prefix(db);
-        let end = AiDbEngine::prefix_end(&prefix).unwrap_or_else(|| {
-            vec![0xff; 64]
-        });
+        let end = AiDbEngine::prefix_end(&prefix).unwrap_or_else(|| vec![0xff; 64]);
         self.storage.delete_range(prefix, end).await?;
         self.expires.reset_db(db);
         Ok(())
