@@ -25,7 +25,8 @@ impl DatabaseCommands {
         if index >= DB_COUNT {
             return Err(Error::Command("ERR DB index is out of range".into()));
         }
-        *db = index;
+        // 对齐 Kvrocks: 兼容客户端连接时的 SELECT 指令, 始终保持单库 (db 0)
+        *db = 0;
         Ok(router::ok())
     }
 
@@ -35,9 +36,9 @@ impl DatabaseCommands {
         Ok(router::integer(n as i64))
     }
 
-    pub async fn flushdb(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
+    pub async fn flushdb(&self, _db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_args("FLUSHDB", args, 0)?;
-        self.storage.clear(db).await?;
+        self.storage.clear_all().await?;
         Ok(router::ok())
     }
 
@@ -54,29 +55,19 @@ impl DatabaseCommands {
         if a >= DB_COUNT || b >= DB_COUNT {
             return Err(Error::Command("ERR DB index is out of range".into()));
         }
-        self.storage.swap_db(a, b).await?;
-        Ok(router::ok())
+        Err(Error::Command(
+            "ERR SWAPDB is not supported in single-db mode".into(),
+        ))
     }
 
-    pub async fn move_key(&self, src_db: usize, args: &[Bytes]) -> Result<RespValue> {
+    pub async fn move_key(&self, _src_db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_args("MOVE", args, 2)?;
-        let key = &args[0];
         let target = parse_db_index(&args[1])?;
         if target >= DB_COUNT {
             return Err(Error::Command("ERR DB index is out of range".into()));
         }
-        if src_db == target {
-            return Ok(router::integer(0));
-        }
-        let Some(value) = self.storage.get_typed(src_db, key).await? else {
-            return Ok(router::integer(0));
-        };
-        if self.storage.get_typed(target, key).await?.is_some() {
-            return Ok(router::integer(0));
-        }
-        self.storage.set_typed(target, key, value).await?;
-        self.storage.delete(src_db, key).await?;
-        Ok(router::integer(1))
+        // 单库模式下不支持跨库移动
+        Ok(router::integer(0))
     }
 }
 

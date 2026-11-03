@@ -573,7 +573,7 @@ async fn test_atom_watch_discard_clears() {
     }
 }
 
-/// Issue #79: WATCH 版本按 DB 隔离, 不同 DB 同名 key 不串.
+/// Issue #79: 单库模式下 SELECT 为垫片兼容，不同连接共享单一命名空间，跨 SELECT 写入同名 key 触发 WATCH 冲突.
 #[tokio::test]
 async fn issue_79_watch_db_isolation_same_key_name() {
     let (addr, _server) = start_ephemeral_server().await;
@@ -588,22 +588,16 @@ async fn issue_79_watch_db_isolation_same_key_name() {
     let _ = conn2.send("ATOM.MULTI", &[]).await;
     let _ = conn2.send("GET", &["shared"]).await;
 
-    // conn1 写 DB1 的同名 key 不应影响 DB0 的 WATCH
+    // 单库模式下写入同名 key 影响被 WATCH 的 key
     let _ = conn1.send("SET", &["shared", "db1-changed"]).await;
 
     let resp = conn2.send("ATOM.EXEC", &[]).await;
     let parsed = parse_response(&resp);
-    match parsed {
-        RespValue::Array(Some(items)) => {
-            assert_eq!(items.len(), 1);
-            assert_eq!(
-                items[0],
-                RespValue::BulkString(None),
-                "DB0 key missing should read nil"
-            );
-        }
-        other => panic!("expected successful EXEC on DB0 after DB1 write, got {other:?}"),
-    }
+    assert_eq!(
+        parsed,
+        RespValue::BulkString(None),
+        "单库模式下同名 key 变更触发 WATCH 冲突返回 nil"
+    );
 }
 
 /// Issue #79: 存储层 bump 后, 另一连接写入应使 EXEC 返回 nil.

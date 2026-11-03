@@ -41,9 +41,9 @@ description: AiKv 存储适配层 — KvStorage Trait、MemoryEngine、AiDbEngin
 ## 关键 Invariants (勿破坏规则)
 
 - **`KvStorage` 抽象隔离**: 上层命令处理器仅持有 `Arc<dyn KvStorage>`, 禁止直接向下转型获取具体引擎实例.
-- **单 `DB` 与多库隔离**:
-  - 底层 AiDb 为单实例, 采用 `{db_index}:{user_key}` 前缀区分 Redis 0~15 号逻辑数据库;
-  - `MemoryEngine` 在内部维护 16 个独立内存 Map, 两者上层 API 表现完全一致.
+- **单 `DB` 裸 Key 与多库兼容**:
+  - 底层 AiDb 对齐 Kvrocks 单库模式, 直接使用裸 `user_key` 存储, 移除 `{db_index}:` 物理前缀以消除键编码堆开销; `SELECT` 指令垫片兼容归一至 db 0;
+  - `MemoryEngine` 保留独立内存 Map 用于单元测试.
 - **Subkey 编码隔离**:
   - 元数据键: `{db}:{user_key}` (记录类型标记、版本号与元素数量);
   - 数据键: `{db}:{user_key}:{field/index}` (记录单字段或元素值);
