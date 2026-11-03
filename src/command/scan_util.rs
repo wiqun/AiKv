@@ -43,11 +43,14 @@ pub(crate) fn parse_scan_options(cmd: &str, args: &[Bytes], start: usize) -> Res
     Ok(opts)
 }
 
-pub(crate) fn paginate_slice<T>(entries: &[T], cursor: u64, count: usize) -> (u64, &[T]) {
+pub(crate) fn paginate_slice<T>(entries: &[T], cursor: u64, count: usize) -> Result<(u64, &[T])> {
     let skip = cursor as usize;
+    if cursor > 0 && skip >= entries.len() {
+        return Ok((0, &[]));
+    }
     let end = (skip + count).min(entries.len());
     let next_cursor = if end < entries.len() { end as u64 } else { 0 };
-    (next_cursor, &entries[skip..end])
+    Ok((next_cursor, &entries[skip..end]))
 }
 
 pub(crate) fn scan_response_bulk(cursor: u64, members: &[Vec<u8>]) -> RespValue {

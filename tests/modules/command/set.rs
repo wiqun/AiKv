@@ -182,3 +182,65 @@ async fn test_sscan_pattern() {
     matched.sort();
     assert_eq!(matched, vec!["bar", "baz"]);
 }
+
+#[tokio::test]
+async fn test_sscan_large_subkey_streaming_and_invalid_cursor() {
+    use aikv::command::CommandRouter;
+    use aikv::storage::{AiDbEngine, KvStorageAdapter};
+    use tempfile::TempDir;
+
+    let dir = TempDir::new().unwrap();
+    let engine = AiDbEngine::open_for_testing(dir.path()).unwrap();
+    let storage = KvStorageAdapter::new(engine);
+    let r = CommandRouter::new(storage);
+    let mut db = 0;
+
+    // 写入 100 个成员, 触发转 Subkey 格式存储
+    for i in 0..100 {
+        r.execute("SADD", &[b("largeset"), b(&format!("mem_{i:03}"))], &mut db)
+            .await
+            .unwrap();
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    let mut cursor = b("0");
+    let mut iterations = 0;
+    loop {
+        iterations += 1;
+        assert!(iterations <= 25, "SSCAN 流式迭代陷入死循环");
+        let resp = r
+            .execute(
+                "SSCAN",
+                &[b("largeset"), cursor, b("COUNT"), b("10")],
+                &mut db,
+            )
+            .await
+            .unwrap();
+        let RespValue::Array(Some(parts)) = resp else {
+            panic!("expected array");
+        };
+        let RespValue::BulkString(Some(next)) = &parts[0] else {
+            panic!("expected cursor");
+        };
+        cursor = next.clone();
+        let RespValue::Array(Some(entries)) = &parts[1] else {
+            panic!("expected entries");
+        };
+        for entry in entries {
+            if let Some(m) = bulk_str(entry) {
+                seen.insert(m);
+            }
+        }
+        if cursor == "0" {
+            break;
+        }
+    }
+    assert_eq!(seen.len(), 100, "必须不漏数据收集齐全部 100 个成员");
+
+    // 验证非法游标报错
+    let err = r
+        .execute("SSCAN", &[b("largeset"), b("999999")], &mut db)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("ERR invalid cursor"));
+}

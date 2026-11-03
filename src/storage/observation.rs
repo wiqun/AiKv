@@ -46,4 +46,9 @@ impl PointReadCounter {
     pub fn misses(&self) -> u64 {
         self.misses.load(Ordering::Relaxed)
     }
+
+    pub fn reset(&self) {
+        self.hits.store(0, Ordering::Relaxed);
+        self.misses.store(0, Ordering::Relaxed);
+    }
 }

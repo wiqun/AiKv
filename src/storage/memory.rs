@@ -376,6 +376,9 @@ impl KvStorage for MemoryEngine {
         valid.sort();
 
         let skip = cursor as usize;
+        if cursor > 0 && skip > valid.len() {
+            return Err(Error::Command("ERR invalid cursor".into()));
+        }
         let end = (skip + count).min(valid.len());
         let keys = valid[skip..end].to_vec();
         let next_cursor = if end < valid.len() { end as u64 } else { 0 };

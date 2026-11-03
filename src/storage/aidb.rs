@@ -338,7 +338,7 @@ fn db_write_op_to_adapter(op: DbWriteOp) -> AdapterWriteOp {
     }
 }
 
-/// `[start, end)` 内至多 `limit` 条, `reverse` 时从末尾向前. 只读取需要的条数.
+/// `[start, end)` 内至多 `limit` 条, `reverse` 时从末尾向前. 若 `end` 为空切片表示扫描至末尾.
 fn scan_limited(
     db: &DB,
     start: &[u8],
@@ -346,6 +346,8 @@ fn scan_limited(
     limit: usize,
     reverse: bool,
 ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-    db.scan_limited(Some(start), Some(end), limit, reverse)
+    let start_opt = if start.is_empty() { None } else { Some(start) };
+    let end_opt = if end.is_empty() { None } else { Some(end) };
+    db.scan_limited(start_opt, end_opt, limit, reverse)
         .map_err(|e| Error::Storage(e.to_string()))
 }

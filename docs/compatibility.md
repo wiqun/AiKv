@@ -134,6 +134,18 @@ description: AiKv Redis 兼容范围 — RESP2/RESP3 协议边界, 已实现命�
 
 ---
 
+## 运维与扫描命令行为规范
+
+- **SCAN 族流式有界游标**:
+  - `SCAN` / `HSCAN` / `SSCAN`: 基于服务端轻量 `CursorManager` (FIFO + 60s TTL) 实现真流式有界迭代, 内存占用严格 $O(count)$, 杜绝千万级全量拉取引发 OOM.
+  - **Subkey 穿透防御与步长预算**: 单次底层原始读取上限为 `budget = (count * 10).clamp(100, 2000)`, 遇到 `CollectionHeader` 大键主动 Seek 跳过所属 subkey 范围, 彻底杜绝空转卡死; 普通键恢复仅前移单步, 避免误跳二进制键.
+  - **严格游标失效防御**: Subkey 大集合与全局游标失效或过期明确返回 `ERR invalid cursor`, 严禁返回 `0` 误导客户端导致静默漏数据; 内联小集合越界优雅返回 `["0", []]` 契约, 兼容边扫边删工作流.
+- **CONFIG 运维规范**:
+  - `CONFIG RESETSTAT`: 支持重置 `INFO stats` 统计指标 (命中/未命中、调用量、直方图等).
+  - `CONFIG REWRITE`: 无配置文件启动时按 Redis 规范统一返回 `ERR The server is running without a config file`.
+
+---
+
 ## 命令对齐门禁
 
 `tests/command_alignment.rs` 用三份清单做差集, 对不上就失败. 运行时要加 `--features cluster`.

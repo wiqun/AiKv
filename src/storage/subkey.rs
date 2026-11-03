@@ -25,7 +25,7 @@
 use crate::storage::types::CollectionKind;
 
 /// Subkey 键编码相关常量.
-const SUBKEY_SEPARATOR: u8 = 0x01;
+pub const SUBKEY_SEPARATOR: u8 = 0x01;
 const HASH_TAG: u8 = b'H';
 const SET_TAG: u8 = b'S';
 /// Subkey 中 field/member 长度字段的字节数 (u16).

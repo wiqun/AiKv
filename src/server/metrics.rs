@@ -1037,6 +1037,20 @@ impl ServerMetrics {
         out
     }
 
+    pub fn reset_stats(&self) {
+        self.keyspace_hits.store(0, Ordering::Relaxed);
+        self.keyspace_misses.store(0, Ordering::Relaxed);
+        self.expired_keys.store(0, Ordering::Relaxed);
+        self.evicted_keys.store(0, Ordering::Relaxed);
+        self.connections_total.store(0, Ordering::Relaxed);
+        self.rejected_connections.store(0, Ordering::Relaxed);
+        if let Some(counter) = self.shared_point_reads.get() {
+            counter.reset();
+        }
+        self.reset_command_histograms(None);
+        self.commands_total.clear();
+    }
+
     pub fn reset_command_histograms(&self, filter: Option<&[&str]>) -> u64 {
         match filter {
             None => {

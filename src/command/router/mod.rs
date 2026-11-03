@@ -693,8 +693,8 @@ impl CommandRouter {
         match sub.as_str() {
             "GET" => self.require_server()?.config_get(args).await,
             "SET" => self.require_server()?.config_set(args).await,
-            "REWRITE" => Ok(ok()),
-            "RESETSTAT" => Ok(ok()),
+            "REWRITE" => self.require_server()?.config_rewrite().await,
+            "RESETSTAT" => self.require_server()?.config_resetstat().await,
             _ => Err(Error::Command("ERR unknown CONFIG subcommand".into())),
         }
     }

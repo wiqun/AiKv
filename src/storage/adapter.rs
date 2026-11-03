@@ -263,6 +263,7 @@ pub struct KvStorageAdapter {
     point_reads: OnceLock<Arc<PointReadCounter>>,
     expires: Arc<ExpiresCounters>,
     watchers: Arc<WatchRegistry>,
+    cursor_mgr: Arc<crate::storage::CursorManager>,
 }
 
 impl KvStorageAdapter {
@@ -289,7 +290,12 @@ impl KvStorageAdapter {
             point_reads: OnceLock::new(),
             expires: Arc::new(ExpiresCounters::new()),
             watchers: WatchRegistry::new(),
+            cursor_mgr: Arc::new(crate::storage::CursorManager::default()),
         })
+    }
+
+    pub fn cursor_mgr(&self) -> &Arc<crate::storage::CursorManager> {
+        &self.cursor_mgr
     }
 
     fn check_db(&self, db: usize) -> Result<()> {
@@ -833,6 +839,10 @@ impl KvStorageAdapter {
 
 #[async_trait]
 impl KvStorage for KvStorageAdapter {
+    fn cursor_mgr(&self) -> Option<&Arc<crate::storage::CursorManager>> {
+        Some(&self.cursor_mgr)
+    }
+
     fn aidb_statistics(&self) -> Option<std::sync::Arc<aidb::Statistics>> {
         self.storage.aidb_statistics()
     }
@@ -933,15 +943,134 @@ impl KvStorage for KvStorageAdapter {
         pattern: &[u8],
         count: usize,
     ) -> Result<ScanResult> {
-        let mut valid = self.keys_for_db(db, pattern).await?;
-        valid.sort();
-        let skip = cursor as usize;
-        let end = (skip + count).min(valid.len());
-        let keys = valid[skip..end].to_vec();
-        let next_cursor = if end < valid.len() { end as u64 } else { 0 };
+        self.check_db(db)?;
+        let count = if count == 0 { 10 } else { count };
+        // 单次扫描最多从底层读取的原始记录条数 (预算防御, 杜绝 Subkey 空转长尾)
+        let budget = (count * 10).clamp(100, 2000);
+
+        // 检索游标. 若失效或过期, 明确返回 ERR invalid cursor (拒绝静默返回 0 导致漏数据)
+        let start_key = self
+            .cursor_mgr
+            .get(cursor, db, crate::storage::ScanKind::Global)
+            .map_err(|e| Error::Command(e.into()))?;
+
+        let db_prefix = Self::db_prefix(db);
+        let db_end = AiDbEngine::prefix_end(&db_prefix).unwrap_or_default();
+
+        let mut current_seek = match start_key {
+            None => db_prefix,
+            Some((last_key, is_coll)) => {
+                let encoded = Self::encode(db, &last_key);
+                if is_coll {
+                    let mut subkey_prefix = encoded.clone();
+                    subkey_prefix.push(subkey::SUBKEY_SEPARATOR);
+                    if let Some(skip_to) = AiDbEngine::prefix_end(&subkey_prefix) {
+                        skip_to
+                    } else {
+                        let mut s = encoded;
+                        s.push(0);
+                        s
+                    }
+                } else {
+                    let mut s = encoded;
+                    s.push(0);
+                    s
+                }
+            }
+        };
+
+        let mut collected = Vec::with_capacity(count);
+        let mut raw_read_count = 0;
+        let mut last_seen_user_key: Option<Vec<u8>> = None;
+        let mut last_seen_is_coll = false;
+        let mut reached_end = false;
+
+        while collected.len() < count && raw_read_count < budget {
+            let batch_size = ((count - collected.len()) * 2).clamp(16, 256);
+            let pairs = self.storage.range_scan_sync(
+                current_seek.clone(),
+                db_end.clone(),
+                batch_size,
+                false,
+            )?;
+            if pairs.is_empty() {
+                reached_end = true;
+                break;
+            }
+            let is_batch_eof = pairs.len() < batch_size;
+            let mut broken_by_header = false;
+
+            for (raw_k, raw_v) in pairs {
+                raw_read_count += 1;
+                // 更新当前游标进度
+                current_seek = raw_k.clone();
+                current_seek.push(0);
+
+                let Some(user_key) = Self::decode_user_key(&raw_k) else {
+                    continue;
+                };
+                if is_watch_meta_user_key(&user_key) {
+                    continue;
+                }
+
+                // 尝试反序列化 StoredValue, 跳过非合法 StoredValue (如 subkey)
+                let Ok(stored) = Self::deserialize(&raw_v) else {
+                    continue;
+                };
+                if stored.is_expired() {
+                    continue;
+                }
+
+                if pattern.is_empty() || glob_match(pattern, &user_key) {
+                    collected.push(user_key.clone());
+                }
+                last_seen_user_key = Some(user_key);
+                let is_coll = matches!(stored.value, ValueType::CollectionHeader { .. });
+                last_seen_is_coll = is_coll;
+
+                // 若遇到 CollectionHeader, 主动 Seek 跳过其所属的全部 subkey 区间 (格式为 {raw_k}\x01...)
+                if is_coll {
+                    let mut subkey_prefix = raw_k.clone();
+                    subkey_prefix.push(subkey::SUBKEY_SEPARATOR);
+                    if let Some(skip_to) = AiDbEngine::prefix_end(&subkey_prefix) {
+                        current_seek = skip_to;
+                        broken_by_header = true;
+                        // 立即跳出当前内存 batch, 下一轮直接从 skip_to 进行 Seek, 杜绝在 subkey 空间空转
+                        break;
+                    }
+                }
+
+                if collected.len() >= count || raw_read_count >= budget {
+                    break;
+                }
+            }
+
+            // 只有当未因 CollectionHeader 主动跳出, 且底层确实已返回短批次时, 才标记全库扫描结束
+            if !broken_by_header
+                && is_batch_eof
+                && (collected.len() < count && raw_read_count < budget)
+            {
+                reached_end = true;
+                break;
+            }
+        }
+
+        let next_cursor = if reached_end {
+            0
+        } else if let Some(last_key) = last_seen_user_key {
+            self.cursor_mgr.put(
+                db,
+                crate::storage::ScanKind::Global,
+                last_key,
+                last_seen_is_coll,
+            )
+        } else {
+            0
+        };
+
         Ok(ScanResult {
             cursor: next_cursor,
-            keys,
+            keys: collected,
         })
     }
 
