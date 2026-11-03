@@ -118,10 +118,24 @@ pub struct ClusterStateManager {
     pub has_active_migration: AtomicBool,
     /// Metrics (注入用于 gossip/failover 计数, 初始化时可 None).
     pub metrics: Option<std::sync::Arc<crate::server::metrics::ServerMetrics>>,
+    /// 记录由于 Failover 等协同运维流程处于暂停写入状态的 group 及其恢复超时截止时间 {group_id -> resume_deadline}
+    pub paused_write_groups: parking_lot::RwLock<HashMap<u64, tokio::time::Instant>>,
     /// Shutdown signal for LeaderChangeWatcher (held to keep sender alive).
     pub _watcher_shutdown: parking_lot::Mutex<Option<tokio::sync::watch::Sender<bool>>>,
     /// Shutdown signal for ConfigAutoSave (held to keep sender alive).
     pub _auto_save_shutdown: parking_lot::Mutex<Option<tokio::sync::watch::Sender<bool>>>,
+}
+
+/// RAII 守护句柄: 当 guard drop 时自动恢复对应 group 的写操作.
+pub struct PauseWriteGuard<'a> {
+    mgr: &'a ClusterStateManager,
+    group_id: u64,
+}
+
+impl Drop for PauseWriteGuard<'_> {
+    fn drop(&mut self) {
+        self.mgr.resume_group_writes(self.group_id);
+    }
 }
 
 impl ClusterStateManager {
@@ -151,6 +165,7 @@ impl ClusterStateManager {
             has_active_migration: AtomicBool::new(false),
             importing_slots: parking_lot::RwLock::new(std::collections::HashMap::new()),
             metrics: None,
+            paused_write_groups: parking_lot::RwLock::new(HashMap::new()),
             _watcher_shutdown: parking_lot::Mutex::new(None),
             _auto_save_shutdown: parking_lot::Mutex::new(None),
         };
@@ -186,15 +201,56 @@ impl ClusterStateManager {
         }
         let mut leaders = self.local_group_leaders.write();
         leaders.clear();
+        let mut any_leader_id = None;
         for (gid, group) in &meta.groups {
             let is_leader = group
                 .replicas
                 .iter()
                 .any(|r| r.node_id == self.node_id && r.is_leader);
             leaders.insert(*gid, is_leader);
+            if let Some(r) = group.replicas.iter().find(|r| r.is_leader) {
+                any_leader_id = Some(r.node_id);
+            }
         }
         drop(leaders);
         self.rebuild_slot_map();
+        if let Some(pid) = any_leader_id {
+            self.sync_role_with_local_leadership(pid);
+        }
+    }
+
+    /// 暂停指定数据 group 的写请求 (支持 RAII 自动恢复与超时兜底).
+    pub fn pause_group_writes(
+        &self,
+        group_id: u64,
+        duration: std::time::Duration,
+    ) -> PauseWriteGuard<'_> {
+        let deadline = tokio::time::Instant::now() + duration;
+        self.paused_write_groups.write().insert(group_id, deadline);
+        PauseWriteGuard {
+            mgr: self,
+            group_id,
+        }
+    }
+
+    /// 显式恢复指定数据 group 的写操作.
+    pub fn resume_group_writes(&self, group_id: u64) {
+        self.paused_write_groups.write().remove(&group_id);
+    }
+
+    /// 检查指定数据 group 当前是否处于暂停写状态 (自动回收已过期暂停).
+    pub fn is_group_write_paused(&self, group_id: u64) -> bool {
+        let mut guard = self.paused_write_groups.write();
+        if let Some(&deadline) = guard.get(&group_id) {
+            if tokio::time::Instant::now() >= deadline {
+                guard.remove(&group_id);
+                false
+            } else {
+                true
+            }
+        } else {
+            false
+        }
     }
 
     #[inline]
@@ -270,11 +326,67 @@ impl ClusterStateManager {
         self.meta_raft.get_migration_epoch()
     }
 
-    /// 应用本地 MultiRaft 观测到的 group leader, 立即刷新路由缓存.
+    /// 应用本地 MultiRaft 观测到的 group leader, 立即刷新路由缓存并联动同步角色.
     pub fn apply_observed_group_leader(&self, group_id: u64, leader_id: u64) {
         self.router.update_group_leader(group_id, leader_id);
         let is_local = leader_id == self.node_id;
         self.local_group_leaders.write().insert(group_id, is_local);
+        self.sync_role_with_local_leadership(leader_id);
+    }
+
+    /// 依据本节点在其所属各 group 的 leader 地位, 自动自适应同步 `role`.
+    /// 当本节点失去所有所属 group 的 leader 权时, 自动降级为 Replica;
+    /// 当本节点当选至少一个所属 group 的 leader 且当前为 Replica 时, 自动晋升为 Primary.
+    pub fn sync_role_with_local_leadership(&self, fallback_primary_id: u64) {
+        let meta = self.meta_raft.get_cluster_meta();
+        let my_groups: Vec<u64> = meta
+            .groups
+            .iter()
+            .filter(|(_, g)| g.replicas.iter().any(|r| r.node_id == self.node_id))
+            .map(|(gid, _)| *gid)
+            .collect();
+
+        if my_groups.is_empty() {
+            return;
+        }
+
+        let leaders = self.local_group_leaders.read();
+        let is_any_leader = my_groups
+            .iter()
+            .any(|gid| leaders.get(gid).copied().unwrap_or(false));
+
+        let mut role_guard = self.role.write();
+        if !is_any_leader {
+            let target_primary_id = my_groups
+                .iter()
+                .find_map(|gid| self.router.get_group_leader(*gid))
+                .unwrap_or(fallback_primary_id);
+
+            match *role_guard {
+                ReplicationRole::Primary => {
+                    *role_guard = ReplicationRole::Replica {
+                        primary_id: target_primary_id,
+                    };
+                    tracing::info!(
+                        node_id = self.node_id,
+                        primary_id = target_primary_id,
+                        "lost leadership of all local groups; automatically demoted to replica"
+                    );
+                }
+                ReplicationRole::Replica { primary_id } if primary_id != target_primary_id => {
+                    *role_guard = ReplicationRole::Replica {
+                        primary_id: target_primary_id,
+                    };
+                }
+                _ => {}
+            }
+        } else if matches!(*role_guard, ReplicationRole::Replica { .. }) {
+            *role_guard = ReplicationRole::Primary;
+            tracing::info!(
+                node_id = self.node_id,
+                "gained leadership of a local group; automatically promoted to primary"
+            );
+        }
     }
 
     /// 应用探活观测的 group quorum 状态, 并用 `derive_cluster_ok` 派生集群健康.

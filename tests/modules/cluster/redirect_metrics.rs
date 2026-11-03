@@ -91,6 +91,7 @@ fn ensure_node2_cluster_state() {
                 data_port_offset: DEFAULT_DATA_PORT_OFFSET,
                 announce_resolver: AnnounceResolver::default(),
                 metrics: None,
+                paused_write_groups: parking_lot::RwLock::new(HashMap::new()),
                 _watcher_shutdown: parking_lot::Mutex::new(None),
                 _auto_save_shutdown: parking_lot::Mutex::new(None),
                 slot_groups: ClusterStateManager::new_slot_groups(),

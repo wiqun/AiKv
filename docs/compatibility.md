@@ -118,7 +118,7 @@ description: AiKv Redis 兼容范围 — RESP2/RESP3 协议边界, 已实现命�
 | `CLUSTER ADDSLOTS` | 支持 | 分配槽位 |
 | `CLUSTER DELSLOTS` | 支持 | 回收槽位 |
 | `CLUSTER SETSLOT` | 支持 | 迁移 / 稳定 / 取消 |
-| `CLUSTER FAILOVER` | 支持 | 手动 failover |
+| `CLUSTER FAILOVER` | 部分支持 | 手动 failover (支持 FORCE 强选模式; 无参协同模式因需跨节点 RPC 协议当前返回明确错误引导使用 FORCE; TAKEOVER 明确拒绝) |
 | `CLUSTER REPLICATE` | 支持 | 配置副本 |
 | `CLUSTER REPLICAS` | 支持 | 列出副本 |
 | `CLUSTER SAVECONFIG` | 支持 | 持久化 nodes.conf |

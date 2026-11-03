@@ -81,6 +81,7 @@ async fn build_mgr(tmp_name: &str) -> Arc<ClusterStateManager> {
         data_port_offset: DEFAULT_DATA_PORT_OFFSET,
         announce_resolver: AnnounceResolver::default(),
         metrics: Some(Arc::clone(&metrics)),
+        paused_write_groups: parking_lot::RwLock::new(HashMap::new()),
         _watcher_shutdown: parking_lot::Mutex::new(None),
         _auto_save_shutdown: parking_lot::Mutex::new(None),
         slot_groups: ClusterStateManager::new_slot_groups(),

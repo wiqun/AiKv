@@ -52,6 +52,11 @@ description: AiKv Redis Cluster 协议层 — 16384 槽位 CRC16 计算、MOVED/
   - AiKv 内部的 Gossip 仅负责周期性拉取 MetaRaft 拓扑并刷新本地缓存, 严禁使用 Gossip 进行投票选主.
 - **不支持 `CLUSTER RESET`**:
   - 由于元数据受 MetaRaft 共识保护, `CLUSTER RESET` 必须返回明确的报错信息, 禁止客户端在线重置元数据.
+- **FAILOVER 拓扑保持与角色自适应**:
+  - `CLUSTER FAILOVER FORCE`: 触发底层 MultiRaft 强行选举并经最长 3 秒轮询确认当选后再升主, 严格保留原共识组全部副本成员拓扑, 严禁通过 `change_group_membership` 篡改为单节点;
+  - `CLUSTER FAILOVER` (无参协同交接): 由于跨节点协调主节点写暂停需专用 gRPC 协议, 当前版本明确返回错误并引导使用 `FORCE` 模式 (`ERR Coordinated failover requires cross-node RPC; please use CLUSTER FAILOVER FORCE`);
+  - `CLUSTER FAILOVER TAKEOVER`: 明确拒绝并引导使用 `FORCE`, 确保 Raft 共识法定人数安全;
+  - **角色双向自适应同步**: 在 `LeaderChangeWatcher` 观测到 group leader 转移后, 若旧 Primary 失去所属所有本地 group 的 leader 权, 自动将应用层角色降级为 `Replica`, 避免主从视图分裂.
 - **节点本地命令不做 slot 路由**:
   - `PING` / `INFO` / `KEYS` / `DBSIZE` / `FLUSHDB` / `FLUSHALL` / `SCAN` 族等在本节点本地执行;
   - 其首参是 pattern、cursor 或无参, 不得按 `args[0]` 计算槽位并返回 `-MOVED`.
@@ -101,7 +106,7 @@ flowchart TD
 | `CLUSTER SETSLOT <slot> STABLE` | 迁移 | 结束迁移, 槽位进入稳定服务状态 |
 | `CLUSTER SETSLOT <slot> CANCEL` | 迁移 | 取消半截迁移, 槽位回退源归属 |
 | `CLUSTER SETSLOT <slot> NODE <node-id>` | 运维写 | 强制将槽位归属变更至指定节点 |
-| `CLUSTER FAILOVER [FORCE\|TAKEOVER]` | 运维写 | 手动触发从节点晋升为主节点 |
+| `CLUSTER FAILOVER [FORCE]` | 运维写 | 手动触发从节点晋升为主节点 (支持 FORCE 强选模式; 无参模式引导使用 FORCE; TAKEOVER 明确拒绝) |
 | `CLUSTER REPLICATE <node-id>` | 运维写 | 配置当前节点作为指定主节点的副本 |
 | `CLUSTER REPLICAS <node-id>` | 只读 | 列出指定主节点下的所有从节点列表 |
 | `CLUSTER REBALANCE` | 运维写 | 触发全局槽位自动负载均衡; 单步拷贝/收尾失败自动 Cancel |

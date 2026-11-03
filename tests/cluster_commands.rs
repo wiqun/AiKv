@@ -79,4 +79,11 @@ mod tests {
     fn parse_forget_force_rejects_unknown_option() {
         assert!(parse_forget_force(Some(b"NOW")).is_err());
     }
+
+    #[tokio::test]
+    async fn cluster_failover_uninitialized() {
+        let result = cluster_failover("FORCE").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("CLUSTERDOWN"));
+    }
 }

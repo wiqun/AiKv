@@ -408,6 +408,13 @@ impl ClusterDataAdapter {
         gid: u64,
         request: Request,
     ) -> Result<Response> {
+        if mgr.is_group_write_paused(gid) {
+            return Err(AidbClusterError::Internal(
+                "TRYAGAIN Group writes temporarily paused for failover".into(),
+            )
+            .into());
+        }
+
         let mut last_err = Self::data_group_not_ready_err();
         let started = std::time::Instant::now();
         let note = || {
