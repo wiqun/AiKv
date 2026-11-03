@@ -1,11 +1,11 @@
 //! AiDb 存储引擎适配器: 把同步 `aidb::DB` 包装为 async `StorageAdapter`.
-//! 普通请求的 DB 操作经 `spawn_blocking`, 避免 LSM 写盘或扫描堵住 tokio worker.
-//! 脚本线程已由 `DirectStorageIo` 标记时, 调用在该线程上直接执行.
+//! 普通请求的写盘或范围扫描经 `spawn_blocking`, 避免堵住 tokio worker.
+//! 脚本线程已由 `DirectStorageIo` 标记时, 调用在该线程上直接执行 (Direct I/O).
 //!
 //! # 持久化模式
 //!
-//! - 物理 key 编码: `encode_key(db, user_key)` = `{db_index}:{user_key}` (ASCII);
-//!   `decode_key` 反解, `prefix_end` 求范围扫描上界 (`for_each_prefix` 使用).
+//! - 物理 key 编码: 对齐 Kvrocks 单库存储架构, 彻底移除 `{db}:` 前缀, 直接裸 Key 存储.
+//!   `encode_key(_db, user_key)` 直通返回 `user_key`; `decode_key_ref` 返回 `(0, user_key)`.
 //! - 值: 命令层 blob = `postcard(StoredValue)` (与 `storage/dump.rs` 同类型, DUMP 多
 //!   1 字节 version 前缀).
 //! - `write_batch` 组装 aidb `WriteBatch` 一次提交 (原子); `clear` 亦走批量 delete.
@@ -14,10 +14,8 @@
 //!
 //! # Invariant
 //!
-//! - key 编码 `{db_index}:{user_key}` 是全部范围操作 (scan / clear / delete_range) 的
-//!   前缀隔离基础, 不得变更.
-//! - 单库多 DB 语义: 16 个逻辑 DB 共享一个 `aidb::DB`, 靠 key 前缀隔离
-//!   (非 oldmain 的 16 个独立 DB 目录).
+//! - 裸 Key 直通存储: 消除键前缀拼接与堆内存分配开销; `SELECT` 指令经合法性检查后垫片化归一至 db 0.
+//! - Direct I/O 与 Blocking 分流: 脚本专用线程直调引擎避免上下文切换, 普通长 I/O 走线程池分流.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

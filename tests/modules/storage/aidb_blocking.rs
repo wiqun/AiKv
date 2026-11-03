@@ -1,3 +1,5 @@
+//! @component aikv-storage
+
 //! 回归: AiDbEngine::get/set 须走 spawn_blocking, 避免阻塞 Tokio worker.
 
 use std::sync::atomic::{AtomicBool, Ordering};

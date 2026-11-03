@@ -208,12 +208,12 @@ async fn test_exists_expired_key() {
     assert_int(r.execute("EXISTS", &[b("k")], &mut db).await.unwrap(), 0);
 }
 
-/// Mirrors `TL.Redis` `BaseRelationTests.创建bits` — bytes [1, 128, 3].
+/// 对齐客户端位图测试 — bytes [1, 128, 3].
 #[tokio::test]
 async fn test_setbit_base_relation_bits_pattern() {
     let r = router();
     let mut db = 0;
-    // TL.Redis: byte 1 → bit j=7; 128 → j=0; 3 → j=6,7
+    // 客户端语义: byte 1 → bit j=7; 128 → j=0; 3 → j=6,7
     let bits: &[(u64, u8)] = &[(7, 1), (8, 1), (22, 1), (23, 1)];
     for &(offset, value) in bits {
         let off = offset.to_string();

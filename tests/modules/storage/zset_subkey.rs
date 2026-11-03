@@ -1,3 +1,5 @@
+//! @component aikv-storage
+
 //! 大 ZSET 拆成 member subkey + score 索引后, 顺序和脚本写入仍然正确.
 
 use std::sync::{Arc, Mutex};

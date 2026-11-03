@@ -23,8 +23,8 @@
 //!
 //! - KeyLock 写路径: mutating 单 key 写用 `lock(key)` (SET NX/XX, INCR, HSET, LPUSH 等);
 //!   双 key 用 `lock_two` (按 key 字节序加锁, 同 key 不重入, 见 RENAME/COPY/LMOVE/SMOVE);
-//!   多 key 用 `lock_keys_sorted` (去重 + 字典序, JSON.MSET), EVAL 用
-//!   `lock_keys_sorted_with_timeout` (默认 30s).
+//!   多 key 用 `lock_keys_sorted` (去重 + 字典序, JSON.MSET); EVAL 写入脚本用
+//!   `lock_keys_sorted_with_timeout` (默认 30s), 静态只读脚本与 EVAL_RO/EVALSHA_RO 无锁直通.
 //! - registry ↔ router 双维护: 新命令须同时更新 `registry.rs` `COMMAND_TABLE` 与
 //!   本文件 `execute_inner` 的 match (或子 dispatch), 否则出现表内命中但路由漏分发的 bug.
 //! - metrics 仅 `new_with_shared` 装配; `new` (测试路径) 无 INFO/SAVE,

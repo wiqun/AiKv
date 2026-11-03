@@ -1,3 +1,5 @@
+//! @component aikv-server
+
 mod helpers;
 mod info_threads_test;
 mod listen;

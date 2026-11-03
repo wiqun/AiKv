@@ -1,3 +1,5 @@
+//! @component aikv-command
+
 use super::helpers::{b, router_with_shared};
 
 #[tokio::test]

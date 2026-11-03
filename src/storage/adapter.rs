@@ -1,25 +1,22 @@
 //! `StorageAdapter` trait 与 `KvStorage` 适配层: 把扁平 KV 抽象 (`StorageAdapter`,
-//! 底层为 `AiDbEngine` 或 `ClusterDataAdapter`) 包装为命令层多 DB 语义
+//! 底层为 `AiDbEngine` 或 `ClusterDataAdapter`) 包装为命令层存储语义
 //! (`KvStorageAdapter`, 实现 `KvStorage`).
 //!
-//! # Key 布局 (扁平 KV → 多 DB)
+//! # Key 布局 (Kvrocks 模式裸 Key + Subkey 编码)
 //!
 //! ```text
-//! 物理 key: {db_index}:{user_key}          # ASCII, 例 b"0:mykey"
-//!   ├─ db_prefix(db) = encode_key(db, "")  # 每 DB 的扫描前缀
-//!   ├─ prefix_end    = 前缀进位            # 范围扫描上界
-//!   └─ 值: postcard(StoredValue)            # 类型 + expires_at
-//! subkey:  {db_index}:{user_key}\x01H|S|Z|Y... # 大 Hash/Set/ZSet 的 field/member, raw bytes
+//! 物理 key: user_key                         # 裸 Key 直通存储, 零额外堆分配
+//!   └─ 值: postcard(StoredValue)            # 类型 + expires_at / version
+//! subkey:  \x01H|S|Z|Y{user_key}\x00{version:8BE}{field/member} # 大集合扁平化字段
 //! ```
 //!
-//! 多 DB 完全靠 key 前缀隔离 (`clear`/`keys`/`scan` 依赖 `db_prefix` + `prefix_end`).
+//! 对齐 Kvrocks 单库存储架构, 彻底移除 `{db_index}:` 物理前缀; `SELECT` 指令经合法性校验后垫片化归一至 db 0.
 //!
 //! # Invariant
 //!
 //! - 两套 WriteOp: `storage::WriteOp` (命令/Lua batch) ≠ `AdapterWriteOp` (扁平 KV);
 //!   转换在 `KvStorageAdapter::write_batch` (Put → postcard `StoredValue`).
-//! - AiDb key 编码: 物理 key = `{db_index}:{user_key}` (ASCII); `clear`/`keys`/`scan`
-//!   依赖 `db_prefix` + `prefix_end`.
+//! - AiDb key 编码: 裸 Key 直通存储; `encode_key` 返回原始 `user_key`, `decode_key_ref` 返回 `(0, user_key)`.
 //! - String `get`/`set` 仅 String; 非 String → `WRONGTYPE`; Hash/List/Set/ZSet
 //!   必须 `get_typed`/`set_typed`.
 //! - 惰性 TTL: 读路径 (`load_typed`) 遇过期返回"不存在"并尽力物理删除

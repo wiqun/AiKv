@@ -15,8 +15,8 @@ AiKv 与底层存储内核 AiDb 保持清晰的上下游分工与职责分离:
 | :--- | :--- | :--- |
 | **产品形态** | 独立网络服务端 (bin + lib), 基于 Tokio 异步运行时 | 纯嵌入式 lib crate, 纯**同步**阻塞 API |
 | **协议与线格式** | RESP2 / RESP3 (HELLO 协商), Pipeline, 二进制安全 BulkString | 无网络层, 纯 Rust 结构体与字节切片 |
-| **数据结构映射** | Redis 复杂类型 (`StoredValue`) 到底层 KV 的 Subkey 扁平化映射 | 单一扁平字节 Keyspace (`[u8] -> [u8]`) |
-| **并发锁模型** | 细粒度 `KeyLock` (4096 桶按 Key 字典序排序加锁防死锁) | 写锁保护的 Sequence 分配与 SkipMap 无锁并发 |
+| **数据结构映射** | 对齐 Kvrocks 模式, 裸 Key 直通存储; 复杂类型通过 Subkey 扁平化映射 | 单一扁平字节 Keyspace (`[u8] -> [u8]`) |
+| **并发锁模型** | 细粒度 `KeyLock` (4096 桶字典序加锁) + `TransactionGate`; 只读脚本无锁直通 | 写锁保护的 Sequence 分配与 SkipMap 无锁并发 |
 | **集群客户端交互** | 计算 16384 槽位, 返回 `-MOVED` / `-ASK`, 支持 `ASKING` / `READONLY` | MetaRaft 拓扑状态机、MultiRaft 数据分片与 gRPC 传输 |
 | **数据面写入** | `ClusterDataAdapter` (批处理合并、EagerFlush 异步 propose) | MultiRaft Log 追加、Commit 与状态机 Apply |
 | **持久化运维** | `SAVE` / `BGSAVE` 指令映射至 AiDb Checkpoint 快照 | LSM WAL 重放、MemTable 落盘与一致性硬链接 Checkpoint |
@@ -54,7 +54,7 @@ flowchart TB
         ExtCmds --> StorageTrait
         StorageTrait --> SubkeyEncoder[Subkey 扁平化编解码]
         StorageTrait --> MemoryEngine[MemoryEngine 内存引擎]
-        StorageTrait --> AiDbEngine[AiDbEngine 持久化引擎 spawn_blocking]
+        StorageTrait --> AiDbEngine[AiDbEngine 持久化引擎 Direct I/O / spawn_blocking]
         StorageTrait --> ClusterAdapter[ClusterDataAdapter 数据面 Raft 批处理]
     end
 
@@ -99,11 +99,15 @@ aikv/src/
 ├── storage/             # 存储适配与数据编码
 │   ├── adapter.rs       # KvStorage trait 核心抽象接口
 │   ├── memory.rs        # MemoryEngine 内存存储实现
-│   ├── aidb.rs          # AiDbEngine 持久化引擎适配 (spawn_blocking)
+│   ├── aidb.rs          # AiDbEngine 持久化引擎适配 (Direct I/O / spawn_blocking)
+│   ├── direct.rs        # 脚本线程 Direct I/O 同步直调存储
+│   ├── string_codec.rs  # String 紧凑编解码与零拷贝切片提取
+│   ├── watch_version.rs # 存储层 WATCH 版本持久化与 db 隔离
+│   ├── watch_registry.rs# 活跃 WATCH 键反向索引与变更通知
 │   ├── aidb_options.rs  # LSM 预设映射 (default, high-write, high-read)
 │   ├── cluster_adapter.rs # ClusterDataAdapter 与 Batcher 异步 propose
 │   ├── cluster_batcher.rs # GroupSetBatcher 写凑批 actor
-│   ├── subkey.rs        # Subkey 扁平化前缀编解码
+│   ├── subkey.rs        # Subkey 扁平化前缀编解码 (\x01 分隔符)
 │   ├── types.rs         # StoredValue, ValueType, SubkeyData
 │   ├── dump.rs          # DUMP / RESTORE 紧凑 postcard 编解码
 │   ├── ttl_filter.rs    # TTL 惰性过期与 Compaction Filter 联动
@@ -165,35 +169,38 @@ flowchart TD
     end
 ```
 
-### 4.1 字典序排序加锁防死锁 (Deadlock Prevention)
+### 4.1 字典序排序加锁与事务并发控制 (Concurrency & Deadlock Prevention)
 
 - **单 Key 写**: 计算 Key 哈希值并获取对应分桶的锁;
 - **双 Key 命令 (如 `RENAME`, `RPOPLPUSH`)**: 对两个 Key 按照字节序比较 (`key_a < key_b`), 强制以固定顺序依次获取锁;
-- **多 Key / Lua 事务**: 提取所有参数 Key, 过滤重复 Key 并全局字典序排序, 设置 30 秒加锁等待超时 (`lock_keys_sorted_with_timeout`), **从数学上保证加锁依赖图严格无环, 彻底消除死锁**.
+- **多 Key 写命令**: 提取所有参数 Key, 过滤重复 Key 并全局字典序排序, 设置 30 秒加锁等待超时 (`lock_keys_sorted_with_timeout`), 从数学上保证加锁依赖图严格无环, 彻底消除死锁;
+- **事务与 WATCH 隔离**: `MULTI/EXEC` 引入节点级 `TransactionGate`, EXEC 执行期间持排他锁并整笔预检集群 CROSSSLOT; WATCH 键版本迁入存储层持久化 (`get_watch_version`), 不仅在进程内比对;
+- **Lua 脚本无锁直通**: 依据 `should_lock = !keys.is_empty() && !read_only;`, 静态判定为只读的脚本及 `EVAL_RO` / `EVALSHA_RO` 完全跳过 KeyLock 排他锁排队, 支持并发直读.
 
 ### 4.2 线程与异步运行时模型
 
-- **网络 IO 线程池**: Tokio Runtime (默认与 CPU 核心数相同), 负责高并发 TCP 连接建立、RESP 流式分帧与 Pipeline 解析;
-- **存储阻塞线程池**: 底层同步 LSM 读写通过 `tokio::task::spawn_blocking` 派发至专用的 Blocking 线程池执行, 避免磁盘 IO 阻塞网络 EventLoop.
+- **网络 IO 与就地流水线**: Tokio Runtime (默认与 CPU 核心数相同), 负责高并发 TCP 连接建立, RESP 流式分帧与命令解析; 流水线采用就地零调度直通批量执行, 消除逐命令协程派发税, 并发发射并严格保序写回 (ADR-001);
+- **脚本执行线程池 (`ScriptWorkerPool`)**: 依据脚本 SHA 执行耗时的指数滑动平均 (EWMA) 进行动态路由 (<1ms 在当前 worker 就地执行, ≥1ms 派发至专用脚本线程池避免阻塞 EventLoop); 脚本线程通过 Direct I/O 直接同步访问底层存储, 不再另起 `spawn_blocking`;
+- **存储阻塞线程池**: 普通连接的磁盘 I/O 写入与全范围扫描通过 `AiDbEngine` 派发至专用的 Blocking 线程池执行.
 
 ---
 
 ## 5. 数据模型与 Subkey 扁平化编码
 
-AiKv 将 Redis 的丰富数据结构映射到底层 AiDb 的单一扁平 KV 空间:
+AiKv 对齐 Kvrocks 单库模式, 彻底移除 `{db}:` 逻辑库物理前缀, 实现裸 Key 直通存储; `SELECT 0..15` 校验后保持单库行为 (db 0):
 
 ### 5.1 编码规则
 
 | Redis 数据类型 | 元数据 Key 格式 | 数据 Key (Subkey) 格式 | 存储 Value 结构 |
 | :--- | :--- | :--- | :--- |
-| **String** | `{db}:{user_key}` | — | `StoredValue { type: String, expire_at, data }` |
-| **Hash** | `{db}:{user_key}` (元数据: 长度/版本) | `{db}:{user_key}:{field}` | 字段 Value 切片 |
-| **List** | `{db}:{user_key}` (元数据: head/tail/len) | `{db}:{user_key}:{index}` | 元素 Value 切片 |
-| **Set** | `{db}:{user_key}` (元数据: 长度/版本) | `{db}:{user_key}:{member}` | 空标记字节 |
-| **ZSet** | `{db}:{user_key}` (元数据: 长度/版本) | `{db}:{user_key}:{member}` / 分数索引 | Score 二进制浮点编码 |
-| **JSON** | `{db}:{user_key}` | — | `StoredValue { type: String, data: JSON 文本 }` |
+| **String** | `{user_key}` (裸 Key 直通) | — | `StoredValue { type: String, expire_at, data }`<br>(支持 `string_codec` 快速紧凑编解码旁路与零拷贝切片提取) |
+| **Hash** | `{user_key}` (≤64 字段 inline / >64 字段 CollectionHeader) | `{user_key}\x01H{field_len:2B}{field}` | 字段 Value 原始字节切片 |
+| **List** | `{user_key}` (元数据: head/tail/len) | `{user_key}\x01L{index}` | 元素 Value 切片 |
+| **Set** | `{user_key}` (≤64 元素 inline / >64 元素 CollectionHeader) | `{user_key}\x01S{member_len:2B}{member}` | 空标记字节 (仅 Key 存在性表示 member) |
+| **ZSet** | `{user_key}` (≤64 元素 inline / >64 元素 CollectionHeader) | `{user_key}\x01Z{member_len:2B}{member}` (member)<br>`{user_key}\x01Y{sortable_score:8B}{member}` (score 索引) | Score f64 小端浮点字节 (Z)<br>Score 索引排序键 (Y) |
+| **JSON** | `{user_key}` (裸 Key 直通) | — | `StoredValue { type: String, data: JSON 文本 }` |
 
-- **Subkey 分隔符**: 内部使用专有前缀与分隔符隔离, 支持对 Hash 单字段或 List 端点的高效 $O(1)$ 读写, 避免整存整取导致的写放大.
+- **Subkey 分隔符**: 内部使用 `\x01` 作为 user key 与 subkey 之间的专有分隔符, 支持对 Hash 单字段, Set 单成员或 ZSet 分数索引的高效 $O(1)$ 读写与原生有界范围扫描, 消除整存整取带来的写放大.
 
 ---
 
@@ -215,7 +222,7 @@ sequenceDiagram
     Conn->>R: dispatch_command(args)
     R->>KL: lock_key("k")
     KL-->>R: Guard
-    R->>S: put(b"0:k", StoredValue)
+    R->>S: put(b"k", StoredValue)
     S->>DB: spawn_blocking(DB::put)
     DB-->>S: Ok(())
     S-->>R: Ok(())

@@ -5,15 +5,14 @@ Redis 清单默认读环境变量 REDIS_COMMANDS_DIR, 否则沿用已提交的
 tests/fixtures/redis_8_8_3_commands.txt. 那个文件来自 Redis tag 8.8.3 的
 src/commands/*.json, 只收顶层命令名.
 
-业务清单扫描这些目录里的 .cs / .lua (去掉注释):
-  /root/code/gitlab/tl
-  /root/code/wiqun/tests
-  /root/code/wiqun/tests-116
-另外并上线上已经打到的脚本命令 BITFIELD. 动态拼出来的命令名扫不到.
+业务代码清单扫描可通过环境变量 BUSINESS_SCAN_ROOTS (路径以冒号或逗号分隔)
+或 --scan-dir 参数指定目录, 扫描其中的 .cs / .lua 脚本 (去掉注释).
+未指定或目录不存在时, 保留已提交的 business_*.txt 清单, 避免误覆盖.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import re
@@ -24,13 +23,7 @@ FIXTURES = ROOT / "tests" / "fixtures"
 REGISTRY = ROOT / "src" / "command" / "registry.rs"
 EXECUTE = ROOT / "src" / "command" / "script" / "execute" / "mod.rs"
 
-BUSINESS_ROOTS = [
-    Path("/root/code/gitlab/tl"),
-    Path("/root/code/wiqun/tests"),
-    Path("/root/code/wiqun/tests-116"),
-]
-
-# CreateUsers 脚本 (sha 0e40ff8777fc0ba94b03db06a462352ede611e95) 第 14 行.
+# 线上已观察到的脚本命令
 OBSERVED_SCRIPT = ["BITFIELD"]
 
 METHOD_COMMANDS = {
@@ -131,13 +124,35 @@ def parse_allowlist() -> list[str]:
     return re.findall(r'"([^"]+)"', match.group(1))
 
 
-def scan_business(redis_names: set[str]) -> tuple[list[str], list[str], list[str]]:
+def parse_scan_roots(cli_dirs: list[str] | None) -> list[Path]:
+    roots: list[Path] = []
+    if cli_dirs:
+        for d in cli_dirs:
+            p = Path(d).expanduser()
+            if p.exists():
+                roots.append(p)
+            else:
+                print(f"Warning: specified scan dir not found: {p}")
+    env_dirs = os.environ.get("BUSINESS_SCAN_ROOTS")
+    if env_dirs:
+        for raw in re.split(r"[:;,]", env_dirs):
+            raw = raw.strip()
+            if not raw:
+                continue
+            p = Path(raw).expanduser()
+            if p.exists():
+                roots.append(p)
+            else:
+                print(f"Warning: env scan dir not found: {p}")
+    return roots
+
+
+def scan_business(
+    roots: list[Path], redis_names: set[str]
+) -> tuple[list[str], list[str], list[str]]:
     script: set[str] = set(OBSERVED_SCRIPT)
     direct: set[str] = set()
-    for root in BUSINESS_ROOTS:
-        if not root.exists():
-            print(f"skip missing {root}")
-            continue
+    for root in roots:
         for path in root.rglob("*"):
             if path.suffix.lower() not in {".cs", ".lua"} or not path.is_file():
                 continue
@@ -154,17 +169,32 @@ def scan_business(redis_names: set[str]) -> tuple[list[str], list[str], list[str
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="刷新 Redis 与业务命令对齐清单")
+    parser.add_argument(
+        "--scan-dir",
+        action="append",
+        dest="scan_dirs",
+        help="指定业务代码扫描根目录 (可重复指定)",
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="仅校验现有清单是否与代码对齐, 不写入文件",
+    )
+    args = parser.parse_args()
+
     FIXTURES.mkdir(parents=True, exist_ok=True)
     commands_dir = os.environ.get("REDIS_COMMANDS_DIR")
     redis_path = FIXTURES / "redis_8_8_3_commands.txt"
     if commands_dir:
         redis = redis_from_commands_dir(Path(commands_dir))
-        write_names(
-            redis_path,
-            "# Redis 8.8.3 顶层命令. 来源: tag 8.8.3 src/commands/*.json\n"
-            "# NAME SCRIPT|NOSCRIPT",
-            [f"{name}\t{redis[name]}" for name in sorted(redis)],
-        )
+        if not args.check:
+            write_names(
+                redis_path,
+                "# Redis 8.8.3 顶层命令. 来源: tag 8.8.3 src/commands/*.json\n"
+                "# NAME SCRIPT|NOSCRIPT",
+                [f"{name}\t{redis[name]}" for name in sorted(redis)],
+            )
     elif redis_path.exists():
         redis = load_redis_file(redis_path)
     else:
@@ -182,44 +212,56 @@ def main() -> None:
             continue
         gaps.append(name)
 
-    write_names(
-        FIXTURES / "redis_unsupported.txt",
-        "# Redis 8.8.3 有、AiKv 注册表没有的顶层命令.",
-        unsupported,
-    )
-    write_names(
-        FIXTURES / "aikv_extensions.txt",
-        "# AiKv 注册表有、Redis 8.8.3 顶层命令没有的名字.",
-        extensions,
-    )
-    write_names(
-        FIXTURES / "script_command_gaps.txt",
-        "# 已实现, 且 Redis 允许在脚本里调用, 但 redis.call 白名单还没有.",
-        gaps,
-    )
+    if not args.check:
+        write_names(
+            FIXTURES / "redis_unsupported.txt",
+            "# Redis 8.8.3 有, AiKv 注册表没有的顶层命令.",
+            unsupported,
+        )
+        write_names(
+            FIXTURES / "aikv_extensions.txt",
+            "# AiKv 注册表有, Redis 8.8.3 顶层命令没有的名字.",
+            extensions,
+        )
+        write_names(
+            FIXTURES / "script_command_gaps.txt",
+            "# 已实现, 且 Redis 允许在脚本里调用, 但 redis.call 白名单还没有.\n"
+            "# 留在这里的是阻塞, 管理, 整库扫描, 跨节点迁移, 以及脚本事务里没有对应语义的命令.",
+            gaps,
+        )
 
-    script, direct, noise = scan_business(redis_names)
-    write_names(
-        FIXTURES / "business_script_commands.txt",
-        "# redis.call / redis.pcall 字面量, 加上线上观察到的 BITFIELD.\n"
-        "# 不是 Redis 命令的名字同时记在 business_command_noise.txt.",
-        script,
-    )
-    write_names(
-        FIXTURES / "business_direct_commands.txt",
-        "# ExecuteAsync 字面量, 以及会发出命令名的客户端方法.",
-        direct,
-    )
-    write_names(
-        FIXTURES / "business_command_noise.txt",
-        "# 扫到了, 但不是 Redis 8.8.3 命令. 目前是 Lua 解析器单测里的 INC.",
-        noise,
-    )
-    print(
-        f"redis={len(redis)} unsupported={len(unsupported)} "
-        f"extensions={len(extensions)} gaps={len(gaps)} "
-        f"script={len(script)} direct={len(direct)} noise={len(noise)}"
-    )
+    scan_roots = parse_scan_roots(args.scan_dirs)
+    if scan_roots:
+        script, direct, noise = scan_business(scan_roots, redis_names)
+        if not args.check:
+            write_names(
+                FIXTURES / "business_script_commands.txt",
+                "# redis.call / redis.pcall 字面量, 加上线上观察到的 BITFIELD.\n"
+                "# 不是 Redis 命令的名字同时记在 business_command_noise.txt.",
+                script,
+            )
+            write_names(
+                FIXTURES / "business_direct_commands.txt",
+                "# ExecuteAsync 字面量, 以及会发出命令名的客户端方法.",
+                direct,
+            )
+            write_names(
+                FIXTURES / "business_command_noise.txt",
+                "# 扫到了, 但不是 Redis 8.8.3 命令. 目前是 Lua 解析器单测里的 INC.",
+                noise,
+            )
+        print(
+            f"redis={len(redis)} unsupported={len(unsupported)} "
+            f"extensions={len(extensions)} gaps={len(gaps)} "
+            f"script={len(script)} direct={len(direct)} noise={len(noise)} (scanned {len(scan_roots)} roots)"
+        )
+    else:
+        # 未指定或目录不存在时, 保持已提交的 fixtures, 不写空文件
+        print(
+            f"redis={len(redis)} unsupported={len(unsupported)} "
+            f"extensions={len(extensions)} gaps={len(gaps)} "
+            f"(business scan skipped: no valid roots provided via --scan-dir or BUSINESS_SCAN_ROOTS)"
+        )
 
 
 if __name__ == "__main__":

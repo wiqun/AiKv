@@ -1,5 +1,5 @@
 //! @component aikv-cluster
-//! 回归测试: ATOM.EXEC/EXEC JSON batch (TL.KvDoc 事务提交协议) 在集群拓扑
+//! 回归测试: ATOM.EXEC/EXEC JSON batch (事务提交协议) 在集群拓扑
 //! 下必须把内部快照阶段命中的 MOVED/ASK 原样透传给客户端, 而不能包裹成
 //! 一个通用的 "ERR internal error during batch snapshot: ..." 错误.
 //!
@@ -12,9 +12,9 @@
 //! 用 `format!("ERR internal error during batch snapshot: {e}")` 包了一层,
 //! 产出类似 `ERR internal error during batch snapshot: 命令错误: MOVED 3821
 //! 192.168.1.112:6379` 的顶层响应.这不是标准 `-MOVED slot addr` 格式,
-//! StackExchange.Redis 等集群感知客户端无法识别并自动重定向重试整个
-//! batch, 导致 `KvDocTransaction.CommitAsync()` 直接抛出
-//! `RedisServerException`.
+//! 客户端无法识别并自动重定向重试整个
+//! batch, 导致客户端事务提交直接抛出
+//! 异常.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;

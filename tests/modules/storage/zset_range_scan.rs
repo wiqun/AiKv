@@ -1,3 +1,5 @@
+//! @component aikv-storage
+
 //! 大 ZSET 的有界范围读: 存储原语 `raw_range_scan` 与命令层结果必须和全量加载排序的结果一致.
 
 use std::sync::Arc;

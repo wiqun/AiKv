@@ -42,10 +42,15 @@ description: AiKv 核心 Redis 命令 — String/Hash/List/Set/ZSet/Key/Database
   - `KeyLock` 内部采用 **4096** 个独立分桶互斥锁 (`tokio::sync::Mutex<()>`);
   - **单 Key 写**: `KeyLock::lock(key)` 加锁 (如 SET NX/XX, INCR, HSET, LPUSH 等);
   - **双 Key 命令**: `KeyLock::lock_two(k1, k2)` 按照 Key 字节序比较升序获取锁 (如 RENAME, COPY, LMOVE, SMOVE);
-  - **多 Key / Lua 事务**: `KeyLock::lock_keys_sorted(keys)` 自动去重并按字典序升序排序加锁, 彻底杜绝并发死锁.
+  - **多 Key 写命令**: `KeyLock::lock_keys_sorted(keys)` 自动去重并按字典序升序排序加锁, 彻底杜绝并发死锁;
+  - **事务排他与预检 (`TransactionGate`)**: `MULTI/EXEC` 事务在 EXEC 执行期间获取 `TransactionGate` 独占写锁, 并整笔预检集群 CROSSSLOT, 杜绝事务执行期间与普通命令交叉交织;
+  - **只读 Lua 脚本无锁直通**: 判定为只读的脚本及 `EVAL_RO`/`EVALSHA_RO` 完全跳过 `KeyLock`, 享受无锁并发直读.
 - **双维护一致性约束 (Registry ↔ Router)**:
   - 新增命令必须**同时更新** `registry.rs` 中的 `COMMAND_TABLE` 和 `router/mod.rs` 中的 `execute_inner` (或子领域 dispatch match);
   - 严禁在 `registry.rs` 中声明但在 `router/` 中遗漏分发, 避免出现 `COMMAND` 命令可查但执行报未知命令的 Bug.
+- **单库对齐与 SELECT 垫片化兼容**:
+  - 对齐 Kvrocks 模式, 底层 AiDb 彻底移除 `{db}:` 前缀采用裸 Key 存储;
+  - `SELECT 0..15` 范围校验后统一归一至 db 0 并返回 `+OK`; `FLUSHDB` 与 `FLUSHALL` 调用底层 `clear_all()`; `SWAPDB` 显式报错不支持.
 - **WRONGTYPE 强制校验**:
   - 对已存在的 Key 执行不匹配的数据结构操作时, 必须立即返回 `-WRONGTYPE Operation against a key holding the wrong kind of value\r\n`;
   - 严禁静默覆盖已有不同类型的 Key (除非是 `SET` 强制覆盖).

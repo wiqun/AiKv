@@ -42,11 +42,12 @@ description: AiKv 扩展 Redis 命令 — JSON/JSONPath 引擎、Lua EVAL/SCRIPT
   - 全量 JSON 文档以合法 UTF-8 字符串保存在 `StoredValue { value_type: ValueType::String, .. }` 中;
   - `JSON.SET` 针对不存在的 Key 创建新文档, 针对已有文档根据 Path 局部修改;
   - `JSON.GET` 支持多 Path 查询, 返回标准格式化 JSON 字符串.
-- **Lua 沙箱与原子事务提交 (`ScriptTransaction`)**:
+- **Lua 沙箱, EWMA 路由与原子事务提交 (`ScriptTransaction`)**:
   - 采用 `mlua` 运行独立 Lua 5.1 虚拟机, 与 Redis 脚本语义一致. 提供 `cjson`、`bit`、`struct`、`cmsgpack` 和 `os.clock`, 裁掉 `os` 的其余函数以及 `io`、`debug`. 阻塞命令、`KEYS`/`FLUSH*`/`CONFIG` 这类管理和 `MIGRATE` 仍不能在 `redis.call` 里执行;
-  - `EVAL` 执行前必须提取所有参数 Key, 并调用 `KeyLock::lock_keys_sorted_with_timeout(keys, 30s)` 获取锁;
-  - 多线程运行时上, 脚本体在脚本线程池执行, `redis.call` 同步走 `ScriptIo`. 集群写入先进入在途缓冲再放开 key 锁, 入队在锁外, Raft 确认仍在其后.
-  - `redis.call` 写操作收集在 `ScriptTransaction` 的 `WriteBatch` 中, 脚本成功时原子提交, 抛出异常或超时时丢弃修改实现回滚.
+  - **动态加锁与只读无锁直通**: 判定为修改的脚本按参数 Key 字典序排序调用 `KeyLock::lock_keys_sorted_with_timeout(keys, 30s)` 获取锁; 静态分析判定为纯只读的脚本 (`is_read_only`) 及 `EVAL_RO` / `EVALSHA_RO` 或无 Key 脚本 (`keys.is_empty()`) **完全跳过 KeyLock**, 享受无锁并发直通;
+  - **EWMA 动态执行路由**: 依据脚本 SHA 历史执行耗时的指数滑动平均 (EWMA) 分流: <1ms 轻脚本在当前 Tokio Worker 线程就地执行, ≥1ms 重脚本派发至专用 `ScriptWorkerPool` 线程池并走 Direct I/O 同步直调存储, 避免占满 EventLoop;
+  - `redis.call` 写操作收集在 `ScriptTransaction` 的 `WriteBatch` 中, 脚本成功时原子提交, 抛出异常或超时时丢弃修改实现回滚. 集群写入先进入在途缓冲再放开 key 锁, 入队在锁外, Raft 确认仍在其后;
+  - **大 ZSet 脚本在途叠加**: 脚本事务内支持对大 ZSet 范围读取结果叠加在途修改增量, 配合 AiDb 原生有界跳表扫描保障正确性与高性能.
 - **`BlockingRegistry` 唤醒机制**:
   - 当客户端执行 `BLPOP`, `BRPOP`, `BZPOPMIN` 等命令且目标 Key 为空时, 将连接注册至 `BlockingRegistry` 对应 Key 的等待通道中, 挂起当前 Task;
   - 任何写命令 (如 `LPUSH`, `RPUSH`, `ZADD`) 成功写入后, 必须调用 `BlockingRegistry::notify_keys(&[key])` 唤醒等待队列头部的连接.
@@ -71,12 +72,18 @@ flowchart TD
         Wakeup --> OutA[返回 [key, val]]
     end
 
-    subgraph LuaFlow [Lua 脚本原子执行流程]
-        EvalReq[EVAL script 2 k1 k2 arg1] --> LockKeys[KeyLock 字典序锁定 [k1, k2] 30s 超时]
-        LockKeys --> Sandbox[Lua 5.1 沙箱加载脚本与参数]
-        Sandbox --> ExecLoop[执行 Lua 字节码]
-        ExecLoop -->|redis.call| TxBatch[ScriptTransaction 收集 WriteBatch]
-        ExecLoop -->|执行成功| Commit[原子 Commit 至 KvStorage 并释放锁]
+    subgraph LuaFlow [Lua 脚本执行流程]
+        EvalReq[EVAL / EVALSHA / EVAL_RO] --> CheckRO{只读脚本或无 Key?}
+        CheckRO -->|是| Direct[跳过 KeyLock 无锁直通]
+        CheckRO -->|否 写入脚本| LockKeys[KeyLock 字典序锁定 keys 30s 超时]
+        Direct --> Route{EWMA 耗时 < 1ms?}
+        LockKeys --> Route
+        Route -->|轻脚本| InPlace[当前 Worker 线程就地执行]
+        Route -->|重脚本| WorkerPool[派发至专用 ScriptWorkerPool 线程池]
+        InPlace --> Sandbox[Lua 5.1 沙箱加载脚本与参数]
+        WorkerPool --> Sandbox
+        Sandbox --> ExecLoop[执行 Lua 字节码 redis.call]
+        ExecLoop -->|执行成功| Commit[原子 Commit 变更并释放锁]
         ExecLoop -->|执行失败 / 超时| Rollback[丢弃 WriteBatch 释放锁并报错]
     end
 ```

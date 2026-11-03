@@ -1,3 +1,5 @@
+//! @component aikv-storage
+
 use aidb::config::Options;
 use aikv::storage::{
     server_db_options, testing_db_options, AiDbEngine, KvStorage, KvStorageAdapter,

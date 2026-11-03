@@ -23,10 +23,11 @@
 
 - **RESP2/RESP3 兼容及已实现命令子集**: 支持标准 array framing 双栈协议与 registry 内命令语义; 完整清单见 [docs/compatibility.md](docs/compatibility.md), 非 registry 命令或未实现能力需客户端适配.
 - **纯 Rust 实现**: 内存安全, 零 C/C++ 依赖, 采用 mimalloc 降低内存碎片.
+- **Kvrocks 模式裸 Key 直通存储**: 对齐 Kvrocks 单库存储架构, 彻底移除 `{db}:` 物理前缀, 键编码零堆分配开销; `SELECT 0..15` 垫片校验后保持单库行为 (db 0).
 - **丰富的数据结构与原生扩展**: 完整支持 String, Hash, List, Set, Sorted Set, 原生内置 JSON (JSONPath) 与 Lua 5.1 脚本 (EVAL / SCRIPT, 含 cjson / bit / struct / cmsgpack).
-- **细粒度并发与事务**: 4096 桶按 Key 字典序排序加锁, 彻底杜绝死锁; 支持 MULTI/EXEC/WATCH 原子事务.
+- **高效执行与并发控制**: Tokio 异步网络 + 4096 桶字典序 KeyLock; 事务通过 `TransactionGate` 独占排他执行并整笔预检 CROSSSLOT; 只读 Lua 脚本无锁直通, 结合 EWMA 运行时估算实现毫秒级就地执行与 Dedicated Pool 动态分流.
+- **Direct I/O 直调与阻塞分流**: 脚本线程与集群直读直接调用底层引擎, 消除无谓的跨线程切换延迟; 耗时大操作分流至 Blocking 线程池.
 - **分布式集群模式**: 16384 槽位路由, Hash Tag, 在线槽位迁移, 客户端透明重定向 (redis-cli -c).
-- **云原生高并发架构**: Tokio 异步运行时 + 4096 桶细粒度 KeyLock, 保证原子性与无死锁的同时最大化多核吞吐.
 - **云原生可观测性**: 指标由 OpenTelemetry 导出 (`aikv_*` 与 `aidb_*`). span 只允许命令入口 `kv_command`, 采样率为 0 或端点为空时不创建.
 
 ---
@@ -43,9 +44,11 @@ flowchart TB
     end
 
     subgraph Dispatch [命令调度与并发控制]
-        Parser --> Router[CommandRouter 命令分发中枢]
-        Router --> KeyLock[KeyLock 字典序加锁]
+        Parser --> Gate[TransactionGate 事务独占排他门闩]
+        Gate --> Router[CommandRouter 命令分发中枢]
+        Router --> KeyLock[KeyLock 4096 桶字典序加锁]
         Router --> Registry[CommandRegistry 命令表]
+        Router --> EWMA[Lua EWMA 运行时分流 / 只读无锁直通]
     end
 
     subgraph CommandHandlers [命令处理器]
@@ -57,9 +60,10 @@ flowchart TB
     subgraph StorageAdapter [存储适配层]
         CoreCmds --> Adapter[KvStorage Trait]
         ExtCmds --> Adapter
-        Adapter --> Subkey[Subkey 扁平化编码]
+        Adapter --> Subkey[Subkey 扁平化编码 \x01H / \x01S / \x01Z / \x01Y]
         Adapter --> Memory[MemoryEngine 内存引擎]
-        Adapter --> AiDbEngine[AiDbEngine 持久化引擎]
+        Adapter --> Direct[Direct I/O 零调度直调]
+        Adapter --> AiDbEngine[AiDbEngine 持久化引擎 裸Key直通]
         Adapter --> ClusterAdapter[ClusterDataAdapter Raft 批处理]
     end
 
@@ -126,7 +130,7 @@ redis-cli -p 6379 GET mykey
 `aikv:dev`, 可用 `AIKV_IMAGE` 覆盖.
 
 `aikv-single.sh up` 只启动一个容器, 使用 named volume `aikv`. `aikv-cluster.sh up` 会
-生成六份节点配置并启动 2 个分片、每个分片 1 主 2 从的 Redis Cluster 拓扑.
+生成六份节点配置并启动 2 个分片, 每个分片 1 主 2 从的 Redis Cluster 拓扑.
 启动时会清理同一 Compose project 中旧服务名产生的 orphan 容器. 运行时配置位于
 `deploy/.runtime/`, 默认 `down` 保留 named volumes; 只有显式 `--purge`
 才删除数据卷. 该开发阶段快速部署参考不提供旧卷到新卷的数据迁移.
@@ -157,7 +161,7 @@ redis-cli -p 6379 GET mykey
 
 ---
 
-## 安全、平台与升级边界
+## 安全, 平台与升级边界
 
 AiKv v1 不内建 `AUTH`, `ACL` 或 `TLS`. `RESP`, `MetaRaft` 和 `MultiRaft` 端口不得暴露到不可信网络. 需要跨越信任边界时, 必须使用认证/TLS proxy 或 service mesh, 并配置网络访问控制.
 

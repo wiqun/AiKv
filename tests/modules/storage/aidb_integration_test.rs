@@ -1,3 +1,5 @@
+//! @component aikv-storage
+
 //! AiDb 统计指标透传与 INFO storage 渲染集成测试.
 
 use std::sync::atomic::Ordering;

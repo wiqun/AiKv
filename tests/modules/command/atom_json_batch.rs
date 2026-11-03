@@ -1,3 +1,5 @@
+//! @component aikv-command
+
 use std::net::SocketAddr;
 use std::time::Duration;
 

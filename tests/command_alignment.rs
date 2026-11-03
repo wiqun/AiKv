@@ -1,3 +1,5 @@
+//! @component aikv-command
+
 //! 命令名字对齐: Redis 8.8.3 全集、脚本白名单、业务实际调用.
 //!
 //! 必须以 `--features cluster` 运行. 分类清单按带 cluster 的注册表生成.

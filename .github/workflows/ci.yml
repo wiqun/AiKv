@@ -26,6 +26,7 @@ env:
 jobs:
   test-cluster:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - name: Prepare workspace (rust + protoc + aidb)
@@ -56,6 +57,7 @@ jobs:
   test-server-stress:
     needs: test-cluster
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Prepare workspace (rust + protoc + aidb)
@@ -69,6 +71,7 @@ jobs:
   test-commands-slow:
     needs: test-cluster
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Prepare workspace (rust + protoc + aidb)
@@ -82,6 +85,7 @@ jobs:
   test-stress-ttl:
     needs: test-cluster
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Prepare workspace (rust + protoc + aidb)
@@ -96,6 +100,7 @@ jobs:
   # compression 已是默认 feature, 普通构建会编译该路径.
   test-compression:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Prepare workspace (rust + protoc + aidb)
@@ -109,6 +114,7 @@ jobs:
   # 验证显式关闭默认 compression 后, 无压缩 fallback 仍可用.
   test-no-compression:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Prepare workspace (rust + protoc + aidb)
@@ -119,4 +125,4 @@ jobs:
       - name: Test without compression feature
         run: cargo test --no-default-features --lib storage::aidb_options -- --test-threads=1
 
- # TODO: 当前 e2ejob 主要为人工执行设计, 暂时从 CI 移除
+  # 说明: 当前 e2e job 主要为人工与专项回归测试设计, 暂不纳入常规 PR 门禁.

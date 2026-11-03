@@ -1,3 +1,5 @@
+//! @component aikv-storage
+
 use std::sync::Arc;
 
 use aikv::storage::{AiDbEngine, KvStorage, KvStorageAdapter, StoredValue, ValueType};

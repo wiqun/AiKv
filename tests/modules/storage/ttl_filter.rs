@@ -1,3 +1,5 @@
+//! @component aikv-storage
+
 //! TTL compaction filter 集成测试.
 //!
 //! 验证: 过期 key 在 compaction 后被自动清理.

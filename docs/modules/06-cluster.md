@@ -26,7 +26,7 @@ description: AiKv Redis Cluster 协议层 — 16384 槽位 CRC16 计算、MOVED/
 | [`src/cluster/mod.rs`](../../src/cluster/mod.rs) | 集群模块根; 统一导出路由工具与子命令处理器 | `AnnounceResolver`, `key_to_slot`, `extract_hash_tag` |
 | [`src/cluster/router.rs`](../../src/cluster/router.rs) | 集群路由决策器: Slot 计算、本地 Leader 判定与重定向响应生成 | `ClusterRouter::decide`, `migration_phase_for_slot` |
 | [`src/cluster/routing_key.rs`](../../src/cluster/routing_key.rs) | Redis 标准 `{...}` Hash Tag 提取算法与 Key 槽位哈希计算 | `extract_hash_tag`, `key_to_slot` |
-| [`src/cluster/state.rs`](../../src/cluster/state.rs) | `ClusterStateManager` 拓扑缓存、Leader 路由快照与全局单例管理 | `ClusterStateManager`, `CLUSTER_STATE_MGR` |
+| [`src/cluster/state.rs`](../../src/cluster/state.rs) | `ClusterStateManager` 拓扑缓存, Leader 路由快照, 16384 槽位 `[AtomicU64; 16384]` 无锁直查表 | `ClusterStateManager`, `CLUSTER_STATE_MGR` |
 | [`src/cluster/gossip.rs`](../../src/cluster/gossip.rs) | 节点间轻量拓扑 tick、Leader 路由缓存刷新与 Gossip 监控指标采集 | `start_gossip_task` |
 | [`src/cluster/replication.rs`](../../src/cluster/replication.rs) | 主从复制状态维护、`READONLY` / `READWRITE` 副本读门控 | `ReplicationState` |
 | [`src/cluster/commands/`](../../src/cluster/commands/) | `dispatch_cluster` + 子模块 `topology` / `membership` / `slots` / `group` / `migration` | `dispatch_cluster` |

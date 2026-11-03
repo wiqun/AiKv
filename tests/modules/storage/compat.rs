@@ -1,3 +1,5 @@
+//! @component aikv-storage
+
 //! memory vs AiDb 双引擎行为一致性测试
 //!
 //! 同一命令序列分别在 MemoryEngine 和 KvStorageAdapter(AiDbEngine) 上执行,
