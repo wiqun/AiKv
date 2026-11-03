@@ -37,40 +37,26 @@ pub struct AiDbEngine {
 }
 
 impl AiDbEngine {
-    const DB_PREFIXES: [&'static [u8]; 16] = [
-        b"0:", b"1:", b"2:", b"3:", b"4:", b"5:", b"6:", b"7:", b"8:", b"9:", b"10:", b"11:",
-        b"12:", b"13:", b"14:", b"15:",
-    ];
-
-    /// 构造真实 key: `{db_index}:{user_key}`
-    pub fn encode_key(db: usize, user_key: &[u8]) -> Vec<u8> {
-        if db < 16 {
-            let prefix = Self::DB_PREFIXES[db];
-            let mut key = Vec::with_capacity(prefix.len() + user_key.len());
-            key.extend_from_slice(prefix);
-            key.extend_from_slice(user_key);
-            key
-        } else {
-            let mut key = Vec::with_capacity(8 + user_key.len());
-            key.extend_from_slice(db.to_string().as_bytes());
-            key.push(b':');
-            key.extend_from_slice(user_key);
-            key
-        }
+    /// 构造真实 key: 对齐 Kvrocks 单库模式, 彻底移除 `{db}:` 前缀, 直接裸 Key 存储
+    #[inline]
+    pub fn encode_key(_db: usize, user_key: &[u8]) -> Vec<u8> {
+        user_key.to_vec()
     }
 
+    #[inline]
     pub fn decode_key_ref(encoded: &[u8]) -> Option<(usize, &[u8])> {
-        let pos = encoded.iter().position(|&b| b == b':')?;
-        let db_str = std::str::from_utf8(&encoded[..pos]).ok()?;
-        let db = db_str.parse().ok()?;
-        Some((db, &encoded[pos + 1..]))
+        Some((0, encoded))
     }
 
+    #[inline]
     pub fn decode_key(encoded: &[u8]) -> Option<(usize, Vec<u8>)> {
-        Self::decode_key_ref(encoded).map(|(db, k)| (db, k.to_vec()))
+        Some((0, encoded.to_vec()))
     }
 
     pub(crate) fn prefix_end(prefix: &[u8]) -> Option<Vec<u8>> {
+        if prefix.is_empty() {
+            return None;
+        }
         let mut end = prefix.to_vec();
         while let Some(last) = end.last_mut() {
             if *last == 0xff {

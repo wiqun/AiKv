@@ -362,18 +362,27 @@ async fn test_compat_scan_returns_all_keys() {
 #[tokio::test]
 async fn test_compat_db_isolation() {
     let dir = TempDir::new().unwrap();
-    for (label, storage) in [("memory", mem()), ("aidb", aidb(&dir))] {
-        storage.set(0, b"k", b"db0").await.unwrap();
-        storage.set(1, b"k", b"db1").await.unwrap();
-        assert_eq!(
-            storage.get(0, b"k").await.unwrap(),
-            Some(b"db0".to_vec()),
-            "{label}: db 0"
-        );
-        assert_eq!(
-            storage.get(1, b"k").await.unwrap(),
-            Some(b"db1".to_vec()),
-            "{label}: db 1"
-        );
-    }
+    // memory 引擎保留隔离, aidb 引擎单库裸 Key 共享命名空间
+    let mem_storage = mem();
+    mem_storage.set(0, b"k", b"db0").await.unwrap();
+    mem_storage.set(1, b"k", b"db1").await.unwrap();
+    assert_eq!(
+        mem_storage.get(0, b"k").await.unwrap(),
+        Some(b"db0".to_vec()),
+        "memory: db 0"
+    );
+    assert_eq!(
+        mem_storage.get(1, b"k").await.unwrap(),
+        Some(b"db1".to_vec()),
+        "memory: db 1"
+    );
+
+    let aidb_storage = aidb(&dir);
+    aidb_storage.set(0, b"k", b"db0").await.unwrap();
+    aidb_storage.set(1, b"k", b"db1").await.unwrap();
+    assert_eq!(
+        aidb_storage.get(0, b"k").await.unwrap(),
+        Some(b"db1".to_vec()),
+        "aidb: single-db raw key mode shares namespace"
+    );
 }

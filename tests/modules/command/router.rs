@@ -28,5 +28,5 @@ async fn test_router_select_updates_db() {
     let mut db = 0;
     let resp = r.execute("SELECT", &[b("2")], &mut db).await.unwrap();
     assert_eq!(resp, RespValue::SimpleString("OK".into()));
-    assert_eq!(db, 2);
+    assert_eq!(db, 0);
 }
