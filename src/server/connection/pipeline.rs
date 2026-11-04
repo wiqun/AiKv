@@ -103,7 +103,18 @@ impl Connection {
             } else {
                 None
             };
-            if needs_barrier(&kinds, kind) {
+            // 同 key 盲写冲突屏障: 仅针对无在途覆盖层的 PlainSet (SET / JSON.SET).
+            // Script (EVAL/EVALSHA) 自带 InFlightBuffer 读写覆盖层, 不在此屏障范围内;
+            // 且 Script 的 args[0] 是脚本内容或 sha1 而非 key, 绝不能误判为 key 冲突.
+            let key_conflict = matches!(kind, Some(DeferKind::PlainSet))
+                && !args.is_empty()
+                && pending.iter().any(|p| {
+                    (p.cmd == "SET" || p.cmd == "JSON.SET")
+                        && !p.args.is_empty()
+                        && p.args[0] == args[0]
+                });
+
+            if needs_barrier(&kinds, kind) || key_conflict {
                 self.flush_pending(&mut pending).await?;
                 kinds.clear();
             }
@@ -196,11 +207,30 @@ enum DeferKind {
     Script,
 }
 
+/// 检查 `JSON.SET` 是否可延迟确认.
+/// 仅当操作根路径 ("$" 或 ".") 且非 XX/NN 选项时允许先入队后确认.
+fn is_deferrable_json_set(args: &[Bytes]) -> bool {
+    if args.len() < 3 {
+        return false;
+    }
+    let path = args[1].as_ref();
+    if path != b"$" && path != b"." {
+        return false;
+    }
+    for arg in args.iter().skip(3) {
+        if arg.eq_ignore_ascii_case(b"XX") || arg.eq_ignore_ascii_case(b"NN") {
+            return false;
+        }
+    }
+    true
+}
+
 /// 命令是否可以先入队后确认. 带选项的 SET (NX/XX/GET/KEEPTTL 等) 与其他写命令 (INCR, DEL, HSET 等)
-/// 要读已应用的旧值, 不可延迟.
+/// 要读已应用的旧值, 不可延迟. 根路径覆盖的 `JSON.SET` (非 XX) 也属于盲写, 允许延迟.
 fn defer_kind(cmd: &str, args: &[Bytes]) -> Option<DeferKind> {
     match cmd {
         "SET" if args.len() == 2 => Some(DeferKind::PlainSet),
+        "JSON.SET" if is_deferrable_json_set(args) => Some(DeferKind::PlainSet),
         "EVAL" | "EVALSHA" | "EVAL_RO" | "EVALSHA_RO" => Some(DeferKind::Script),
         _ => None,
     }
@@ -443,6 +473,32 @@ mod defer_tests {
                 Some(DeferKind::Script)
             );
         }
+        // JSON.SET 根路径盲写可延迟, 包含 XE/NX/过期, 遇到 XX 或子路径不可延迟
+        assert_eq!(
+            defer_kind("JSON.SET", &[b("k"), b("$"), b("{\"a\":1}")]),
+            Some(DeferKind::PlainSet)
+        );
+        assert_eq!(
+            defer_kind("JSON.SET", &[b("k"), b("."), b("{\"a\":1}")]),
+            Some(DeferKind::PlainSet)
+        );
+        assert_eq!(
+            defer_kind("JSON.SET", &[b("k"), b("$"), b("{\"a\":1}"), b("0"), b("XE")]),
+            Some(DeferKind::PlainSet)
+        );
+        assert_eq!(
+            defer_kind("JSON.SET", &[b("k"), b("$"), b("{\"a\":1}"), b("NX")]),
+            Some(DeferKind::PlainSet)
+        );
+        assert_eq!(
+            defer_kind("JSON.SET", &[b("k"), b("$"), b("{\"a\":1}"), b("XX")]),
+            None
+        );
+        assert_eq!(
+            defer_kind("JSON.SET", &[b("k"), b("$.sub"), b("1")]),
+            None
+        );
+        assert_eq!(defer_kind("JSON.SET", &[b("k")]), None);
         for cmd in ["GET", "INCR", "DEL", "HSET", "MSET", "SETNX", "FCALL"] {
             assert_eq!(defer_kind(cmd, &[b("k"), b("v")]), None, "{cmd} 不可延迟");
         }

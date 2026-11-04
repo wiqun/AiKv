@@ -217,7 +217,11 @@ impl JsonCommands {
             }
 
             let _lock = self.key_lock.lock(key).await;
-            let exists = self.storage.exists(db, key).await?;
+            let exists = if xe || nx || xx {
+                self.storage.exists(db, key).await?
+            } else {
+                false
+            };
 
             if xe && exists {
                 return Err(Error::Command("ERR Key already exists (XE)".into()));
