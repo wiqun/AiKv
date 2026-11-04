@@ -235,6 +235,92 @@ impl ClusterDataAdapter {
         user_key
     }
 
+    pub(crate) fn is_collection_subkey(key: &[u8]) -> bool {
+        let Some((_, user_key)) = AiDbEngine::decode_key_ref(key) else {
+            return false;
+        };
+        if let Some(pos) = user_key.iter().position(|&b| b == 0x01) {
+            if pos + 1 < user_key.len() && matches!(user_key[pos + 1], b'H' | b'S' | b'Z' | b'Y') {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn merge_sorted_batches(
+        batches: Vec<Vec<(Vec<u8>, Vec<u8>)>>,
+        limit: usize,
+        reverse: bool,
+    ) -> Vec<(Vec<u8>, Vec<u8>)> {
+        if batches.is_empty() || limit == 0 {
+            return Vec::new();
+        }
+        if batches.len() == 1 {
+            let mut single = batches.into_iter().next().unwrap();
+            single.truncate(limit);
+            return single;
+        }
+
+        use std::cmp::Ordering;
+        use std::collections::{BinaryHeap, VecDeque};
+
+        let mut deques: Vec<VecDeque<(Vec<u8>, Vec<u8>)>> =
+            batches.into_iter().map(VecDeque::from).collect();
+
+        #[derive(Eq, PartialEq)]
+        struct HeapEntry {
+            key: Vec<u8>,
+            batch_idx: usize,
+            reverse: bool,
+        }
+
+        impl Ord for HeapEntry {
+            fn cmp(&self, other: &Self) -> Ordering {
+                if self.reverse {
+                    self.key.cmp(&other.key)
+                } else {
+                    other.key.cmp(&self.key)
+                }
+            }
+        }
+
+        impl PartialOrd for HeapEntry {
+            fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+
+        let mut heap = BinaryHeap::with_capacity(deques.len());
+        for (idx, dq) in deques.iter().enumerate() {
+            if let Some((k, _)) = dq.front() {
+                heap.push(HeapEntry {
+                    key: k.clone(),
+                    batch_idx: idx,
+                    reverse,
+                });
+            }
+        }
+
+        let mut result = Vec::with_capacity(limit);
+        while let Some(top) = heap.pop() {
+            if let Some(pair) = deques[top.batch_idx].pop_front() {
+                result.push(pair);
+                if result.len() >= limit {
+                    break;
+                }
+                if let Some((next_k, _)) = deques[top.batch_idx].front() {
+                    heap.push(HeapEntry {
+                        key: next_k.clone(),
+                        batch_idx: top.batch_idx,
+                        reverse,
+                    });
+                }
+            }
+        }
+
+        result
+    }
+
     /// 读路径: 按 router 已分配 slot 路由到本地 group, 或 F-056-A1 合并读.
     /// ReadyToCommit 读切 target (纯 target, 仅本地时走快路径); Frozen/Copying
     /// 读为合并读 (可能涉及远程 RPC, 由调用方 `merge_read` 处理).
@@ -524,14 +610,21 @@ impl StorageAdapter for ClusterDataAdapter {
         let Some(mgr) = CLUSTER_STATE_MGR.get().cloned() else {
             return self.local.last_in_range_sync(start, end);
         };
-        match Self::route_read(&start)? {
-            Some((_, ReadRoute::Single(gid))) => mgr
-                .multi_raft
-                .last_local_user_pair_sync(gid, &start, &end)
-                .map_err(Self::map_err),
-            Some(_) => Err(Error::Command(TRYAGAIN_MIGRATION.into())),
-            None => self.local.last_in_range_sync(start, end),
+        let effective_end = if end.is_empty() { vec![0xff; 64] } else { end };
+        if Self::is_collection_subkey(&start) {
+            match Self::route_read(&start)? {
+                Some((_, ReadRoute::Single(gid))) => {
+                    return mgr
+                        .multi_raft
+                        .last_local_user_pair_sync(gid, &start, &effective_end)
+                        .map_err(Self::map_err);
+                }
+                Some(_) => return Err(Error::Command(TRYAGAIN_MIGRATION.into())),
+                None => return self.local.last_in_range_sync(start, effective_end),
+            }
         }
+        let pairs = self.range_scan_sync(start, effective_end, 1, true)?;
+        Ok(pairs.into_iter().next())
     }
 
     fn range_scan_sync(
@@ -544,13 +637,45 @@ impl StorageAdapter for ClusterDataAdapter {
         let Some(mgr) = CLUSTER_STATE_MGR.get().cloned() else {
             return self.local.range_scan_sync(start, end, limit, reverse);
         };
-        match Self::route_read(&start)? {
-            Some((_, ReadRoute::Single(gid))) => mgr
-                .multi_raft
-                .scan_local_user_pairs_limited_sync(gid, &start, &end, limit, reverse)
-                .map_err(Self::map_err),
-            Some(_) => Err(Error::Command(TRYAGAIN_MIGRATION.into())),
-            None => self.local.range_scan_sync(start, end, limit, reverse),
+        let effective_end = if end.is_empty() { vec![0xff; 64] } else { end };
+        if Self::is_collection_subkey(&start) {
+            match Self::route_read(&start)? {
+                Some((_, ReadRoute::Single(gid))) => mgr
+                    .multi_raft
+                    .scan_local_user_pairs_limited_sync(gid, &start, &effective_end, limit, reverse)
+                    .map_err(Self::map_err),
+                Some(_) => Err(Error::Command(TRYAGAIN_MIGRATION.into())),
+                None => self
+                    .local
+                    .range_scan_sync(start, effective_end, limit, reverse),
+            }
+        } else {
+            let mut gids = mgr.multi_raft.local_group_ids();
+            gids.sort_unstable();
+            if gids.is_empty() {
+                return Ok(Vec::new());
+            }
+            if gids.len() == 1 {
+                return mgr
+                    .multi_raft
+                    .scan_local_user_pairs_limited_sync(
+                        gids[0],
+                        &start,
+                        &effective_end,
+                        limit,
+                        reverse,
+                    )
+                    .map_err(Self::map_err);
+            }
+            let mut group_batches = Vec::with_capacity(gids.len());
+            for gid in gids {
+                let pairs = mgr
+                    .multi_raft
+                    .scan_local_user_pairs_limited_sync(gid, &start, &effective_end, limit, reverse)
+                    .map_err(Self::map_err)?;
+                group_batches.push(pairs);
+            }
+            Ok(Self::merge_sorted_batches(group_batches, limit, reverse))
         }
     }
 
@@ -563,15 +688,17 @@ impl StorageAdapter for ClusterDataAdapter {
             return self.local.for_each_prefix_sync(prefix, f);
         };
         let end = AiDbEngine::prefix_end(&prefix);
-        if let Ok(Some((_, ReadRoute::Single(gid)))) = Self::route_read(&prefix) {
-            let pairs = mgr
-                .multi_raft
-                .scan_local_pairs_in_range_sync(gid, &prefix, end.as_deref())
-                .map_err(Self::map_err)?;
-            for (key, value) in pairs {
-                f(key, value)?;
+        if Self::is_collection_subkey(&prefix) {
+            if let Ok(Some((_, ReadRoute::Single(gid)))) = Self::route_read(&prefix) {
+                let pairs = mgr
+                    .multi_raft
+                    .scan_local_pairs_in_range_sync(gid, &prefix, end.as_deref())
+                    .map_err(Self::map_err)?;
+                for (key, value) in pairs {
+                    f(key, value)?;
+                }
+                return Ok(());
             }
-            return Ok(());
         }
         for gid in mgr.multi_raft.local_group_ids() {
             let pairs = mgr
@@ -752,16 +879,18 @@ impl StorageAdapter for ClusterDataAdapter {
         match CLUSTER_STATE_MGR.get() {
             Some(mgr) => {
                 let end = AiDbEngine::prefix_end(&prefix);
-                if let Ok(Some((_, ReadRoute::Single(gid)))) = Self::route_read(&prefix) {
-                    let pairs = mgr
-                        .multi_raft
-                        .scan_local_pairs_in_range(gid, prefix, end)
-                        .await
-                        .map_err(Self::map_err)?;
-                    for (k, v) in pairs {
-                        f(k, v)?;
+                if Self::is_collection_subkey(&prefix) {
+                    if let Ok(Some((_, ReadRoute::Single(gid)))) = Self::route_read(&prefix) {
+                        let pairs = mgr
+                            .multi_raft
+                            .scan_local_pairs_in_range(gid, prefix, end)
+                            .await
+                            .map_err(Self::map_err)?;
+                        for (k, v) in pairs {
+                            f(k, v)?;
+                        }
+                        return Ok(());
                     }
-                    return Ok(());
                 }
                 for gid in mgr.multi_raft.local_group_ids() {
                     let pairs = mgr
@@ -789,14 +918,50 @@ impl StorageAdapter for ClusterDataAdapter {
         let Some(mgr) = CLUSTER_STATE_MGR.get().cloned() else {
             return self.local.range_scan(start, end, limit, reverse).await;
         };
-        match Self::route_read(&start)? {
-            Some((_, ReadRoute::Single(gid))) => mgr
-                .multi_raft
-                .scan_local_user_pairs_limited(gid, start, end, limit, reverse)
-                .await
-                .map_err(Self::map_err),
-            Some(_) => Err(Error::Command(TRYAGAIN_MIGRATION.into())),
-            None => self.local.range_scan(start, end, limit, reverse).await,
+        let effective_end = if end.is_empty() { vec![0xff; 64] } else { end };
+        if Self::is_collection_subkey(&start) {
+            match Self::route_read(&start)? {
+                Some((_, ReadRoute::Single(gid))) => mgr
+                    .multi_raft
+                    .scan_local_user_pairs_limited(gid, start, effective_end, limit, reverse)
+                    .await
+                    .map_err(Self::map_err),
+                Some(_) => Err(Error::Command(TRYAGAIN_MIGRATION.into())),
+                None => {
+                    self.local
+                        .range_scan(start, effective_end, limit, reverse)
+                        .await
+                }
+            }
+        } else {
+            let mut gids = mgr.multi_raft.local_group_ids();
+            gids.sort_unstable();
+            if gids.is_empty() {
+                return Ok(Vec::new());
+            }
+            if gids.len() == 1 {
+                return mgr
+                    .multi_raft
+                    .scan_local_user_pairs_limited(gids[0], start, effective_end, limit, reverse)
+                    .await
+                    .map_err(Self::map_err);
+            }
+            let mut futures = Vec::with_capacity(gids.len());
+            for gid in &gids {
+                futures.push(mgr.multi_raft.scan_local_user_pairs_limited(
+                    *gid,
+                    start.clone(),
+                    effective_end.clone(),
+                    limit,
+                    reverse,
+                ));
+            }
+            let results = futures_util::future::join_all(futures).await;
+            let mut group_batches = Vec::with_capacity(gids.len());
+            for res in results {
+                group_batches.push(res.map_err(Self::map_err)?);
+            }
+            Ok(Self::merge_sorted_batches(group_batches, limit, reverse))
         }
     }
 
@@ -808,24 +973,33 @@ impl StorageAdapter for ClusterDataAdapter {
         let Some(mgr) = CLUSTER_STATE_MGR.get().cloned() else {
             return self.local.last_in_range(start, end).await;
         };
-        if let Some((_, ReadRoute::Single(gid))) = Self::route_read(&start)? {
-            return mgr
-                .multi_raft
-                .last_local_user_pair(gid, start, end)
-                .await
-                .map_err(Self::map_err);
+        let effective_end = if end.is_empty() { vec![0xff; 64] } else { end };
+        if Self::is_collection_subkey(&start) {
+            if let Some((_, ReadRoute::Single(gid))) = Self::route_read(&start)? {
+                return mgr
+                    .multi_raft
+                    .last_local_user_pair(gid, start, effective_end)
+                    .await
+                    .map_err(Self::map_err);
+            }
         }
-        self.local.last_in_range(start, end).await
+        let pairs = self.range_scan(start, effective_end, 1, true).await?;
+        Ok(pairs.into_iter().next())
     }
 
     async fn delete_range(&self, start: Vec<u8>, end: Vec<u8>) -> Result<()> {
         const BATCH_DELETE_RANGE_LIMIT: usize = 512;
         match CLUSTER_STATE_MGR.get() {
             Some(mgr) => {
-                let target_gids: Vec<u64> = match Self::route_read(&start)? {
-                    Some((_, ReadRoute::Single(gid))) => vec![gid],
-                    _ => mgr.multi_raft.local_group_ids(),
+                let target_gids: Vec<u64> = if Self::is_collection_subkey(&start) {
+                    match Self::route_read(&start)? {
+                        Some((_, ReadRoute::Single(gid))) => vec![gid],
+                        _ => mgr.multi_raft.local_group_ids(),
+                    }
+                } else {
+                    mgr.multi_raft.local_group_ids()
                 };
+                let effective_end = if end.is_empty() { vec![0xff; 64] } else { end };
                 for gid in target_gids {
                     loop {
                         let pairs = mgr
@@ -833,7 +1007,7 @@ impl StorageAdapter for ClusterDataAdapter {
                             .scan_local_user_pairs_limited(
                                 gid,
                                 start.clone(),
-                                end.clone(),
+                                effective_end.clone(),
                                 BATCH_DELETE_RANGE_LIMIT,
                                 false,
                             )
@@ -1063,5 +1237,102 @@ mod tests {
                 Some(b"val".to_vec())
             );
         }
+    }
+
+    #[test]
+    fn test_is_collection_subkey_detection() {
+        assert!(!ClusterDataAdapter::is_collection_subkey(b""));
+        assert!(!ClusterDataAdapter::is_collection_subkey(b"normal_key"));
+        assert!(!ClusterDataAdapter::is_collection_subkey(b"user:1000\x00"));
+        assert!(!ClusterDataAdapter::is_collection_subkey(
+            b"invalid\x01Xdata"
+        ));
+
+        assert!(ClusterDataAdapter::is_collection_subkey(
+            b"hash\x01H\x00\x05field"
+        ));
+        assert!(ClusterDataAdapter::is_collection_subkey(
+            b"set\x01S\x00\x03mem"
+        ));
+        assert!(ClusterDataAdapter::is_collection_subkey(
+            b"zset\x01Z\x00\x03mem"
+        ));
+        assert!(ClusterDataAdapter::is_collection_subkey(
+            b"zset\x01Y12345678mem"
+        ));
+    }
+
+    #[test]
+    fn test_merge_sorted_batches_multi_group() {
+        let g1 = vec![
+            (b"apple".to_vec(), b"v1".to_vec()),
+            (b"cherry".to_vec(), b"v3".to_vec()),
+            (b"zebra".to_vec(), b"v5".to_vec()),
+        ];
+        let g2 = vec![
+            (b"banana".to_vec(), b"v2".to_vec()),
+            (b"date".to_vec(), b"v4".to_vec()),
+        ];
+
+        // 1. 正向全量归并
+        let merged =
+            ClusterDataAdapter::merge_sorted_batches(vec![g1.clone(), g2.clone()], 10, false);
+        let keys: Vec<&[u8]> = merged.iter().map(|(k, _)| k.as_slice()).collect();
+        assert_eq!(
+            keys,
+            vec![
+                &b"apple"[..],
+                &b"banana"[..],
+                &b"cherry"[..],
+                &b"date"[..],
+                &b"zebra"[..]
+            ]
+        );
+
+        // 2. 正向有限截断 (limit = 3)
+        let merged_top3 =
+            ClusterDataAdapter::merge_sorted_batches(vec![g1.clone(), g2.clone()], 3, false);
+        let keys_top3: Vec<&[u8]> = merged_top3.iter().map(|(k, _)| k.as_slice()).collect();
+        assert_eq!(
+            keys_top3,
+            vec![&b"apple"[..], &b"banana"[..], &b"cherry"[..]]
+        );
+
+        // 3. 反向全量归并
+        let g1_rev = vec![
+            (b"zebra".to_vec(), b"v5".to_vec()),
+            (b"cherry".to_vec(), b"v3".to_vec()),
+            (b"apple".to_vec(), b"v1".to_vec()),
+        ];
+        let g2_rev = vec![
+            (b"date".to_vec(), b"v4".to_vec()),
+            (b"banana".to_vec(), b"v2".to_vec()),
+        ];
+        let merged_rev = ClusterDataAdapter::merge_sorted_batches(
+            vec![g1_rev.clone(), g2_rev.clone()],
+            10,
+            true,
+        );
+        let keys_rev: Vec<&[u8]> = merged_rev.iter().map(|(k, _)| k.as_slice()).collect();
+        assert_eq!(
+            keys_rev,
+            vec![
+                &b"zebra"[..],
+                &b"date"[..],
+                &b"cherry"[..],
+                &b"banana"[..],
+                &b"apple"[..]
+            ]
+        );
+
+        // 4. 反向有限截断 (limit = 2)
+        let merged_rev_top2 =
+            ClusterDataAdapter::merge_sorted_batches(vec![g1_rev, g2_rev], 2, true);
+        let keys_rev_top2: Vec<&[u8]> = merged_rev_top2.iter().map(|(k, _)| k.as_slice()).collect();
+        assert_eq!(keys_rev_top2, vec![&b"zebra"[..], &b"date"[..]]);
+
+        // 5. 空 batch 边界处理
+        let empty = ClusterDataAdapter::merge_sorted_batches(vec![vec![], vec![]], 10, false);
+        assert!(empty.is_empty());
     }
 }
