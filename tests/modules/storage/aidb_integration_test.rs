@@ -44,6 +44,31 @@ async fn test_storage_adapter_and_kv_storage_statistics_flow() {
 }
 
 #[tokio::test]
+async fn test_keys_literal_prefix_pushdown_matches_full_scan() {
+    let dir = TempDir::new().unwrap();
+    let engine = AiDbEngine::open_for_testing(dir.path()).expect("open aidb");
+    let storage: Arc<dyn KvStorage> = KvStorageAdapter::new(engine);
+    for k in ["a:1", "a:2", "ab:1", "b:1", "a", "a:x1"] {
+        storage.set(0, k.as_bytes(), b"v").await.unwrap();
+    }
+
+    let sorted = |mut v: Vec<Vec<u8>>| {
+        v.sort();
+        v.into_iter()
+            .map(|k| String::from_utf8(k).unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        sorted(storage.keys(0, b"a:*").await.unwrap()),
+        ["a:1", "a:2", "a:x1"]
+    );
+    assert_eq!(sorted(storage.keys(0, b"a:?").await.unwrap()), ["a:1", "a:2"]);
+    assert_eq!(sorted(storage.keys(0, b"a").await.unwrap()), ["a"]);
+    assert_eq!(sorted(storage.keys(0, b"*:1").await.unwrap()), ["a:1", "ab:1", "b:1"]);
+    assert_eq!(storage.keys(0, b"zzz*").await.unwrap().len(), 0);
+}
+
+#[tokio::test]
 async fn test_info_storage_renders_aidb_snapshot() {
     let dir = TempDir::new().unwrap();
     let engine = AiDbEngine::open_for_testing(dir.path()).expect("open aidb");

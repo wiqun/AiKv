@@ -30,7 +30,7 @@ use std::sync::{Arc, OnceLock};
 use async_trait::async_trait;
 
 use crate::error::{Error, Result};
-use crate::storage::memory::glob_match;
+use crate::storage::memory::{glob_literal_prefix, glob_match};
 use crate::storage::observation::{PointReadCounter, StorageObservation};
 use crate::storage::subkey;
 use crate::storage::types::{
@@ -481,7 +481,13 @@ impl KvStorageAdapter {
 
     async fn keys_for_db(&self, db: usize, pattern: &[u8]) -> Result<Vec<Vec<u8>>> {
         self.check_db(db)?;
-        let prefix = Self::db_prefix(db);
+        // 字面前缀下推为范围扫描, 避免全库扫描; 含 0x01 的前缀可能被误判为集合 subkey 路由, 不下推.
+        let literal = glob_literal_prefix(pattern);
+        let prefix = if literal.contains(&0x01) {
+            Self::db_prefix(db)
+        } else {
+            AiDbEngine::encode_key(db, literal)
+        };
         let pattern = pattern.to_vec();
         let observation = self.observation.clone();
         let keys = Arc::new(std::sync::Mutex::new(Vec::new()));

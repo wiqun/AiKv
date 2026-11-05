@@ -161,6 +161,16 @@ pub fn glob_match(pattern: &[u8], text: &[u8]) -> bool {
     glob_match_impl(pattern, text, 0, 0)
 }
 
+/// glob 模式开头不含元字符的字面前缀: 任何匹配的 key 必以它开头, 可作为范围扫描的下界.
+/// 遇到 `*` / `?` / `[` / `\` 即截止 (后两者当前不支持, 保守处理).
+pub fn glob_literal_prefix(pattern: &[u8]) -> &[u8] {
+    let end = pattern
+        .iter()
+        .position(|b| matches!(b, b'*' | b'?' | b'[' | b'\\'))
+        .unwrap_or(pattern.len());
+    &pattern[..end]
+}
+
 fn glob_match_impl(pattern: &[u8], text: &[u8], pi: usize, ti: usize) -> bool {
     if pi == pattern.len() {
         return ti == text.len();
@@ -798,6 +808,17 @@ impl crate::storage::script_io::ScriptIo for MemoryEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn glob_literal_prefix_stops_at_meta() {
+        assert_eq!(glob_literal_prefix(b"Kv:a:b:*"), b"Kv:a:b:");
+        assert_eq!(glob_literal_prefix(b"Kv:a?c*"), b"Kv:a");
+        assert_eq!(glob_literal_prefix(b"*foo"), b"");
+        assert_eq!(glob_literal_prefix(b"exact"), b"exact");
+        assert_eq!(glob_literal_prefix(b"a[bc]*"), b"a");
+        assert_eq!(glob_literal_prefix(b"a\\*b"), b"a");
+        assert_eq!(glob_literal_prefix(b""), b"");
+    }
 
     #[test]
     fn glob_star_and_question() {
