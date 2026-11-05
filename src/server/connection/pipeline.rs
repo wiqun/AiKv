@@ -483,7 +483,10 @@ mod defer_tests {
             Some(DeferKind::PlainSet)
         );
         assert_eq!(
-            defer_kind("JSON.SET", &[b("k"), b("$"), b("{\"a\":1}"), b("0"), b("XE")]),
+            defer_kind(
+                "JSON.SET",
+                &[b("k"), b("$"), b("{\"a\":1}"), b("0"), b("XE")]
+            ),
             Some(DeferKind::PlainSet)
         );
         assert_eq!(
@@ -494,10 +497,7 @@ mod defer_tests {
             defer_kind("JSON.SET", &[b("k"), b("$"), b("{\"a\":1}"), b("XX")]),
             None
         );
-        assert_eq!(
-            defer_kind("JSON.SET", &[b("k"), b("$.sub"), b("1")]),
-            None
-        );
+        assert_eq!(defer_kind("JSON.SET", &[b("k"), b("$.sub"), b("1")]), None);
         assert_eq!(defer_kind("JSON.SET", &[b("k")]), None);
         for cmd in ["GET", "INCR", "DEL", "HSET", "MSET", "SETNX", "FCALL"] {
             assert_eq!(defer_kind(cmd, &[b("k"), b("v")]), None, "{cmd} 不可延迟");
