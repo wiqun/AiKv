@@ -62,9 +62,15 @@ async fn test_keys_literal_prefix_pushdown_matches_full_scan() {
         sorted(storage.keys(0, b"a:*").await.unwrap()),
         ["a:1", "a:2", "a:x1"]
     );
-    assert_eq!(sorted(storage.keys(0, b"a:?").await.unwrap()), ["a:1", "a:2"]);
+    assert_eq!(
+        sorted(storage.keys(0, b"a:?").await.unwrap()),
+        ["a:1", "a:2"]
+    );
     assert_eq!(sorted(storage.keys(0, b"a").await.unwrap()), ["a"]);
-    assert_eq!(sorted(storage.keys(0, b"*:1").await.unwrap()), ["a:1", "ab:1", "b:1"]);
+    assert_eq!(
+        sorted(storage.keys(0, b"*:1").await.unwrap()),
+        ["a:1", "ab:1", "b:1"]
+    );
     assert_eq!(storage.keys(0, b"zzz*").await.unwrap().len(), 0);
 }
 
