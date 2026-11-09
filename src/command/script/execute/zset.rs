@@ -28,7 +28,7 @@ pub(super) fn exec_zadd(
     }
     let k = key(&args[0]);
     if txn.uses_subkey_zset(storage, &k)? {
-        return txn.subkey_zadd(storage, args);
+        return txn.subkey_zadd_with_flags(storage, &args[0], &pairs, flags);
     }
     let zset = match txn.ensure_zset_mut(storage, &k)? {
         Some(z) => z,

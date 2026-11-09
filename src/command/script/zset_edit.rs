@@ -7,7 +7,7 @@ use bytes::Bytes;
 
 use crate::command::router;
 use crate::command::script::transaction::{
-    parse_f64_arg, ScriptTransaction, ZSetDelta, ZSetMemberChange,
+    ScriptTransaction, ZSetDelta, ZSetMemberChange,
 };
 use crate::error::Result;
 use crate::protocol::RespValue;
@@ -36,11 +36,13 @@ impl ScriptTransaction {
         self.zset_deltas.get(key).map(|delta| delta.count)
     }
 
+    #[cfg(test)]
     pub(crate) fn subkey_zadd(
         &mut self,
         storage: &dyn crate::storage::ScriptIo,
         args: &[Bytes],
     ) -> Result<RespValue> {
+        use crate::command::script::transaction::parse_f64_arg;
         let (flags, idx) = crate::command::zset::helpers::parse_zadd_flags(args)?;
         let mut pairs = Vec::with_capacity((args.len() - idx) / 2);
         for i in (idx..args.len()).step_by(2) {
