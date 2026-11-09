@@ -6,9 +6,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 
 use crate::command::router;
-use crate::command::script::transaction::{
-    ScriptTransaction, ZSetDelta, ZSetMemberChange,
-};
+use crate::command::script::transaction::{ScriptTransaction, ZSetDelta, ZSetMemberChange};
 use crate::error::Result;
 use crate::protocol::RespValue;
 use crate::storage::zset_subkey::{self, member_key};

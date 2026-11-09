@@ -569,19 +569,28 @@ mod members_resp_tests {
         map.insert(b"m1".to_vec(), 10.0);
 
         // 1. NX: 不更新已有元素
-        let flags = ZAddFlags { nx: true, ..Default::default() };
+        let flags = ZAddFlags {
+            nx: true,
+            ..Default::default()
+        };
         let res = apply_zadd_flags(&mut map, &[(20.0, b"m1".to_vec())], flags).unwrap();
         assert_eq!(res, ZAddOutcome::Count(0));
         assert_eq!(map.get(b"m1".as_slice()), Some(&10.0));
 
         // 2. XX: 仅更新已有元素, 不添加新元素
-        let flags = ZAddFlags { xx: true, ..Default::default() };
+        let flags = ZAddFlags {
+            xx: true,
+            ..Default::default()
+        };
         let res = apply_zadd_flags(&mut map, &[(30.0, b"m2".to_vec())], flags).unwrap();
         assert_eq!(res, ZAddOutcome::Count(0));
         assert!(!map.contains_key(b"m2".as_slice()));
 
         // 3. GT: 仅在 score 大于旧分时更新
-        let flags = ZAddFlags { gt: true, ..Default::default() };
+        let flags = ZAddFlags {
+            gt: true,
+            ..Default::default()
+        };
         let res = apply_zadd_flags(&mut map, &[(5.0, b"m1".to_vec())], flags).unwrap();
         assert_eq!(res, ZAddOutcome::Count(0));
         assert_eq!(map.get(b"m1".as_slice()), Some(&10.0));
@@ -590,12 +599,23 @@ mod members_resp_tests {
         assert_eq!(map.get(b"m1".as_slice()), Some(&15.0));
 
         // 4. CH: 统计修改数
-        let flags = ZAddFlags { ch: true, ..Default::default() };
-        let res = apply_zadd_flags(&mut map, &[(20.0, b"m1".to_vec()), (30.0, b"m2".to_vec())], flags).unwrap();
+        let flags = ZAddFlags {
+            ch: true,
+            ..Default::default()
+        };
+        let res = apply_zadd_flags(
+            &mut map,
+            &[(20.0, b"m1".to_vec()), (30.0, b"m2".to_vec())],
+            flags,
+        )
+        .unwrap();
         assert_eq!(res, ZAddOutcome::Count(2)); // m1 变更 + m2 新增
 
         // 5. INCR
-        let flags = ZAddFlags { incr: true, ..Default::default() };
+        let flags = ZAddFlags {
+            incr: true,
+            ..Default::default()
+        };
         let res = apply_zadd_flags(&mut map, &[(5.5, b"m1".to_vec())], flags).unwrap();
         assert_eq!(res, ZAddOutcome::Score(Some(25.5)));
     }

@@ -41,9 +41,9 @@ pub(super) fn exec_zadd(
     match outcome {
         crate::command::zset::helpers::ZAddOutcome::Count(n) => Ok(router::integer(n)),
         crate::command::zset::helpers::ZAddOutcome::Score(None) => Ok(RespValue::Null),
-        crate::command::zset::helpers::ZAddOutcome::Score(Some(s)) => {
-            Ok(router::bulk(crate::command::zset::helpers::format_score(s).into_bytes()))
-        }
+        crate::command::zset::helpers::ZAddOutcome::Score(Some(s)) => Ok(router::bulk(
+            crate::command::zset::helpers::format_score(s).into_bytes(),
+        )),
     }
 }
 

@@ -980,20 +980,14 @@ mod tests {
             .lpop(0, &[key.clone(), Bytes::from_static(b"2")])
             .await
             .unwrap();
-        assert_eq!(
-            res,
-            array_of_bulk(vec![b"b".to_vec(), b"c".to_vec()])
-        );
+        assert_eq!(res, array_of_bulk(vec![b"b".to_vec(), b"c".to_vec()]));
 
         // 3. RPOP 带 count 1: 返回包含 1 个元素的 array (带 count 始终返回 Array)
         let res = commands
             .rpop(0, &[key.clone(), Bytes::from_static(b"1")])
             .await
             .unwrap();
-        assert_eq!(
-            res,
-            array_of_bulk(vec![b"d".to_vec()])
-        );
+        assert_eq!(res, array_of_bulk(vec![b"d".to_vec()]));
 
         // 4. 列表已空: 返回 nil
         let res = commands

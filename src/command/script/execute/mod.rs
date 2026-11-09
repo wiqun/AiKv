@@ -733,10 +733,7 @@ mod tests {
             ],
         )
         .unwrap();
-        assert_eq!(
-            res,
-            RespValue::BulkString(Some(Bytes::from_static(b"eLL")))
-        );
+        assert_eq!(res, RespValue::BulkString(Some(Bytes::from_static(b"eLL"))));
 
         // 4. STRLEN
         let res = string::exec_strlen(&io, &txn, &[Bytes::from_static(b"k_bmp")]).unwrap();

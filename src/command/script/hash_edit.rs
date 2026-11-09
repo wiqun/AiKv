@@ -466,16 +466,31 @@ mod tests {
         fn raw_prefix_last(&self, _prefix: Vec<u8>) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
             Ok(None)
         }
-        fn raw_range_last(&self, _start: Vec<u8>, _end: Vec<u8>) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        fn raw_range_last(
+            &self,
+            _start: Vec<u8>,
+            _end: Vec<u8>,
+        ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
             Ok(None)
         }
-        fn raw_range_scan(&self, _start: Vec<u8>, _end: Vec<u8>, _limit: usize, _reverse: bool) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        fn raw_range_scan(
+            &self,
+            _start: Vec<u8>,
+            _end: Vec<u8>,
+            _limit: usize,
+            _reverse: bool,
+        ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
             Ok(Vec::new())
         }
         fn raw_subkey_get(&self, _db: usize, encoded_key: Vec<u8>) -> Result<Option<Vec<u8>>> {
             Ok(self.subkeys.lock().unwrap().get(&encoded_key).cloned())
         }
-        fn raw_subkey_for_each(&self, _db: usize, prefix: Vec<u8>, mut f: crate::storage::types::RawPairVisitor) -> Result<()> {
+        fn raw_subkey_for_each(
+            &self,
+            _db: usize,
+            prefix: Vec<u8>,
+            mut f: crate::storage::types::RawPairVisitor,
+        ) -> Result<()> {
             let subkeys = self.subkeys.lock().unwrap();
             for (k, v) in subkeys.iter() {
                 if k.starts_with(&prefix) {
@@ -613,8 +628,14 @@ mod tests {
         assert_eq!(res, router::bulk(b"val1".to_vec()));
 
         // 2. subkey_hexists
-        assert_eq!(txn.subkey_hexists(&io, key, b"f1").unwrap(), router::integer(1));
-        assert_eq!(txn.subkey_hexists(&io, key, b"f2").unwrap(), router::integer(0));
+        assert_eq!(
+            txn.subkey_hexists(&io, key, b"f1").unwrap(),
+            router::integer(1)
+        );
+        assert_eq!(
+            txn.subkey_hexists(&io, key, b"f2").unwrap(),
+            router::integer(0)
+        );
 
         // 3. subkey_hset new field f2
         let hset_args = vec![
@@ -626,7 +647,10 @@ mod tests {
         assert_eq!(txn.hash_delta_count(key, &io).unwrap(), 101);
 
         // 4. subkey_hget f2 from delta
-        assert_eq!(txn.subkey_hget(&io, key, b"f2").unwrap(), router::bulk(b"val2".to_vec()));
+        assert_eq!(
+            txn.subkey_hget(&io, key, b"f2").unwrap(),
+            router::bulk(b"val2".to_vec())
+        );
 
         // 5. prepare_batch_ops: writes only field changes
         let ops = txn.prepare_batch_ops_owned(&io).unwrap();

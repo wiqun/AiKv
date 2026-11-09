@@ -444,7 +444,9 @@ impl JsonCommands {
             };
             let len = match &target {
                 JsonValue::Object(obj) => obj.len() as i64,
-                JsonValue::Array(arr) if arr.len() == 1 && matches!(&arr[0], JsonValue::Object(_)) => {
+                JsonValue::Array(arr)
+                    if arr.len() == 1 && matches!(&arr[0], JsonValue::Object(_)) =>
+                {
                     if let JsonValue::Object(inner) = &arr[0] {
                         inner.len() as i64
                     } else {
