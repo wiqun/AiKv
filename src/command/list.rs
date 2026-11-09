@@ -153,7 +153,9 @@ impl ListCommands {
     }
 
     pub async fn lpop(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
-        router::require_args("LPOP", args, 1)?;
+        if args.is_empty() || args.len() > 2 {
+            return Err(router::wrong_args("LPOP", ""));
+        }
         let count = if args.len() > 1 {
             Some(parse_pop_count(&args[1])?)
         } else {
@@ -163,7 +165,9 @@ impl ListCommands {
     }
 
     pub async fn rpop(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
-        router::require_args("RPOP", args, 1)?;
+        if args.is_empty() || args.len() > 2 {
+            return Err(router::wrong_args("RPOP", ""));
+        }
         let count = if args.len() > 1 {
             Some(parse_pop_count(&args[1])?)
         } else {
@@ -184,11 +188,15 @@ impl ListCommands {
             return Ok(router::nil_bulk());
         };
         let list = stored.as_list_mut()?;
-        let count = count.unwrap_or(1);
-        if count == 0 {
+        if list.is_empty() {
+            return Ok(router::nil_bulk());
+        }
+        let is_count_given = count.is_some();
+        let limit = count.unwrap_or(1);
+        if limit == 0 {
             return Ok(RespValue::Array(Some(vec![])));
         }
-        let n = (count as usize).min(list.len());
+        let n = (limit as usize).min(list.len());
         let mut popped = Vec::with_capacity(n);
         for _ in 0..n {
             let v = if front {
@@ -203,7 +211,7 @@ impl ListCommands {
         } else {
             self.storage.rewrite_stored(db, key, stored).await?;
         }
-        if count == 1 && popped.len() == 1 {
+        if !is_count_given {
             return Ok(router::bulk(popped.into_iter().next().unwrap()));
         }
         Ok(array_of_bulk(popped))
@@ -939,5 +947,59 @@ mod tests {
         BlockingRegistry::global().notify(&source, RespValue::SimpleString("OK".into()));
         wait_for_waiter(&source).await;
         task.abort();
+    }
+
+    #[tokio::test]
+    async fn test_lpop_rpop_with_count() {
+        let commands = ListCommands::new(
+            MemoryEngine::new(1),
+            Arc::new(KeyLock::new(4096)),
+            Arc::new(tokio::sync::RwLock::new(())),
+        );
+        let key = Bytes::from_static(b"list_pop_count");
+        commands
+            .rpush(
+                0,
+                &[
+                    key.clone(),
+                    Bytes::from_static(b"a"),
+                    Bytes::from_static(b"b"),
+                    Bytes::from_static(b"c"),
+                    Bytes::from_static(b"d"),
+                ],
+            )
+            .await
+            .unwrap();
+
+        // 1. 无 count: 返回单个 bulk string
+        let res = commands.lpop(0, std::slice::from_ref(&key)).await.unwrap();
+        assert_eq!(res, router::bulk(b"a".to_vec()));
+
+        // 2. 带 count 2: 返回包含 2 个元素的 array
+        let res = commands
+            .lpop(0, &[key.clone(), Bytes::from_static(b"2")])
+            .await
+            .unwrap();
+        assert_eq!(
+            res,
+            array_of_bulk(vec![b"b".to_vec(), b"c".to_vec()])
+        );
+
+        // 3. RPOP 带 count 1: 返回包含 1 个元素的 array (带 count 始终返回 Array)
+        let res = commands
+            .rpop(0, &[key.clone(), Bytes::from_static(b"1")])
+            .await
+            .unwrap();
+        assert_eq!(
+            res,
+            array_of_bulk(vec![b"d".to_vec()])
+        );
+
+        // 4. 列表已空: 返回 nil
+        let res = commands
+            .lpop(0, &[key.clone(), Bytes::from_static(b"1")])
+            .await
+            .unwrap();
+        assert_eq!(res, router::nil_bulk());
     }
 }
