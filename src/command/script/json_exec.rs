@@ -292,7 +292,18 @@ pub fn exec_json_arrlen(
         }
     };
     match &target {
-        JsonValue::Array(arr) => Ok(router::integer(arr.len() as i64)),
+        JsonValue::Array(arr) => {
+            let len = if arr.len() == 1 && matches!(&arr[0], JsonValue::Array(_)) {
+                if let JsonValue::Array(inner) = &arr[0] {
+                    inner.len() as i64
+                } else {
+                    arr.len() as i64
+                }
+            } else {
+                arr.len() as i64
+            };
+            Ok(router::integer(len))
+        }
         _ => Ok(router::nil_bulk()),
     }
 }
@@ -327,6 +338,13 @@ pub fn exec_json_objlen(
     };
     match &target {
         JsonValue::Object(obj) => Ok(router::integer(obj.len() as i64)),
+        JsonValue::Array(arr) if arr.len() == 1 && matches!(&arr[0], JsonValue::Object(_)) => {
+            if let JsonValue::Object(inner) = &arr[0] {
+                Ok(router::integer(inner.len() as i64))
+            } else {
+                Ok(router::integer(arr.len() as i64))
+            }
+        }
         _ => Ok(router::nil_bulk()),
     }
 }
@@ -416,7 +434,17 @@ pub fn exec_json_arrappend(
 
     let extracted = engine.extract(&json_val, &path)?;
     let len = match &extracted {
-        JsonValue::Array(arr) => arr.len() as i64,
+        JsonValue::Array(arr) => {
+            if arr.len() == 1 && matches!(&arr[0], JsonValue::Array(_)) {
+                if let JsonValue::Array(inner) = &arr[0] {
+                    inner.len() as i64
+                } else {
+                    arr.len() as i64
+                }
+            } else {
+                arr.len() as i64
+            }
+        }
         _ => return Ok(router::nil_bulk()),
     };
 
