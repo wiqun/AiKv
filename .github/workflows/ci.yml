@@ -5,7 +5,7 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# 主 CI 仅非文档变更触发: .md 与 docs/ 由 docs-link-check 单独检查
+# 主 CI 仅在针对 main 的 PR 与合并到 main 时触发; .md 与 docs/ 由 docs-link-check 单独检查
 on:
   push:
     branches: [main]
@@ -25,8 +25,9 @@ env:
 
 jobs:
   test-cluster:
+    name: Cluster & Monitoring Fast Gate
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Prepare workspace (rust + protoc + aidb)
@@ -38,69 +39,17 @@ jobs:
       - name: Check format
         run: cargo fmt --check
 
-      - name: Clippy
-        run: cargo clippy --all-targets --features cluster
+      - name: Clippy (cluster & monitoring)
+        run: cargo clippy --all-targets --features cluster,monitoring
 
-      - name: Test
-        run: cargo test --workspace --features cluster -- --test-threads=1
-
-      - name: Clippy monitoring
-        run: cargo clippy --all-targets --features monitoring,cluster
-
-      - name: Test monitoring (observability contract + otel)
-        run: cargo test --features monitoring,cluster --test server -- --test-threads=1
-
-      # cluster 侧 observability (modules/cluster/observability.rs): gossip/failover/redirect OTLP 指标
-      - name: Test monitoring (cluster observability)
-        run: cargo test --features monitoring,cluster --test cluster_commands -- --test-threads=1
-
-  test-server-stress:
-    needs: test-cluster
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-      - name: Prepare workspace (rust + protoc + aidb)
-        uses: ./.github/actions/prepare
-        with:
-          cache-save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      - name: TCP stress tests
-        run: cargo test --test server --features cluster -- --ignored --test-threads=1
-
-  test-commands-slow:
-    needs: test-cluster
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-      - name: Prepare workspace (rust + protoc + aidb)
-        uses: ./.github/actions/prepare
-        with:
-          cache-save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      - name: Command slow tests
-        run: cargo test --test commands --features cluster -- --ignored --test-threads=1
-
-  test-stress-ttl:
-    needs: test-cluster
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-      - name: Prepare workspace (rust + protoc + aidb)
-        uses: ./.github/actions/prepare
-        with:
-          cache-save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      - name: TTL concurrent write stress tests
-        run: cargo test --features cluster --test stress_ttl -- --ignored --test-threads=1
+      - name: Test (workspace with cluster & monitoring)
+        run: cargo test --workspace --features cluster,monitoring -- --test-threads=1
 
   # compression feature: aidb_options 的 Snap/LZ4 压缩 gate 测试.
-  # compression 已是默认 feature, 普通构建会编译该路径.
   test-compression:
+    name: Snap/LZ4 Compression Gate
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Prepare workspace (rust + protoc + aidb)
@@ -113,8 +62,9 @@ jobs:
 
   # 验证显式关闭默认 compression 后, 无压缩 fallback 仍可用.
   test-no-compression:
+    name: Fallback without Compression Gate
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Prepare workspace (rust + protoc + aidb)
@@ -124,5 +74,3 @@ jobs:
 
       - name: Test without compression feature
         run: cargo test --no-default-features --lib storage::aidb_options -- --test-threads=1
-
-  # 说明: 当前 e2e job 主要为人工与专项回归测试设计, 暂不纳入常规 PR 门禁.

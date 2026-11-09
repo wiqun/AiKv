@@ -1,0 +1,59 @@
+name: Nightly Stress & Benchmark
+
+concurrency:
+  group: nightly-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  schedule:
+    # 每天 UTC 18:00 (北京时间凌晨 02:00) 自动演练
+    - cron: "0 18 * * *"
+  workflow_dispatch:
+    # 支持在 GitHub Actions 网页手动点击触发
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test-server-stress:
+    name: TCP Stress Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare workspace (rust + protoc + aidb)
+        uses: ./.github/actions/prepare
+        with:
+          cache-save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: TCP stress tests
+        run: cargo test --test server --features cluster -- --ignored --test-threads=1
+
+  test-commands-slow:
+    name: Command Slow Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare workspace (rust + protoc + aidb)
+        uses: ./.github/actions/prepare
+        with:
+          cache-save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Command slow tests
+        run: cargo test --test commands --features cluster -- --ignored --test-threads=1
+
+  test-stress-ttl:
+    name: TTL Concurrent Stress Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare workspace (rust + protoc + aidb)
+        uses: ./.github/actions/prepare
+        with:
+          cache-save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: TTL concurrent write stress tests
+        run: cargo test --features cluster --test stress_ttl -- --ignored --test-threads=1
