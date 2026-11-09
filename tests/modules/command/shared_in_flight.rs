@@ -14,9 +14,13 @@ async fn test_shared_in_flight_context_visibility() {
     let ctx = InFlightContext::new();
 
     // 1. 写入普通 String 并在同/异句柄中可见
-    let (seq1, encoded1) = ctx
-        .in_flight
-        .insert_batch(0, &[(b"str_key".to_vec(), WriteOp::Put(Arc::new(b"value_1".to_vec())))]);
+    let (seq1, encoded1) = ctx.in_flight.insert_batch(
+        0,
+        &[(
+            b"str_key".to_vec(),
+            WriteOp::Put(Arc::new(b"value_1".to_vec())),
+        )],
+    );
     let stored = ctx.in_flight.get(0, b"str_key");
     assert!(stored.is_some());
     let val = stored.unwrap().unwrap();
@@ -54,9 +58,13 @@ async fn test_command_router_shares_same_in_flight_context() {
 
     let ctx = router.in_flight_context();
     // 向 router 共享 context 写入
-    let (seq, encoded) = ctx
-        .in_flight
-        .insert_batch(0, &[(b"shared_k".to_vec(), WriteOp::Put(Arc::new(b"shared_v".to_vec())))]);
+    let (seq, encoded) = ctx.in_flight.insert_batch(
+        0,
+        &[(
+            b"shared_k".to_vec(),
+            WriteOp::Put(Arc::new(b"shared_v".to_vec())),
+        )],
+    );
 
     // 验证 router 的 context 能读到
     let stored = router.in_flight_context().in_flight.get(0, b"shared_k");

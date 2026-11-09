@@ -236,9 +236,7 @@ impl KvStorage for GatedKvStorage {
         limit: usize,
         reverse: bool,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        self.inner
-            .raw_range_scan(start, end, limit, reverse)
-            .await
+        self.inner.raw_range_scan(start, end, limit, reverse).await
     }
 
     fn watch_registry(&self) -> Arc<aikv::storage::WatchRegistry> {
@@ -303,7 +301,10 @@ async fn test_zadd_hotkey_gate_releases_lock_and_preserves_count() {
         key_lock.lock(&key).await
     })
     .await;
-    assert!(lock_res.is_ok(), "第二条 ZADD 写入未能在提前放锁后快速拿到锁");
+    assert!(
+        lock_res.is_ok(),
+        "第二条 ZADD 写入未能在提前放锁后快速拿到锁"
+    );
     let guard = lock_res.unwrap();
 
     // 关键红绿灯断言 2:
@@ -418,7 +419,10 @@ async fn test_zadd_hotkey_same_member_overwrites_score() {
         )
         .await
         .unwrap();
-    assert_eq!(score, RespValue::BulkString(Some(Bytes::from_static(b"25"))));
+    assert_eq!(
+        score,
+        RespValue::BulkString(Some(Bytes::from_static(b"25")))
+    );
 }
 
 #[tokio::test]
@@ -496,4 +500,74 @@ async fn test_zadd_enqueue_failure_rolls_back() {
         .await
         .unwrap();
     assert_eq!(card, RespValue::Integer(0));
+}
+
+#[tokio::test]
+async fn test_zadd_followed_by_zrem_in_flight() {
+    let (_dir, gated, router) = setup_gated_env();
+
+    let mut db = 0;
+    // 初始化 zset header
+    gated
+        .inner
+        .set_typed(0, b"z_cross", zset_subkey::header(0, None))
+        .await
+        .unwrap();
+
+    gated.should_block.store(true, Ordering::SeqCst);
+
+    let r1 = Arc::clone(&router);
+    let h1 = tokio::spawn(async move {
+        let mut db = 0;
+        r1.execute(
+            "ZADD",
+            &[Bytes::from("z_cross"), Bytes::from("10"), Bytes::from("m1")],
+            &mut db,
+        )
+        .await
+    });
+
+    // 等待 ZADD 算完并在途登记，放锁后卡在存储闸门
+    gated.entered.notified().await;
+
+    // 并发执行 ZREM z_cross m1: 此时 m1 在在途缓冲中，ZREM 应该感知并成功删除返回 1
+    let r2 = Arc::clone(&router);
+    let h2 = tokio::spawn(async move {
+        let mut db2 = 0;
+        r2.execute(
+            "ZREM",
+            &[Bytes::from("z_cross"), Bytes::from("m1")],
+            &mut db2,
+        )
+        .await
+    });
+
+    // 稍微等待调度让 ZREM 完成在途计算并入队
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // 放行底层存储
+    gated.should_block.store(false, Ordering::SeqCst);
+    gated.gate.notify_waiters();
+    let zadd_res = h1.await.unwrap().unwrap();
+    assert_eq!(zadd_res, RespValue::Integer(1));
+
+    let zrem_res = h2.await.unwrap().unwrap();
+
+    // ZREM 应该成功删除 1 个元素
+    assert_eq!(
+        zrem_res,
+        RespValue::Integer(1),
+        "ZREM 应感知在途 ZADD 插入的成员并成功删除返回 1"
+    );
+
+    // 最终 ZCARD 必须是 0 (m1 不应被落盘的 ZADD 复活)
+    let final_card = router
+        .execute("ZCARD", &[Bytes::from("z_cross")], &mut db)
+        .await
+        .unwrap();
+    assert_eq!(
+        final_card,
+        RespValue::Integer(0),
+        "ZREM 提交后 ZCARD 必须为 0，m1 不能被复活"
+    );
 }

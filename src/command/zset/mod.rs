@@ -139,9 +139,15 @@ impl ZSetCommands {
     pub async fn zrem(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_min_args("ZREM", args, 2)?;
         let key = &args[0];
-        let _lock = self.key_lock.lock(key).await;
+        let lock = self.key_lock.lock(key).await;
         let members: Vec<Vec<u8>> = args[1..].iter().map(|member| member.to_vec()).collect();
-        let count = persist::remove_members(self.storage.as_ref(), db, key, &members).await?;
+        let ctx = persist::ZAddContext {
+            storage: self.storage.as_ref(),
+            in_flight: &self.in_flight_ctx,
+            db,
+            key,
+        };
+        let count = persist::remove_members_pipeline(&ctx, &members, lock).await?;
         Ok(router::integer(count))
     }
 

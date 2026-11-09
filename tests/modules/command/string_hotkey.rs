@@ -12,7 +12,9 @@ use aikv::command::CommandRouter;
 use aikv::error::{Error, Result};
 use aikv::protocol::RespValue;
 use aikv::storage::memory::MemoryEngine;
-use aikv::storage::types::{BatchWriteHandle, KeyspaceStats, KvStorage, ScanResult, StorageEngineKind, StoredValue, WriteOp};
+use aikv::storage::types::{
+    BatchWriteHandle, KeyspaceStats, KvStorage, ScanResult, StorageEngineKind, StoredValue, WriteOp,
+};
 
 /// 带有可控闸门的三入口测试存储 (同时拦截 set, write_batch, enqueue_batch)
 struct GatedKvStorage {
@@ -53,7 +55,13 @@ impl KvStorage for GatedKvStorage {
         self.inner.set(db, key, value).await
     }
 
-    async fn set_with_ttl(&self, db: usize, key: &[u8], value: &[u8], expire_at_ms: u64) -> Result<()> {
+    async fn set_with_ttl(
+        &self,
+        db: usize,
+        key: &[u8],
+        value: &[u8],
+        expire_at_ms: u64,
+    ) -> Result<()> {
         if self.should_block.load(Ordering::SeqCst) {
             self.entered.notify_waiters();
             self.gate.notified().await;
@@ -85,7 +93,11 @@ impl KvStorage for GatedKvStorage {
         self.inner.write_batch(db, ops).await
     }
 
-    async fn enqueue_batch(&self, db: usize, ops: Vec<(Vec<u8>, WriteOp)>) -> Result<Box<dyn BatchWriteHandle>> {
+    async fn enqueue_batch(
+        &self,
+        db: usize,
+        ops: Vec<(Vec<u8>, WriteOp)>,
+    ) -> Result<Box<dyn BatchWriteHandle>> {
         if self.fail_enqueue.load(Ordering::SeqCst) {
             return Err(Error::Command("ERR enqueue failed".into()));
         }
@@ -100,7 +112,13 @@ impl KvStorage for GatedKvStorage {
         self.inner.keys(db, pattern).await
     }
 
-    async fn scan(&self, db: usize, cursor: u64, pattern: &[u8], count: usize) -> Result<ScanResult> {
+    async fn scan(
+        &self,
+        db: usize,
+        cursor: u64,
+        pattern: &[u8],
+        count: usize,
+    ) -> Result<ScanResult> {
         self.inner.scan(db, cursor, pattern, count).await
     }
 
@@ -164,8 +182,17 @@ impl KvStorage for GatedKvStorage {
         self.inner.rename_key_nx(db, old_key, new_key).await
     }
 
-    async fn copy_key(&self, src_db: usize, dst_db: usize, src_key: &[u8], dst_key: &[u8], replace: bool) -> Result<bool> {
-        self.inner.copy_key(src_db, dst_db, src_key, dst_key, replace).await
+    async fn copy_key(
+        &self,
+        src_db: usize,
+        dst_db: usize,
+        src_key: &[u8],
+        dst_key: &[u8],
+        replace: bool,
+    ) -> Result<bool> {
+        self.inner
+            .copy_key(src_db, dst_db, src_key, dst_key, replace)
+            .await
     }
 
     async fn random_key(&self, db: usize) -> Result<Option<Vec<u8>>> {
@@ -194,7 +221,11 @@ async fn test_setrange_hotkey_gate_releases_lock_and_folds() {
     // 预设一个 10 字节字符串 "0000000000"
     let mut db = 0;
     router
-        .execute("SET", &[Bytes::from("doc"), Bytes::from("0000000000")], &mut db)
+        .execute(
+            "SET",
+            &[Bytes::from("doc"), Bytes::from("0000000000")],
+            &mut db,
+        )
         .await
         .unwrap();
 
@@ -260,7 +291,10 @@ async fn test_setrange_hotkey_gate_releases_lock_and_folds() {
         .execute("GET", &[Bytes::from("doc")], &mut db)
         .await
         .unwrap();
-    assert_eq!(final_val, RespValue::BulkString(Some(Bytes::from_static(b"AABB000000"))));
+    assert_eq!(
+        final_val,
+        RespValue::BulkString(Some(Bytes::from_static(b"AABB000000")))
+    );
 }
 
 #[tokio::test]
@@ -271,7 +305,11 @@ async fn test_setrange_public_get_reads_committed_only() {
 
     let mut db = 0;
     router
-        .execute("SET", &[Bytes::from("doc_iso"), Bytes::from("INIT")], &mut db)
+        .execute(
+            "SET",
+            &[Bytes::from("doc_iso"), Bytes::from("INIT")],
+            &mut db,
+        )
         .await
         .unwrap();
 
@@ -282,7 +320,11 @@ async fn test_setrange_public_get_reads_committed_only() {
         let mut db = 0;
         r1.execute(
             "SETRANGE",
-            &[Bytes::from("doc_iso"), Bytes::from("0"), Bytes::from("NEW_")],
+            &[
+                Bytes::from("doc_iso"),
+                Bytes::from("0"),
+                Bytes::from("NEW_"),
+            ],
             &mut db,
         )
         .await
@@ -295,7 +337,10 @@ async fn test_setrange_public_get_reads_committed_only() {
         .execute("GET", &[Bytes::from("doc_iso")], &mut db)
         .await
         .unwrap();
-    assert_eq!(get_val, RespValue::BulkString(Some(Bytes::from_static(b"INIT"))));
+    assert_eq!(
+        get_val,
+        RespValue::BulkString(Some(Bytes::from_static(b"INIT")))
+    );
 
     // 放行
     gated.should_block.store(false, Ordering::SeqCst);
@@ -307,7 +352,10 @@ async fn test_setrange_public_get_reads_committed_only() {
         .execute("GET", &[Bytes::from("doc_iso")], &mut db)
         .await
         .unwrap();
-    assert_eq!(final_val, RespValue::BulkString(Some(Bytes::from_static(b"NEW_"))));
+    assert_eq!(
+        final_val,
+        RespValue::BulkString(Some(Bytes::from_static(b"NEW_")))
+    );
 }
 
 #[tokio::test]
@@ -318,7 +366,11 @@ async fn test_enqueue_failure_cascades_and_rolls_back() {
 
     let mut db = 0;
     router
-        .execute("SET", &[Bytes::from("fail_k"), Bytes::from("BASE")], &mut db)
+        .execute(
+            "SET",
+            &[Bytes::from("fail_k"), Bytes::from("BASE")],
+            &mut db,
+        )
         .await
         .unwrap();
 
@@ -340,7 +392,10 @@ async fn test_enqueue_failure_cascades_and_rolls_back() {
         .execute("GET", &[Bytes::from("fail_k")], &mut db)
         .await
         .unwrap();
-    assert_eq!(cur, RespValue::BulkString(Some(Bytes::from_static(b"BASE"))));
+    assert_eq!(
+        cur,
+        RespValue::BulkString(Some(Bytes::from_static(b"BASE")))
+    );
 }
 
 #[tokio::test]
@@ -366,5 +421,180 @@ async fn test_concurrent_incr_50_accuracy() {
         .execute("GET", &[Bytes::from("counter")], &mut db)
         .await
         .unwrap();
-    assert_eq!(final_res, RespValue::BulkString(Some(Bytes::from_static(b"50"))));
+    assert_eq!(
+        final_res,
+        RespValue::BulkString(Some(Bytes::from_static(b"50")))
+    );
+}
+
+#[tokio::test]
+async fn test_incr_followed_by_set_nx_in_flight() {
+    let raw_storage = MemoryEngine::new(1);
+    let gated = Arc::new(GatedKvStorage::new(raw_storage));
+    let router = Arc::new(CommandRouter::new(gated.clone()));
+
+    // 阻塞在途提交
+    gated.should_block.store(true, Ordering::SeqCst);
+
+    let r1 = Arc::clone(&router);
+    let h1 = tokio::spawn(async move {
+        let mut db = 0;
+        r1.execute("INCR", &[Bytes::from("cnt_nx")], &mut db).await
+    });
+
+    // 等待 INCR 算完新值 (1) 并登记在途，放锁后卡在存储闸门
+    gated.entered.notified().await;
+
+    // 并发执行 SET cnt_nx hello NX: 此时键已在在途缓冲中存在 (值为 1)，NX 应判定键已存在并返回 nil
+    let r2 = Arc::clone(&router);
+    let h2 = tokio::spawn(async move {
+        let mut db2 = 0;
+        r2.execute(
+            "SET",
+            &[
+                Bytes::from("cnt_nx"),
+                Bytes::from("hello"),
+                Bytes::from("NX"),
+            ],
+            &mut db2,
+        )
+        .await
+    });
+
+    // 稍微等待调度以触发可能的误写
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // 放行存储
+    gated.should_block.store(false, Ordering::SeqCst);
+    gated.gate.notify_waiters();
+    let incr_res = h1.await.unwrap().unwrap();
+    assert_eq!(incr_res, RespValue::Integer(1));
+
+    let set_nx_res = h2.await.unwrap().unwrap();
+
+    // NX 必须返回 nil (而不是误判不存在而写入 OK)
+    assert_eq!(
+        set_nx_res,
+        RespValue::BulkString(None),
+        "SET NX 应感知在途 INCR 产生的键存在，返回 nil"
+    );
+
+    // 最终值必须是 "1"
+    let mut db = 0;
+    let final_val = router
+        .execute("GET", &[Bytes::from("cnt_nx")], &mut db)
+        .await
+        .unwrap();
+    assert_eq!(
+        final_val,
+        RespValue::BulkString(Some(Bytes::from_static(b"1")))
+    );
+}
+
+#[tokio::test]
+async fn test_incr_followed_by_set_xx_in_flight() {
+    let raw_storage = MemoryEngine::new(1);
+    let gated = Arc::new(GatedKvStorage::new(raw_storage));
+    let router = Arc::new(CommandRouter::new(gated.clone()));
+
+    // 阻塞在途提交
+    gated.should_block.store(true, Ordering::SeqCst);
+
+    let r1 = Arc::clone(&router);
+    let h1 = tokio::spawn(async move {
+        let mut db = 0;
+        r1.execute("INCR", &[Bytes::from("cnt_xx")], &mut db).await
+    });
+
+    // 等待 INCR 算完新值 (1) 并登记在途，放锁后卡在存储闸门
+    gated.entered.notified().await;
+
+    // 并发执行 SET cnt_xx world XX: 此时键在在途缓冲中存在，XX 判定通过并覆写为 "world"
+    let r2 = Arc::clone(&router);
+    let h2 = tokio::spawn(async move {
+        let mut db2 = 0;
+        r2.execute(
+            "SET",
+            &[
+                Bytes::from("cnt_xx"),
+                Bytes::from("world"),
+                Bytes::from("XX"),
+            ],
+            &mut db2,
+        )
+        .await
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // 放行存储
+    gated.should_block.store(false, Ordering::SeqCst);
+    gated.gate.notify_waiters();
+    let incr_res = h1.await.unwrap().unwrap();
+    assert_eq!(incr_res, RespValue::Integer(1));
+
+    let set_xx_res = h2.await.unwrap().unwrap();
+    assert_eq!(
+        set_xx_res,
+        RespValue::SimpleString("OK".into()),
+        "SET XX 应感知在途 INCR 产生的键存在，成功返回 OK"
+    );
+
+    // 最终值必须是 "world"
+    let mut db = 0;
+    let final_val = router
+        .execute("GET", &[Bytes::from("cnt_xx")], &mut db)
+        .await
+        .unwrap();
+    assert_eq!(
+        final_val,
+        RespValue::BulkString(Some(Bytes::from_static(b"world")))
+    );
+}
+
+#[tokio::test]
+async fn test_incr_followed_by_getdel_in_flight() {
+    let raw_storage = MemoryEngine::new(1);
+    let gated = Arc::new(GatedKvStorage::new(raw_storage));
+    let router = Arc::new(CommandRouter::new(gated.clone()));
+
+    gated.should_block.store(true, Ordering::SeqCst);
+
+    let r1 = Arc::clone(&router);
+    let h1 = tokio::spawn(async move {
+        let mut db = 0;
+        r1.execute("INCR", &[Bytes::from("cnt_gd")], &mut db).await
+    });
+
+    gated.entered.notified().await;
+
+    // 并发执行 GETDEL cnt_gd: 必须读出在途的 "1" 并标记在途删除
+    let r2 = Arc::clone(&router);
+    let h2 = tokio::spawn(async move {
+        let mut db2 = 0;
+        r2.execute("GETDEL", &[Bytes::from("cnt_gd")], &mut db2)
+            .await
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    gated.should_block.store(false, Ordering::SeqCst);
+    gated.gate.notify_waiters();
+    let incr_res = h1.await.unwrap().unwrap();
+    assert_eq!(incr_res, RespValue::Integer(1));
+
+    let getdel_res = h2.await.unwrap().unwrap();
+    assert_eq!(
+        getdel_res,
+        RespValue::BulkString(Some(Bytes::from_static(b"1"))),
+        "GETDEL 应读到在途 INCR 产生的 1"
+    );
+
+    // 最终键已被删除，GET 返回 nil
+    let mut db = 0;
+    let final_val = router
+        .execute("GET", &[Bytes::from("cnt_gd")], &mut db)
+        .await
+        .unwrap();
+    assert_eq!(final_val, RespValue::BulkString(None));
 }

@@ -116,20 +116,48 @@ pub async fn remove_members(
     key: &[u8],
     members: &[Vec<u8>],
 ) -> Result<i64> {
-    let Some(stored) = storage.get_typed(db, key).await? else {
+    let in_flight = InFlightContext::new();
+    let ctx = ZAddContext {
+        storage,
+        in_flight: &in_flight,
+        db,
+        key,
+    };
+    remove_members_pipeline(&ctx, members, ()).await
+}
+
+pub async fn remove_members_pipeline<G>(
+    ctx: &ZAddContext<'_>,
+    members: &[Vec<u8>],
+    guard: G,
+) -> Result<i64> {
+    let stored = match ctx.in_flight.in_flight.get(ctx.db, ctx.key) {
+        Some(Some(s)) => Some(s),
+        Some(None) => None,
+        None => ctx.storage.get_typed(ctx.db, ctx.key).await?,
+    };
+    let Some(stored) = stored else {
+        drop(guard);
         return Ok(0);
     };
     if zset_subkey::is_zset_header(&stored).is_some() {
-        return remove_from_header(storage, db, key, &stored, members).await;
+        return remove_from_header_pipeline(ctx, &stored, members, guard).await;
     }
     let expires = stored.expires_at;
     let mut map = stored.as_zset()?.clone();
     let removed = remove_pairs(&mut map, members);
-    if map.is_empty() {
-        storage.delete(db, key).await?;
-    } else {
-        store_map(storage, db, key, map, expires).await?;
+    if removed == 0 {
+        drop(guard);
+        return Ok(0);
     }
+    let ops = if map.is_empty() {
+        vec![(ctx.key.to_vec(), WriteOp::Delete)]
+    } else {
+        let mut stored = StoredValue::new_zset(map);
+        stored.expires_at = expires;
+        vec![(ctx.key.to_vec(), WriteOp::put_stored(stored))]
+    };
+    commit_ops_in_lock(ctx.storage, ctx.in_flight, ctx.db, ctx.key, ops, guard).await?;
     Ok(removed)
 }
 
@@ -284,36 +312,39 @@ async fn header_batch_ops(
     Ok((ops, outcome, count))
 }
 
-async fn remove_from_header(
-    storage: &dyn KvStorage,
-    db: usize,
-    key: &[u8],
+async fn remove_from_header_pipeline<G>(
+    ctx: &ZAddContext<'_>,
     stored: &crate::storage::StoredValue,
     members: &[Vec<u8>],
+    guard: G,
 ) -> Result<i64> {
     let mut count = zset_subkey::is_zset_header(stored).unwrap_or(0);
     let mut ops = Vec::new();
     let mut removed = 0i64;
     let mut seen = HashMap::<Vec<u8>, ()>::new();
+    let encoded = AiDbEngine::encode_key(ctx.db, ctx.key);
     for member in members {
         if seen.insert(member.clone(), ()).is_some() {
             continue;
         }
-        let old = zset_subkey::read_member_score(storage, db, key, member).await?;
+        let old = read_member_score_in_flight(ctx, &encoded, member).await?;
         if old.is_none() {
             continue;
         }
         removed += 1;
         count = count.saturating_sub(1);
-        ops.extend(zset_subkey::member_change_ops(db, key, member, old, None));
+        ops.extend(zset_subkey::member_change_ops(
+            ctx.db, ctx.key, member, old, None,
+        ));
     }
     if removed == 0 {
+        drop(guard);
         return Ok(0);
     }
-    push_header_or_delete(&mut ops, key, count, stored.expires_at);
-    storage.write_batch(db, ops).await?;
+    push_header_or_delete(&mut ops, ctx.key, count, stored.expires_at);
+    commit_ops_in_lock(ctx.storage, ctx.in_flight, ctx.db, ctx.key, ops, guard).await?;
     if count == 0 {
-        zset_subkey::invalidate_score_bounds_hint(db, key);
+        zset_subkey::invalidate_score_bounds_hint(ctx.db, ctx.key);
     }
     Ok(removed)
 }
@@ -332,24 +363,6 @@ fn push_header_or_delete(
         key.to_vec(),
         WriteOp::put_stored(zset_subkey::header(count, expires_at)),
     ));
-}
-
-async fn store_map(
-    storage: &dyn KvStorage,
-    db: usize,
-    key: &[u8],
-    map: BTreeMap<Vec<u8>, f64>,
-    expires_at: Option<u64>,
-) -> Result<()> {
-    if storage.engine_kind() != StorageEngineKind::AiDb || map.len() <= zset_subkey::ZSET_MAX_INLINE
-    {
-        let mut stored = crate::storage::StoredValue::new_zset(map);
-        stored.expires_at = expires_at;
-        return storage.rewrite_stored(db, key, stored).await;
-    }
-    storage
-        .write_batch(db, zset_subkey::replace_ops(db, key, &map, expires_at))
-        .await
 }
 
 fn remove_pairs(map: &mut BTreeMap<Vec<u8>, f64>, members: &[Vec<u8>]) -> i64 {

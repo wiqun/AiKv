@@ -18,11 +18,13 @@ use std::sync::Arc;
 use bytes::Bytes;
 
 use crate::command::router::{self, KeyLock};
+use crate::command::shared::commit_ops_in_lock;
 use crate::error::{Error, Result};
 use crate::protocol::RespValue;
+use crate::storage::types::{StoredValue, WriteOp};
 use crate::storage::{now_ms, KvStorage};
 pub(crate) use args::*;
-use rmw::{commit_string_in_lock, read_string_in_lock};
+use rmw::{commit_string_in_lock, exists_in_lock, read_stored_in_lock, read_string_in_lock};
 
 pub struct StringCommands {
     storage: Arc<dyn KvStorage>,
@@ -82,7 +84,7 @@ impl StringCommands {
         let keys: Vec<&[u8]> = args.chunks(2).map(|chunk| chunk[0].as_ref()).collect();
         let _guard = self.key_lock.lock_keys_sorted(&keys).await;
         for key in &keys {
-            if self.storage.exists(db, key).await? {
+            if exists_in_lock(self.storage.as_ref(), &self.in_flight_ctx, db, key).await? {
                 return Ok(router::integer(0));
             }
         }
@@ -102,56 +104,74 @@ impl StringCommands {
             || matches!(opts.condition, SetCondition::Nx | SetCondition::Xx);
 
         if needs_lock {
-            let _lock = self.key_lock.lock(&opts.key).await;
-            let old_value = self.storage.get(db, &opts.key).await?;
-
-            // NX: 仅在 key 不存在时设置
-            if opts.condition == SetCondition::Nx {
-                if let Some(val) = old_value {
-                    return Ok(if opts.return_old {
-                        router::bulk(val)
-                    } else {
-                        router::nil_bulk()
-                    });
-                }
-            }
-            // XX: 仅在 key 存在时设置
-            if opts.condition == SetCondition::Xx && old_value.is_none() {
-                return Ok(router::nil_bulk());
-            }
-
-            // KEEPTTL: 保留现有过期时间
-            let previous_ttl = if opts.keep_ttl {
-                self.storage
-                    .get_typed(db, &opts.key)
-                    .await?
-                    .and_then(|s| s.expires_at)
-            } else {
-                None
-            };
-            let expire = if opts.keep_ttl {
-                previous_ttl
-            } else {
-                opts.expire_at
-            };
-
-            self.apply_set(db, &opts.key, &opts.value, expire).await?;
-            if previous_ttl.is_some() {
-                self.storage.release_seen_ttl(db).await?;
-            }
-
-            return Ok(if opts.return_old {
-                match old_value {
-                    Some(v) => router::bulk(v),
-                    None => router::nil_bulk(),
-                }
-            } else {
-                router::ok()
-            });
+            return self.set_locked(db, opts).await;
         }
 
         self.apply_set(db, &opts.key, &opts.value, opts.expire_at)
             .await
+    }
+
+    async fn set_locked(&self, db: usize, opts: SetOptions) -> Result<RespValue> {
+        let lock = self.key_lock.lock(&opts.key).await;
+        let stored =
+            read_stored_in_lock(self.storage.as_ref(), &self.in_flight_ctx, db, &opts.key).await?;
+
+        // NX: 仅在 key 不存在时设置
+        if opts.condition == SetCondition::Nx {
+            if let Some(s) = stored {
+                drop(lock);
+                return Ok(if opts.return_old {
+                    let old_bytes = s.as_string()?.to_vec();
+                    router::bulk(old_bytes)
+                } else {
+                    router::nil_bulk()
+                });
+            }
+        }
+        // XX: 仅在 key 存在时设置
+        if opts.condition == SetCondition::Xx && stored.is_none() {
+            drop(lock);
+            return Ok(router::nil_bulk());
+        }
+
+        let old_value = if opts.return_old {
+            stored.as_ref().and_then(|s| s.as_string().ok().map(|b| b.to_vec()))
+        } else {
+            None
+        };
+
+        // KEEPTTL: 保留现有过期时间
+        let previous_ttl = stored.as_ref().and_then(|s| s.expires_at);
+        let expire = if opts.keep_ttl {
+            previous_ttl
+        } else {
+            opts.expire_at
+        };
+
+        let mut new_stored = StoredValue::string(opts.value);
+        new_stored.expires_at = expire;
+        let ops = vec![(opts.key.clone(), WriteOp::put_stored(new_stored))];
+        commit_ops_in_lock(
+            self.storage.as_ref(),
+            &self.in_flight_ctx,
+            db,
+            &opts.key,
+            ops,
+            lock,
+        )
+        .await?;
+        if previous_ttl.is_some() {
+            self.storage.release_seen_ttl(db).await?;
+        }
+
+        Ok(if opts.return_old {
+            match old_value {
+                Some(v) => router::bulk(v),
+                None => router::nil_bulk(),
+            }
+        } else {
+            router::ok()
+        })
     }
 
     async fn apply_set(
@@ -199,8 +219,21 @@ impl StringCommands {
         router::require_min_args("DEL", args, 1)?;
         let mut count = 0i64;
         for key in args {
-            if self.storage.delete(db, key).await? {
+            let lock = self.key_lock.lock(key).await;
+            if exists_in_lock(self.storage.as_ref(), &self.in_flight_ctx, db, key).await? {
                 count += 1;
+                let ops = vec![(key.to_vec(), WriteOp::Delete)];
+                commit_ops_in_lock(
+                    self.storage.as_ref(),
+                    &self.in_flight_ctx,
+                    db,
+                    key,
+                    ops,
+                    lock,
+                )
+                .await?;
+            } else {
+                drop(lock);
             }
         }
         Ok(router::integer(count))
@@ -241,14 +274,9 @@ impl StringCommands {
         let offset = parse_setrange_offset(&args[1])?;
         let patch = &args[2];
         let lock = self.key_lock.lock(key).await;
-        let mut current = read_string_in_lock(
-            self.storage.as_ref(),
-            &self.in_flight_ctx,
-            db,
-            key,
-        )
-        .await?
-        .unwrap_or_default();
+        let mut current = read_string_in_lock(self.storage.as_ref(), &self.in_flight_ctx, db, key)
+            .await?
+            .unwrap_or_default();
         let end = offset
             .checked_add(patch.len())
             .ok_or_else(|| Error::Command("ERR offset is out of range".into()))?;
@@ -275,14 +303,9 @@ impl StringCommands {
         let offset = parse_bit_offset(&args[1])?;
         let bit = parse_bit_value(&args[2])?;
         let lock = self.key_lock.lock(key).await;
-        let mut data = read_string_in_lock(
-            self.storage.as_ref(),
-            &self.in_flight_ctx,
-            db,
-            key,
-        )
-        .await?
-        .unwrap_or_default();
+        let mut data = read_string_in_lock(self.storage.as_ref(), &self.in_flight_ctx, db, key)
+            .await?
+            .unwrap_or_default();
         let prev = read_bit(&data, offset);
         write_bit(&mut data, offset, bit);
         commit_string_in_lock(
@@ -334,13 +357,8 @@ impl StringCommands {
             return Ok(RespValue::Array(Some(result.replies)));
         }
         let lock = self.key_lock.lock(key).await;
-        let existing = read_string_in_lock(
-            self.storage.as_ref(),
-            &self.in_flight_ctx,
-            db,
-            key,
-        )
-        .await?;
+        let existing =
+            read_string_in_lock(self.storage.as_ref(), &self.in_flight_ctx, db, key).await?;
         let result = crate::command::bitfield::execute_bitfield(existing.as_deref(), &plan);
         if let Some(bytes) = result.stored {
             commit_string_in_lock(
@@ -362,14 +380,10 @@ impl StringCommands {
         router::require_args("APPEND", args, 2)?;
         let key = &args[0];
         let lock = self.key_lock.lock(key).await;
-        let mut current: Vec<u8> = read_string_in_lock(
-            self.storage.as_ref(),
-            &self.in_flight_ctx,
-            db,
-            key,
-        )
-        .await?
-        .unwrap_or_default();
+        let mut current: Vec<u8> =
+            read_string_in_lock(self.storage.as_ref(), &self.in_flight_ctx, db, key)
+                .await?
+                .unwrap_or_default();
         current.extend_from_slice(&args[1]);
         let len = current.len() as i64;
         commit_string_in_lock(
@@ -414,25 +428,13 @@ impl StringCommands {
         router::require_args(cmd, args, 1)?;
         let key = &args[0];
         let lock = self.key_lock.lock(key).await;
-        let stored = read_string_in_lock(
-            self.storage.as_ref(),
-            &self.in_flight_ctx,
-            db,
-            key,
-        )
-        .await?;
+        let stored =
+            read_string_in_lock(self.storage.as_ref(), &self.in_flight_ctx, db, key).await?;
         match stored {
             None => {
                 let s = delta.to_string().into_bytes();
-                commit_string_in_lock(
-                    self.storage.as_ref(),
-                    &self.in_flight_ctx,
-                    db,
-                    key,
-                    s,
-                    lock,
-                )
-                .await?;
+                commit_string_in_lock(self.storage.as_ref(), &self.in_flight_ctx, db, key, s, lock)
+                    .await?;
                 Ok(router::integer(delta))
             }
             Some(bytes) => {
@@ -481,13 +483,8 @@ impl StringCommands {
             return Err(Error::Command("ERR value is not a valid float".into()));
         }
         let lock = self.key_lock.lock(key).await;
-        let stored = read_string_in_lock(
-            self.storage.as_ref(),
-            &self.in_flight_ctx,
-            db,
-            key,
-        )
-        .await?;
+        let stored =
+            read_string_in_lock(self.storage.as_ref(), &self.in_flight_ctx, db, key).await?;
         let result = match stored {
             None => delta,
             Some(bytes) => {
@@ -526,12 +523,20 @@ impl StringCommands {
         router::require_args("SETNX", args, 2)?;
         let key = &args[0];
         let value = &args[1];
-        let _lock = self.key_lock.lock(key).await;
-        let exists = self.storage.get(db, key).await?.is_some();
-        if exists {
+        let lock = self.key_lock.lock(key).await;
+        if exists_in_lock(self.storage.as_ref(), &self.in_flight_ctx, db, key).await? {
+            drop(lock);
             return Ok(router::integer(0));
         }
-        self.storage.set(db, key, value).await?;
+        commit_string_in_lock(
+            self.storage.as_ref(),
+            &self.in_flight_ctx,
+            db,
+            key,
+            value.to_vec(),
+            lock,
+        )
+        .await?;
         Ok(router::integer(1))
     }
 
@@ -568,11 +573,25 @@ impl StringCommands {
     pub async fn getdel(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_args("GETDEL", args, 1)?;
         let key = &args[0];
-        let _lock = self.key_lock.lock(key).await;
-        match self.storage.get(db, key).await? {
-            None => Ok(router::nil_bulk()),
+        let lock = self.key_lock.lock(key).await;
+        let current =
+            read_string_in_lock(self.storage.as_ref(), &self.in_flight_ctx, db, key).await?;
+        match current {
+            None => {
+                drop(lock);
+                Ok(router::nil_bulk())
+            }
             Some(v) => {
-                self.storage.delete(db, key).await?;
+                let ops = vec![(key.to_vec(), WriteOp::Delete)];
+                commit_ops_in_lock(
+                    self.storage.as_ref(),
+                    &self.in_flight_ctx,
+                    db,
+                    key,
+                    ops,
+                    lock,
+                )
+                .await?;
                 Ok(router::bulk(v))
             }
         }

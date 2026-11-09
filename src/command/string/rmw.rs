@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use crate::command::shared::{commit_ops_in_lock, InFlightContext};
 use crate::error::Result;
-use crate::storage::types::WriteOp;
+use crate::storage::types::{StoredValue, WriteOp};
 use crate::storage::KvStorage;
 
 /// 在持有 KeyLock 的临界区内读取最新 String 字节.
@@ -26,6 +26,33 @@ pub(crate) async fn read_string_in_lock(
         }
     }
     storage.get(db, key).await
+}
+
+/// 在持有 KeyLock 的临界区内读取最新 StoredValue (感知在途与过期元数据).
+pub(crate) async fn read_stored_in_lock(
+    storage: &dyn KvStorage,
+    in_flight_ctx: &InFlightContext,
+    db: usize,
+    key: &[u8],
+) -> Result<Option<StoredValue>> {
+    if let Some(opt_stored) = in_flight_ctx.in_flight.get(db, key) {
+        return Ok(opt_stored);
+    }
+    storage.get_typed(db, key).await
+}
+
+/// 在持有 KeyLock 的临界区内判断键是否存在 (优先检查在途缓冲与 Tombstone).
+pub(crate) async fn exists_in_lock(
+    storage: &dyn KvStorage,
+    in_flight_ctx: &InFlightContext,
+    db: usize,
+    key: &[u8],
+) -> Result<bool> {
+    match in_flight_ctx.in_flight.get(db, key) {
+        Some(Some(_)) => Ok(true),
+        Some(None) => Ok(false),
+        None => storage.exists(db, key).await,
+    }
 }
 
 /// 在锁内登记在途缓冲并发布入队序列，随后立即释放 KeyLock，
