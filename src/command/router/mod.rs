@@ -187,6 +187,10 @@ impl CommandRouter {
         Arc::clone(&self.in_flight_ctx)
     }
 
+    pub fn key_lock(&self) -> Arc<KeyLock> {
+        Arc::clone(&self.key_lock)
+    }
+
     pub fn storage(&self) -> Arc<dyn KvStorage> {
         Arc::clone(&self.storage)
     }
