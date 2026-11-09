@@ -178,6 +178,7 @@ impl ScriptTransaction {
             .entry(key.clone())
             .or_insert(None);
         self.zset_deltas.remove(&key);
+        self.hash_deltas.remove(&key);
         self.write_buffer.insert(key.clone(), op);
         self.expire_at.insert(key, expires_at);
         Ok(())
@@ -211,6 +212,16 @@ impl ScriptTransaction {
                 ExtendedBatchOp::Delete => Ok(None),
                 _ => Ok(Some(op_to_stored(op)?)),
             };
+        }
+        if let Some(delta) = self.hash_deltas.get(key) {
+            if delta.count == 0 {
+                return Ok(None);
+            }
+        }
+        if let Some(delta) = self.zset_deltas.get(key) {
+            if delta.count == 0 {
+                return Ok(None);
+            }
         }
         if let Some(cached) = self.read_cache.lock().get(key) {
             return Ok(cached.clone());
@@ -279,6 +290,16 @@ impl ScriptTransaction {
         if let Some(op) = self.write_buffer.get(key) {
             return Ok(!matches!(op, ExtendedBatchOp::Delete));
         }
+        if let Some(delta) = self.hash_deltas.get(key) {
+            if delta.count == 0 {
+                return Ok(false);
+            }
+        }
+        if let Some(delta) = self.zset_deltas.get(key) {
+            if delta.count == 0 {
+                return Ok(false);
+            }
+        }
         if let Some(cached) = self.read_cache.lock().get(key) {
             return Ok(cached.is_some());
         }
@@ -340,7 +361,7 @@ impl ScriptTransaction {
         }
     }
 
-    fn load_hash_from_stored(
+    pub(crate) fn load_hash_from_stored(
         &self,
         storage: &dyn ScriptIo,
         key: &[u8],
@@ -383,11 +404,18 @@ impl ScriptTransaction {
         key: &[u8],
     ) -> Result<Option<&mut HashMap<Vec<u8>, Vec<u8>>>> {
         if !self.write_buffer.contains_key(key) {
-            let loaded = self.get_value(storage, key)?;
-            if let Some(stored) = loaded {
-                let hash = self.load_hash_from_stored(storage, key, &stored)?;
+            if self.hash_deltas.contains_key(key) {
+                let hash = self.materialize_hash_delta(storage, key)?;
+                self.hash_deltas.remove(key);
                 self.write_buffer
                     .insert(key.to_vec(), ExtendedBatchOp::SetHash(hash));
+            } else {
+                let loaded = self.get_value(storage, key)?;
+                if let Some(stored) = loaded {
+                    let hash = self.load_hash_from_stored(storage, key, &stored)?;
+                    self.write_buffer
+                        .insert(key.to_vec(), ExtendedBatchOp::SetHash(hash));
+                }
             }
         }
         self.read_cache.lock().remove(key);
@@ -409,6 +437,10 @@ impl ScriptTransaction {
                 ExtendedBatchOp::SetHash(hash) => f(hash).map(Some),
                 _ => Err(Error::Command(WRONGTYPE.into())),
             };
+        }
+        if self.hash_deltas.contains_key(key) {
+            let map = self.materialize_hash_delta(storage, key)?;
+            return f(&map).map(Some);
         }
         if let Some(cached) = self.read_cache.lock().get(key) {
             return match cached {

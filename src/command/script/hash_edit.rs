@@ -252,6 +252,56 @@ impl ScriptTransaction {
         Ok(router::integer(new_val))
     }
 
+    pub(crate) fn subkey_hincrbyfloat(
+        &mut self,
+        storage: &dyn crate::storage::ScriptIo,
+        key: &[u8],
+        field: &[u8],
+        delta: f64,
+    ) -> Result<RespValue> {
+        self.ensure_hash_delta(storage, key)?;
+        let current = self.point_hash_field(storage, key, field)?;
+        let current_num = match &current {
+            Some(bytes) => crate::command::hash::parse_f64_field_bytes(bytes)?,
+            None => 0.0,
+        };
+        let new_num = current_num + delta;
+        if !new_num.is_finite() {
+            return Err(crate::error::Error::Command(
+                "ERR increment would produce NaN or Infinity".into(),
+            ));
+        }
+        let text = crate::command::hash::format_hash_float(new_num);
+        let new_bytes = text.as_bytes().to_vec();
+        self.record_field(key, field, current, Some(new_bytes));
+        Ok(router::bulk(text.into_bytes()))
+    }
+
+    pub(crate) fn materialize_hash_delta(
+        &self,
+        storage: &dyn crate::storage::ScriptIo,
+        key: &[u8],
+    ) -> Result<HashMap<Vec<u8>, Vec<u8>>> {
+        let stored = self.get_value(storage, key)?;
+        let mut map = match stored {
+            Some(stored) => self.load_hash_from_stored(storage, key, &stored)?,
+            None => HashMap::new(),
+        };
+        if let Some(delta) = self.hash_deltas.get(key) {
+            for (field, change) in &delta.fields {
+                match &change.after {
+                    Some(v) => {
+                        map.insert(field.clone(), v.clone());
+                    }
+                    None => {
+                        map.remove(field);
+                    }
+                }
+            }
+        }
+        Ok(map)
+    }
+
     pub(crate) fn append_hash_deltas(
         &self,
         storage: &dyn crate::storage::ScriptIo,
@@ -425,9 +475,120 @@ mod tests {
         fn raw_subkey_get(&self, _db: usize, encoded_key: Vec<u8>) -> Result<Option<Vec<u8>>> {
             Ok(self.subkeys.lock().unwrap().get(&encoded_key).cloned())
         }
-        fn raw_subkey_for_each(&self, _db: usize, _prefix: Vec<u8>, _f: crate::storage::types::RawPairVisitor) -> Result<()> {
-            panic!("raw_subkey_for_each should NEVER be called on point subkey access!");
+        fn raw_subkey_for_each(&self, _db: usize, prefix: Vec<u8>, mut f: crate::storage::types::RawPairVisitor) -> Result<()> {
+            let subkeys = self.subkeys.lock().unwrap();
+            for (k, v) in subkeys.iter() {
+                if k.starts_with(&prefix) {
+                    f(k.clone(), v.clone())?;
+                }
+            }
+            Ok(())
         }
+    }
+
+    #[test]
+    fn test_hash_delta_materializes_for_with_hash() {
+        let key = b"my_manifest";
+        let enc_user_key = AiDbEngine::encode_key(0, key);
+        let field1_key = subkey::encode_hash_field_key(&enc_user_key, b"f1");
+
+        let mut subkeys = HashMap::new();
+        subkeys.insert(field1_key, b"val1".to_vec());
+
+        let io = MockSubkeyIo {
+            header_count: 1,
+            subkeys: std::sync::Mutex::new(subkeys),
+        };
+
+        let mut txn = ScriptTransaction::new(0);
+        let hset_args = vec![
+            Bytes::from_static(key),
+            Bytes::from_static(b"f2"),
+            Bytes::from_static(b"val2"),
+        ];
+        txn.subkey_hset(&io, &hset_args).unwrap();
+
+        // with_hash 必须看到在同一脚本内新写入 hash_deltas 的 f2
+        let seen_f2 = txn
+            .with_hash(&io, key, |h| Ok(h.get(b"f2".as_slice()).cloned()))
+            .unwrap()
+            .flatten();
+        assert_eq!(seen_f2, Some(b"val2".to_vec()));
+    }
+
+    #[test]
+    fn test_hash_delta_empty_count_reports_key_not_exists() {
+        let key = b"my_manifest";
+        let enc_user_key = AiDbEngine::encode_key(0, key);
+        let field1_key = subkey::encode_hash_field_key(&enc_user_key, b"f1");
+
+        let mut subkeys = HashMap::new();
+        subkeys.insert(field1_key, b"val1".to_vec());
+
+        let io = MockSubkeyIo {
+            header_count: 1,
+            subkeys: std::sync::Mutex::new(subkeys),
+        };
+
+        let mut txn = ScriptTransaction::new(0);
+        let removed = txn.subkey_hdel_single(&io, key, b"f1").unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(txn.hash_delta_count(key, &io).unwrap(), 0);
+
+        // 删空后，同脚本后续 exists 必须感知为不存在
+        assert!(!txn.exists(&io, key).unwrap());
+        assert!(txn.get_value(&io, key).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_replace_stored_cleans_hash_deltas() {
+        let key = b"my_manifest";
+        let io = MockSubkeyIo {
+            header_count: 1,
+            subkeys: std::sync::Mutex::new(HashMap::new()),
+        };
+
+        let mut txn = ScriptTransaction::new(0);
+        let hset_args = vec![
+            Bytes::from_static(key),
+            Bytes::from_static(b"f1"),
+            Bytes::from_static(b"val1"),
+        ];
+        txn.subkey_hset(&io, &hset_args).unwrap();
+        assert!(txn.hash_deltas.contains_key(key.as_slice()));
+
+        txn.replace_stored(
+            key.to_vec(),
+            StoredValue {
+                value: ValueType::String(b"overwritten".to_vec()),
+                expires_at: None,
+            },
+        )
+        .unwrap();
+
+        assert!(
+            !txn.hash_deltas.contains_key(key.as_slice()),
+            "replace_stored 必须清理 hash_deltas"
+        );
+    }
+
+    #[test]
+    fn test_subkey_hincrbyfloat() {
+        let key = b"my_manifest";
+        let io = MockSubkeyIo {
+            header_count: 1,
+            subkeys: std::sync::Mutex::new(HashMap::new()),
+        };
+
+        let mut txn = ScriptTransaction::new(0);
+        let res1 = txn.subkey_hincrbyfloat(&io, key, b"score", 10.5).unwrap();
+        assert_eq!(res1, router::bulk(b"10.5".to_vec()));
+
+        let res2 = txn.subkey_hincrbyfloat(&io, key, b"score", 2.25).unwrap();
+        assert_eq!(res2, router::bulk(b"12.75".to_vec()));
+
+        let read_back = txn.subkey_hget(&io, key, b"score").unwrap();
+        assert_eq!(read_back, router::bulk(b"12.75".to_vec()));
     }
 
     #[test]

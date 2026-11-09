@@ -293,6 +293,9 @@ pub(super) fn exec_hincrbyfloat(
     if !delta.is_finite() {
         return Err(Error::Command("ERR value is not a valid float".into()));
     }
+    if txn.uses_subkey_hash(storage, &args[0])? {
+        return txn.subkey_hincrbyfloat(storage, &args[0], &args[1], delta);
+    }
     let k = key(&args[0]);
     let hash = match txn.ensure_hash_mut(storage, &k)? {
         Some(h) => h,
