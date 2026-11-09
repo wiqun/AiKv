@@ -41,19 +41,88 @@ impl ScriptTransaction {
         storage: &dyn crate::storage::ScriptIo,
         args: &[Bytes],
     ) -> Result<RespValue> {
-        let key = &args[0];
-        self.ensure_zset_delta(storage, key)?;
-        let mut added = 0i64;
-        for i in (1..args.len()).step_by(2) {
+        let (flags, idx) = crate::command::zset::helpers::parse_zadd_flags(args)?;
+        let mut pairs = Vec::with_capacity((args.len() - idx) / 2);
+        for i in (idx..args.len()).step_by(2) {
             let score = parse_f64_arg(&args[i], "score")?;
-            let member = args[i + 1].as_ref();
-            let current = self.current_member_score(storage, key, member)?;
-            if current.is_none() {
-                added += 1;
-            }
-            self.record_member(key, member, current, Some(score));
+            pairs.push((score, args[i + 1].to_vec()));
         }
-        Ok(router::integer(added))
+        self.subkey_zadd_with_flags(storage, &args[0], &pairs, flags)
+    }
+
+    pub(crate) fn subkey_zadd_with_flags(
+        &mut self,
+        storage: &dyn crate::storage::ScriptIo,
+        key: &[u8],
+        pairs: &[(f64, Vec<u8>)],
+        flags: crate::command::zset::helpers::ZAddFlags,
+    ) -> Result<RespValue> {
+        self.ensure_zset_delta(storage, key)?;
+        if flags.incr {
+            let (incr_score, member) = &pairs[0];
+            let current = self.current_member_score(storage, key, member)?;
+            if current.is_none() && flags.xx {
+                return Ok(RespValue::Null);
+            }
+            if current.is_some() && flags.nx {
+                return Ok(RespValue::Null);
+            }
+            let old_score = current.unwrap_or(0.0);
+            let new_score = old_score + incr_score;
+            if new_score.is_nan() {
+                return Err(crate::error::Error::Command(
+                    "ERR resulting score is not a number (NaN)".into(),
+                ));
+            }
+            if let Some(old) = current {
+                if flags.gt && new_score <= old {
+                    return Ok(RespValue::Null);
+                }
+                if flags.lt && new_score >= old {
+                    return Ok(RespValue::Null);
+                }
+            }
+            self.record_member(key, member, current, Some(new_score));
+            return Ok(router::bulk(
+                crate::command::zset::helpers::format_score(new_score).into_bytes(),
+            ));
+        }
+
+        let mut added = 0i64;
+        let mut changed = 0i64;
+        for (score, member) in pairs {
+            let current = self.current_member_score(storage, key, member)?;
+            match current {
+                None => {
+                    if flags.xx {
+                        continue;
+                    }
+                    added += 1;
+                    changed += 1;
+                    self.record_member(key, member, None, Some(*score));
+                }
+                Some(old_score) => {
+                    if flags.nx {
+                        continue;
+                    }
+                    if flags.gt && *score <= old_score {
+                        continue;
+                    }
+                    if flags.lt && *score >= old_score {
+                        continue;
+                    }
+                    if *score != old_score {
+                        changed += 1;
+                    }
+                    self.record_member(key, member, Some(old_score), Some(*score));
+                }
+            }
+        }
+        if flags.ch {
+            Ok(router::integer(changed))
+        } else {
+            Ok(router::integer(added))
+        }
     }
 
     pub(crate) fn subkey_zrem(

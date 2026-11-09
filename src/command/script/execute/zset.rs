@@ -17,14 +17,19 @@ pub(super) fn exec_zadd(
     txn: &mut ScriptTransaction,
     args: &[Bytes],
 ) -> Result<RespValue> {
-    if args.len() < 3 || !(args.len() - 1).is_multiple_of(2) {
+    if args.len() < 3 {
         return Err(wrong_count("ZADD"));
+    }
+    let (flags, idx) = crate::command::zset::helpers::parse_zadd_flags(args)?;
+    let mut pairs = Vec::with_capacity((args.len() - idx) / 2);
+    for i in (idx..args.len()).step_by(2) {
+        let score = parse_f64_arg(&args[i], "score")?;
+        pairs.push((score, args[i + 1].to_vec()));
     }
     let k = key(&args[0]);
     if txn.uses_subkey_zset(storage, &k)? {
         return txn.subkey_zadd(storage, args);
     }
-    let mut added = 0i64;
     let zset = match txn.ensure_zset_mut(storage, &k)? {
         Some(z) => z,
         None => {
@@ -32,13 +37,14 @@ pub(super) fn exec_zadd(
             txn.ensure_zset_mut(storage, &k)?.unwrap()
         }
     };
-    for i in (1..args.len()).step_by(2) {
-        let score = parse_f64_arg(&args[i], "score")?;
-        if zset.insert(args[i + 1].to_vec(), score).is_none() {
-            added += 1;
+    let outcome = crate::command::zset::helpers::apply_zadd_flags(zset, &pairs, flags)?;
+    match outcome {
+        crate::command::zset::helpers::ZAddOutcome::Count(n) => Ok(router::integer(n)),
+        crate::command::zset::helpers::ZAddOutcome::Score(None) => Ok(RespValue::Null),
+        crate::command::zset::helpers::ZAddOutcome::Score(Some(s)) => {
+            Ok(router::bulk(crate::command::zset::helpers::format_score(s).into_bytes()))
         }
     }
-    Ok(router::integer(added))
 }
 
 pub(super) fn exec_zrem(

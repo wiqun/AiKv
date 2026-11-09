@@ -108,18 +108,21 @@ impl ZSetCommands {
 
     pub async fn zadd(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_min_args("ZADD", args, 3)?;
-        if !(args.len() - 1).is_multiple_of(2) {
-            return Err(router::wrong_args("ZADD", ""));
-        }
+        let (flags, idx) = helpers::parse_zadd_flags(args)?;
         let key = &args[0];
         let _lock = self.key_lock.lock(key).await;
-        let mut pairs = Vec::with_capacity(args[1..].len() / 2);
-        for chunk in args[1..].chunks(2) {
+        let mut pairs = Vec::with_capacity((args.len() - idx) / 2);
+        for chunk in args[idx..].chunks(2) {
             pairs.push((parse_score(&chunk[0])?, chunk[1].to_vec()));
         }
-        let count = persist::add_members(self.storage.as_ref(), db, key, &pairs).await?;
+        let outcome =
+            persist::add_members_with_flags(self.storage.as_ref(), db, key, &pairs, flags).await?;
         BlockingRegistry::global().notify(key, RespValue::SimpleString("OK".into()));
-        Ok(router::integer(count))
+        match outcome {
+            helpers::ZAddOutcome::Count(count) => Ok(router::integer(count)),
+            helpers::ZAddOutcome::Score(None) => Ok(router::nil_bulk()),
+            helpers::ZAddOutcome::Score(Some(s)) => Ok(router::bulk(format_score(s).into_bytes())),
+        }
     }
 
     pub async fn zrem(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
@@ -845,5 +848,91 @@ mod tests {
         BlockingRegistry::global().notify(&key, RespValue::SimpleString("OK".into()));
         wait_for_waiter(&key).await;
         task.abort();
+    }
+
+    #[tokio::test]
+    async fn test_zadd_flags_command() {
+        let commands = ZSetCommands::new(
+            MemoryEngine::new(1),
+            Arc::new(KeyLock::new(1)),
+            Arc::new(tokio::sync::RwLock::new(())),
+        );
+        let key = Bytes::from_static(b"test_zadd_flags_key");
+
+        // 基础插入
+        let res = commands
+            .zadd(
+                0,
+                &[
+                    key.clone(),
+                    Bytes::from_static(b"10"),
+                    Bytes::from_static(b"m1"),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(res, router::integer(1));
+
+        // NX: 不更新已有
+        let res = commands
+            .zadd(
+                0,
+                &[
+                    key.clone(),
+                    Bytes::from_static(b"NX"),
+                    Bytes::from_static(b"20"),
+                    Bytes::from_static(b"m1"),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(res, router::integer(0));
+
+        // XX: 仅更新已有
+        let res = commands
+            .zadd(
+                0,
+                &[
+                    key.clone(),
+                    Bytes::from_static(b"XX"),
+                    Bytes::from_static(b"30"),
+                    Bytes::from_static(b"m2"),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(res, router::integer(0));
+
+        // CH: 变更统计
+        let res = commands
+            .zadd(
+                0,
+                &[
+                    key.clone(),
+                    Bytes::from_static(b"CH"),
+                    Bytes::from_static(b"25"),
+                    Bytes::from_static(b"m1"),
+                    Bytes::from_static(b"40"),
+                    Bytes::from_static(b"m2"),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(res, router::integer(2)); // m1 更改 + m2 新增
+
+        // INCR: 自增并返回新 score
+        let res = commands
+            .zadd(
+                0,
+                &[
+                    key.clone(),
+                    Bytes::from_static(b"INCR"),
+                    Bytes::from_static(b"5.5"),
+                    Bytes::from_static(b"m1"),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(res, router::bulk(b"30.5".to_vec()));
     }
 }

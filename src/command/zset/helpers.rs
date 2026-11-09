@@ -390,6 +390,145 @@ pub(crate) fn sort_by_score_then_member(items: &mut [(Vec<u8>, f64)]) {
     });
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ZAddFlags {
+    pub nx: bool,
+    pub xx: bool,
+    pub gt: bool,
+    pub lt: bool,
+    pub ch: bool,
+    pub incr: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ZAddOutcome {
+    Count(i64),
+    Score(Option<f64>),
+}
+
+pub fn parse_zadd_flags(args: &[Bytes]) -> Result<(ZAddFlags, usize)> {
+    let mut flags = ZAddFlags::default();
+    let mut idx = 1;
+    while idx < args.len() {
+        let arg = &args[idx];
+        if arg.eq_ignore_ascii_case(b"NX") {
+            flags.nx = true;
+        } else if arg.eq_ignore_ascii_case(b"XX") {
+            flags.xx = true;
+        } else if arg.eq_ignore_ascii_case(b"GT") {
+            flags.gt = true;
+        } else if arg.eq_ignore_ascii_case(b"LT") {
+            flags.lt = true;
+        } else if arg.eq_ignore_ascii_case(b"CH") {
+            flags.ch = true;
+        } else if arg.eq_ignore_ascii_case(b"INCR") {
+            flags.incr = true;
+        } else {
+            break;
+        }
+        idx += 1;
+    }
+
+    if flags.nx && flags.xx {
+        return Err(Error::Command(
+            "ERR XX and NX options at the same time are not compatible".into(),
+        ));
+    }
+    if flags.nx && (flags.gt || flags.lt) {
+        return Err(Error::Command(
+            "ERR GT, LT, and/or NX options at the same time are not compatible".into(),
+        ));
+    }
+    if flags.gt && flags.lt {
+        return Err(Error::Command(
+            "ERR GT and LT options at the same time are not compatible".into(),
+        ));
+    }
+
+    let pairs_len = args.len() - idx;
+    if pairs_len == 0 || !pairs_len.is_multiple_of(2) {
+        return Err(router::wrong_args("ZADD", ""));
+    }
+    if flags.incr && pairs_len != 2 {
+        return Err(Error::Command(
+            "ERR INCR option supports a single increment-element pair".into(),
+        ));
+    }
+
+    Ok((flags, idx))
+}
+
+pub fn apply_zadd_flags(
+    map: &mut BTreeMap<Vec<u8>, f64>,
+    pairs: &[(f64, Vec<u8>)],
+    flags: ZAddFlags,
+) -> Result<ZAddOutcome> {
+    if flags.incr {
+        let (incr_score, member) = &pairs[0];
+        let old_score = map.get(member).copied();
+        if old_score.is_none() && flags.xx {
+            return Ok(ZAddOutcome::Score(None));
+        }
+        if old_score.is_some() && flags.nx {
+            return Ok(ZAddOutcome::Score(None));
+        }
+        let current = old_score.unwrap_or(0.0);
+        let new_score = current + incr_score;
+        if new_score.is_nan() {
+            return Err(Error::Command(
+                "ERR resulting score is not a number (NaN)".into(),
+            ));
+        }
+        if let Some(old) = old_score {
+            if flags.gt && new_score <= old {
+                return Ok(ZAddOutcome::Score(None));
+            }
+            if flags.lt && new_score >= old {
+                return Ok(ZAddOutcome::Score(None));
+            }
+        }
+        map.insert(member.clone(), new_score);
+        return Ok(ZAddOutcome::Score(Some(new_score)));
+    }
+
+    let mut added = 0i64;
+    let mut changed = 0i64;
+
+    for (score, member) in pairs {
+        match map.get(member).copied() {
+            None => {
+                if flags.xx {
+                    continue;
+                }
+                map.insert(member.clone(), *score);
+                added += 1;
+                changed += 1;
+            }
+            Some(old_score) => {
+                if flags.nx {
+                    continue;
+                }
+                if flags.gt && *score <= old_score {
+                    continue;
+                }
+                if flags.lt && *score >= old_score {
+                    continue;
+                }
+                if *score != old_score {
+                    changed += 1;
+                }
+                map.insert(member.clone(), *score);
+            }
+        }
+    }
+
+    if flags.ch {
+        Ok(ZAddOutcome::Count(changed))
+    } else {
+        Ok(ZAddOutcome::Count(added))
+    }
+}
+
 #[cfg(test)]
 mod members_resp_tests {
     use super::*;
@@ -422,5 +561,42 @@ mod members_resp_tests {
         // len = 1, start = 0, stop = -1: len + stop = 0. Range [0, 0].
         let (start, stop) = normalize_range(1, 0, -1);
         assert_eq!((start, stop), (0, 0));
+    }
+
+    #[test]
+    fn test_zadd_flags_parsing_and_application() {
+        let mut map = BTreeMap::new();
+        map.insert(b"m1".to_vec(), 10.0);
+
+        // 1. NX: 不更新已有元素
+        let flags = ZAddFlags { nx: true, ..Default::default() };
+        let res = apply_zadd_flags(&mut map, &[(20.0, b"m1".to_vec())], flags).unwrap();
+        assert_eq!(res, ZAddOutcome::Count(0));
+        assert_eq!(map.get(b"m1".as_slice()), Some(&10.0));
+
+        // 2. XX: 仅更新已有元素, 不添加新元素
+        let flags = ZAddFlags { xx: true, ..Default::default() };
+        let res = apply_zadd_flags(&mut map, &[(30.0, b"m2".to_vec())], flags).unwrap();
+        assert_eq!(res, ZAddOutcome::Count(0));
+        assert!(!map.contains_key(b"m2".as_slice()));
+
+        // 3. GT: 仅在 score 大于旧分时更新
+        let flags = ZAddFlags { gt: true, ..Default::default() };
+        let res = apply_zadd_flags(&mut map, &[(5.0, b"m1".to_vec())], flags).unwrap();
+        assert_eq!(res, ZAddOutcome::Count(0));
+        assert_eq!(map.get(b"m1".as_slice()), Some(&10.0));
+        let res = apply_zadd_flags(&mut map, &[(15.0, b"m1".to_vec())], flags).unwrap();
+        assert_eq!(res, ZAddOutcome::Count(0));
+        assert_eq!(map.get(b"m1".as_slice()), Some(&15.0));
+
+        // 4. CH: 统计修改数
+        let flags = ZAddFlags { ch: true, ..Default::default() };
+        let res = apply_zadd_flags(&mut map, &[(20.0, b"m1".to_vec()), (30.0, b"m2".to_vec())], flags).unwrap();
+        assert_eq!(res, ZAddOutcome::Count(2)); // m1 变更 + m2 新增
+
+        // 5. INCR
+        let flags = ZAddFlags { incr: true, ..Default::default() };
+        let res = apply_zadd_flags(&mut map, &[(5.5, b"m1".to_vec())], flags).unwrap();
+        assert_eq!(res, ZAddOutcome::Score(Some(25.5)));
     }
 }
