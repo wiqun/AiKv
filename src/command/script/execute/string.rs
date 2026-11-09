@@ -200,7 +200,9 @@ pub(super) fn exec_strlen(
     if args.len() != 1 {
         return Err(wrong_count("STRLEN"));
     }
-    let len = txn.get(storage, &args[0])?.map(|v| v.len()).unwrap_or(0) as i64;
+    let len = txn
+        .with_string(storage, &args[0], |s| Ok(s.len()))?
+        .unwrap_or(0) as i64;
     Ok(router::integer(len))
 }
 
@@ -212,11 +214,13 @@ pub(super) fn exec_getbit(
     if args.len() != 2 {
         return Err(wrong_count("GETBIT"));
     }
-    let data = txn.get(storage, &args[0])?.unwrap_or_default();
     let offset = crate::command::string::parse_bit_offset(&args[1])?;
-    Ok(router::integer(i64::from(
-        crate::command::string::read_bit(&data, offset),
-    )))
+    let bit = txn
+        .with_string(storage, &args[0], |s| {
+            Ok(crate::command::string::read_bit(s, offset))
+        })?
+        .unwrap_or(0);
+    Ok(router::integer(i64::from(bit)))
 }
 
 pub(super) fn exec_setbit(
@@ -227,12 +231,11 @@ pub(super) fn exec_setbit(
     if args.len() != 3 {
         return Err(wrong_count("SETBIT"));
     }
-    let mut data = txn.get(storage, &args[0])?.unwrap_or_default();
     let offset = crate::command::string::parse_bit_offset(&args[1])?;
     let bit = crate::command::string::parse_bit_value(&args[2])?;
-    let prev = crate::command::string::read_bit(&data, offset);
-    crate::command::string::write_bit(&mut data, offset, bit);
-    txn.set_string(key(&args[0]), data);
+    let data = txn.get_or_create_string_mut(storage, &args[0])?;
+    let prev = crate::command::string::read_bit(data, offset);
+    crate::command::string::write_bit(data, offset, bit);
     Ok(router::integer(i64::from(prev)))
 }
 
@@ -244,8 +247,11 @@ pub(super) fn exec_bitcount(
     if args.is_empty() {
         return Err(wrong_count("BITCOUNT"));
     }
-    let data = txn.get(storage, &args[0])?;
-    let n = crate::command::bitfield::bitcount(data.as_deref(), args)?;
+    let n = txn
+        .with_string(storage, &args[0], |s| {
+            crate::command::bitfield::bitcount(Some(s), args)
+        })?
+        .unwrap_or(0);
     Ok(router::integer(n))
 }
 

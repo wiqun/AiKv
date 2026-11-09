@@ -402,11 +402,21 @@ impl JsonCommands {
                     Err(_) => return Ok(router::nil_bulk()),
                 }
             };
-            if let JsonValue::Array(arr) = target {
-                Ok(router::integer(arr.len() as i64))
-            } else {
-                Ok(router::nil_bulk())
-            }
+            let len = match &target {
+                JsonValue::Array(arr) => {
+                    if arr.len() == 1 && matches!(&arr[0], JsonValue::Array(_)) {
+                        if let JsonValue::Array(inner) = &arr[0] {
+                            inner.len() as i64
+                        } else {
+                            arr.len() as i64
+                        }
+                    } else {
+                        arr.len() as i64
+                    }
+                }
+                _ => return Ok(router::nil_bulk()),
+            };
+            Ok(router::integer(len))
         }
         .await;
 
@@ -432,11 +442,20 @@ impl JsonCommands {
                     Err(_) => return Ok(router::nil_bulk()),
                 }
             };
-            if let JsonValue::Object(obj) = target {
-                Ok(router::integer(obj.len() as i64))
-            } else {
-                Ok(router::nil_bulk())
-            }
+            let len = match &target {
+                JsonValue::Object(obj) => obj.len() as i64,
+                JsonValue::Array(arr)
+                    if arr.len() == 1 && matches!(&arr[0], JsonValue::Object(_)) =>
+                {
+                    if let JsonValue::Object(inner) = &arr[0] {
+                        inner.len() as i64
+                    } else {
+                        arr.len() as i64
+                    }
+                }
+                _ => return Ok(router::nil_bulk()),
+            };
+            Ok(router::integer(len))
         }
         .await;
 
@@ -526,10 +545,19 @@ impl JsonCommands {
             self.path_engine.append(&mut json_val, &parts, &values)?;
 
             let extracted = self.path_engine.extract(&json_val, &path)?;
-            let len = if let JsonValue::Array(arr) = extracted {
-                arr.len() as i64
-            } else {
-                return Ok(router::nil_bulk());
+            let len = match extracted {
+                JsonValue::Array(ref arr) => {
+                    if arr.len() == 1 && matches!(&arr[0], JsonValue::Array(_)) {
+                        if let JsonValue::Array(inner) = &arr[0] {
+                            inner.len() as i64
+                        } else {
+                            arr.len() as i64
+                        }
+                    } else {
+                        arr.len() as i64
+                    }
+                }
+                _ => return Ok(router::nil_bulk()),
             };
 
             let json_bytes = serde_json::to_vec(&json_val).map_err(Self::invalid_json)?;

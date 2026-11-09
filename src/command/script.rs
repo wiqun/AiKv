@@ -12,6 +12,7 @@ mod convert;
 mod drive;
 mod enqueue_chain;
 mod execute;
+mod hash_edit;
 pub(crate) mod in_flight;
 pub(crate) mod json_exec;
 mod libs;
@@ -666,9 +667,14 @@ impl ScriptCommands {
             phase_stats::micros_between(t_call, t_back),
             phase_stats::micros_between(t_back, t_done),
         );
-        eval_result
-            .map(|value| (value, txn))
-            .map_err(|e| Error::Command(format!("ERR Error running script: {e}")))
+        eval_result.map(|value| (value, txn)).map_err(|e| {
+            let msg = e.to_string();
+            let sanitized: String = msg
+                .chars()
+                .map(|c| if c == '\r' || c == '\n' { ' ' } else { c })
+                .collect();
+            Error::Command(format!("ERR Error running script: {sanitized}"))
+        })
     }
 }
 

@@ -22,7 +22,10 @@
 //! `\x01` 用于分隔 user key 和 subkey 部分.
 //! 常规 key 不含 `\x01`, 因此 subkey entries 可被 `collect_db_entries` 过滤.
 
-use crate::storage::types::CollectionKind;
+use std::collections::HashMap;
+
+use crate::storage::types::{CollectionKind, StoredValue, ValueType};
+use crate::storage::{AiDbEngine, WriteOp};
 
 /// Subkey 键编码相关常量.
 pub const SUBKEY_SEPARATOR: u8 = 0x01;
@@ -164,6 +167,48 @@ pub fn parse_strict_subkey(encoded_key: &[u8]) -> Option<(Vec<u8>, CollectionKin
 /// 检查是否为 regular key 或 metadata key (不含 subkey 分隔符).
 pub fn is_not_subkey(encoded_key: &[u8]) -> bool {
     !encoded_key.contains(&SUBKEY_SEPARATOR)
+}
+
+/// 将 Hash 转换为 Subkey 存储格式的一批写操作.
+pub fn replace_hash_ops(
+    db: usize,
+    user_key: &[u8],
+    hash: &HashMap<Vec<u8>, Vec<u8>>,
+    expires_at: Option<u64>,
+) -> Vec<(Vec<u8>, WriteOp)> {
+    let encoded = AiDbEngine::encode_key(db, user_key);
+    let mut ops = Vec::with_capacity(1 + hash.len());
+    ops.push((
+        user_key.to_vec(),
+        WriteOp::put_stored(StoredValue {
+            value: ValueType::CollectionHeader {
+                kind: CollectionKind::Hash,
+                count: hash.len() as u32,
+            },
+            expires_at,
+        }),
+    ));
+    for (field, value) in hash {
+        let subkey = encode_hash_field_key(&encoded, field);
+        ops.push((subkey, WriteOp::put_engine(value.clone())));
+    }
+    ops
+}
+
+/// 小 Hash 整包写入; 超过 inline 上限且后端支持 subkey 时改写 header + field subkeys.
+pub fn commit_inline_hash(
+    db: usize,
+    key: Vec<u8>,
+    hash: &HashMap<Vec<u8>, Vec<u8>>,
+    expires_at: Option<u64>,
+    persist_subkeys: bool,
+) -> Vec<(Vec<u8>, WriteOp)> {
+    if persist_subkeys && hash.len() > HASH_MAX_INLINE_FIELDS {
+        return replace_hash_ops(db, &key, hash, expires_at);
+    }
+    let mut stored = StoredValue::new_hash(hash.clone());
+    stored.expires_at = expires_at;
+    vec![(key, WriteOp::put_stored(stored))]
 }
 
 #[cfg(test)]

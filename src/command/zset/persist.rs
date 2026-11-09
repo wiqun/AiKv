@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use crate::command::zset::helpers::{apply_zadd_flags, ZAddFlags, ZAddOutcome};
 use crate::error::Result;
 use crate::storage::types::{StorageEngineKind, WriteOp};
 use crate::storage::{zset_subkey, KvStorage, ValueType};
@@ -41,10 +42,23 @@ pub async fn add_members(
     key: &[u8],
     pairs: &[(f64, Vec<u8>)],
 ) -> Result<i64> {
+    match add_members_with_flags(storage, db, key, pairs, ZAddFlags::default()).await? {
+        ZAddOutcome::Count(n) => Ok(n),
+        ZAddOutcome::Score(_) => Ok(0),
+    }
+}
+
+pub async fn add_members_with_flags(
+    storage: &dyn KvStorage,
+    db: usize,
+    key: &[u8],
+    pairs: &[(f64, Vec<u8>)],
+    flags: ZAddFlags,
+) -> Result<ZAddOutcome> {
     let stored = storage.get_typed(db, key).await?;
     if let Some(stored) = stored.as_ref() {
         if zset_subkey::is_zset_header(stored).is_some() {
-            return add_to_header(storage, db, key, stored, pairs).await;
+            return add_to_header(storage, db, key, stored, pairs, flags).await;
         }
     }
     let expires = stored.as_ref().and_then(|s| s.expires_at);
@@ -52,9 +66,9 @@ pub async fn add_members(
         None => BTreeMap::new(),
         Some(stored) => stored.as_zset()?.clone(),
     };
-    let added = insert_pairs(&mut map, pairs);
+    let outcome = apply_zadd_flags(&mut map, pairs, flags)?;
     store_map(storage, db, key, map, expires).await?;
-    Ok(added)
+    Ok(outcome)
 }
 
 pub async fn remove_members(
@@ -86,15 +100,16 @@ async fn add_to_header(
     key: &[u8],
     stored: &crate::storage::StoredValue,
     pairs: &[(f64, Vec<u8>)],
-) -> Result<i64> {
+    flags: ZAddFlags,
+) -> Result<ZAddOutcome> {
     let base = zset_subkey::is_zset_header(stored).unwrap_or(0);
-    let (mut ops, added, count) = header_add_ops(storage, db, key, base, pairs).await?;
+    let (mut ops, outcome, count) = header_add_ops(storage, db, key, base, pairs, flags).await?;
     ops.push((
         key.to_vec(),
         WriteOp::put_stored(zset_subkey::header(count, stored.expires_at)),
     ));
     storage.write_batch(db, ops).await?;
-    Ok(added)
+    Ok(outcome)
 }
 
 async fn header_add_ops(
@@ -103,32 +118,99 @@ async fn header_add_ops(
     key: &[u8],
     mut count: u32,
     pairs: &[(f64, Vec<u8>)],
-) -> Result<(Vec<(Vec<u8>, WriteOp)>, i64, u32)> {
+    flags: ZAddFlags,
+) -> Result<(Vec<(Vec<u8>, WriteOp)>, ZAddOutcome, u32)> {
+    if flags.incr {
+        let (incr_score, member) = &pairs[0];
+        let old = zset_subkey::read_member_score(storage, db, key, member).await?;
+        if old.is_none() && flags.xx {
+            return Ok((Vec::new(), ZAddOutcome::Score(None), count));
+        }
+        if old.is_some() && flags.nx {
+            return Ok((Vec::new(), ZAddOutcome::Score(None), count));
+        }
+        let current = old.unwrap_or(0.0);
+        let new_score = current + incr_score;
+        if new_score.is_nan() {
+            return Err(crate::error::Error::Command(
+                "ERR resulting score is not a number (NaN)".into(),
+            ));
+        }
+        if let Some(old_val) = old {
+            if flags.gt && new_score <= old_val {
+                return Ok((Vec::new(), ZAddOutcome::Score(None), count));
+            }
+            if flags.lt && new_score >= old_val {
+                return Ok((Vec::new(), ZAddOutcome::Score(None), count));
+            }
+        } else {
+            count = count.saturating_add(1);
+        }
+        let ops = zset_subkey::member_change_ops(db, key, member, old, Some(new_score));
+        return Ok((ops, ZAddOutcome::Score(Some(new_score)), count));
+    }
+
     let mut ops = Vec::new();
     let mut overlay: HashMap<Vec<u8>, f64> = HashMap::new();
     let mut added = 0i64;
+    let mut changed = 0i64;
+
     for (score, member) in pairs {
         let old = match overlay.get(member) {
             Some(score) => Some(*score),
             None => zset_subkey::read_member_score(storage, db, key, member).await?,
         };
-        if old.is_none() {
-            added += 1;
-            count = count.saturating_add(1);
+        match old {
+            None => {
+                if flags.xx {
+                    continue;
+                }
+                added += 1;
+                changed += 1;
+                count = count.saturating_add(1);
+                overlay.insert(member.clone(), *score);
+                ops.extend(zset_subkey::member_change_ops(
+                    db,
+                    key,
+                    member,
+                    None,
+                    Some(*score),
+                ));
+            }
+            Some(old_score) => {
+                if flags.nx {
+                    continue;
+                }
+                if flags.gt && *score <= old_score {
+                    continue;
+                }
+                if flags.lt && *score >= old_score {
+                    continue;
+                }
+                if *score != old_score {
+                    changed += 1;
+                }
+                overlay.insert(member.clone(), *score);
+                if old_score == *score {
+                    continue;
+                }
+                ops.extend(zset_subkey::member_change_ops(
+                    db,
+                    key,
+                    member,
+                    Some(old_score),
+                    Some(*score),
+                ));
+            }
         }
-        overlay.insert(member.clone(), *score);
-        if old == Some(*score) {
-            continue;
-        }
-        ops.extend(zset_subkey::member_change_ops(
-            db,
-            key,
-            member,
-            old,
-            Some(*score),
-        ));
     }
-    Ok((ops, added, count))
+
+    let outcome = if flags.ch {
+        ZAddOutcome::Count(changed)
+    } else {
+        ZAddOutcome::Count(added)
+    };
+    Ok((ops, outcome, count))
 }
 
 async fn remove_from_header(
@@ -197,17 +279,6 @@ async fn store_map(
     storage
         .write_batch(db, zset_subkey::replace_ops(db, key, &map, expires_at))
         .await
-}
-
-fn insert_pairs(map: &mut BTreeMap<Vec<u8>, f64>, pairs: &[(f64, Vec<u8>)]) -> i64 {
-    let mut added = 0i64;
-    for (score, member) in pairs {
-        if !map.contains_key(member) {
-            added += 1;
-        }
-        map.insert(member.clone(), *score);
-    }
-    added
 }
 
 fn remove_pairs(map: &mut BTreeMap<Vec<u8>, f64>, members: &[Vec<u8>]) -> i64 {

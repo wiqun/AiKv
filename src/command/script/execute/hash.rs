@@ -20,6 +20,9 @@ pub(super) fn exec_hget(
     if args.len() != 2 {
         return Err(wrong_count("HGET"));
     }
+    if txn.uses_subkey_hash(storage, &args[0])? {
+        return txn.subkey_hget(storage, &args[0], &args[1]);
+    }
     let res = txn.with_hash(storage, &args[0], |hash| {
         Ok(match hash.get(args[1].as_ref()) {
             Some(v) => router::bulk(v.clone()),
@@ -36,6 +39,9 @@ pub(super) fn exec_hset(
 ) -> Result<RespValue> {
     if args.len() < 3 || args.len().is_multiple_of(2) {
         return Err(wrong_count("HSET"));
+    }
+    if txn.uses_subkey_hash(storage, &args[0])? {
+        return txn.subkey_hset(storage, args);
     }
     let k = key(&args[0]);
     let mut added = 0i64;
@@ -69,6 +75,9 @@ pub(super) fn exec_hsetnx(
     if args.len() != 3 {
         return Err(wrong_count("HSETNX"));
     }
+    if txn.uses_subkey_hash(storage, &args[0])? {
+        return txn.subkey_hsetnx(storage, args);
+    }
     let k = key(&args[0]);
     let hash = match txn.ensure_hash_mut(storage, &k)? {
         Some(h) => h,
@@ -91,6 +100,9 @@ pub(super) fn exec_hdel(
 ) -> Result<RespValue> {
     if args.len() < 2 {
         return Err(wrong_count("HDEL"));
+    }
+    if txn.uses_subkey_hash(storage, &args[0])? {
+        return txn.subkey_hdel(storage, args);
     }
     let k = key(&args[0]);
     let mut count = 0i64;
@@ -118,6 +130,9 @@ pub(super) fn exec_hgetall(
     if args.len() != 1 {
         return Err(wrong_count("HGETALL"));
     }
+    if txn.uses_subkey_hash(storage, &args[0])? {
+        return txn.subkey_hgetall(storage, &args[0]);
+    }
     let res = txn.with_hash(storage, &args[0], |hash| {
         let mut out = Vec::with_capacity(hash.len() * 2);
         for (f, v) in hash {
@@ -138,6 +153,13 @@ pub(super) fn exec_hmget(
         return Err(wrong_count("HMGET"));
     }
     let fields = &args[1..];
+    if txn.uses_subkey_hash(storage, &args[0])? {
+        let mut out = Vec::with_capacity(fields.len());
+        for f in fields {
+            out.push(txn.subkey_hget(storage, &args[0], f)?);
+        }
+        return Ok(RespValue::Array(Some(out)));
+    }
     let res = txn.with_hash(storage, &args[0], |hash| {
         let mut out = Vec::with_capacity(fields.len());
         for f in fields {
@@ -159,8 +181,11 @@ pub(super) fn exec_hincrby(
     if args.len() != 3 {
         return Err(wrong_count("HINCRBY"));
     }
-    let k = key(&args[0]);
     let inc = parse_i64_arg(&args[2], "increment")?;
+    if txn.uses_subkey_hash(storage, &args[0])? {
+        return txn.subkey_hincrby(storage, &args[0], &args[1], inc);
+    }
+    let k = key(&args[0]);
     let hash = match txn.ensure_hash_mut(storage, &k)? {
         Some(h) => h,
         None => {
@@ -186,6 +211,9 @@ pub(super) fn exec_hexists(
     if args.len() != 2 {
         return Err(wrong_count("HEXISTS"));
     }
+    if txn.uses_subkey_hash(storage, &args[0])? {
+        return txn.subkey_hexists(storage, &args[0], &args[1]);
+    }
     let res = txn.with_hash(storage, &args[0], |hash| {
         Ok(hash.contains_key(args[1].as_ref()))
     })?;
@@ -200,6 +228,10 @@ pub(super) fn exec_hlen(
 ) -> Result<RespValue> {
     if args.len() != 1 {
         return Err(wrong_count("HLEN"));
+    }
+    if txn.uses_subkey_hash(storage, &args[0])? {
+        let count = txn.hash_delta_count(&args[0], storage)?;
+        return Ok(router::integer(count as i64));
     }
     let res = txn.with_hash(storage, &args[0], |hash| Ok(hash.len() as i64))?;
     let len = res.unwrap_or(0);

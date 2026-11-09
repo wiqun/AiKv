@@ -8,7 +8,7 @@ use crate::protocol::RespValue;
 
 pub fn lua_to_resp(value: LuaValue) -> Result<RespValue> {
     match value {
-        LuaValue::Nil => Ok(RespValue::Null),
+        LuaValue::Nil => Ok(RespValue::BulkString(None)),
         LuaValue::Boolean(b) => {
             if b {
                 Ok(RespValue::Integer(1))
@@ -19,7 +19,7 @@ pub fn lua_to_resp(value: LuaValue) -> Result<RespValue> {
         LuaValue::Integer(i) => Ok(RespValue::Integer(i)),
         LuaValue::Number(n) => {
             if !n.is_finite() {
-                return Ok(RespValue::Null);
+                return Ok(RespValue::BulkString(None));
             }
             if n.fract() == 0.0 && n >= i64::MIN as f64 && n <= i64::MAX as f64 {
                 Ok(RespValue::Integer(n as i64))
@@ -39,7 +39,7 @@ pub fn lua_to_resp(value: LuaValue) -> Result<RespValue> {
             }
             Ok(RespValue::Array(Some(items)))
         }
-        _ => Ok(RespValue::Null),
+        _ => Ok(RespValue::BulkString(None)),
     }
 }
 
@@ -174,5 +174,13 @@ mod tests {
             LuaValue::Nil
         ));
         assert!(matches!(t.raw_get::<LuaValue>(5).unwrap(), LuaValue::Nil));
+    }
+
+    #[test]
+    fn lua_nil_to_resp_is_null_bulk_string() {
+        assert_eq!(
+            lua_to_resp(LuaValue::Nil).unwrap(),
+            RespValue::BulkString(None)
+        );
     }
 }

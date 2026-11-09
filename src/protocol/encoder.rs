@@ -20,6 +20,21 @@ use bytes::{BufMut, Bytes, BytesMut};
 
 use crate::protocol::types::RespValue;
 
+#[inline]
+fn sanitize_single_line(s: &str, buf: &mut BytesMut) {
+    if !s.as_bytes().iter().any(|&b| b == b'\r' || b == b'\n') {
+        buf.put_slice(s.as_bytes());
+    } else {
+        for &b in s.as_bytes() {
+            if b == b'\r' || b == b'\n' {
+                buf.put_u8(b' ');
+            } else {
+                buf.put_u8(b);
+            }
+        }
+    }
+}
+
 impl RespValue {
     /// 编码为 RESP 帧
     pub fn serialize(&self) -> Bytes {
@@ -33,12 +48,12 @@ impl RespValue {
         match self {
             RespValue::SimpleString(s) => {
                 buf.put_slice(b"+");
-                buf.put_slice(s.as_bytes());
+                sanitize_single_line(s, buf);
                 buf.put_slice(b"\r\n");
             }
             RespValue::Error(e) => {
                 buf.put_slice(b"-");
-                buf.put_slice(e.as_bytes());
+                sanitize_single_line(e, buf);
                 buf.put_slice(b"\r\n");
             }
             RespValue::Integer(i) => {
@@ -246,5 +261,14 @@ mod tests {
 
         assert_eq!(buf.as_ref(), expected.as_ref());
         assert_eq!(buf.as_ref(), b"PREFIX:+PONG\r\n:42\r\n");
+    }
+
+    #[test]
+    fn test_sanitize_single_line_error_and_simple_string() {
+        let err = RespValue::Error("ERR line1\nline2\rline3\r\nend".into());
+        assert_eq!(err.serialize().as_ref(), b"-ERR line1 line2 line3  end\r\n");
+
+        let simple = RespValue::SimpleString("hello\nworld".into());
+        assert_eq!(simple.serialize().as_ref(), b"+hello world\r\n");
     }
 }

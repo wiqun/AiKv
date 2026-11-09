@@ -6,7 +6,7 @@ use bytes::Bytes;
 
 use crate::command::router;
 use crate::command::script::transaction::{parse_i64_arg, ScriptTransaction};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::protocol::RespValue;
 use crate::storage::ScriptIo;
 
@@ -49,33 +49,70 @@ pub(super) fn exec_lpush(
     Ok(router::integer(len))
 }
 
+fn parse_pop_count(arg: &Bytes) -> Result<i64> {
+    let s = std::str::from_utf8(arg)
+        .map_err(|_| Error::Command("ERR value is not an integer".into()))?;
+    let n: i64 = s
+        .parse()
+        .map_err(|_| Error::Command("ERR value is not an integer".into()))?;
+    if n < 0 {
+        return Err(Error::Command(
+            "ERR value is not an integer or out of range".into(),
+        ));
+    }
+    Ok(n)
+}
+
 pub(super) fn exec_lpop(
     storage: &dyn ScriptIo,
     txn: &mut ScriptTransaction,
     args: &[Bytes],
     from_front: bool,
 ) -> Result<RespValue> {
-    if args.is_empty() {
-        return Err(wrong_count("LPOP"));
+    if args.is_empty() || args.len() > 2 {
+        let cmd = if from_front { "LPOP" } else { "RPOP" };
+        return Err(wrong_count(cmd));
     }
+    let count = match args.get(1) {
+        Some(arg) => Some(parse_pop_count(arg)?),
+        None => None,
+    };
     let Some(stored) = txn.get_value(storage, &args[0])? else {
         return Ok(RespValue::Null);
     };
     let mut list = stored.as_list()?.clone();
-    let val = if from_front {
-        list.pop_front()
-    } else {
-        list.pop_back()
-    };
-    let Some(v) = val else {
+    if list.is_empty() {
         return Ok(RespValue::Null);
-    };
+    }
+    let is_count_given = count.is_some();
+    let limit = count.unwrap_or(1);
+    if limit == 0 {
+        return Ok(RespValue::Array(Some(vec![])));
+    }
+    let n = (limit as usize).min(list.len());
+    let mut popped = Vec::with_capacity(n);
+    for _ in 0..n {
+        let v = if from_front {
+            list.pop_front()
+        } else {
+            list.pop_back()
+        };
+        popped.push(v.expect("len checked"));
+    }
     if list.is_empty() {
         txn.delete(key(&args[0]));
     } else {
         txn.set_list(key(&args[0]), list);
     }
-    Ok(router::bulk(v))
+    if !is_count_given {
+        return Ok(router::bulk(popped.into_iter().next().unwrap()));
+    }
+    Ok(RespValue::Array(Some(
+        popped
+            .into_iter()
+            .map(|b| RespValue::BulkString(Some(b.into())))
+            .collect(),
+    )))
 }
 
 pub(super) fn exec_llen(

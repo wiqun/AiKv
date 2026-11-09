@@ -38,6 +38,7 @@ use crate::storage::ScriptIo;
 
 mod extra;
 pub mod fast_path;
+pub(super) mod fast_path_hash;
 mod hash;
 mod list;
 mod set;
@@ -688,5 +689,54 @@ mod tests {
         ]);
         let err = try_fast_path(&lua, &io, &mut txn, &declared, &get_k2, true, false);
         assert!(err.is_err(), "undeclared key must error");
+    }
+
+    #[test]
+    fn test_script_setrange_and_getrange_in_place() {
+        let io = DummyIo;
+        let mut txn = ScriptTransaction::new(0);
+
+        // 1. SETRANGE on empty key
+        let res = extra::exec_setrange(
+            &io,
+            &mut txn,
+            &[
+                Bytes::from_static(b"k_bmp"),
+                Bytes::from_static(b"0"),
+                Bytes::from_static(b"hello"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(res, RespValue::Integer(5));
+
+        // 2. SETRANGE patch offset 2 "LL" -> "heLLo"
+        let res = extra::exec_setrange(
+            &io,
+            &mut txn,
+            &[
+                Bytes::from_static(b"k_bmp"),
+                Bytes::from_static(b"2"),
+                Bytes::from_static(b"LL"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(res, RespValue::Integer(5));
+
+        // 3. GETRANGE
+        let res = extra::exec_getrange(
+            &io,
+            &txn,
+            &[
+                Bytes::from_static(b"k_bmp"),
+                Bytes::from_static(b"1"),
+                Bytes::from_static(b"3"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(res, RespValue::BulkString(Some(Bytes::from_static(b"eLL"))));
+
+        // 4. STRLEN
+        let res = string::exec_strlen(&io, &txn, &[Bytes::from_static(b"k_bmp")]).unwrap();
+        assert_eq!(res, RespValue::Integer(5));
     }
 }

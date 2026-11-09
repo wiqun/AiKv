@@ -162,6 +162,13 @@ impl StoredValue {
         }
     }
 
+    pub fn new_hash(map: HashMap<Vec<u8>, Vec<u8>>) -> Self {
+        Self {
+            value: ValueType::Hash(map),
+            expires_at: None,
+        }
+    }
+
     pub fn new_list(list: VecDeque<Vec<u8>>) -> Self {
         Self {
             value: ValueType::List(list),
@@ -235,6 +242,20 @@ impl StoredValue {
     pub fn as_zset_mut(&mut self) -> Result<&mut BTreeMap<Vec<u8>, f64>> {
         match &mut self.value {
             ValueType::ZSet(zset) => Ok(zset),
+            _ => Err(Error::Command(WRONGTYPE.into())),
+        }
+    }
+
+    pub fn as_string(&self) -> Result<&[u8]> {
+        match &self.value {
+            ValueType::String(s) => Ok(s),
+            _ => Err(Error::Command(WRONGTYPE.into())),
+        }
+    }
+
+    pub fn as_string_mut(&mut self) -> Result<&mut Vec<u8>> {
+        match &mut self.value {
+            ValueType::String(s) => Ok(s),
             _ => Err(Error::Command(WRONGTYPE.into())),
         }
     }

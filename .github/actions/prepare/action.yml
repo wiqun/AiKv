@@ -25,7 +25,8 @@ runs:
         components: ${{ inputs.components }}
         cache-save-if: ${{ inputs.cache-save-if }}
 
-    # cluster feature 编译 aidb tonic/prost 需要 protoc.
+    # cluster feature 编译 aidb tonic/prost 需要 protoc (通过预编译二进制免去耗时的 apt-get update)
     - name: Install protoc
-      run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      shell: bash
+      uses: taiki-e/install-action@v2
+      with:
+        tool: protoc

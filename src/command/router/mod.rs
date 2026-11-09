@@ -57,7 +57,7 @@ use stats::record_command_outcome;
 #[cfg(feature = "monitoring")]
 use stats::record_command_span_status;
 #[cfg(feature = "cluster")]
-use stats::{classify_command, is_cluster_local_admin_cmd, is_multi_key_cmd};
+use stats::{classify_command, is_cluster_local_admin_cmd};
 
 pub struct CommandRouter {
     storage: Arc<dyn KvStorage>,
@@ -272,18 +272,8 @@ impl CommandRouter {
             return None;
         }
         // Multi-key CROSSSLOT check
-        if args.len() > 1 && is_multi_key_cmd(cmd) {
-            // MSET args are [key, val, key, val, ...] — only even indices are keys.
-            let is_mset = cmd.eq_ignore_ascii_case("mset");
-            let is_blocking_pop =
-                cmd.eq_ignore_ascii_case("blpop") || cmd.eq_ignore_ascii_case("brpop");
-            let key_bytes: Vec<&[u8]> = if is_mset {
-                args.iter().step_by(2).map(|a| a.as_ref()).collect()
-            } else if is_blocking_pop {
-                args[..args.len() - 1].iter().map(|a| a.as_ref()).collect()
-            } else {
-                args.iter().map(|a| a.as_ref()).collect()
-            };
+        let key_bytes = crate::command::command_keys(cmd, args);
+        if key_bytes.len() > 1 {
             if let Err(msg) = crate::cluster::router::check_cross_slot(&key_bytes) {
                 return Some(Ok(RespValue::Error(msg)));
             }
