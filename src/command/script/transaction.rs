@@ -511,10 +511,38 @@ impl ScriptTransaction {
         key: &[u8],
     ) -> Result<&mut Vec<u8>> {
         if !self.write_buffer.contains_key(key) {
-            let loaded = self.get_value(storage, key)?;
-            let s = match loaded {
-                Some(stored) => stored.as_string()?.to_vec(),
-                None => Vec::new(),
+            let cached_opt = self.read_cache.lock().remove(key);
+            let s = match cached_opt {
+                Some(Some(StoredValue {
+                    value: ValueType::String(s),
+                    expires_at,
+                })) => {
+                    self.orig_expires_at
+                        .lock()
+                        .entry(key.to_vec())
+                        .or_insert(expires_at);
+                    s
+                }
+                Some(Some(_)) => return Err(Error::Command(WRONGTYPE.into())),
+                Some(None) => Vec::new(),
+                None => {
+                    let loaded = self.get_value(storage, key)?;
+                    self.read_cache.lock().remove(key);
+                    match loaded {
+                        Some(StoredValue {
+                            value: ValueType::String(s),
+                            expires_at,
+                        }) => {
+                            self.orig_expires_at
+                                .lock()
+                                .entry(key.to_vec())
+                                .or_insert(expires_at);
+                            s
+                        }
+                        Some(_) => return Err(Error::Command(WRONGTYPE.into())),
+                        None => Vec::new(),
+                    }
+                }
             };
             self.orig_expires_at
                 .lock()

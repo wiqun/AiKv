@@ -49,6 +49,20 @@ pub(super) fn exec_lpush(
     Ok(router::integer(len))
 }
 
+fn parse_pop_count(arg: &Bytes) -> Result<i64> {
+    let s = std::str::from_utf8(arg)
+        .map_err(|_| Error::Command("ERR value is not an integer".into()))?;
+    let n: i64 = s
+        .parse()
+        .map_err(|_| Error::Command("ERR value is not an integer".into()))?;
+    if n < 0 {
+        return Err(Error::Command(
+            "ERR value is not an integer or out of range".into(),
+        ));
+    }
+    Ok(n)
+}
+
 pub(super) fn exec_lpop(
     storage: &dyn ScriptIo,
     txn: &mut ScriptTransaction,
@@ -59,20 +73,9 @@ pub(super) fn exec_lpop(
         let cmd = if from_front { "LPOP" } else { "RPOP" };
         return Err(wrong_count(cmd));
     }
-    let count = if args.len() > 1 {
-        let s = std::str::from_utf8(&args[1])
-            .map_err(|_| Error::Command("ERR value is not an integer".into()))?;
-        let n: i64 = s
-            .parse()
-            .map_err(|_| Error::Command("ERR value is not an integer".into()))?;
-        if n < 0 {
-            return Err(Error::Command(
-                "ERR value is not an integer or out of range".into(),
-            ));
-        }
-        Some(n)
-    } else {
-        None
+    let count = match args.get(1) {
+        Some(arg) => Some(parse_pop_count(arg)?),
+        None => None,
     };
     let Some(stored) = txn.get_value(storage, &args[0])? else {
         return Ok(RespValue::Null);

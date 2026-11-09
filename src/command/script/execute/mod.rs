@@ -38,6 +38,7 @@ use crate::storage::ScriptIo;
 
 mod extra;
 pub mod fast_path;
+pub(super) mod fast_path_hash;
 mod hash;
 mod list;
 mod set;
