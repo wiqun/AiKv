@@ -22,6 +22,8 @@ use crate::storage::{now_ms, KvStorage, WRONGTYPE};
 pub struct StringCommands {
     storage: Arc<dyn KvStorage>,
     key_lock: Arc<KeyLock>,
+    #[allow(dead_code)]
+    pub(crate) in_flight_ctx: Arc<crate::command::shared::InFlightContext>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,8 +34,16 @@ pub(crate) enum SetCondition {
 }
 
 impl StringCommands {
-    pub fn new(storage: Arc<dyn KvStorage>, key_lock: Arc<KeyLock>) -> Self {
-        Self { storage, key_lock }
+    pub fn new(
+        storage: Arc<dyn KvStorage>,
+        key_lock: Arc<KeyLock>,
+        in_flight_ctx: Arc<crate::command::shared::InFlightContext>,
+    ) -> Self {
+        Self {
+            storage,
+            key_lock,
+            in_flight_ctx,
+        }
     }
 
     pub async fn get(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {

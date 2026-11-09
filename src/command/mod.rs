@@ -17,6 +17,7 @@ mod scan_util;
 mod script;
 mod server;
 mod set;
+pub mod shared;
 mod string;
 mod zset;
 

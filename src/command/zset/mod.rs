@@ -76,6 +76,8 @@ pub struct ZSetCommands {
     key_lock: Arc<KeyLock>,
     metrics: Option<Arc<ServerMetrics>>,
     transaction_gate: TransactionGate,
+    #[allow(dead_code)]
+    pub(crate) in_flight_ctx: Arc<crate::command::shared::InFlightContext>,
 }
 
 impl ZSetCommands {
@@ -83,12 +85,14 @@ impl ZSetCommands {
         storage: Arc<dyn KvStorage>,
         key_lock: Arc<KeyLock>,
         transaction_gate: TransactionGate,
+        in_flight_ctx: Arc<crate::command::shared::InFlightContext>,
     ) -> Self {
         Self {
             storage,
             key_lock,
             metrics: None,
             transaction_gate,
+            in_flight_ctx,
         }
     }
 
@@ -97,12 +101,14 @@ impl ZSetCommands {
         key_lock: Arc<KeyLock>,
         metrics: Arc<ServerMetrics>,
         transaction_gate: TransactionGate,
+        in_flight_ctx: Arc<crate::command::shared::InFlightContext>,
     ) -> Self {
         Self {
             storage,
             key_lock,
             metrics: Some(metrics),
             transaction_gate,
+            in_flight_ctx,
         }
     }
 
@@ -835,6 +841,7 @@ mod tests {
             MemoryEngine::new(1),
             Arc::new(KeyLock::new(1)),
             Arc::new(tokio::sync::RwLock::new(())),
+            Arc::new(crate::command::shared::InFlightContext::new()),
         ));
         let task = {
             let commands = Arc::clone(&commands);
@@ -856,6 +863,7 @@ mod tests {
             MemoryEngine::new(1),
             Arc::new(KeyLock::new(1)),
             Arc::new(tokio::sync::RwLock::new(())),
+            Arc::new(crate::command::shared::InFlightContext::new()),
         );
         let key = Bytes::from_static(b"test_zadd_flags_key");
 

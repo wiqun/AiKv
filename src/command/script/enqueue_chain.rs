@@ -18,11 +18,11 @@ enum PublishState {
 
 type Tails = Arc<Mutex<HashMap<Vec<u8>, watch::Sender<PublishState>>>>;
 
-pub(super) struct EnqueueChain {
+pub struct EnqueueChain {
     tails: Tails,
 }
 
-pub(super) struct Publication {
+pub struct Publication {
     tx: watch::Sender<PublishState>,
     prev: Vec<watch::Receiver<PublishState>>,
     settled: bool,
@@ -32,7 +32,7 @@ pub(super) struct Publication {
 }
 
 impl EnqueueChain {
-    pub(super) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             tails: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -43,7 +43,7 @@ impl EnqueueChain {
         self.tails.lock().len()
     }
 
-    pub(super) fn publish(&self, keys: &[&[u8]]) -> Publication {
+    pub fn publish(&self, keys: &[&[u8]]) -> Publication {
         let (tx, _rx) = watch::channel(PublishState::Pending);
         let mut prev = Vec::new();
         let mut seen = HashSet::new();
@@ -70,18 +70,18 @@ impl EnqueueChain {
 }
 
 impl Publication {
-    pub(super) async fn wait_predecessors(&mut self) -> Result<()> {
+    pub async fn wait_predecessors(&mut self) -> Result<()> {
         for rx in &mut self.prev {
             wait_one(rx).await?;
         }
         Ok(())
     }
 
-    pub(super) fn succeed(&mut self) {
+    pub fn succeed(&mut self) {
         self.settle(PublishState::Ready);
     }
 
-    fn fail(&mut self) {
+    pub fn fail(&mut self) {
         self.settle(PublishState::Failed);
     }
 

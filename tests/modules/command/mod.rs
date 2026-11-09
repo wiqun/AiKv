@@ -16,5 +16,6 @@ pub mod router;
 pub mod script;
 pub mod server;
 pub mod set;
+pub mod shared_in_flight;
 pub mod string;
 pub mod zset;

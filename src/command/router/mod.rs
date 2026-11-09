@@ -74,14 +74,20 @@ pub struct CommandRouter {
     key_cmds: key::KeyCommands,
     server: Option<server::ServerCommands>,
     persistence: Option<persistence::PersistenceCommands>,
+    in_flight_ctx: Arc<crate::command::shared::InFlightContext>,
 }
 
 impl CommandRouter {
     pub fn new(storage: Arc<dyn KvStorage>) -> Self {
         let key_lock = Arc::new(KeyLock::new(KEY_LOCK_BUCKETS));
         let transaction_gate = Arc::new(tokio::sync::RwLock::new(()));
+        let in_flight_ctx = Arc::new(crate::command::shared::InFlightContext::new());
         Self {
-            string: string::StringCommands::new(storage.clone(), key_lock.clone()),
+            string: string::StringCommands::new(
+                storage.clone(),
+                key_lock.clone(),
+                Arc::clone(&in_flight_ctx),
+            ),
             hash: hash::HashCommands::new(storage.clone(), key_lock.clone()),
             list: list::ListCommands::new(
                 storage.clone(),
@@ -89,9 +95,18 @@ impl CommandRouter {
                 Arc::clone(&transaction_gate),
             ),
             set: set::SetCommands::new(storage.clone(), key_lock.clone()),
-            zset: zset::ZSetCommands::new(storage.clone(), key_lock.clone(), transaction_gate),
+            zset: zset::ZSetCommands::new(
+                storage.clone(),
+                key_lock.clone(),
+                transaction_gate,
+                Arc::clone(&in_flight_ctx),
+            ),
             json: json::JsonCommands::new(storage.clone(), key_lock.clone()),
-            script: script::ScriptCommands::new(storage.clone(), key_lock.clone()),
+            script: script::ScriptCommands::new(
+                storage.clone(),
+                key_lock.clone(),
+                Arc::clone(&in_flight_ctx),
+            ),
             database: database::DatabaseCommands::new(storage.clone()),
             key_cmds: key::KeyCommands::new(storage.clone(), key_lock.clone()),
             server: None,
@@ -99,6 +114,7 @@ impl CommandRouter {
             metrics: None,
             storage,
             key_lock,
+            in_flight_ctx,
         }
     }
 
@@ -111,6 +127,7 @@ impl CommandRouter {
         self.script = script::ScriptCommands::with_worker_threads(
             Arc::clone(&self.storage),
             Arc::clone(&self.key_lock),
+            Arc::clone(&self.in_flight_ctx),
             threads,
         );
         self
@@ -118,8 +135,13 @@ impl CommandRouter {
 
     pub fn new_with_shared(storage: Arc<dyn KvStorage>, shared: Arc<ServerSharedState>) -> Self {
         let key_lock = Arc::new(KeyLock::new(KEY_LOCK_BUCKETS));
+        let in_flight_ctx = Arc::new(crate::command::shared::InFlightContext::new());
         Self {
-            string: string::StringCommands::new(storage.clone(), key_lock.clone()),
+            string: string::StringCommands::new(
+                storage.clone(),
+                key_lock.clone(),
+                Arc::clone(&in_flight_ctx),
+            ),
             hash: hash::HashCommands::new(storage.clone(), key_lock.clone()),
             list: list::ListCommands::with_metrics(
                 storage.clone(),
@@ -133,6 +155,7 @@ impl CommandRouter {
                 key_lock.clone(),
                 shared.metrics.clone(),
                 Arc::clone(&shared.transaction_gate),
+                Arc::clone(&in_flight_ctx),
             ),
             json: json::JsonCommands::with_metrics(
                 storage.clone(),
@@ -142,6 +165,7 @@ impl CommandRouter {
             script: script::ScriptCommands::with_metrics(
                 storage.clone(),
                 key_lock.clone(),
+                Arc::clone(&in_flight_ctx),
                 shared.metrics.clone(),
                 shared.connection_config.script_worker_threads,
             ),
@@ -155,7 +179,12 @@ impl CommandRouter {
             metrics: Some(Arc::clone(&shared.metrics)),
             storage,
             key_lock,
+            in_flight_ctx,
         }
+    }
+
+    pub fn in_flight_context(&self) -> Arc<crate::command::shared::InFlightContext> {
+        Arc::clone(&self.in_flight_ctx)
     }
 
     pub fn storage(&self) -> Arc<dyn KvStorage> {
