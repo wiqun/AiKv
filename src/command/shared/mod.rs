@@ -2,4 +2,4 @@
 
 pub mod in_flight_context;
 
-pub use in_flight_context::InFlightContext;
+pub use in_flight_context::{commit_ops_in_lock, InFlightCommitHandle, InFlightContext};

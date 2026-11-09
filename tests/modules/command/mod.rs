@@ -20,3 +20,4 @@ pub mod shared_in_flight;
 pub mod string;
 pub mod string_hotkey;
 pub mod zset;
+pub mod zset_hotkey;

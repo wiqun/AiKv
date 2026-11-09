@@ -116,13 +116,18 @@ impl ZSetCommands {
         router::require_min_args("ZADD", args, 3)?;
         let (flags, idx) = helpers::parse_zadd_flags(args)?;
         let key = &args[0];
-        let _lock = self.key_lock.lock(key).await;
+        let lock = self.key_lock.lock(key).await;
         let mut pairs = Vec::with_capacity((args.len() - idx) / 2);
         for chunk in args[idx..].chunks(2) {
             pairs.push((parse_score(&chunk[0])?, chunk[1].to_vec()));
         }
-        let outcome =
-            persist::add_members_with_flags(self.storage.as_ref(), db, key, &pairs, flags).await?;
+        let ctx = persist::ZAddContext {
+            storage: self.storage.as_ref(),
+            in_flight: &self.in_flight_ctx,
+            db,
+            key,
+        };
+        let outcome = persist::add_members_pipeline(&ctx, &pairs, flags, lock).await?;
         BlockingRegistry::global().notify(key, RespValue::SimpleString("OK".into()));
         match outcome {
             helpers::ZAddOutcome::Count(count) => Ok(router::integer(count)),
@@ -381,11 +386,23 @@ impl ZSetCommands {
         let increment = parse_score(&args[1])?;
         let member = args[2].to_vec();
         let key = &args[0];
-        let _lock = self.key_lock.lock(key).await;
-        let current = persist::member_score(self.storage.as_ref(), db, key, &member).await?;
-        let new_score = current.unwrap_or(0.0) + increment;
-        persist::add_members(self.storage.as_ref(), db, key, &[(new_score, member)]).await?;
-        Ok(router::bulk(format_score(new_score).into_bytes()))
+        let lock = self.key_lock.lock(key).await;
+        let flags = helpers::ZAddFlags {
+            incr: true,
+            ..Default::default()
+        };
+        let ctx = persist::ZAddContext {
+            storage: self.storage.as_ref(),
+            in_flight: &self.in_flight_ctx,
+            db,
+            key,
+        };
+        let outcome =
+            persist::add_members_pipeline(&ctx, &[(increment, member)], flags, lock).await?;
+        match outcome {
+            helpers::ZAddOutcome::Score(Some(s)) => Ok(router::bulk(format_score(s).into_bytes())),
+            _ => Ok(router::nil_bulk()),
+        }
     }
 
     pub async fn zscan(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {

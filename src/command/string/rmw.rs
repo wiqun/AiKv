@@ -5,8 +5,7 @@
 
 use std::sync::Arc;
 
-use crate::command::shared::in_flight_context::InFlightCommitHandle;
-use crate::command::shared::InFlightContext;
+use crate::command::shared::{commit_ops_in_lock, InFlightContext};
 use crate::error::Result;
 use crate::storage::types::WriteOp;
 use crate::storage::KvStorage;
@@ -40,40 +39,5 @@ pub(crate) async fn commit_string_in_lock<G>(
     guard: G,
 ) -> Result<()> {
     let ops = vec![(key.to_vec(), WriteOp::Put(Arc::new(new_value)))];
-    let inserted = in_flight_ctx.in_flight.insert_batch(db, &ops);
-    let mut publication = in_flight_ctx.enqueue_chain.publish(&[key]);
-
-    // 关键步骤: 内存修改与在途登记完成后，立刻提前释放 KeyLock!
-    drop(guard);
-
-    if !crate::storage::deferred::is_active() {
-        tokio::task::yield_now().await;
-    }
-
-    if let Err(err) = publication.wait_predecessors().await {
-        in_flight_ctx
-            .in_flight
-            .remove_encoded(&inserted.1, inserted.0);
-        return Err(err);
-    }
-
-    let handle = match storage.enqueue_batch(db, ops).await {
-        Ok(handle) => handle,
-        Err(err) => {
-            in_flight_ctx
-                .in_flight
-                .remove_encoded(&inserted.1, inserted.0);
-            return Err(err);
-        }
-    };
-
-    // 关键高并发步骤: 成功入队 batcher 后立刻放行后继，
-    // 使后续并发请求能够涌入 batcher 形成批量提案.
-    publication.succeed();
-
-    let commit = InFlightCommitHandle::new(handle, Arc::clone(&in_flight_ctx.in_flight), inserted);
-    match crate::storage::deferred::defer(Box::new(commit)) {
-        Ok(()) => Ok(()),
-        Err(commit) => commit.wait().await,
-    }
+    commit_ops_in_lock(storage, in_flight_ctx, db, key, ops, guard).await
 }
