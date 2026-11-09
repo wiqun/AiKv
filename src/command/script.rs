@@ -21,6 +21,7 @@ mod route;
 mod sandbox;
 mod transaction;
 mod zset_edit;
+mod hash_edit;
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -668,7 +669,14 @@ impl ScriptCommands {
         );
         eval_result
             .map(|value| (value, txn))
-            .map_err(|e| Error::Command(format!("ERR Error running script: {e}")))
+            .map_err(|e| {
+                let msg = e.to_string();
+                let sanitized: String = msg
+                    .chars()
+                    .map(|c| if c == '\r' || c == '\n' { ' ' } else { c })
+                    .collect();
+                Error::Command(format!("ERR Error running script: {sanitized}"))
+            })
     }
 }
 

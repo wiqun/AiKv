@@ -73,6 +73,9 @@ pub(crate) fn sorted_by_score(zset: &BTreeMap<Vec<u8>, f64>, reverse: bool) -> V
 }
 
 pub(crate) fn normalize_range(len: usize, start: i64, stop: i64) -> (usize, usize) {
+    if len == 0 {
+        return (1, 0);
+    }
     let len_i = len as i64;
     let start_idx = if start < 0 {
         (len_i + start).max(0) as usize
@@ -80,7 +83,11 @@ pub(crate) fn normalize_range(len: usize, start: i64, stop: i64) -> (usize, usiz
         (start as usize).min(len.saturating_sub(1))
     };
     let stop_idx = if stop < 0 {
-        (len_i + stop).max(0) as usize
+        let s = len_i + stop;
+        if s < 0 {
+            return (1, 0);
+        }
+        s as usize
     } else {
         (stop as usize).min(len.saturating_sub(1))
     };
@@ -404,5 +411,16 @@ mod members_resp_tests {
             members_into_resp(Vec::new(), true),
             RespValue::Array(Some(Vec::new()))
         );
+    }
+
+    #[test]
+    fn test_normalize_range_negative_out_of_bounds() {
+        // len = 1, start = 0, stop = -3: len + stop = -2 < 0. Must yield start > stop (empty range).
+        let (start, stop) = normalize_range(1, 0, -3);
+        assert!(start > stop, "expected start > stop, got ({start}, {stop})");
+
+        // len = 1, start = 0, stop = -1: len + stop = 0. Range [0, 0].
+        let (start, stop) = normalize_range(1, 0, -1);
+        assert_eq!((start, stop), (0, 0));
     }
 }

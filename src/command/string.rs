@@ -671,10 +671,14 @@ pub(crate) fn string_range_slice(value: &[u8], start: i64, end: i64) -> Vec<u8> 
         start.min(len)
     } as usize;
     let end_idx = if end < 0 {
-        (len + end).max(0)
+        let e = len + end;
+        if e < 0 {
+            return Vec::new();
+        }
+        e as usize
     } else {
-        end.min(len - 1)
-    } as usize;
+        end.min(len - 1) as usize
+    };
 
     if start_idx > end_idx || start_idx >= value.len() {
         Vec::new()
@@ -750,5 +754,22 @@ fn format_float(v: f64) -> String {
         s.trim_end_matches('0').trim_end_matches('.').to_string()
     } else {
         s
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_string_range_slice_negative_bounds() {
+        let val = b"hello";
+        assert_eq!(string_range_slice(val, 0, -1), b"hello");
+        assert_eq!(string_range_slice(val, 0, -2), b"hell");
+        assert_eq!(string_range_slice(val, 0, -5), b"h");
+        // len = 5, end = -10: len + end = -5 < 0. Empty slice!
+        assert_eq!(string_range_slice(val, 0, -10), b"");
+        // start out of bounds
+        assert_eq!(string_range_slice(val, 10, 20), b"");
     }
 }

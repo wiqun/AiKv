@@ -85,10 +85,12 @@ pub(super) fn exec_getrange(
     }
     let start = parse_i64_arg(&args[1], "start")?;
     let end = parse_i64_arg(&args[2], "end")?;
-    match txn.get(storage, &args[0])? {
-        None => Ok(router::bulk(Vec::new())),
-        Some(value) => Ok(router::bulk(string_range_slice(&value, start, end))),
-    }
+    let slice = txn
+        .with_string(storage, &args[0], |value| {
+            Ok(string_range_slice(value, start, end))
+        })?
+        .unwrap_or_default();
+    Ok(router::bulk(slice))
 }
 
 pub(super) fn exec_setrange(
@@ -101,16 +103,15 @@ pub(super) fn exec_setrange(
     }
     let offset = parse_setrange_offset(&args[1])?;
     let patch = &args[2];
-    let mut current = txn.get(storage, &args[0])?.unwrap_or_default();
     let end = offset
         .checked_add(patch.len())
         .ok_or_else(|| Error::Command("ERR offset is out of range".into()))?;
+    let current = txn.get_or_create_string_mut(storage, &args[0])?;
     if end > current.len() {
         current.resize(end, 0);
     }
     current[offset..end].copy_from_slice(patch);
     let len = current.len() as i64;
-    txn.set_string(key(&args[0]), current);
     Ok(router::integer(len))
 }
 

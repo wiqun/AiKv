@@ -663,6 +663,9 @@ impl ListCommands {
 }
 
 pub(crate) fn normalize_range(len: usize, start: i64, stop: i64) -> (usize, usize) {
+    if len == 0 {
+        return (1, 0);
+    }
     let len_i = len as i64;
     let start_idx = if start < 0 {
         (len_i + start).max(0) as usize
@@ -670,7 +673,11 @@ pub(crate) fn normalize_range(len: usize, start: i64, stop: i64) -> (usize, usiz
         (start as usize).min(len)
     };
     let stop_idx = if stop < 0 {
-        (len_i + stop).max(0) as usize
+        let s = len_i + stop;
+        if s < 0 {
+            return (1, 0);
+        }
+        s as usize
     } else {
         (stop as usize).min(len.saturating_sub(1))
     };

@@ -272,20 +272,55 @@ fn fast_hmget(
         let _timed = CallTimer::start(ScriptCallOp::Hash);
         let field_count = args.len() - 2;
         let is_resp3 = matches!(lua.named_registry_value::<i64>("aikv_script_resp"), Ok(3));
-
-        let query_res = txn.with_hash(storage, k, |hash| {
-            let mut vals = Vec::with_capacity(field_count);
-            for i in 0..field_count {
-                let field_val = match args.get(i + 2) {
-                    Some(arg) => with_arg_bytes(arg, |f| hash.get(f).cloned()).flatten(),
-                    None => None,
-                };
-                vals.push(field_val);
+        let is_subkey = match txn.uses_subkey_hash(storage, k) {
+            Ok(b) => b,
+            Err(e) => {
+                let msg = e.to_string();
+                if throw_error {
+                    return Err(mlua::Error::RuntimeError(msg));
+                }
+                return pcall_error_table(lua, &msg).map(Some);
             }
-            Ok(vals)
-        });
+        };
+
+        let query_res = if is_subkey {
+            let mut vals = Vec::with_capacity(field_count);
+            let mut err = None;
+            for i in 0..field_count {
+                if let Some(arg) = args.get(i + 2) {
+                    let v = with_arg_bytes(arg, |f| txn.point_hash_field(storage, k, f));
+                    match v {
+                        Some(Ok(val)) => vals.push(val),
+                        Some(Err(e)) => {
+                            err = Some(e);
+                            break;
+                        }
+                        None => vals.push(None),
+                    }
+                } else {
+                    vals.push(None);
+                }
+            }
+            match err {
+                Some(e) => Err(e),
+                None => Ok(vals),
+            }
+        } else {
+            txn.with_hash(storage, k, |hash| {
+                let mut vals = Vec::with_capacity(field_count);
+                for i in 0..field_count {
+                    let field_val = match args.get(i + 2) {
+                        Some(arg) => with_arg_bytes(arg, |f| hash.get(f).cloned()).flatten(),
+                        None => None,
+                    };
+                    vals.push(field_val);
+                }
+                Ok(vals)
+            })
+            .map(|opt| opt.unwrap_or_else(|| vec![None; field_count]))
+        };
         match query_res {
-            Ok(vals) => build_hmget_table(lua, vals, field_count, is_resp3).map(Some),
+            Ok(vals) => build_hmget_table(lua, Some(vals), field_count, is_resp3).map(Some),
             Err(e) => {
                 let msg = e.to_string();
                 if throw_error {
@@ -455,14 +490,37 @@ fn fast_hget(
             prep.finish();
             let _timed = CallTimer::start(ScriptCallOp::Hash);
             let is_resp3 = matches!(lua.named_registry_value::<i64>("aikv_script_resp"), Ok(3));
-            let val_opt = match txn.with_hash(storage, k, |h| Ok(h.get(f).cloned())) {
-                Ok(opt) => opt.flatten(),
+            let is_subkey = match txn.uses_subkey_hash(storage, k) {
+                Ok(b) => b,
                 Err(e) => {
                     let msg = e.to_string();
                     if throw_error {
                         return Err(mlua::Error::RuntimeError(msg));
                     }
                     return pcall_error_table(lua, &msg).map(Some);
+                }
+            };
+            let val_opt = if is_subkey {
+                match txn.point_hash_field(storage, k, f) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let msg = e.to_string();
+                        if throw_error {
+                            return Err(mlua::Error::RuntimeError(msg));
+                        }
+                        return pcall_error_table(lua, &msg).map(Some);
+                    }
+                }
+            } else {
+                match txn.with_hash(storage, k, |h| Ok(h.get(f).cloned())) {
+                    Ok(opt) => opt.flatten(),
+                    Err(e) => {
+                        let msg = e.to_string();
+                        if throw_error {
+                            return Err(mlua::Error::RuntimeError(msg));
+                        }
+                        return pcall_error_table(lua, &msg).map(Some);
+                    }
                 }
             };
             match val_opt {
@@ -517,20 +575,43 @@ fn fast_hset(
                 let mut prep = CallTimer::start(ScriptCallOp::Prep);
                 prep.finish();
                 let _timed = CallTimer::start(ScriptCallOp::Hash);
-                let added = match txn.ensure_hash_mut(storage, k) {
-                    Ok(Some(h)) => h.insert(f.to_vec(), v.to_vec()).is_none() as i64,
-                    Ok(None) => {
-                        let mut map = std::collections::HashMap::new();
-                        map.insert(f.to_vec(), v.to_vec());
-                        txn.set_hash(k.to_vec(), map);
-                        1i64
-                    }
+                let is_subkey = match txn.uses_subkey_hash(storage, k) {
+                    Ok(b) => b,
                     Err(e) => {
                         let msg = e.to_string();
                         if throw_error {
                             return Err(mlua::Error::RuntimeError(msg));
                         }
                         return pcall_error_table(lua, &msg).map(Some);
+                    }
+                };
+                let added = if is_subkey {
+                    match txn.subkey_hset_single(storage, k, f, v) {
+                        Ok(a) => a,
+                        Err(e) => {
+                            let msg = e.to_string();
+                            if throw_error {
+                                return Err(mlua::Error::RuntimeError(msg));
+                            }
+                            return pcall_error_table(lua, &msg).map(Some);
+                        }
+                    }
+                } else {
+                    match txn.ensure_hash_mut(storage, k) {
+                        Ok(Some(h)) => h.insert(f.to_vec(), v.to_vec()).is_none() as i64,
+                        Ok(None) => {
+                            let mut map = std::collections::HashMap::new();
+                            map.insert(f.to_vec(), v.to_vec());
+                            txn.set_hash(k.to_vec(), map);
+                            1i64
+                        }
+                        Err(e) => {
+                            let msg = e.to_string();
+                            if throw_error {
+                                return Err(mlua::Error::RuntimeError(msg));
+                            }
+                            return pcall_error_table(lua, &msg).map(Some);
+                        }
                     }
                 };
                 Ok(Some(mlua::Value::Integer(added)))
@@ -572,6 +653,27 @@ fn fast_hdel(
         let _timed = CallTimer::start(ScriptCallOp::Hash);
         let field_count = args.len() - 2;
         let mut count = 0i64;
+        let is_subkey = match txn.uses_subkey_hash(storage, k) {
+            Ok(b) => b,
+            Err(e) => {
+                let msg = e.to_string();
+                if throw_error {
+                    return Err(mlua::Error::RuntimeError(msg));
+                }
+                return pcall_error_table(lua, &msg).map(Some);
+            }
+        };
+        if is_subkey {
+            for i in 0..field_count {
+                if let Some(arg) = args.get(i + 2) {
+                    let r = with_arg_bytes(arg, |f| txn.subkey_hdel_single(storage, k, f));
+                    if let Some(Ok(c)) = r {
+                        count += c;
+                    }
+                }
+            }
+            return Ok(Some(mlua::Value::Integer(count)));
+        }
         let delete_res = match txn.ensure_hash_mut(storage, k) {
             Ok(Some(h)) => {
                 for i in 0..field_count {

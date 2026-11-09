@@ -54,23 +54,6 @@ pub(super) fn record_command_span_status(result: &Result<RespValue>) {
     }
 }
 
-#[cfg(feature = "cluster")]
-pub(super) fn is_multi_key_cmd(cmd: &str) -> bool {
-    matches!(
-        cmd.to_ascii_lowercase().as_str(),
-        "mget"
-            | "mset"
-            | "del"
-            | "exists"
-            | "unlink"
-            | "touch"
-            | "mexecute"
-            | "rpop"
-            | "blpop"
-            | "brpop"
-    )
-}
-
 /// 集群模式下在本节点本地执行、不按 `args[0]` 做 slot 路由的命令.
 ///
 /// 含管理面命令, 以及 KEYS / SCAN 族 (首参是 pattern 或 cursor, 不是 key).

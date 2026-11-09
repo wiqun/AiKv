@@ -38,10 +38,26 @@ pub struct ScriptTransaction {
     pub(crate) in_flight: Option<Arc<InFlightBuffer>>,
     /// 大 ZSET 的增量修改. 提交时写 subkey, 不把整份集合塞回 inline blob.
     pub(crate) zset_deltas: HashMap<Vec<u8>, ZSetDelta>,
+    /// 大 HASH 的增量修改. 提交时写 subkey, 不把整张表展开成 inline blob.
+    pub(crate) hash_deltas: HashMap<Vec<u8>, HashDelta>,
     /// 事务内大 ZSET 的内存视图缓存 (避免事务内循环查询/修改时反复全表扫描底层存储)
     pub(crate) zset_views: ZSetViewCache,
     /// 事务开始时大 ZSET (storage + in_flight) 的最大 score 索引 key 缓存
     pub(crate) zset_base_top: Mutex<HashMap<Vec<u8>, Option<Vec<u8>>>>,
+}
+
+/// 一次脚本里某个大 Hash field 的变化.
+#[derive(Debug, Clone)]
+pub struct HashFieldChange {
+    pub before: Option<Vec<u8>>,
+    pub after: Option<Vec<u8>>,
+}
+
+/// 大 Hash 在脚本中的增量. `count` 是提交后的字段数.
+#[derive(Debug, Clone)]
+pub struct HashDelta {
+    pub count: u32,
+    pub fields: HashMap<Vec<u8>, HashFieldChange>,
 }
 
 /// 一次脚本里某个大 ZSET member 的分数变化. `before` 是脚本开始前的分数.
@@ -73,6 +89,7 @@ impl ScriptTransaction {
             read_cache: Mutex::new(HashMap::new()),
             in_flight,
             zset_deltas: HashMap::new(),
+            hash_deltas: HashMap::new(),
             zset_views: Mutex::new(HashMap::new()),
             zset_base_top: Mutex::new(HashMap::new()),
         }
@@ -100,6 +117,7 @@ impl ScriptTransaction {
 
     pub fn set_hash(&mut self, key: Vec<u8>, hash: HashMap<Vec<u8>, Vec<u8>>) {
         self.read_cache.lock().remove(&key);
+        self.hash_deltas.remove(&key);
         self.orig_expires_at
             .lock()
             .entry(key.clone())
@@ -133,6 +151,8 @@ impl ScriptTransaction {
         self.read_cache.lock().remove(&key);
         self.zset_views.lock().remove(&key);
         self.zset_base_top.lock().remove(&key);
+        self.zset_deltas.remove(&key);
+        self.hash_deltas.remove(&key);
         self.write_buffer.insert(key, ExtendedBatchOp::Delete);
     }
 
@@ -215,38 +235,8 @@ impl ScriptTransaction {
         self.orig_expires_at
             .lock()
             .insert(key.to_vec(), stored.expires_at);
-        // 透明展开 CollectionHeader -> 完整集合, 使 Lua 脚本读路径无需感知 subkey 格式.
+        // 透明展开 CollectionHeader -> 完整集合 (仅针对尚未增量化的 Set).
         let expanded = match stored.value {
-            ValueType::CollectionHeader {
-                kind: CollectionKind::Hash,
-                ..
-            } => {
-                let encoded = AiDbEngine::encode_key(self.db_index, key);
-                let prefix = subkey::hash_subkey_prefix(&encoded);
-                let map = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
-                let map_c = map.clone();
-                storage.raw_subkey_for_each(
-                    self.db_index,
-                    prefix,
-                    Box::new(move |enc, raw| {
-                        if let Some((kind, field)) = subkey::decode_subkey(&enc) {
-                            if kind == CollectionKind::Hash {
-                                map_c.lock().unwrap().insert(field, raw);
-                            }
-                        }
-                        Ok(())
-                    }),
-                )?;
-                StoredValue {
-                    value: ValueType::Hash(
-                        std::sync::Arc::try_unwrap(map)
-                            .unwrap()
-                            .into_inner()
-                            .unwrap(),
-                    ),
-                    expires_at: stored.expires_at,
-                }
-            }
             ValueType::CollectionHeader {
                 kind: CollectionKind::Set,
                 ..
@@ -350,6 +340,43 @@ impl ScriptTransaction {
         }
     }
 
+    fn load_hash_from_stored(
+        &self,
+        storage: &dyn ScriptIo,
+        key: &[u8],
+        stored: &StoredValue,
+    ) -> Result<HashMap<Vec<u8>, Vec<u8>>> {
+        match &stored.value {
+            ValueType::Hash(map) => Ok(map.clone()),
+            ValueType::CollectionHeader {
+                kind: CollectionKind::Hash,
+                ..
+            } => {
+                let encoded_user_key = AiDbEngine::encode_key(self.db_index, key);
+                let prefix = subkey::hash_subkey_prefix(&encoded_user_key);
+                let map_h = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
+                let map_c = map_h.clone();
+                storage.raw_subkey_for_each(
+                    self.db_index,
+                    prefix,
+                    Box::new(move |subkey_key, value| {
+                        if let Some((kind, field)) = subkey::decode_subkey(&subkey_key) {
+                            if kind == CollectionKind::Hash {
+                                map_c.lock().unwrap().insert(field.to_vec(), value);
+                            }
+                        }
+                        Ok(())
+                    }),
+                )?;
+                Ok(std::sync::Arc::try_unwrap(map_h)
+                    .unwrap()
+                    .into_inner()
+                    .unwrap())
+            }
+            _ => Err(Error::Command(WRONGTYPE.into())),
+        }
+    }
+
     pub fn ensure_hash_mut(
         &mut self,
         storage: &dyn ScriptIo,
@@ -358,7 +385,7 @@ impl ScriptTransaction {
         if !self.write_buffer.contains_key(key) {
             let loaded = self.get_value(storage, key)?;
             if let Some(stored) = loaded {
-                let hash = stored.as_hash()?.clone();
+                let hash = self.load_hash_from_stored(storage, key, &stored)?;
                 self.write_buffer
                     .insert(key.to_vec(), ExtendedBatchOp::SetHash(hash));
             }
@@ -385,8 +412,52 @@ impl ScriptTransaction {
         }
         if let Some(cached) = self.read_cache.lock().get(key) {
             return match cached {
-                Some(stored) => match stored.as_hash() {
-                    Ok(hash) => f(hash).map(Some),
+                Some(stored) => match &stored.value {
+                    ValueType::Hash(hash) => f(hash).map(Some),
+                    ValueType::CollectionHeader {
+                        kind: CollectionKind::Hash,
+                        ..
+                    } => {
+                        let hash = self.load_hash_from_stored(storage, key, stored)?;
+                        f(&hash).map(Some)
+                    }
+                    _ => Err(Error::Command(WRONGTYPE.into())),
+                },
+                None => Ok(None),
+            };
+        }
+        let stored = self.get_value(storage, key)?;
+        match stored {
+            Some(stored) => match &stored.value {
+                ValueType::Hash(hash) => f(hash).map(Some),
+                ValueType::CollectionHeader {
+                    kind: CollectionKind::Hash,
+                    ..
+                } => {
+                    let hash = self.load_hash_from_stored(storage, key, &stored)?;
+                    f(&hash).map(Some)
+                }
+                _ => Err(Error::Command(WRONGTYPE.into())),
+            },
+            None => Ok(None),
+        }
+    }
+
+    pub fn with_string<F, R>(&self, storage: &dyn ScriptIo, key: &[u8], f: F) -> Result<Option<R>>
+    where
+        F: FnOnce(&[u8]) -> Result<R>,
+    {
+        if let Some(op) = self.write_buffer.get(key) {
+            return match op {
+                ExtendedBatchOp::Delete => Ok(None),
+                ExtendedBatchOp::SetString(s) => f(s).map(Some),
+                _ => Err(Error::Command(WRONGTYPE.into())),
+            };
+        }
+        if let Some(cached) = self.read_cache.lock().get(key) {
+            return match cached {
+                Some(stored) => match stored.as_string() {
+                    Ok(s) => f(s).map(Some),
                     Err(e) => Err(e),
                 },
                 None => Ok(None),
@@ -394,11 +465,36 @@ impl ScriptTransaction {
         }
         let stored = self.get_value(storage, key)?;
         match stored {
-            Some(stored) => match stored.as_hash() {
-                Ok(hash) => f(hash).map(Some),
+            Some(stored) => match stored.as_string() {
+                Ok(s) => f(s).map(Some),
                 Err(e) => Err(e),
             },
             None => Ok(None),
+        }
+    }
+
+    pub fn get_or_create_string_mut(
+        &mut self,
+        storage: &dyn ScriptIo,
+        key: &[u8],
+    ) -> Result<&mut Vec<u8>> {
+        if !self.write_buffer.contains_key(key) {
+            let loaded = self.get_value(storage, key)?;
+            let s = match loaded {
+                Some(stored) => stored.as_string()?.to_vec(),
+                None => Vec::new(),
+            };
+            self.orig_expires_at
+                .lock()
+                .entry(key.to_vec())
+                .or_insert(None);
+            self.write_buffer
+                .insert(key.to_vec(), ExtendedBatchOp::SetString(s));
+        }
+        self.read_cache.lock().remove(key);
+        match self.write_buffer.get_mut(key) {
+            Some(ExtendedBatchOp::SetString(s)) => Ok(s),
+            _ => Err(Error::Command(WRONGTYPE.into())),
         }
     }
 
@@ -458,6 +554,16 @@ impl ScriptTransaction {
                             storage.engine_kind() == StorageEngineKind::AiDb,
                         ));
                     }
+                    ExtendedBatchOp::SetHash(hash) => {
+                        let exp = self.resolve_expires_at(storage, &key)?;
+                        batch_ops.extend(subkey::commit_inline_hash(
+                            self.db_index,
+                            key,
+                            hash,
+                            exp,
+                            storage.engine_kind() == StorageEngineKind::AiDb,
+                        ));
+                    }
                     _ => {
                         let exp = self.resolve_expires_at(storage, &key)?;
                         let mut stored = op_to_stored(op)?;
@@ -473,6 +579,7 @@ impl ScriptTransaction {
             }
         }
         self.append_zset_deltas(storage, &mut batch_ops)?;
+        self.append_hash_deltas(storage, &mut batch_ops)?;
         Ok(batch_ops)
     }
 
@@ -485,9 +592,10 @@ impl ScriptTransaction {
             Vec::with_capacity(write_buffer.len() + self.expire_at.len());
         self.append_owned_writes(storage, write_buffer, &mut batch_ops)?;
         self.append_zset_deltas(storage, &mut batch_ops)?;
+        self.append_hash_deltas(storage, &mut batch_ops)?;
         let expire_at = std::mem::take(&mut self.expire_at);
         for (key, exp) in expire_at {
-            if self.zset_deltas.contains_key(&key) {
+            if self.zset_deltas.contains_key(&key) || self.hash_deltas.contains_key(&key) {
                 continue;
             }
             if let Some(mut stored) = storage.get_typed(self.db_index, &key)? {
@@ -529,6 +637,18 @@ impl ScriptTransaction {
                         self.db_index,
                         key,
                         &zset,
+                        exp,
+                        subkeys,
+                    ));
+                }
+                ExtendedBatchOp::SetHash(hash) => {
+                    let exp = self.resolve_expires_at(storage, &key)?;
+                    self.expire_at.remove(&key);
+                    let subkeys = storage.engine_kind() == StorageEngineKind::AiDb;
+                    batch_ops.extend(subkey::commit_inline_hash(
+                        self.db_index,
+                        key,
+                        &hash,
                         exp,
                         subkeys,
                     ));
