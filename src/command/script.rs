@@ -10,7 +10,7 @@ mod call_stats;
 mod commit;
 mod convert;
 mod drive;
-mod enqueue_chain;
+pub(crate) mod enqueue_chain;
 mod execute;
 mod hash_edit;
 pub(crate) mod in_flight;
@@ -300,7 +300,7 @@ pub struct ScriptCommands {
     metrics: Option<Arc<ServerMetrics>>,
     vm_pool: parking_lot::Mutex<Vec<mlua::Lua>>,
     in_flight: Arc<InFlightBuffer>,
-    enqueue_chain: enqueue_chain::EnqueueChain,
+    enqueue_chain: Arc<enqueue_chain::EnqueueChain>,
     pool: pool::ScriptWorkerPool,
     router: route::ScriptRouter,
     active: active::ActiveScripts,
@@ -312,10 +312,15 @@ impl ScriptCommands {
         self
     }
 
-    pub fn new(storage: Arc<dyn KvStorage>, key_lock: Arc<KeyLock>) -> Self {
+    pub fn new(
+        storage: Arc<dyn KvStorage>,
+        key_lock: Arc<KeyLock>,
+        in_flight_ctx: Arc<crate::command::shared::InFlightContext>,
+    ) -> Self {
         Self::with_worker_threads(
             storage,
             key_lock,
+            in_flight_ctx,
             crate::config::settings::default_script_worker_threads(),
         )
     }
@@ -323,6 +328,7 @@ impl ScriptCommands {
     pub fn with_worker_threads(
         storage: Arc<dyn KvStorage>,
         key_lock: Arc<KeyLock>,
+        in_flight_ctx: Arc<crate::command::shared::InFlightContext>,
         threads: usize,
     ) -> Self {
         Self {
@@ -333,8 +339,8 @@ impl ScriptCommands {
             script_memory_limit: DEFAULT_MEMORY_LIMIT,
             metrics: None,
             vm_pool: parking_lot::Mutex::new(Vec::new()),
-            in_flight: Arc::new(InFlightBuffer::new()),
-            enqueue_chain: enqueue_chain::EnqueueChain::new(),
+            in_flight: Arc::clone(&in_flight_ctx.in_flight),
+            enqueue_chain: Arc::clone(&in_flight_ctx.enqueue_chain),
             pool: pool::ScriptWorkerPool::new(threads),
             router: route::ScriptRouter::from_env(),
             active: active::ActiveScripts::default(),
@@ -344,10 +350,11 @@ impl ScriptCommands {
     pub fn with_metrics(
         storage: Arc<dyn KvStorage>,
         key_lock: Arc<KeyLock>,
+        in_flight_ctx: Arc<crate::command::shared::InFlightContext>,
         metrics: Arc<ServerMetrics>,
         threads: usize,
     ) -> Self {
-        let mut commands = Self::with_worker_threads(storage, key_lock, threads);
+        let mut commands = Self::with_worker_threads(storage, key_lock, in_flight_ctx, threads);
         commands.metrics = Some(metrics);
         commands
     }

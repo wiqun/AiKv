@@ -19,6 +19,7 @@
 
 ### Performance
 
+- 引入跨命令与脚本共享的在途写缓冲与流水线提议 (`InFlightContext` / `commit_ops_in_lock`): 将热 Key 算子 (`INCR`, `SETRANGE`, `SETBIT`, `BITFIELD`, `APPEND`, `ZADD`, `ZREM`) 在锁内完成内存读改写与在途登记后立即提前释放 `KeyLock`, 并在锁外入队底层批处理器后立即放行后继入队, 消除 1/RTT 串行网络等待, 使底层 `GroupSetBatcher` 能够无阻塞批量聚合并行提议. 家里测试机 (Home 环境) 3 节点集群单热 Key `INCR` 由 1,980 跃升至 22,819 QPS, `SETRANGE` 由 2,016 跃升至 22,168 QPS, `ZADD` 由 2,012 跃升至 22,185 QPS, 达成 11 倍吞吐提升.
 - 流水线盲写延迟确认扩展支持根路径覆盖的 `JSON.SET key $ value`: 针对根路径 ("$" 或 ".") 且非 XX 选项的盲写请求允许入队后延迟确认, 并跳过无条件 `exists` 检查; 在 `pipeline` 中增加同 key 屏障避免覆盖乱序, 同时将屏障限制在 PlainSet 避免误将 `EVALSHA` 的 SHA1 判为 key 冲突, 解决客户端深流水线批量灌入 JSON 数据超时报错问题.
 - `KEYS` 命令字面前缀下推 (`glob_literal_prefix`) 优化: 提取 glob 模式中首个通配符前的字面量前缀并下推至底层存储的范围扫描 (`scan(start, end)`), 避免整库无谓的全表遍历反序列化, 单次耗时从 166ms 降低至 0.29ms (提速 550 倍), 全量清除慢日志.
 - 脚本内 `ZREVRANGE 0 0` (`revrange_top`) 增量合并快路径与 `SCORE_BOUNDS_HINT` 墓碑边界自适应推进: 在 `ScriptTransaction` 中缓存事务初始最大索引键 `zset_base_top` 并与 `zset_deltas` 增量做 $O(|\text{delta}|)$ 极值合并, 消除单脚本循环交替 `ZADD` + `ZREVRANGE 0 0` 触发的 31 次全量集合克隆与 $O(N \log N)$ 排序; 同时维护大 ZSet 的 `(min_score_key, max_score_key)` 提示边界以跳过头尾已删除的 `TypeDelete` 墓碑区, 使消息传输基准测试 `SendReceiveBenchmark` 稳定降至 6s ~ 7s, 集群 S7 提升至 9.94k QPS.
@@ -39,6 +40,7 @@
 
 ### Fixed
 
+- 修复锁内写命令在途一致性漏洞: 针对 `SET NX/XX`, `DEL`, `MSETNX`, `ZREM` 等带前置状态条件检查的写命令, 统一在持锁临界区内通过 `read_stored_in_lock` / `read_string_in_lock` / `exists_in_lock` 优先感知在途缓冲与 Tombstone 墓碑, 杜绝前序未落盘写被后序命令误判或覆盖.
 - 修复脚本入队链 `EnqueueChain` 的内存增长: 每个写过的 key 都在 `tails` 里留一项且永不清理 (1 万个不同 key 之后仍有 1 万项). 现在发布完成且仍是该 key 的队尾时摘掉条目; 已订阅的后继不受影响.
 - 修复在线槽迁移期间同 key 脚本写可能乱序: 迁移期的 `MigrationWrite` 原先在 `BatchWriteHandle::wait` 时才 propose, 先入队的旧值会覆盖后入队的新值. 现在 `enqueue_batch` 内完成 propose (迁移窗口内这几笔写不参与流水线的延迟确认). 回归测试: `migration_merge_read_and_del_tombstone_lifecycle` 中的迁移期顺序点检查.
 - 修复单机并发脚本丢更新: 未路由到 data group 的写 (单机, 带 `cluster` feature 的构建里也走 `ClusterDataAdapter`) 在 `ClusterBatchWaitHandle::wait` 时才落本地引擎, 而 `enqueue_chain` 以 `enqueue_batch` 返回为同 key 写的顺序点, 两个脚本的写按 `wait` 先后落盘时旧值会覆盖新值 (`-c 50` 同 key 计数 20000 次约 3/8 轮丢 100+ 条). 现在 `enqueue_batch` 内完成本地写.

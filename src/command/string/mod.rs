@@ -10,18 +10,27 @@
 //! - mutating 写 (SET NX/XX、INCR 等) 先 `key_lock.lock(key)` 再读改写.
 //! - DEL/UNLINK/EXISTS 位于本文件 (registry 中归 String 域). UNLINK 与 DEL 同语义.
 
+pub(crate) mod args;
+pub(crate) mod rmw;
+
 use std::sync::Arc;
 
 use bytes::Bytes;
 
 use crate::command::router::{self, KeyLock};
+use crate::command::shared::commit_ops_in_lock;
 use crate::error::{Error, Result};
 use crate::protocol::RespValue;
-use crate::storage::{now_ms, KvStorage, WRONGTYPE};
+use crate::storage::types::{StoredValue, WriteOp};
+use crate::storage::{now_ms, KvStorage};
+pub(crate) use args::*;
+use rmw::{commit_string_in_lock, exists_in_lock, read_stored_in_lock, read_string_in_lock};
 
 pub struct StringCommands {
     storage: Arc<dyn KvStorage>,
     key_lock: Arc<KeyLock>,
+    #[allow(dead_code)]
+    pub(crate) in_flight_ctx: Arc<crate::command::shared::InFlightContext>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,8 +41,16 @@ pub(crate) enum SetCondition {
 }
 
 impl StringCommands {
-    pub fn new(storage: Arc<dyn KvStorage>, key_lock: Arc<KeyLock>) -> Self {
-        Self { storage, key_lock }
+    pub fn new(
+        storage: Arc<dyn KvStorage>,
+        key_lock: Arc<KeyLock>,
+        in_flight_ctx: Arc<crate::command::shared::InFlightContext>,
+    ) -> Self {
+        Self {
+            storage,
+            key_lock,
+            in_flight_ctx,
+        }
     }
 
     pub async fn get(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
@@ -67,7 +84,7 @@ impl StringCommands {
         let keys: Vec<&[u8]> = args.chunks(2).map(|chunk| chunk[0].as_ref()).collect();
         let _guard = self.key_lock.lock_keys_sorted(&keys).await;
         for key in &keys {
-            if self.storage.exists(db, key).await? {
+            if exists_in_lock(self.storage.as_ref(), &self.in_flight_ctx, db, key).await? {
                 return Ok(router::integer(0));
             }
         }
@@ -87,56 +104,76 @@ impl StringCommands {
             || matches!(opts.condition, SetCondition::Nx | SetCondition::Xx);
 
         if needs_lock {
-            let _lock = self.key_lock.lock(&opts.key).await;
-            let old_value = self.storage.get(db, &opts.key).await?;
-
-            // NX: 仅在 key 不存在时设置
-            if opts.condition == SetCondition::Nx {
-                if let Some(val) = old_value {
-                    return Ok(if opts.return_old {
-                        router::bulk(val)
-                    } else {
-                        router::nil_bulk()
-                    });
-                }
-            }
-            // XX: 仅在 key 存在时设置
-            if opts.condition == SetCondition::Xx && old_value.is_none() {
-                return Ok(router::nil_bulk());
-            }
-
-            // KEEPTTL: 保留现有过期时间
-            let previous_ttl = if opts.keep_ttl {
-                self.storage
-                    .get_typed(db, &opts.key)
-                    .await?
-                    .and_then(|s| s.expires_at)
-            } else {
-                None
-            };
-            let expire = if opts.keep_ttl {
-                previous_ttl
-            } else {
-                opts.expire_at
-            };
-
-            self.apply_set(db, &opts.key, &opts.value, expire).await?;
-            if previous_ttl.is_some() {
-                self.storage.release_seen_ttl(db).await?;
-            }
-
-            return Ok(if opts.return_old {
-                match old_value {
-                    Some(v) => router::bulk(v),
-                    None => router::nil_bulk(),
-                }
-            } else {
-                router::ok()
-            });
+            return self.set_locked(db, opts).await;
         }
 
         self.apply_set(db, &opts.key, &opts.value, opts.expire_at)
             .await
+    }
+
+    async fn set_locked(&self, db: usize, opts: SetOptions) -> Result<RespValue> {
+        let lock = self.key_lock.lock(&opts.key).await;
+        let stored =
+            read_stored_in_lock(self.storage.as_ref(), &self.in_flight_ctx, db, &opts.key).await?;
+
+        // NX: 仅在 key 不存在时设置
+        if opts.condition == SetCondition::Nx {
+            if let Some(s) = stored {
+                drop(lock);
+                return Ok(if opts.return_old {
+                    let old_bytes = s.as_string()?.to_vec();
+                    router::bulk(old_bytes)
+                } else {
+                    router::nil_bulk()
+                });
+            }
+        }
+        // XX: 仅在 key 存在时设置
+        if opts.condition == SetCondition::Xx && stored.is_none() {
+            drop(lock);
+            return Ok(router::nil_bulk());
+        }
+
+        let old_value = if opts.return_old {
+            stored
+                .as_ref()
+                .and_then(|s| s.as_string().ok().map(|b| b.to_vec()))
+        } else {
+            None
+        };
+
+        // KEEPTTL: 保留现有过期时间
+        let previous_ttl = stored.as_ref().and_then(|s| s.expires_at);
+        let expire = if opts.keep_ttl {
+            previous_ttl
+        } else {
+            opts.expire_at
+        };
+
+        let mut new_stored = StoredValue::string(opts.value);
+        new_stored.expires_at = expire;
+        let ops = vec![(opts.key.clone(), WriteOp::put_stored(new_stored))];
+        commit_ops_in_lock(
+            self.storage.as_ref(),
+            &self.in_flight_ctx,
+            db,
+            &opts.key,
+            ops,
+            lock,
+        )
+        .await?;
+        if previous_ttl.is_some() {
+            self.storage.release_seen_ttl(db).await?;
+        }
+
+        Ok(if opts.return_old {
+            match old_value {
+                Some(v) => router::bulk(v),
+                None => router::nil_bulk(),
+            }
+        } else {
+            router::ok()
+        })
     }
 
     async fn apply_set(
@@ -184,8 +221,21 @@ impl StringCommands {
         router::require_min_args("DEL", args, 1)?;
         let mut count = 0i64;
         for key in args {
-            if self.storage.delete(db, key).await? {
+            let lock = self.key_lock.lock(key).await;
+            if exists_in_lock(self.storage.as_ref(), &self.in_flight_ctx, db, key).await? {
                 count += 1;
+                let ops = vec![(key.to_vec(), WriteOp::Delete)];
+                commit_ops_in_lock(
+                    self.storage.as_ref(),
+                    &self.in_flight_ctx,
+                    db,
+                    key,
+                    ops,
+                    lock,
+                )
+                .await?;
+            } else {
+                drop(lock);
             }
         }
         Ok(router::integer(count))
@@ -225,8 +275,10 @@ impl StringCommands {
         let key = &args[0];
         let offset = parse_setrange_offset(&args[1])?;
         let patch = &args[2];
-        let _lock = self.key_lock.lock(key).await;
-        let mut current = self.storage.get(db, key).await?.unwrap_or_default();
+        let lock = self.key_lock.lock(key).await;
+        let mut current = read_string_in_lock(self.storage.as_ref(), &self.in_flight_ctx, db, key)
+            .await?
+            .unwrap_or_default();
         let end = offset
             .checked_add(patch.len())
             .ok_or_else(|| Error::Command("ERR offset is out of range".into()))?;
@@ -235,7 +287,15 @@ impl StringCommands {
         }
         current[offset..end].copy_from_slice(patch);
         let len = current.len() as i64;
-        self.storage.set(db, key, &current).await?;
+        commit_string_in_lock(
+            self.storage.as_ref(),
+            &self.in_flight_ctx,
+            db,
+            key,
+            current,
+            lock,
+        )
+        .await?;
         Ok(router::integer(len))
     }
 
@@ -244,11 +304,21 @@ impl StringCommands {
         let key = &args[0];
         let offset = parse_bit_offset(&args[1])?;
         let bit = parse_bit_value(&args[2])?;
-        let _lock = self.key_lock.lock(key).await;
-        let mut data = self.storage.get(db, key).await?.unwrap_or_default();
+        let lock = self.key_lock.lock(key).await;
+        let mut data = read_string_in_lock(self.storage.as_ref(), &self.in_flight_ctx, db, key)
+            .await?
+            .unwrap_or_default();
         let prev = read_bit(&data, offset);
         write_bit(&mut data, offset, bit);
-        self.storage.set(db, key, &data).await?;
+        commit_string_in_lock(
+            self.storage.as_ref(),
+            &self.in_flight_ctx,
+            db,
+            key,
+            data,
+            lock,
+        )
+        .await?;
         Ok(router::integer(i64::from(prev)))
     }
 
@@ -288,11 +358,22 @@ impl StringCommands {
             let result = crate::command::bitfield::execute_bitfield(existing.as_deref(), &plan);
             return Ok(RespValue::Array(Some(result.replies)));
         }
-        let _lock = self.key_lock.lock(key).await;
-        let existing = self.storage.get(db, key).await?;
+        let lock = self.key_lock.lock(key).await;
+        let existing =
+            read_string_in_lock(self.storage.as_ref(), &self.in_flight_ctx, db, key).await?;
         let result = crate::command::bitfield::execute_bitfield(existing.as_deref(), &plan);
-        if let Some(bytes) = &result.stored {
-            self.storage.set(db, key, bytes).await?;
+        if let Some(bytes) = result.stored {
+            commit_string_in_lock(
+                self.storage.as_ref(),
+                &self.in_flight_ctx,
+                db,
+                key,
+                bytes,
+                lock,
+            )
+            .await?;
+        } else {
+            drop(lock);
         }
         Ok(RespValue::Array(Some(result.replies)))
     }
@@ -300,11 +381,22 @@ impl StringCommands {
     pub async fn append(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_args("APPEND", args, 2)?;
         let key = &args[0];
-        let _lock = self.key_lock.lock(key).await;
-        let mut current: Vec<u8> = self.storage.get(db, key).await?.unwrap_or_default();
+        let lock = self.key_lock.lock(key).await;
+        let mut current: Vec<u8> =
+            read_string_in_lock(self.storage.as_ref(), &self.in_flight_ctx, db, key)
+                .await?
+                .unwrap_or_default();
         current.extend_from_slice(&args[1]);
         let len = current.len() as i64;
-        self.storage.set(db, key, &current).await?;
+        commit_string_in_lock(
+            self.storage.as_ref(),
+            &self.in_flight_ctx,
+            db,
+            key,
+            current,
+            lock,
+        )
+        .await?;
         Ok(router::integer(len))
     }
 
@@ -337,12 +429,13 @@ impl StringCommands {
     ) -> Result<RespValue> {
         router::require_args(cmd, args, 1)?;
         let key = &args[0];
-        let _lock = self.key_lock.lock(key).await;
-        let stored = self.storage.get(db, key).await?;
+        let lock = self.key_lock.lock(key).await;
+        let stored =
+            read_string_in_lock(self.storage.as_ref(), &self.in_flight_ctx, db, key).await?;
         match stored {
             None => {
-                self.storage
-                    .set(db, key, delta.to_string().as_bytes())
+                let s = delta.to_string().into_bytes();
+                commit_string_in_lock(self.storage.as_ref(), &self.in_flight_ctx, db, key, s, lock)
                     .await?;
                 Ok(router::integer(delta))
             }
@@ -351,16 +444,33 @@ impl StringCommands {
                     let result = v.checked_add(delta).ok_or_else(|| {
                         Error::Command("ERR increment or decrement would overflow".into())
                     })?;
-                    self.storage
-                        .set(db, key, result.to_string().as_bytes())
-                        .await?;
+                    let s = result.to_string().into_bytes();
+                    commit_string_in_lock(
+                        self.storage.as_ref(),
+                        &self.in_flight_ctx,
+                        db,
+                        key,
+                        s,
+                        lock,
+                    )
+                    .await?;
                     Ok(router::integer(result))
                 } else if let Ok(f) = parse_f64_bytes(&bytes) {
                     let result = f + delta as f64;
                     let s = format_float(result);
-                    self.storage.set(db, key, s.as_bytes()).await?;
+                    let bytes = s.clone().into_bytes();
+                    commit_string_in_lock(
+                        self.storage.as_ref(),
+                        &self.in_flight_ctx,
+                        db,
+                        key,
+                        bytes,
+                        lock,
+                    )
+                    .await?;
                     Ok(router::bulk(s.into_bytes()))
                 } else {
+                    drop(lock);
                     Err(router::wrongtype())
                 }
             }
@@ -374,14 +484,22 @@ impl StringCommands {
         if !delta.is_finite() {
             return Err(Error::Command("ERR value is not a valid float".into()));
         }
-        let _lock = self.key_lock.lock(key).await;
-        let stored = self.storage.get(db, key).await?;
+        let lock = self.key_lock.lock(key).await;
+        let stored =
+            read_string_in_lock(self.storage.as_ref(), &self.in_flight_ctx, db, key).await?;
         let result = match stored {
             None => delta,
             Some(bytes) => {
-                let v = parse_f64_bytes(&bytes).map_err(|_| router::wrongtype())?;
+                let v = match parse_f64_bytes(&bytes) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        drop(lock);
+                        return Err(router::wrongtype());
+                    }
+                };
                 let r = v + delta;
                 if !r.is_finite() {
+                    drop(lock);
                     return Err(Error::Command(
                         "ERR increment would produce NaN or Infinity".into(),
                     ));
@@ -390,7 +508,16 @@ impl StringCommands {
             }
         };
         let s = format_float(result);
-        self.storage.set(db, key, s.as_bytes()).await?;
+        let bytes = s.clone().into_bytes();
+        commit_string_in_lock(
+            self.storage.as_ref(),
+            &self.in_flight_ctx,
+            db,
+            key,
+            bytes,
+            lock,
+        )
+        .await?;
         Ok(router::bulk(s.into_bytes()))
     }
 
@@ -398,12 +525,20 @@ impl StringCommands {
         router::require_args("SETNX", args, 2)?;
         let key = &args[0];
         let value = &args[1];
-        let _lock = self.key_lock.lock(key).await;
-        let exists = self.storage.get(db, key).await?.is_some();
-        if exists {
+        let lock = self.key_lock.lock(key).await;
+        if exists_in_lock(self.storage.as_ref(), &self.in_flight_ctx, db, key).await? {
+            drop(lock);
             return Ok(router::integer(0));
         }
-        self.storage.set(db, key, value).await?;
+        commit_string_in_lock(
+            self.storage.as_ref(),
+            &self.in_flight_ctx,
+            db,
+            key,
+            value.to_vec(),
+            lock,
+        )
+        .await?;
         Ok(router::integer(1))
     }
 
@@ -440,11 +575,25 @@ impl StringCommands {
     pub async fn getdel(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_args("GETDEL", args, 1)?;
         let key = &args[0];
-        let _lock = self.key_lock.lock(key).await;
-        match self.storage.get(db, key).await? {
-            None => Ok(router::nil_bulk()),
+        let lock = self.key_lock.lock(key).await;
+        let current =
+            read_string_in_lock(self.storage.as_ref(), &self.in_flight_ctx, db, key).await?;
+        match current {
+            None => {
+                drop(lock);
+                Ok(router::nil_bulk())
+            }
             Some(v) => {
-                self.storage.delete(db, key).await?;
+                let ops = vec![(key.to_vec(), WriteOp::Delete)];
+                commit_ops_in_lock(
+                    self.storage.as_ref(),
+                    &self.in_flight_ctx,
+                    db,
+                    key,
+                    ops,
+                    lock,
+                )
+                .await?;
                 Ok(router::bulk(v))
             }
         }
@@ -517,243 +666,6 @@ impl StringCommands {
             _ => return Err(Error::Command("ERR syntax error".into())),
         }
         Ok(router::bulk(value))
-    }
-}
-
-pub(crate) struct SetOptions {
-    pub(crate) key: Vec<u8>,
-    pub(crate) value: Vec<u8>,
-    pub(crate) expire_at: Option<u64>,
-    pub(crate) condition: SetCondition,
-    pub(crate) return_old: bool,
-    pub(crate) keep_ttl: bool,
-}
-
-pub(crate) fn parse_set_options(args: &[Bytes]) -> Result<SetOptions> {
-    let key = args[0].to_vec();
-    let value = args[1].to_vec();
-    let mut expire_at: Option<u64> = None;
-    let mut condition = SetCondition::None;
-    let mut return_old = false;
-    let mut keep_ttl = false;
-    let mut i = 2;
-    while i < args.len() {
-        let opt = String::from_utf8_lossy(&args[i]).to_ascii_uppercase();
-        match opt.as_str() {
-            "EX" => {
-                if expire_at.is_some() {
-                    return Err(Error::Command("ERR syntax error".into()));
-                }
-                i += 1;
-                if i >= args.len() {
-                    return Err(router::wrong_args("SET", ""));
-                }
-                let secs = parse_u64_arg(&args[i], "SET")?;
-                if secs == 0 {
-                    return Err(Error::Command(
-                        "ERR invalid expire time in 'set' command".into(),
-                    ));
-                }
-                expire_at = Some(now_ms().saturating_add(secs.saturating_mul(1000)));
-            }
-            "PX" => {
-                if expire_at.is_some() {
-                    return Err(Error::Command("ERR syntax error".into()));
-                }
-                i += 1;
-                if i >= args.len() {
-                    return Err(router::wrong_args("SET", ""));
-                }
-                let ms = parse_u64_arg(&args[i], "SET")?;
-                if ms == 0 {
-                    return Err(Error::Command(
-                        "ERR invalid expire time in 'set' command".into(),
-                    ));
-                }
-                expire_at = Some(now_ms().saturating_add(ms));
-            }
-            "EXAT" => {
-                if expire_at.is_some() {
-                    return Err(Error::Command("ERR syntax error".into()));
-                }
-                i += 1;
-                if i >= args.len() {
-                    return Err(router::wrong_args("SET", ""));
-                }
-                let ts_secs = parse_u64_arg(&args[i], "SET")?;
-                if ts_secs == 0 {
-                    return Err(Error::Command(
-                        "ERR invalid expire time in 'set' command".into(),
-                    ));
-                }
-                expire_at = Some(ts_secs.saturating_mul(1000));
-            }
-            "PXAT" => {
-                if expire_at.is_some() {
-                    return Err(Error::Command("ERR syntax error".into()));
-                }
-                i += 1;
-                if i >= args.len() {
-                    return Err(router::wrong_args("SET", ""));
-                }
-                let ts_ms = parse_u64_arg(&args[i], "SET")?;
-                if ts_ms == 0 {
-                    return Err(Error::Command(
-                        "ERR invalid expire time in 'set' command".into(),
-                    ));
-                }
-                expire_at = Some(ts_ms);
-            }
-            "NX" => {
-                if condition != SetCondition::None {
-                    return Err(Error::Command("ERR syntax error".into()));
-                }
-                condition = SetCondition::Nx;
-            }
-            "XX" => {
-                if condition != SetCondition::None {
-                    return Err(Error::Command("ERR syntax error".into()));
-                }
-                condition = SetCondition::Xx;
-            }
-            "GET" => {
-                return_old = true;
-            }
-            "KEEPTTL" => {
-                keep_ttl = true;
-            }
-            _ => return Err(Error::Command("ERR syntax error".into())),
-        }
-        i += 1;
-    }
-    Ok(SetOptions {
-        key,
-        value,
-        expire_at,
-        condition,
-        return_old,
-        keep_ttl,
-    })
-}
-
-/// Redis bit offset: 0 is the leftmost bit of the first byte.
-pub(crate) fn read_bit(data: &[u8], offset: u64) -> u8 {
-    let byte_idx = (offset / 8) as usize;
-    let bit_pos = 7 - (offset % 8);
-    let byte = data.get(byte_idx).copied().unwrap_or(0);
-    (byte >> bit_pos) & 1
-}
-
-pub(crate) fn write_bit(data: &mut Vec<u8>, offset: u64, bit: u8) {
-    let byte_idx = (offset / 8) as usize;
-    let bit_pos = 7 - (offset % 8);
-    if data.len() <= byte_idx {
-        data.resize(byte_idx + 1, 0);
-    }
-    let mask = 1u8 << bit_pos;
-    if bit == 1 {
-        data[byte_idx] |= mask;
-    } else {
-        data[byte_idx] &= !mask;
-    }
-}
-
-/// Redis GETRANGE inclusive byte range (negative indices count from end).
-pub(crate) fn string_range_slice(value: &[u8], start: i64, end: i64) -> Vec<u8> {
-    let len = value.len() as i64;
-    if len == 0 {
-        return Vec::new();
-    }
-
-    let start_idx = if start < 0 {
-        (len + start).max(0)
-    } else {
-        start.min(len)
-    } as usize;
-    let end_idx = if end < 0 {
-        let e = len + end;
-        if e < 0 {
-            return Vec::new();
-        }
-        e as usize
-    } else {
-        end.min(len - 1) as usize
-    };
-
-    if start_idx > end_idx || start_idx >= value.len() {
-        Vec::new()
-    } else {
-        value[start_idx..=end_idx].to_vec()
-    }
-}
-
-pub(crate) fn parse_setrange_offset(b: &[u8]) -> Result<usize> {
-    let s =
-        std::str::from_utf8(b).map_err(|_| Error::Command("ERR offset is out of range".into()))?;
-    if s.starts_with('-') {
-        return Err(Error::Command("ERR offset is out of range".into()));
-    }
-    s.parse::<usize>()
-        .map_err(|_| Error::Command("ERR offset is out of range".into()))
-}
-
-pub(crate) fn parse_bit_offset(b: &[u8]) -> Result<u64> {
-    let s = std::str::from_utf8(b)
-        .map_err(|_| Error::Command("ERR bit offset is not an integer or out of range".into()))?;
-    if s.starts_with('-') {
-        return Err(Error::Command(
-            "ERR bit offset is not an integer or out of range".into(),
-        ));
-    }
-    s.parse::<u64>()
-        .map_err(|_| Error::Command("ERR bit offset is not an integer or out of range".into()))
-}
-
-pub(crate) fn parse_bit_value(b: &[u8]) -> Result<u8> {
-    let s = std::str::from_utf8(b)
-        .map_err(|_| Error::Command("ERR bit is not an integer or out of range".into()))?;
-    match s {
-        "0" => Ok(0),
-        "1" => Ok(1),
-        _ => Err(Error::Command(
-            "ERR bit is not an integer or out of range".into(),
-        )),
-    }
-}
-
-fn parse_i64_arg(b: &[u8], _cmd: &str) -> Result<i64> {
-    parse_i64_bytes(b)
-        .map_err(|_| Error::Command("ERR value is not an integer or out of range".into()))
-}
-
-fn parse_u64_arg(b: &[u8], _cmd: &str) -> Result<u64> {
-    let s = std::str::from_utf8(b).map_err(|_| Error::Command("ERR syntax error".into()))?;
-    s.parse::<u64>()
-        .map_err(|_| Error::Command("ERR syntax error".into()))
-}
-
-fn parse_f64_arg(b: &[u8], _cmd: &str) -> Result<f64> {
-    parse_f64_bytes(b)
-}
-
-fn parse_i64_bytes(b: &[u8]) -> Result<i64> {
-    let s = std::str::from_utf8(b).map_err(|_| Error::Command(WRONGTYPE.into()))?;
-    s.parse::<i64>()
-        .map_err(|_| Error::Command(WRONGTYPE.into()))
-}
-
-fn parse_f64_bytes(b: &[u8]) -> Result<f64> {
-    let s = std::str::from_utf8(b).map_err(|_| Error::Command(WRONGTYPE.into()))?;
-    s.parse::<f64>()
-        .map_err(|_| Error::Command(WRONGTYPE.into()))
-}
-
-fn format_float(v: f64) -> String {
-    let s = v.to_string();
-    if s.contains('.') {
-        s.trim_end_matches('0').trim_end_matches('.').to_string()
-    } else {
-        s
     }
 }
 
