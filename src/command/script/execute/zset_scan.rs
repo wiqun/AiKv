@@ -70,7 +70,6 @@ struct HintUpdate<'a> {
     hints: (&'a Option<Vec<u8>>, &'a Option<Vec<u8>>),
     inflight_puts: (Option<&'a [u8]>, Option<&'a [u8]>),
     stored_first: Option<&'a [u8]>,
-    scan_end: &'a [u8],
     reverse: bool,
     expected_epoch: u64,
 }
@@ -84,12 +83,15 @@ fn update_bounds_hint(upd: HintUpdate<'_>) {
             .is_some_and(|h| upd.bounds.0 <= h.as_slice());
     if !upd.reverse {
         if covers_bottom {
-            let floor = upd.stored_first.unwrap_or(upd.scan_end);
-            let new_min = match upd.inflight_puts.0 {
-                Some(inf) if inf < floor => inf,
-                _ => floor,
+            let new_min = match (upd.stored_first, upd.inflight_puts.0) {
+                (Some(s), Some(i)) => Some(if s <= i { s } else { i }),
+                (Some(s), None) => Some(s),
+                (None, Some(i)) => Some(i),
+                (None, None) => None,
             };
-            zset_subkey::advance_min_score_hint(upd.prefix, new_min.to_vec(), upd.expected_epoch);
+            if let Some(m) = new_min {
+                zset_subkey::advance_min_score_hint(upd.prefix, m.to_vec(), upd.expected_epoch);
+            }
         }
         return;
     }
@@ -152,7 +154,6 @@ fn merged_keys(
             hints: (&min_hint, &max_hint),
             inflight_puts: (min_put.as_deref(), max_put.as_deref()),
             stored_first: stored.first().map(|(k, _)| k.as_slice()),
-            scan_end: &scan_end,
             reverse,
             expected_epoch,
         });
@@ -750,6 +751,76 @@ mod tests {
             RespValue::Array(Some(vec![RespValue::BulkString(Some(Bytes::from_static(
                 b"n00"
             )))]))
+        );
+    }
+
+    /// 验证 ZSet 空范围扫描绝不错误推进 min_score_hint, 避免后续合法记录被边界截断漏读 (Fixes #112).
+    #[tokio::test]
+    async fn empty_range_scan_must_not_advance_min_score_hint() {
+        let dir = TempDir::new().unwrap();
+        let engine = AiDbEngine::open_for_testing(dir.path()).unwrap();
+        let storage: Arc<dyn KvStorage> = KvStorageAdapter::new(engine);
+        let router = CommandRouter::new(storage);
+        let mut db = 0;
+        let prefix = zset_subkey::score_prefix(&AiDbEngine::encode_key(0, b"empty_probe"));
+        zset_subkey::clear_score_bounds_hint();
+
+        // 1. 在空 key 上执行覆盖底部的范围扫描 (如 0 到 100)
+        let empty_scan = Bytes::from("return redis.call('ZRANGEBYSCORE', KEYS[1], '0', '100')");
+        let res = router
+            .execute(
+                "EVAL",
+                &[
+                    empty_scan,
+                    Bytes::from_static(b"1"),
+                    Bytes::from_static(b"empty_probe"),
+                ],
+                &mut db,
+            )
+            .await
+            .unwrap();
+        assert_eq!(res, crate::protocol::RespValue::Array(Some(vec![])));
+
+        // 验证 min_score_hint 绝未被推进
+        let (min_h, _, _) = zset_subkey::get_score_bounds_hint(&prefix);
+        assert_eq!(min_h, None, "空范围查询绝不能推进 min_score_hint");
+
+        // 2. 插入 score=50 和 score=150
+        router
+            .execute(
+                "ZADD",
+                &[
+                    Bytes::from_static(b"empty_probe"),
+                    Bytes::from_static(b"50"),
+                    Bytes::from_static(b"m50"),
+                    Bytes::from_static(b"150"),
+                    Bytes::from_static(b"m150"),
+                ],
+                &mut db,
+            )
+            .await
+            .unwrap();
+
+        // 3. 全范围扫描必须完整返回 m50 和 m150，不能被旧空区间的 100 边界截断
+        let all_scan = Bytes::from("return redis.call('ZRANGEBYSCORE', KEYS[1], '0', '200')");
+        let all_res = router
+            .execute(
+                "EVAL",
+                &[
+                    all_scan,
+                    Bytes::from_static(b"1"),
+                    Bytes::from_static(b"empty_probe"),
+                ],
+                &mut db,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            all_res,
+            crate::protocol::RespValue::Array(Some(vec![
+                crate::protocol::RespValue::BulkString(Some(Bytes::from_static(b"m50"))),
+                crate::protocol::RespValue::BulkString(Some(Bytes::from_static(b"m150"))),
+            ]))
         );
     }
 }
