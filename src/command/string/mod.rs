@@ -135,7 +135,9 @@ impl StringCommands {
         }
 
         let old_value = if opts.return_old {
-            stored.as_ref().and_then(|s| s.as_string().ok().map(|b| b.to_vec()))
+            stored
+                .as_ref()
+                .and_then(|s| s.as_string().ok().map(|b| b.to_vec()))
         } else {
             None
         };
