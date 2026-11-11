@@ -294,10 +294,15 @@ impl CommandRouter {
                         return Some(Ok(RespValue::Error(reason)));
                     }
                     crate::cluster::router::RouteDecision::ClusterDown(msg) => {
+                        let formatted = if msg.starts_with("CLUSTERDOWN ") || msg == "CLUSTERDOWN" {
+                            msg
+                        } else {
+                            format!("CLUSTERDOWN {msg}")
+                        };
                         if let Some(m) = self.metrics.as_ref() {
-                            m.on_error_stat(&msg);
+                            m.on_error_stat(&formatted);
                         }
-                        return Some(Ok(RespValue::Error(msg)));
+                        return Some(Ok(RespValue::Error(formatted)));
                     }
                     _ => {}
                 }
@@ -426,7 +431,14 @@ impl CommandRouter {
                 }
                 Some(RespValue::Error(reason))
             }
-            crate::cluster::router::RouteDecision::ClusterDown(msg) => Some(RespValue::Error(msg)),
+            crate::cluster::router::RouteDecision::ClusterDown(msg) => {
+                let err = if msg.starts_with("CLUSTERDOWN ") || msg == "CLUSTERDOWN" {
+                    msg
+                } else {
+                    format!("CLUSTERDOWN {msg}")
+                };
+                Some(RespValue::Error(err))
+            }
         }
     }
 

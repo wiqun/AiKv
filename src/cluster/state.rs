@@ -59,17 +59,40 @@ pub(crate) fn groups_with_slots(slot_table: &SlotTable) -> HashSet<u64> {
 ///   `compute_cluster_state` 的 `slots_map_to_known_groups` 判定对齐, 避免
 ///   router 门开放而 CLUSTER INFO 报 fail 的分裂.
 /// - 本机不负责任何 group → true.
+///
+/// 本机视角集群健康派生 (纯函数): 负责 slot 的 group 中, 若有本节点作为
+/// leader 的 group 已失去 quorum (探活判定失败), 或远端 leader 节点已离线, 则视为不健康.
+pub fn derive_cluster_ok_with_peers<F>(
+    quorum_status: &HashMap<u64, bool>,
+    slot_table: &SlotTable,
+    meta: &ClusterMeta,
+    is_peer_online: F,
+) -> bool
+where
+    F: Fn(u64) -> bool,
+{
+    groups_with_slots(slot_table).iter().all(|gid| {
+        let Some(group) = meta.groups.get(gid) else {
+            return false;
+        };
+        if quorum_status.get(gid) == Some(&false) {
+            return false;
+        }
+        if let Some(leader) = group.replicas.iter().find(|r| r.is_leader) {
+            if !is_peer_online(leader.node_id) {
+                return false;
+            }
+        }
+        true
+    })
+}
+
 pub fn derive_cluster_ok(
     quorum_status: &HashMap<u64, bool>,
     slot_table: &SlotTable,
     meta: &ClusterMeta,
 ) -> bool {
-    groups_with_slots(slot_table).iter().all(|gid| {
-        if !meta.groups.contains_key(gid) {
-            return false;
-        }
-        quorum_status.get(gid) != Some(&false)
-    })
+    derive_cluster_ok_with_peers(quorum_status, slot_table, meta, |_| true)
 }
 
 /// 本节点角色
@@ -124,6 +147,10 @@ pub struct ClusterStateManager {
     pub _watcher_shutdown: parking_lot::Mutex<Option<tokio::sync::watch::Sender<bool>>>,
     /// Shutdown signal for ConfigAutoSave (held to keep sender alive).
     pub _auto_save_shutdown: parking_lot::Mutex<Option<tokio::sync::watch::Sender<bool>>>,
+    /// Peer 节点最后在线时间戳缓存 {node_id → Instant} (后台 gossip 探活注入).
+    pub peer_last_seen: parking_lot::RwLock<HashMap<u64, std::time::Instant>>,
+    /// 节点启动时间戳 (初始探活宽限期保护).
+    pub start_time: std::time::Instant,
 }
 
 /// RAII 守护句柄: 当 guard drop 时自动恢复对应 group 的写操作.
@@ -168,6 +195,8 @@ impl ClusterStateManager {
             paused_write_groups: parking_lot::RwLock::new(HashMap::new()),
             _watcher_shutdown: parking_lot::Mutex::new(None),
             _auto_save_shutdown: parking_lot::Mutex::new(None),
+            peer_last_seen: parking_lot::RwLock::new(HashMap::new()),
+            start_time: std::time::Instant::now(),
         };
         mgr.refresh();
         mgr.rebuild_slot_map();
@@ -389,7 +418,34 @@ impl ClusterStateManager {
         }
     }
 
-    /// 应用探活观测的 group quorum 状态, 并用 `derive_cluster_ok` 派生集群健康.
+    /// 记录 peer 节点最近一次心跳/探活成功时间.
+    pub fn mark_peer_online(&self, node_id: u64) {
+        self.peer_last_seen
+            .write()
+            .insert(node_id, std::time::Instant::now());
+    }
+
+    /// 显式标记 peer 节点离线 (测试与故障注入用).
+    pub fn mark_peer_offline(&self, node_id: u64) {
+        let past = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(3600))
+            .unwrap_or_else(std::time::Instant::now);
+        self.peer_last_seen.write().insert(node_id, past);
+    }
+
+    /// 判定 peer 节点是否在线 (若启动不足 5s 处于宽限期视为在线; 之后超过 timeout 未见视为离线).
+    pub fn is_peer_online(&self, node_id: u64, timeout: std::time::Duration) -> bool {
+        if node_id == self.node_id {
+            return true;
+        }
+        let last_seen = self.peer_last_seen.read().get(&node_id).copied();
+        match last_seen {
+            Some(t) => t.elapsed() <= timeout,
+            None => self.start_time.elapsed() < std::time::Duration::from_secs(5),
+        }
+    }
+
+    /// 应用探活观测的 group quorum 状态, 并用 `derive_cluster_ok_with_peers` 派生集群健康.
     /// 参数化 (status 全量覆盖 + 注入 slot_table/meta), 便于纯函数单测.
     pub fn apply_observed_group_quorum(
         &self,
@@ -397,7 +453,9 @@ impl ClusterStateManager {
         slot_table: SlotTable,
         meta: ClusterMeta,
     ) {
-        let ok = derive_cluster_ok(&status, &slot_table, &meta);
+        let ok = derive_cluster_ok_with_peers(&status, &slot_table, &meta, |nid| {
+            self.is_peer_online(nid, std::time::Duration::from_secs(3))
+        });
         *self.group_quorum_ok.write() = status;
         self.cluster_state_ok.store(ok, Ordering::Relaxed);
     }
@@ -501,5 +559,56 @@ mod groups_with_slots_tests {
     fn empty_and_all_unallocated_yield_no_groups() {
         assert!(groups_with_slots(&Vec::new()).is_empty());
         assert!(groups_with_slots(&vec![Unallocated; 16384]).is_empty());
+    }
+
+    #[test]
+    fn derive_cluster_ok_reports_fail_when_remote_leader_offline() {
+        use aidb::cluster::meta_types::{ClusterMeta, GroupMeta, ReplicaInfo};
+        let mut slot_table = vec![Unallocated; 16384];
+        slot_table[0] = Assigned(1);
+        slot_table[1] = Assigned(2);
+
+        let mut meta = ClusterMeta::default();
+        meta.groups.insert(
+            1,
+            GroupMeta {
+                group_id: 1,
+                replicas: vec![ReplicaInfo {
+                    node_id: 1,
+                    is_leader: true,
+                }],
+                slot_ranges: vec![(0, 0)],
+                config_version: 1,
+            },
+        );
+        meta.groups.insert(
+            2,
+            GroupMeta {
+                group_id: 2,
+                replicas: vec![ReplicaInfo {
+                    node_id: 2,
+                    is_leader: true,
+                }],
+                slot_ranges: vec![(1, 1)],
+                config_version: 1,
+            },
+        );
+
+        let quorum_status = std::collections::HashMap::new();
+        // 节点 2 在线: 集群 ok
+        assert!(super::derive_cluster_ok_with_peers(
+            &quorum_status,
+            &slot_table,
+            &meta,
+            |nid| nid == 1 || nid == 2
+        ));
+
+        // 节点 2 离线 (挂掉): 集群 fail
+        assert!(!super::derive_cluster_ok_with_peers(
+            &quorum_status,
+            &slot_table,
+            &meta,
+            |nid| nid == 1
+        ));
     }
 }

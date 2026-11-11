@@ -137,15 +137,22 @@ fn spawn_client_addr_sync(
 }
 
 /// 等到 Meta 中本节点应承载的 data group 已在 MultiRaft 打开, 再扫计数.
-/// `expected` 为空 (尚未 ADDSLOTS) 时立即返回; 超时则视为启动失败.
+/// 如果节点指定了 peers (非 bootstrap 节点), 必须等待 MetaRaft 完成初次同步,
+/// 且本地数据组全部就绪; 若超时未就绪则报错, 严禁在本地数据组未就绪时提前放行对外端口.
 #[cfg(feature = "cluster")]
-async fn wait_local_data_groups(timeout: std::time::Duration) -> Result<(), String> {
+async fn wait_local_data_groups(
+    has_peers: bool,
+    timeout: std::time::Duration,
+) -> Result<(), String> {
     let Some(mgr) = aikv::cluster::state::CLUSTER_STATE_MGR.get() else {
         return Err("CLUSTER_STATE_MGR not set".into());
     };
-    let deadline = tokio::time::Instant::now() + timeout;
+    let start_instant = tokio::time::Instant::now();
+    let deadline = start_instant + timeout;
+    let initial_wait = std::time::Duration::from_millis(1500);
     loop {
         let meta = mgr.meta_raft.get_cluster_meta();
+        let node_registered = meta.nodes.contains_key(&mgr.node_id);
         let expected: std::collections::HashSet<u64> = meta
             .groups
             .iter()
@@ -154,9 +161,28 @@ async fn wait_local_data_groups(timeout: std::time::Duration) -> Result<(), Stri
             .collect();
         let current: std::collections::HashSet<u64> =
             mgr.multi_raft.local_group_ids().into_iter().collect();
-        if expected.is_subset(&current) {
-            return Ok(());
+
+        if node_registered {
+            // 本节点已在 Meta 中注册 (既有集群成员或已对齐元数据):
+            if !expected.is_empty() && expected.is_subset(&current) {
+                return Ok(());
+            }
+            if expected.is_empty() && meta.version > 0 {
+                return Ok(());
+            }
+        } else if !has_peers {
+            // Bootstrap 首节点: expected 为空或已全部就绪
+            if expected.is_subset(&current) {
+                return Ok(());
+            }
+        } else {
+            // 有 peers 但尚未在本地 meta 中见到注册:
+            // 等待直到 MetaRaft 完成初次握手同步或达到初始等待窗口 (判定为首次组网)
+            if meta.version == 0 && start_instant.elapsed() >= initial_wait {
+                return Ok(());
+            }
         }
+
         if tokio::time::Instant::now() >= deadline {
             return Err(format!(
                 "local data groups not ready: expected {expected:?} have {current:?}"
@@ -641,7 +667,8 @@ async fn main() {
                 .saturating_mul(3)
                 .saturating_add(10_000),
         );
-        if let Err(e) = wait_local_data_groups(wait_timeout).await {
+        let has_peers = !settings.cluster.peers.is_empty();
+        if let Err(e) = wait_local_data_groups(has_peers, wait_timeout).await {
             tracing::error!(error = %e, "local data groups not ready after cluster init");
             std::process::exit(1);
         }

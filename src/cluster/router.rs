@@ -269,7 +269,11 @@ impl ClusterRouter {
                 refresh_router_cache(mgr);
                 match mgr.router.route_key(key) {
                     Ok(r) => r,
-                    Err(e) => return RouteDecision::ClusterDown(e.to_string()),
+                    Err(_) => {
+                        return RouteDecision::ClusterDown(
+                            "CLUSTERDOWN Hash slot not served".into(),
+                        )
+                    }
                 }
             }
         };

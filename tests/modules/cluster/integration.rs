@@ -137,6 +137,8 @@ async fn create_cluster_mgr() -> ClusterStateManager {
         paused_write_groups: parking_lot::RwLock::new(HashMap::new()),
         _watcher_shutdown: parking_lot::Mutex::new(None),
         _auto_save_shutdown: parking_lot::Mutex::new(None),
+        peer_last_seen: parking_lot::RwLock::new(HashMap::new()),
+        start_time: std::time::Instant::now(),
         slot_groups: ClusterStateManager::new_slot_groups(),
         has_active_migration: AtomicBool::new(false),
     }
