@@ -32,6 +32,11 @@ impl Default for ScriptCache {
 }
 
 impl ScriptCache {
+    /// 只读取出脚本正文, 不调整 LRU. 慢日志在命令返回后调用.
+    pub fn peek(&self, sha1: &str) -> Option<String> {
+        self.inner.read().map.get(sha1).map(|c| c.script.clone())
+    }
+
     pub fn get(&self, sha1: &str) -> Option<String> {
         let mut inner = self.inner.write();
         if !inner.map.contains_key(sha1) {
@@ -236,6 +241,14 @@ mod tests {
     use super::*;
 
     /// 回归测试 (Issue #93): 验证只读脚本静态词法判定, 确保 `local r = redis` 别名与字符串字面量内 `--` / `--[[` 不会绕过写命令检测.
+    #[test]
+    fn peek_returns_loaded_script_without_missing_key() {
+        let cache = ScriptCache::default();
+        assert_eq!(cache.peek("missing"), None);
+        cache.insert("abc".to_string(), "return 1".to_string());
+        assert_eq!(cache.peek("abc").as_deref(), Some("return 1"));
+    }
+
     #[test]
     fn test_is_script_read_only() {
         // 无 redis 调用

@@ -402,6 +402,10 @@ impl ScriptCommands {
         result
     }
 
+    pub fn script_source(&self, sha: &str) -> Option<String> {
+        self.cache.peek(sha)
+    }
+
     pub async fn evalsha(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_min_args("EVALSHA", args, 2)?;
         let sha1 = String::from_utf8_lossy(&args[0]).to_string();

@@ -5,6 +5,10 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+fn is_evalsha_command(cmd: &str) -> bool {
+    cmd.eq_ignore_ascii_case("EVALSHA") || cmd.eq_ignore_ascii_case("EVALSHA_RO")
+}
+
 pub const DEFAULT_SLOWLOG_THRESHOLD_US: u64 = 100_000;
 pub const DEFAULT_SLOWLOG_MAX_LEN: usize = 128;
 
@@ -113,6 +117,16 @@ impl SlowQueryLog {
         }
     }
 
+    /// `EVALSHA` / `EVALSHA_RO` 慢日志在原参数后附上脚本正文. 其他命令不改参数.
+    pub fn append_evalsha_source(cmd: &str, args: &mut Vec<String>, source: Option<String>) {
+        if !is_evalsha_command(cmd) {
+            return;
+        }
+        if let Some(source) = source {
+            args.push(source);
+        }
+    }
+
     /// 返回最近 `count` 条; count ≤ 0 时返回空 Vec
     pub fn get(&self, count: usize) -> Vec<SlowQueryEntry> {
         if count == 0 {
@@ -167,5 +181,24 @@ mod tests {
         log.record("GET", &["k".into()], 5000, "127.0.0.1:1", 1);
         assert_eq!(log.len(), 1);
         assert_eq!(log.get(1)[0].db_index, 1);
+    }
+
+    #[test]
+    fn evalsha_slowlog_keeps_sha_and_appends_source() {
+        let mut args = vec!["abc".to_string(), "0".to_string()];
+        SlowQueryLog::append_evalsha_source("EVALSHA", &mut args, Some("return 1".to_string()));
+        assert_eq!(args, vec!["abc", "0", "return 1"]);
+
+        let mut ro = vec!["abc".to_string()];
+        SlowQueryLog::append_evalsha_source("evalsha_ro", &mut ro, Some("return 1".to_string()));
+        assert_eq!(ro, vec!["abc", "return 1"]);
+
+        let mut missing = vec!["abc".to_string()];
+        SlowQueryLog::append_evalsha_source("EVALSHA", &mut missing, None);
+        assert_eq!(missing, vec!["abc"]);
+
+        let mut other = vec!["k".to_string()];
+        SlowQueryLog::append_evalsha_source("GET", &mut other, Some("return 1".to_string()));
+        assert_eq!(other, vec!["k"]);
     }
 }

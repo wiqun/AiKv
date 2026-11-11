@@ -747,6 +747,11 @@ impl CommandRouter {
             _ => Err(Error::Command("ERR unknown CLIENT subcommand".into())),
         }
     }
+
+    /// `EVALSHA` 刚执行过的脚本正文. 缓存未命中时返回 `None`.
+    pub fn script_source(&self, sha: &str) -> Option<String> {
+        self.script.script_source(sha)
+    }
 }
 
 pub(crate) fn wrong_args(cmd: &str, expected: &str) -> Error {

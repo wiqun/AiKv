@@ -10,6 +10,7 @@
 ### Added
 
 - 新增 `EVAL_RO` 与 `EVALSHA_RO` 只读脚本命令支持, 执行期间拦截一切写命令 (`ERR Write commands not allowed in read-only script`).
+- `EVALSHA` / `EVALSHA_RO` 的慢日志在原有参数后追加脚本正文, 便于直接定位慢脚本. 正文经 `ScriptCache::peek` 读取, 只读不调整 LRU; 缓存未命中时不追加, 参数保持原样.
 - `AIKV_SCRIPT_OFF_WORKER` 新增默认的 `auto` 取值: 按脚本 sha 记录执行耗时的 EWMA, 低于 1ms 的轻脚本就地执行, 否则派发到脚本线程池 (集群与单机一致); `1`/`true` 强制线程池, `0`/`false` 强制就地.
 
 ### Changed

@@ -660,10 +660,18 @@ impl Connection {
         self.state.latency_stats.record(cmd, duration_us);
         let threshold = self.state.slow_query_log.threshold_us();
         if duration_us >= threshold {
-            let arg_strings: Vec<String> = args
+            let mut arg_strings: Vec<String> = args
                 .iter()
                 .map(|b| String::from_utf8_lossy(b).into_owned())
                 .collect();
+            let source = arg_strings
+                .first()
+                .and_then(|sha| self.state.router().script_source(sha));
+            crate::server::slowlog::SlowQueryLog::append_evalsha_source(
+                cmd,
+                &mut arg_strings,
+                source,
+            );
             self.state.slow_query_log.record(
                 cmd,
                 &arg_strings,
