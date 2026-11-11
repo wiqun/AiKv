@@ -679,7 +679,7 @@ fn map_ttl_seconds(ttl: Option<i64>) -> i64 {
     match ttl {
         None => -2,
         Some(TTL_NO_EXPIRY) => -1,
-        Some(ms) => ms / 1000,
+        Some(ms) => (ms + 500) / 1000,
     }
 }
 

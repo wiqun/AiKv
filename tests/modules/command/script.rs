@@ -316,6 +316,100 @@ async fn test_script_expire_ttl_preserved_on_hset() {
 }
 
 #[tokio::test]
+async fn test_script_ttl_sees_set_ex_from_same_script() {
+    let r = router();
+    let mut db = 0;
+    let script = r#"
+    redis.call('SET', KEYS[1], 'v', 'EX', 300)
+    return tostring(redis.call('TTL', KEYS[1]))
+  "#;
+    let resp = r
+        .execute("EVAL", &[b(script), b("1"), b("k")], &mut db)
+        .await
+        .unwrap();
+    assert_eq!(
+        resp,
+        RespValue::BulkString(Some(b("300"))),
+        "脚本内 SET EX 之后 TTL 必须读到同一个脚本写入的过期时间"
+    );
+}
+
+#[tokio::test]
+async fn test_script_ttl_sees_expire_from_same_script() {
+    let r = router();
+    let mut db = 0;
+    r.execute("SET", &[b("k"), b("v")], &mut db).await.unwrap();
+    let script = r#"
+    redis.call('EXPIRE', KEYS[1], 300)
+    return tostring(redis.call('TTL', KEYS[1]))
+  "#;
+    let resp = r
+        .execute("EVAL", &[b(script), b("1"), b("k")], &mut db)
+        .await
+        .unwrap();
+    assert_eq!(
+        resp,
+        RespValue::BulkString(Some(b("300"))),
+        "脚本内 EXPIRE 之后 TTL 必须读到未提交事务里的过期时间"
+    );
+}
+
+#[tokio::test]
+async fn test_ttl_rounds_to_nearest_second_like_redis() {
+    let r = router();
+    let mut db = 0;
+    r.execute("SET", &[b("k"), b("v"), b("EX"), b("300")], &mut db)
+        .await
+        .unwrap();
+    let ttl = r.execute("TTL", &[b("k")], &mut db).await.unwrap();
+    assert_eq!(
+        ttl,
+        RespValue::Integer(300),
+        "Redis 的 TTL 按 (pttl + 500) / 1000 取整, 剩余 299992ms 应返回 300 而不是 299"
+    );
+}
+
+#[tokio::test]
+async fn test_script_plain_set_clears_ttl_like_redis() {
+    let r = router();
+    let mut db = 0;
+    let script = r#"
+    redis.call('SET', KEYS[1], 'v', 'EX', 300)
+    redis.call('SET', KEYS[1], 'v2')
+    return tostring(redis.call('TTL', KEYS[1]))
+  "#;
+    let resp = r
+        .execute("EVAL", &[b(script), b("1"), b("k")], &mut db)
+        .await
+        .unwrap();
+    assert_eq!(
+        resp,
+        RespValue::BulkString(Some(b("-1"))),
+        "脚本内普通 SET 必须清除已有过期时间, 与 Redis 语义一致"
+    );
+}
+
+#[tokio::test]
+async fn test_script_set_keepttl_preserves_ttl() {
+    let r = router();
+    let mut db = 0;
+    let script = r#"
+    redis.call('SET', KEYS[1], 'v', 'EX', 300)
+    redis.call('SET', KEYS[1], 'v2', 'KEEPTTL')
+    return tostring(redis.call('TTL', KEYS[1]))
+  "#;
+    let resp = r
+        .execute("EVAL", &[b(script), b("1"), b("k")], &mut db)
+        .await
+        .unwrap();
+    assert_eq!(
+        resp,
+        RespValue::BulkString(Some(b("300"))),
+        "脚本内 SET ... KEEPTTL 必须保留已有过期时间"
+    );
+}
+
+#[tokio::test]
 async fn test_evalsha_loaded() {
     let r = router();
     let mut db = 0;

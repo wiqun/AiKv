@@ -1344,7 +1344,7 @@ pub(super) fn exec_pttl(
     if millis {
         Ok(router::integer(left))
     } else {
-        Ok(router::integer((left / 1000).max(0)))
+        Ok(router::integer((left + 500) / 1000))
     }
 }
 

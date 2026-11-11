@@ -179,6 +179,8 @@ fn fast_set(
         let _timed = CallTimer::start(ScriptCallOp::String);
         let inner_res = with_arg_bytes(third_arg, |v| {
             txn.set_string(k.to_vec(), v.to_vec());
+            // 直通路径只接 `SET key value` 三参数形态, 无 KEEPTTL, 必定清除已有过期时间
+            txn.set_expire_at(k.to_vec(), None);
             Ok(Some(mlua::Value::String(lua.create_string(b"OK")?)))
         });
         match inner_res {
