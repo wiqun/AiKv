@@ -644,14 +644,14 @@ mod tests {
         match &tb.ops[0] {
             ThinWriteOp::Put { key, value } => {
                 assert_eq!(key, b"m");
-                assert_eq!(value, b"w");
+                assert_eq!(&value[..], b"w".as_slice());
             }
             other => panic!("ops[0] expected Put(m,w), got {other:?}"),
         }
         match &tb.ops[1] {
             ThinWriteOp::Put { key, value } => {
                 assert_eq!(key, b"k");
-                assert_eq!(value, b"v2");
+                assert_eq!(&value[..], b"v2".as_slice());
             }
             other => panic!("ops[1] expected Put(k,v2), got {other:?}"),
         }
@@ -681,7 +681,7 @@ mod tests {
         match &tb.ops[0] {
             ThinWriteOp::Put { key, value } => {
                 assert_eq!(key, b"k");
-                assert_eq!(value, b"v2");
+                assert_eq!(&value[..], b"v2".as_slice());
             }
             other => panic!("expected Put(k,v2), got {other:?}"),
         }
@@ -721,7 +721,7 @@ mod tests {
         let (tb, indices) = plan_reverse_dedup(items);
         assert_eq!(tb.ops.len(), 1);
         match &tb.ops[0] {
-            ThinWriteOp::Put { value, .. } => assert_eq!(value, b"v2"),
+            ThinWriteOp::Put { value, .. } => assert_eq!(&value[..], b"v2".as_slice()),
             other => panic!("expected Put, got {other:?}"),
         }
         assert_eq!(indices, vec![None, Some(0)]);

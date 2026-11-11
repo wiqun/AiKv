@@ -310,7 +310,7 @@ async fn migration_merge_read_and_del_tombstone_lifecycle() {
             1,
             Request::Put {
                 key: del_key_enc.clone(),
-                value: b"old-on-source".to_vec(),
+                value: bytes::Bytes::from_static(b"old-on-source"),
             },
         )
         .await
@@ -367,7 +367,7 @@ async fn migration_merge_read_and_del_tombstone_lifecycle() {
             2,
             Request::PutConditional {
                 key: del_key_enc.clone(),
-                value: b"old-on-source".to_vec(),
+                value: bytes::Bytes::from_static(b"old-on-source"),
                 migration_epoch: Some(epoch),
             },
         )
