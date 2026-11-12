@@ -360,3 +360,51 @@ async fn test_hscan_large_subkey_streaming() {
         .unwrap_err();
     assert!(err.to_string().contains("ERR invalid cursor"));
 }
+
+/// 大 Hash (Subkey 格式) 的 HGETALL / HKEYS / HVALS 返回完整且 field 与 value 配对正确.
+#[tokio::test]
+async fn test_hash_hgetall_hkeys_hvals_large_subkey() {
+    use aikv::command::CommandRouter;
+    use aikv::storage::{AiDbEngine, KvStorageAdapter};
+    use std::collections::{BTreeMap, BTreeSet};
+    use tempfile::TempDir;
+
+    let dir = TempDir::new().unwrap();
+    let engine = AiDbEngine::open_for_testing(dir.path()).unwrap();
+    let r = CommandRouter::new(KvStorageAdapter::new(engine));
+    let mut db = 0;
+
+    let mut expected = BTreeMap::new();
+    for i in 0..100 {
+        let (f, v) = (format!("f_{i:03}"), format!("val_{i:03}"));
+        r.execute("HSET", &[b("big"), b(&f), b(&v)], &mut db)
+            .await
+            .unwrap();
+        expected.insert(f, v);
+    }
+
+    let bulk = |item: &RespValue| match item {
+        RespValue::BulkString(Some(s)) => String::from_utf8(s.to_vec()).unwrap(),
+        other => panic!("expected bulk string, got {other:?}"),
+    };
+    let array = |resp: RespValue| match resp {
+        RespValue::Array(Some(items)) => items,
+        other => panic!("expected array, got {other:?}"),
+    };
+
+    let all = array(r.execute("HGETALL", &[b("big")], &mut db).await.unwrap());
+    assert_eq!(all.len(), 200);
+    let got: BTreeMap<String, String> = all
+        .chunks(2)
+        .map(|kv| (bulk(&kv[0]), bulk(&kv[1])))
+        .collect();
+    assert_eq!(got, expected);
+
+    let keys = array(r.execute("HKEYS", &[b("big")], &mut db).await.unwrap());
+    let keys: BTreeSet<String> = keys.iter().map(bulk).collect();
+    assert_eq!(keys, expected.keys().cloned().collect());
+
+    let vals = array(r.execute("HVALS", &[b("big")], &mut db).await.unwrap());
+    let vals: BTreeSet<String> = vals.iter().map(bulk).collect();
+    assert_eq!(vals, expected.values().cloned().collect());
+}

@@ -249,21 +249,21 @@ impl HashCommands {
 
     pub async fn hkeys(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_args("HKEYS", args, 1)?;
-        let keys = self.load_hash_all_fields(db, &args[0]).await?;
-        Ok(array_of_bulk(keys.into_keys().collect()))
+        let pairs = self.load_hash_pairs(db, &args[0]).await?;
+        Ok(array_of_bulk(pairs.into_iter().map(|(f, _)| f).collect()))
     }
 
     pub async fn hvals(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_args("HVALS", args, 1)?;
-        let keys = self.load_hash_all_fields(db, &args[0]).await?;
-        Ok(array_of_bulk(keys.into_values().collect()))
+        let pairs = self.load_hash_pairs(db, &args[0]).await?;
+        Ok(array_of_bulk(pairs.into_iter().map(|(_, v)| v).collect()))
     }
 
     pub async fn hgetall(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_args("HGETALL", args, 1)?;
-        let map = self.load_hash_all_fields(db, &args[0]).await?;
-        let mut items = Vec::new();
-        for (k, v) in map {
+        let pairs = self.load_hash_pairs(db, &args[0]).await?;
+        let mut items = Vec::with_capacity(pairs.len() * 2);
+        for (k, v) in pairs {
             items.push(router::bulk(k));
             items.push(router::bulk(v));
         }
@@ -646,25 +646,20 @@ impl HashCommands {
 
     // ---- helpers ----
 
-    /// 读取 hash 的所有 field → value (兼容 inline 和 subkey).
-    async fn load_hash_all_fields(
-        &self,
-        db: usize,
-        key: &[u8],
-    ) -> Result<HashMap<Vec<u8>, Vec<u8>>> {
+    /// 读取 hash 的所有 (field, value) 对 (兼容 inline 和 subkey), 不经过 `HashMap` 重建,
+    /// subkey 格式下 field 唯一, 无需去重.
+    async fn load_hash_pairs(&self, db: usize, key: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let Some(stored) = self.storage.get_typed(db, key).await? else {
-            return Ok(HashMap::new());
+            return Ok(Vec::new());
         };
         match stored.value {
-            ValueType::Hash(map) => Ok(map),
+            ValueType::Hash(map) => Ok(map.into_iter().collect()),
             ValueType::CollectionHeader {
                 kind: CollectionKind::Hash,
                 ..
             } => {
                 let encoded_user_key = AiDbEngine::encode_key(db, key);
-                self.scan_hash_subkeys(db, &encoded_user_key, None)
-                    .await
-                    .map(|pairs| pairs.into_iter().collect())
+                self.scan_hash_subkeys(db, &encoded_user_key, None).await
             }
             _ => Err(router::wrongtype()),
         }
@@ -720,6 +715,8 @@ impl HashCommands {
         pattern: Option<&[u8]>,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let prefix = subkey::hash_subkey_prefix(encoded_user_key);
+        // field 紧跟在 `{prefix}{field_len:2B}` 之后, 直接在原 key 缓冲上截取, 省去逐 field 再分配.
+        let field_offset = prefix.len() + 2;
         let out = Arc::new(std::sync::Mutex::new(Vec::new()));
         let out_c = out.clone();
         let pattern = pattern.map(|p| p.to_vec());
@@ -729,18 +726,17 @@ impl HashCommands {
             .raw_subkey_for_each(
                 db,
                 prefix,
-                Box::new(move |encoded, raw| {
-                    if let Some((kind, field)) = subkey::decode_subkey(&encoded) {
-                        if kind != CollectionKind::Hash {
+                Box::new(move |mut encoded, raw| {
+                    if encoded.len() < field_offset {
+                        return Ok(());
+                    }
+                    encoded.drain(..field_offset);
+                    if let Some(ref pat) = pattern {
+                        if !glob_match(pat, &encoded) {
                             return Ok(());
                         }
-                        if let Some(ref pat) = pattern {
-                            if !glob_match(pat, &field) {
-                                return Ok(());
-                            }
-                        }
-                        out_c.lock().unwrap().push((field, raw));
                     }
+                    out_c.lock().unwrap().push((encoded, raw));
                     Ok(())
                 }),
             )
