@@ -447,14 +447,14 @@ impl HashCommands {
                             seek_pos = raw_k.clone();
                             seek_pos.push(0);
 
-                            if let Some((kind, field)) = subkey::decode_subkey(&raw_k) {
+                            if let Some((kind, field)) = subkey::decode_subkey_ref(&raw_k) {
                                 if kind != CollectionKind::Hash {
                                     continue;
                                 }
-                                if opts.pattern.as_ref().is_none_or(|p| glob_match(p, &field)) {
-                                    pairs.push((field.clone(), raw_v));
+                                if opts.pattern.as_ref().is_none_or(|p| glob_match(p, field)) {
+                                    pairs.push((field.to_vec(), raw_v));
                                 }
-                                last_seen_field = Some(field);
+                                last_seen_field = Some(field.to_vec());
                             }
 
                             if pairs.len() >= opts.count || raw_read_count >= budget {

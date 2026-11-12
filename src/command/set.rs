@@ -217,8 +217,8 @@ impl SetCommands {
 
     pub async fn smembers(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_args("SMEMBERS", args, 1)?;
-        let set = self.load_set_full(db, &args[0]).await?;
-        Ok(array_of_bulk(set.into_iter().collect()))
+        let members = self.load_set_members_vec(db, &args[0]).await?;
+        Ok(array_of_bulk(members))
     }
 
     pub async fn scard(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
@@ -549,14 +549,14 @@ impl SetCommands {
                             seek_pos = raw_k.clone();
                             seek_pos.push(0);
 
-                            if let Some((kind, member)) = subkey::decode_subkey(&raw_k) {
+                            if let Some((kind, member)) = subkey::decode_subkey_ref(&raw_k) {
                                 if kind != CollectionKind::Set {
                                     continue;
                                 }
-                                if opts.pattern.as_ref().is_none_or(|p| glob_match(p, &member)) {
-                                    members.push(member.clone());
+                                if opts.pattern.as_ref().is_none_or(|p| glob_match(p, member)) {
+                                    members.push(member.to_vec());
                                 }
-                                last_seen_member = Some(member);
+                                last_seen_member = Some(member.to_vec());
                             }
 
                             if members.len() >= opts.count || raw_read_count >= budget {
@@ -645,6 +645,25 @@ impl SetCommands {
         Ok(result)
     }
 
+    /// 读取 set 全部 members (兼容 inline 与 subkey), 供 SMEMBERS 直接返回,
+    /// 避免在 subkey 模式下进行多余的 `HashSet` 重建与二次迭代.
+    async fn load_set_members_vec(&self, db: usize, key: &[u8]) -> Result<Vec<Vec<u8>>> {
+        let Some(stored) = self.storage.get_typed(db, key).await? else {
+            return Ok(Vec::new());
+        };
+        match stored.value {
+            ValueType::Set(set) => Ok(set.into_iter().collect()),
+            ValueType::CollectionHeader {
+                kind: CollectionKind::Set,
+                ..
+            } => {
+                let encoded_user_key = AiDbEngine::encode_key(db, key);
+                self.scan_set_subkeys(db, &encoded_user_key, None).await
+            }
+            _ => Err(router::wrongtype()),
+        }
+    }
+
     /// 加载 set 全部 members (兼容所有格式).
     async fn load_set_full(&self, db: usize, key: &[u8]) -> Result<HashSet<Vec<u8>>> {
         let Some(stored) = self.storage.get_typed(db, key).await? else {
@@ -690,6 +709,8 @@ impl SetCommands {
         pattern: Option<&[u8]>,
     ) -> Result<Vec<Vec<u8>>> {
         let prefix = subkey::set_subkey_prefix(encoded_user_key);
+        // member 紧跟在 `{prefix}{member_len:2B}` 之后, 直接在原 key 缓冲上截取, 省去逐 member 再分配.
+        let member_offset = prefix.len() + 2;
         let out = Arc::new(std::sync::Mutex::new(Vec::new()));
         let out_c = out.clone();
         let pattern = pattern.map(|p| p.to_vec());
@@ -699,18 +720,17 @@ impl SetCommands {
             .raw_subkey_for_each(
                 db,
                 prefix,
-                Box::new(move |encoded, _raw| {
-                    if let Some((kind, member)) = subkey::decode_subkey(&encoded) {
-                        if kind != CollectionKind::Set {
+                Box::new(move |mut encoded, _raw| {
+                    if encoded.len() < member_offset {
+                        return Ok(());
+                    }
+                    encoded.drain(..member_offset);
+                    if let Some(ref pat) = pattern {
+                        if !glob_match(pat, &encoded) {
                             return Ok(());
                         }
-                        if let Some(ref pat) = pattern {
-                            if !glob_match(pat, &member) {
-                                return Ok(());
-                            }
-                        }
-                        out_c.lock().unwrap().push(member);
                     }
+                    out_c.lock().unwrap().push(encoded);
                     Ok(())
                 }),
             )

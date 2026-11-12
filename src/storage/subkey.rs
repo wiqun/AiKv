@@ -89,8 +89,8 @@ fn encode_collection_subkey(user_key: &[u8], tag: u8, sub: &[u8]) -> Vec<u8> {
 
 // ---- 解码函数 ----
 
-/// 解码结果: (collection_kind, field_or_member_bytes).
-pub fn decode_subkey(encoded_key: &[u8]) -> Option<(CollectionKind, Vec<u8>)> {
+/// 零拷贝借用解码结果: (collection_kind, field_or_member_bytes_slice).
+pub fn decode_subkey_ref(encoded_key: &[u8]) -> Option<(CollectionKind, &[u8])> {
     let sep_pos = encoded_key.iter().position(|&b| b == SUBKEY_SEPARATOR)?;
     if sep_pos + 1 >= encoded_key.len() {
         return None;
@@ -106,8 +106,12 @@ pub fn decode_subkey(encoded_key: &[u8]) -> Option<(CollectionKind, Vec<u8>)> {
     if data_start > encoded_key.len() {
         return None;
     }
-    let field = encoded_key[data_start..].to_vec();
-    Some((kind, field))
+    Some((kind, &encoded_key[data_start..]))
+}
+
+/// 解码结果: (collection_kind, field_or_member_bytes).
+pub fn decode_subkey(encoded_key: &[u8]) -> Option<(CollectionKind, Vec<u8>)> {
+    decode_subkey_ref(encoded_key).map(|(kind, slice)| (kind, slice.to_vec()))
 }
 
 /// 判断某个 engine key 是否为 subkey entry (field/member, 非 metadata).
