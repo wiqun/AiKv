@@ -17,6 +17,7 @@
 
 - 集群模式流水线 (pipeline) 内的命令改为按到达顺序执行, 与单机一致. 之前集群为每条命令 `spawn` 并发执行, 同一连接 `SET k new` + `GET k` 会读到旧值, 连续 `SET k` 的最终值也可能不是最后一条.
 - `LATENCY HISTORY` 的样本只记录耗时不低于 1ms 的调用 (与 Redis latency-monitor 只记录超阈值事件一致); 计数与直方图仍包含全部调用.
+- 数据 group 的 `snapshot_logs_since_last` 由 50,000 调为 100,000, 减少日常快照频率. 配合 aidb 的快照不再阻塞写路径 (见 aidb CHANGELOG).
 
 ### Performance
 
