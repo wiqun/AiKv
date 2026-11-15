@@ -31,6 +31,7 @@ use aidb::error::ClusterError as AidbClusterError;
 use aidb::Checkpoint;
 
 use super::cluster_batcher::{submit_write_op, GroupSetBatcher};
+use super::local_batcher::LocalWriteBatcher;
 use crate::cluster::router::{migration_phase_for_slot, MigrationRoutePhase, TRYAGAIN_MIGRATION};
 use crate::cluster::state::{ClusterStateManager, CLUSTER_STATE_MGR};
 use crate::error::{Error, Result};
@@ -70,6 +71,7 @@ pub(super) enum WriteRoute {
 /// 数据面感知的存储适配器.
 pub struct ClusterDataAdapter {
     local: Arc<dyn StorageAdapter>,
+    local_batcher: LocalWriteBatcher,
     set_batchers: Mutex<HashMap<u64, Arc<GroupSetBatcher>>>,
     eager_flush: usize,
 }
@@ -80,8 +82,10 @@ impl ClusterDataAdapter {
     pub const DEFAULT_EAGER_FLUSH: usize = 48;
 
     pub fn new(local: Arc<dyn StorageAdapter>, eager_flush: usize) -> Arc<Self> {
+        let local_batcher = LocalWriteBatcher::new(Arc::clone(&local));
         Arc::new(Self {
             local,
+            local_batcher,
             set_batchers: Mutex::new(HashMap::new()),
             eager_flush,
         })
@@ -862,6 +866,11 @@ impl StorageAdapter for ClusterDataAdapter {
     }
 
     async fn enqueue_batch(&self, batch: Vec<AdapterWriteOp>) -> Result<Box<dyn BatchWriteHandle>> {
+        // 单机模式没有 data group 路由与 Raft 批处理, 走本地合批器, 把并发命令的写合并成一次
+        // 本地 write_batch. 集群模式仍按 data group 凑批后 propose.
+        if CLUSTER_STATE_MGR.get().is_none() {
+            return self.local_batcher.enqueue(batch).await;
+        }
         super::cluster_batcher::enqueue_cluster_batch(
             &self.set_batchers,
             self.eager_flush,

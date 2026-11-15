@@ -335,7 +335,11 @@ impl KvStorageAdapter {
     }
 
     fn serialize(value: &StoredValue) -> Result<Vec<u8>> {
-        postcard::to_allocvec(value).map_err(|e| Error::Storage(format!("postcard encode: {e}")))
+        let capacity = usize::try_from(value.approximate_heap_bytes())
+            .unwrap_or(0)
+            .saturating_add(96);
+        let out = Vec::with_capacity(capacity);
+        postcard::to_extend(value, out).map_err(|e| Error::Storage(format!("postcard encode: {e}")))
     }
 
     async fn read_watch_version(&self, db: usize, user_key: &[u8]) -> Result<u64> {
