@@ -656,13 +656,48 @@ impl HashCommands {
             ValueType::Hash(map) => Ok(map.into_iter().collect()),
             ValueType::CollectionHeader {
                 kind: CollectionKind::Hash,
-                ..
+                count,
             } => {
                 let encoded_user_key = AiDbEngine::encode_key(db, key);
-                self.scan_hash_subkeys(db, &encoded_user_key, None).await
+                self.load_hash_subkeys_bounded(db, &encoded_user_key, count)
+                    .await
             }
             _ => Err(router::wrongtype()),
         }
+    }
+
+    /// header 格式 hash 的有界读取: 用 header 的 field count 触发引擎有界扫描快路径.
+    /// count 在并发写下可能略旧, 多取 `COUNT_SLACK` 条; 达到上限时回退流式扫描,
+    /// 保证不漏 field.
+    async fn load_hash_subkeys_bounded(
+        &self,
+        db: usize,
+        encoded_user_key: &[u8],
+        count: u32,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        const COUNT_SLACK: usize = 8;
+        let prefix = subkey::hash_subkey_prefix(encoded_user_key);
+        let Some(end) = AiDbEngine::prefix_end(&prefix) else {
+            return self.scan_hash_subkeys(db, encoded_user_key, None).await;
+        };
+        let limit = (count as usize).saturating_add(COUNT_SLACK);
+        let mut raw = self
+            .storage
+            .raw_range_scan(prefix.clone(), end, limit, false)
+            .await?;
+        if raw.len() >= limit {
+            return self.scan_hash_subkeys(db, encoded_user_key, None).await;
+        }
+        let field_offset = prefix.len() + 2;
+        let mut out = Vec::with_capacity(raw.len());
+        for (mut encoded, value) in raw.drain(..) {
+            if encoded.len() < field_offset {
+                continue;
+            }
+            encoded.drain(..field_offset);
+            out.push((encoded, value));
+        }
+        Ok(out)
     }
 
     /// 加载或创建 hash (兼容所有格式).

@@ -14,6 +14,8 @@
 //! # 接口
 //!
 //! - `lookup(name)`: 大小写不敏感查表.
+//! - `lookup_bytes(name)`: 字节形态查表, 命令名 <= 32B 时零堆分配.
+//! - `canonical_command(name)`: 经索引返回表内静态名, 未知命令返回 `unknown`.
 //! - `key_indices(info, argc)`: 计算 key 参数位置; `first_key=0` → 无 key.
 //! - `all_commands()` / `command_count()`: COMMAND 子命令数据源.
 //!
@@ -266,18 +268,44 @@ fn command_index() -> &'static HashMap<&'static str, CommandInfo> {
 }
 
 pub fn lookup(name: &str) -> Option<CommandInfo> {
+    // 热路径调用方已把命令名规范成大写, 命中时不再分配 String.
+    if name.bytes().all(|b| !b.is_ascii_lowercase()) {
+        return command_index().get(name).copied();
+    }
     let upper = name.to_ascii_uppercase();
     command_index().get(upper.as_str()).copied()
 }
 
+/// 字节形态的命令名查表, 供连接层在命令名尚未转成 `String` 时使用.
+/// 命令名不超过 32B (全部内置命令都满足) 时在栈上大写, 零堆分配.
+pub fn lookup_bytes(name: &[u8]) -> Option<CommandInfo> {
+    const STACK_CAP: usize = 32;
+    if name.len() <= STACK_CAP {
+        let mut buf = [0u8; STACK_CAP];
+        for (dst, src) in buf.iter_mut().zip(name) {
+            *dst = src.to_ascii_uppercase();
+        }
+        return std::str::from_utf8(&buf[..name.len()])
+            .ok()
+            .and_then(|upper| command_index().get(upper).copied());
+    }
+    lookup(&String::from_utf8_lossy(name))
+}
+
 /// 命令表里的名字返回那条 `&'static str`. 表里没有的返回静态 `unknown`.
 pub fn canonical_command(name: &str) -> &'static str {
-    for info in COMMAND_TABLE {
-        if info.name.eq_ignore_ascii_case(name) {
-            return info.name;
-        }
+    // 走命令索引, 避免每条命令线性扫描整张表 (183 条).
+    if name.bytes().all(|b| !b.is_ascii_lowercase()) {
+        return command_index()
+            .get(name)
+            .map(|info| info.name)
+            .unwrap_or("unknown");
     }
-    "unknown"
+    let upper = name.to_ascii_uppercase();
+    command_index()
+        .get(upper.as_str())
+        .map(|info| info.name)
+        .unwrap_or("unknown")
 }
 
 pub fn all_commands() -> &'static [CommandInfo] {
@@ -422,6 +450,25 @@ mod tests {
 
         assert!(lookup("nosuch").is_none());
         assert!(command_count() >= 131);
+    }
+
+    /// 字节查表与 `&str` 查表结果一致, 覆盖大小写与非 UTF-8 输入.
+    #[test]
+    fn test_registry_lookup_bytes() {
+        assert_eq!(lookup_bytes(b"get").map(|i| i.name), Some("GET"));
+        assert_eq!(lookup_bytes(b"GET").map(|i| i.name), Some("GET"));
+        assert_eq!(lookup_bytes(b"HsEt").map(|i| i.name), Some("HSET"));
+        assert!(lookup_bytes(b"nosuch").is_none());
+        assert!(lookup_bytes(&[0xff, 0xfe]).is_none());
+    }
+
+    /// `canonical_command` 走索引: 大小写输入都返回表内静态名, 未知命令返回 `unknown`.
+    #[test]
+    fn test_canonical_command_indexed() {
+        assert_eq!(canonical_command("get"), "GET");
+        assert_eq!(canonical_command("GET"), "GET");
+        assert_eq!(canonical_command("zAdD"), "ZADD");
+        assert_eq!(canonical_command("nosuch"), "unknown");
     }
 
     #[test]
