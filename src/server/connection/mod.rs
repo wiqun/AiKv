@@ -324,37 +324,46 @@ impl Connection {
             return Ok(true);
         }
 
-        let mut batch = vec![first];
-        while batch.len() < 128 {
-            match self.parse_frame().await {
-                Ok(Some(value)) => {
-                    let is_imm = should_flush_immediately(&value);
-                    let is_blk = is_blocking_command(&value);
-                    batch.push(value);
-                    if is_imm || is_blk {
-                        break;
+        let second = match self.parse_frame().await {
+            Ok(Some(v)) => v,
+            Ok(None) => {
+                self::pipeline::record_batch_len(1);
+                self.process_single_frame(first, buf).await?;
+                return Ok(true);
+            }
+            Err(e) => return Err(e),
+        };
+
+        let mut batch = Vec::with_capacity(8);
+        batch.push(first);
+        let stop = should_flush_immediately(&second) || is_blocking_command(&second);
+        batch.push(second);
+        if !stop {
+            while batch.len() < 128 {
+                match self.parse_frame().await {
+                    Ok(Some(value)) => {
+                        let is_imm = should_flush_immediately(&value);
+                        let is_blk = is_blocking_command(&value);
+                        batch.push(value);
+                        if is_imm || is_blk {
+                            break;
+                        }
                     }
+                    Ok(None) => break,
+                    Err(e) => return Err(e),
                 }
-                Ok(None) => break,
-                Err(e) => return Err(e),
             }
         }
 
-        let batch_len = batch.len();
-        self::pipeline::record_batch_len(batch_len);
-
-        if batch_len == 1 {
-            self.process_single_frame(batch.pop().unwrap(), buf).await?;
-        } else {
-            if let Err(e) = self.process_pipeline_batch(batch).await {
-                let _ = self.flush_responses().await;
-                return Err(e);
-            }
-            self.last_active = Instant::now();
-            if self.quit {
-                self.flush_responses().await?;
-                return Ok(false);
-            }
+        self::pipeline::record_batch_len(batch.len());
+        if let Err(e) = self.process_pipeline_batch(batch).await {
+            let _ = self.flush_responses().await;
+            return Err(e);
+        }
+        self.last_active = Instant::now();
+        if self.quit {
+            self.flush_responses().await?;
+            return Ok(false);
         }
         Ok(true)
     }
