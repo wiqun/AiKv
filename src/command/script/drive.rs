@@ -41,7 +41,7 @@ pub(super) struct ScriptJob {
     pub(super) timeout: Duration,
     pub(super) db: usize,
     pub(super) sha1: String,
-    pub(super) script: String,
+    pub(super) script: Arc<str>,
     pub(super) keys: Vec<Bytes>,
     pub(super) argv: Vec<Bytes>,
     pub(super) local_commit: bool,

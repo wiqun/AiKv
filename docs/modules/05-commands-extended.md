@@ -46,6 +46,7 @@ description: AiKv 扩展 Redis 命令 — JSON/JSONPath 引擎、Lua EVAL/SCRIPT
   - 采用 `mlua` 运行独立 Lua 5.1 虚拟机, 与 Redis 脚本语义一致. 提供 `cjson`、`bit`、`struct`、`cmsgpack` 和 `os.clock`, 裁掉 `os` 的其余函数以及 `io`、`debug`. 阻塞命令、`KEYS`/`FLUSH*`/`CONFIG` 这类管理和 `MIGRATE` 仍不能在 `redis.call` 里执行;
   - **动态加锁与只读无锁直通**: 判定为修改的脚本按参数 Key 字典序排序调用 `KeyLock::lock_keys_sorted_with_timeout(keys, 30s)` 获取锁; 静态分析判定为纯只读的脚本 (`is_read_only`) 及 `EVAL_RO` / `EVALSHA_RO` 或无 Key 脚本 (`keys.is_empty()`) **完全跳过 KeyLock**, 享受无锁并发直通;
   - **EWMA 动态执行路由**: 依据脚本 SHA 历史执行耗时的指数滑动平均 (EWMA) 分流: <1ms 轻脚本在当前 Tokio Worker 线程就地执行, ≥1ms 重脚本派发至专用 `ScriptWorkerPool` 线程池并走 Direct I/O 同步直调存储, 避免占满 EventLoop;
+  - **脚本缓存与锁优化**: `ScriptCache` 命中路径仅需读锁与原子访问位 (`Arc<str>` 零拷贝共享), 淘汰采用 Clock 近似 LRU; 单 Key 写入脚本走 `KeyLock::lock_one_with_timeout` 零堆分配快路径;
   - `redis.call` 写操作收集在 `ScriptTransaction` 的 `WriteBatch` 中, 脚本成功时原子提交, 抛出异常或超时时丢弃修改实现回滚. 集群写入先进入在途缓冲再放开 key 锁, 入队在锁外, Raft 确认仍在其后;
   - **大 ZSet 脚本在途叠加**: 脚本事务内支持对大 ZSet 范围读取结果叠加在途修改增量, 配合 AiDb 原生有界跳表扫描保障正确性与高性能.
 - **`BlockingRegistry` 唤醒机制**:

@@ -1,14 +1,35 @@
-//! SCRIPT LOAD 脚本缓存 (LRU 256; EVAL 亦写入并做只读解析)
+//! SCRIPT LOAD 脚本缓存 (Clock 近似 LRU 256; EVAL 亦写入并做只读解析).
+//! 命中路径仅需读锁 + 原子引用标志置位, 消除高频 EVALSHA 下的全局写锁争用与源码克隆.
 
 use parking_lot::RwLock;
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 const MAX_SCRIPTS: usize = 256;
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct CachedScript {
-    pub script: String,
+    pub script: Arc<str>,
     pub read_only: bool,
+    referenced: AtomicBool,
+}
+
+impl CachedScript {
+    fn new(script: Arc<str>, read_only: bool) -> Self {
+        Self {
+            script,
+            read_only,
+            referenced: AtomicBool::new(true),
+        }
+    }
+
+    #[inline]
+    fn touch(&self) {
+        if !self.referenced.load(Ordering::Relaxed) {
+            self.referenced.store(true, Ordering::Relaxed);
+        }
+    }
 }
 
 pub struct ScriptCache {
@@ -16,7 +37,7 @@ pub struct ScriptCache {
 }
 
 struct ScriptCacheInner {
-    map: HashMap<String, CachedScript>,
+    map: HashMap<String, Arc<CachedScript>>,
     order: VecDeque<String>,
 }
 
@@ -32,37 +53,68 @@ impl Default for ScriptCache {
 }
 
 impl ScriptCache {
-    /// 只读取出脚本正文, 不调整 LRU. 慢日志在命令返回后调用.
+    /// 只读取出脚本正文, 不调整淘汰状态. 慢日志在命令返回后调用.
     pub fn peek(&self, sha1: &str) -> Option<String> {
-        self.inner.read().map.get(sha1).map(|c| c.script.clone())
+        self.inner
+            .read()
+            .map
+            .get(sha1)
+            .map(|c| c.script.as_ref().to_owned())
     }
 
-    pub fn get(&self, sha1: &str) -> Option<String> {
+    /// 读锁命中返回共享缓存条目, 仅设置原子引用位; 零写锁、零字符串克隆.
+    pub fn get_entry(&self, sha1: &str) -> Option<Arc<CachedScript>> {
+        let inner = self.inner.read();
+        let entry = inner.map.get(sha1)?;
+        entry.touch();
+        Some(Arc::clone(entry))
+    }
+
+    pub fn insert_and_get(&self, sha1: String, script: String) -> Arc<CachedScript> {
+        let read_only = is_script_read_only(&script);
+        let arc_script: Arc<str> = Arc::from(script);
         let mut inner = self.inner.write();
-        if !inner.map.contains_key(sha1) {
-            return None;
+        if let Some(existing) = inner.map.get(&sha1) {
+            if existing.script.as_ref() == arc_script.as_ref() && existing.read_only == read_only {
+                existing.touch();
+                return Arc::clone(existing);
+            }
+            let entry = Arc::new(CachedScript::new(arc_script, read_only));
+            inner.map.insert(sha1, Arc::clone(&entry));
+            return entry;
         }
-        inner.order.retain(|s| s != sha1);
-        inner.order.push_back(sha1.to_string());
-        inner.map.get(sha1).map(|c| c.script.clone())
+        if inner.map.len() >= MAX_SCRIPTS {
+            Self::evict_one(&mut inner);
+        }
+        let entry = Arc::new(CachedScript::new(arc_script, read_only));
+        inner.order.push_back(sha1.clone());
+        inner.map.insert(sha1, Arc::clone(&entry));
+        entry
     }
 
     pub fn insert(&self, sha1: String, script: String) {
-        let read_only = is_script_read_only(&script);
-        let mut inner = self.inner.write();
-        if inner.map.contains_key(&sha1) {
-            inner.order.retain(|s| s != &sha1);
-        } else if inner.map.len() >= MAX_SCRIPTS {
-            if let Some(old) = inner.order.pop_front() {
-                inner.map.remove(&old);
-            }
-        }
-        inner.order.push_back(sha1.clone());
-        inner.map.insert(sha1, CachedScript { script, read_only });
+        let _ = self.insert_and_get(sha1, script);
     }
 
-    pub fn is_read_only(&self, sha1: &str) -> bool {
-        self.inner.read().map.get(sha1).is_some_and(|c| c.read_only)
+    fn evict_one(inner: &mut ScriptCacheInner) {
+        let max_steps = inner.order.len();
+        for _ in 0..max_steps {
+            let Some(candidate) = inner.order.pop_front() else {
+                return;
+            };
+            let Some(entry) = inner.map.get(&candidate) else {
+                continue;
+            };
+            if entry.referenced.swap(false, Ordering::Relaxed) {
+                inner.order.push_back(candidate);
+            } else {
+                inner.map.remove(&candidate);
+                return;
+            }
+        }
+        if let Some(victim) = inner.order.pop_front() {
+            inner.map.remove(&victim);
+        }
     }
 
     pub fn exists(&self, sha1: &str) -> bool {
@@ -247,6 +299,29 @@ mod tests {
         assert_eq!(cache.peek("missing"), None);
         cache.insert("abc".to_string(), "return 1".to_string());
         assert_eq!(cache.peek("abc").as_deref(), Some("return 1"));
+    }
+
+    #[test]
+    fn clock_eviction_keeps_recently_accessed_script() {
+        let cache = ScriptCache::default();
+        for i in 0..MAX_SCRIPTS {
+            cache.insert(format!("s{i:03}"), format!("return {i}"));
+        }
+        // 新插入条目带 referenced=true；逐个触发一次访问后仅 s000 在第二次扫描被淘汰，
+        // 再次访问 s001 让 s001 保留而淘汰未再访问的 s002
+        for _ in 0..MAX_SCRIPTS {
+            // 第一轮 insert 全部 referenced=true，先读 s000 之外的脚本一次？
+            // 插入 s_extra 会把所有 referenced 清 false 直到命中第一个 false (即 s000).
+        }
+        cache.insert("extra1".to_string(), "return -1".to_string());
+        assert!(!cache.exists("s000"));
+        assert!(cache.exists("s001"));
+        // 此时 s001..s255 刚被清成 referenced=false；访问 s001 使其免于下一轮淘汰
+        let e = cache.get_entry("s001").expect("s001 hit");
+        assert_eq!(e.script.as_ref(), "return 1");
+        cache.insert("extra2".to_string(), "return -2".to_string());
+        assert!(cache.exists("s001"), "最近命中的 s001 应保留");
+        assert!(!cache.exists("s002"), "未再命中的 s002 应被 Clock 淘汰");
     }
 
     #[test]

@@ -606,8 +606,8 @@ impl KvStorageAdapter {
                 WriteOp::Put(value) => {
                     let encoded = Self::encode(db, &key);
                     touched.push(encoded.clone());
-                    let stored = StoredValue::string((*value).clone());
-                    let bytes = Self::serialize(&stored)?;
+                    let bytes =
+                        crate::storage::string_codec::encode_string_fast(value.as_slice(), None);
                     batch.push(AdapterWriteOp::Put {
                         key: encoded,
                         value: bytes,
@@ -616,7 +616,12 @@ impl KvStorageAdapter {
                 WriteOp::PutStored(stored) => {
                     let encoded = Self::encode(db, &key);
                     touched.push(encoded.clone());
-                    let bytes = Self::serialize(&stored)?;
+                    let bytes = match &stored.value {
+                        ValueType::String(s) => {
+                            crate::storage::string_codec::encode_string_fast(s, stored.expires_at)
+                        }
+                        _ => Self::serialize(&stored)?,
+                    };
                     batch.push(AdapterWriteOp::Put {
                         key: encoded,
                         value: bytes,
@@ -671,18 +676,26 @@ impl KvStorageAdapter {
                 WriteOp::Put(value) => {
                     let encoded = Self::encode(db, &key);
                     touched.push(encoded.clone());
-                    let stored = StoredValue::string((*value).clone());
                     batch.push(AdapterWriteOp::Put {
                         key: encoded,
-                        value: Self::serialize(&stored)?,
+                        value: crate::storage::string_codec::encode_string_fast(
+                            value.as_slice(),
+                            None,
+                        ),
                     });
                 }
                 WriteOp::PutStored(stored) => {
                     let encoded = Self::encode(db, &key);
                     touched.push(encoded.clone());
+                    let bytes = match &stored.value {
+                        ValueType::String(s) => {
+                            crate::storage::string_codec::encode_string_fast(s, stored.expires_at)
+                        }
+                        _ => Self::serialize(&stored)?,
+                    };
                     batch.push(AdapterWriteOp::Put {
                         key: encoded,
-                        value: Self::serialize(&stored)?,
+                        value: bytes,
                     });
                 }
                 WriteOp::Delete => {
