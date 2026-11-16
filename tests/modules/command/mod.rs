@@ -5,6 +5,7 @@ pub mod atom_json_batch;
 pub mod compat_aliases;
 pub mod database;
 pub mod hash;
+pub mod hash_hotkey;
 pub mod helpers;
 pub mod info_alignment;
 pub mod info_golden;

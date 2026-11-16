@@ -88,7 +88,11 @@ impl CommandRouter {
                 key_lock.clone(),
                 Arc::clone(&in_flight_ctx),
             ),
-            hash: hash::HashCommands::new(storage.clone(), key_lock.clone()),
+            hash: hash::HashCommands::new(
+                storage.clone(),
+                key_lock.clone(),
+                Arc::clone(&in_flight_ctx),
+            ),
             list: list::ListCommands::new(
                 storage.clone(),
                 key_lock.clone(),
@@ -142,7 +146,11 @@ impl CommandRouter {
                 key_lock.clone(),
                 Arc::clone(&in_flight_ctx),
             ),
-            hash: hash::HashCommands::new(storage.clone(), key_lock.clone()),
+            hash: hash::HashCommands::new(
+                storage.clone(),
+                key_lock.clone(),
+                Arc::clone(&in_flight_ctx),
+            ),
             list: list::ListCommands::with_metrics(
                 storage.clone(),
                 key_lock.clone(),
