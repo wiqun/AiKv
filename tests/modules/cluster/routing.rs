@@ -109,6 +109,8 @@ async fn route_decision_all_branches() {
         paused_write_groups: parking_lot::RwLock::new(HashMap::new()),
         _watcher_shutdown: parking_lot::Mutex::new(None),
         _auto_save_shutdown: parking_lot::Mutex::new(None),
+        peer_last_seen: parking_lot::RwLock::new(HashMap::new()),
+        start_time: std::time::Instant::now(),
         slot_groups: ClusterStateManager::new_slot_groups(),
         has_active_migration: AtomicBool::new(false),
     };
@@ -139,8 +141,8 @@ async fn route_decision_all_branches() {
     // b"\x01" → CRC16=0x1021=4129 → slot 4129 (unallocated) → CLUSTERDOWN
     let r = ClusterRouter::decide(b"\x01", CommandType::Read, false, false);
     assert!(
-        matches!(r, RouteDecision::ClusterDown(_)),
-        "expected CLUSTERDOWN, got {:?}",
+        matches!(&r, RouteDecision::ClusterDown(msg) if msg == "CLUSTERDOWN Hash slot not served"),
+        "expected CLUSTERDOWN Hash slot not served, got {:?}",
         r
     );
 

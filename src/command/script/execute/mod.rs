@@ -526,7 +526,7 @@ fn dispatch(
         "ZSCAN" => extra::exec_zscan(storage, txn, args),
         "ZUNION" => extra::exec_zunion(storage, txn, args),
         "ZUNIONSTORE" => extra::exec_zunionstore(storage, txn, args),
-        "TTL" => exec_ttl(storage, txn, args),
+        "TTL" => extra::exec_pttl(storage, txn, args, false),
         "EXPIRE" => exec_expire(storage, txn, args),
         "JSON.GET" => json_exec::exec_json_get(storage, txn, args),
         "JSON.MGET" => json_exec::exec_json_mget(storage, txn, args),
@@ -544,23 +544,6 @@ fn dispatch(
             "ERR Command not supported in scripts: {cmd}"
         ))),
     }
-}
-
-fn exec_ttl(storage: &dyn ScriptIo, txn: &ScriptTransaction, args: &[Bytes]) -> Result<RespValue> {
-    if args.len() != 1 {
-        return Err(wrong_count("TTL"));
-    }
-    let k = &args[0];
-    if !txn.exists(storage, k)? {
-        return Ok(router::integer(-2));
-    }
-    let ttl_res = storage.ttl(txn.db_index, k)?;
-    let res = match ttl_res {
-        None => -2,
-        Some(crate::storage::TTL_NO_EXPIRY) => -1,
-        Some(ms) => (ms / 1000).max(0),
-    };
-    Ok(router::integer(res))
 }
 
 fn exec_expire(

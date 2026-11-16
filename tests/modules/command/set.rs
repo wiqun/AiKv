@@ -244,3 +244,44 @@ async fn test_sscan_large_subkey_streaming_and_invalid_cursor() {
         .unwrap_err();
     assert!(err.to_string().contains("ERR invalid cursor"));
 }
+
+/// 大 Set (Subkey 格式) 的 SMEMBERS 返回完整且成员正确.
+#[tokio::test]
+async fn test_set_smembers_large_subkey() {
+    use aikv::command::CommandRouter;
+    use aikv::storage::{AiDbEngine, KvStorageAdapter};
+    use std::collections::BTreeSet;
+    use tempfile::TempDir;
+
+    let dir = TempDir::new().unwrap();
+    let engine = AiDbEngine::open_for_testing(dir.path()).unwrap();
+    let r = CommandRouter::new(KvStorageAdapter::new(engine));
+    let mut db = 0;
+
+    let mut expected = BTreeSet::new();
+    for i in 0..100 {
+        let m = format!("member_{i:03}");
+        r.execute("SADD", &[b("bigset"), b(&m)], &mut db)
+            .await
+            .unwrap();
+        expected.insert(m);
+    }
+
+    let bulk = |item: &RespValue| match item {
+        RespValue::BulkString(Some(s)) => String::from_utf8(s.to_vec()).unwrap(),
+        other => panic!("expected bulk string, got {other:?}"),
+    };
+    let array = |resp: RespValue| match resp {
+        RespValue::Array(Some(items)) => items,
+        other => panic!("expected array, got {other:?}"),
+    };
+
+    let all = array(
+        r.execute("SMEMBERS", &[b("bigset")], &mut db)
+            .await
+            .unwrap(),
+    );
+    assert_eq!(all.len(), 100);
+    let got: BTreeSet<String> = all.iter().map(bulk).collect();
+    assert_eq!(got, expected);
+}

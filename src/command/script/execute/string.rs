@@ -67,8 +67,9 @@ pub(super) fn exec_set(
     }
 
     txn.set_string(key(&args[0]), opts.value);
-    if let Some(exp) = opts.expire_at {
-        txn.set_expire_at(key(&args[0]), Some(exp));
+    if !opts.keep_ttl {
+        // 普通 SET 清除已有过期时间 (Redis 语义); 命令层同此逻辑
+        txn.set_expire_at(key(&args[0]), opts.expire_at);
     }
 
     if opts.return_old {

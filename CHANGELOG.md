@@ -10,12 +10,14 @@
 ### Added
 
 - 新增 `EVAL_RO` 与 `EVALSHA_RO` 只读脚本命令支持, 执行期间拦截一切写命令 (`ERR Write commands not allowed in read-only script`).
+- `EVALSHA` / `EVALSHA_RO` 的慢日志在原有参数后追加脚本正文, 便于直接定位慢脚本. 正文经 `ScriptCache::peek` 读取, 只读不调整 LRU; 缓存未命中时不追加, 参数保持原样.
 - `AIKV_SCRIPT_OFF_WORKER` 新增默认的 `auto` 取值: 按脚本 sha 记录执行耗时的 EWMA, 低于 1ms 的轻脚本就地执行, 否则派发到脚本线程池 (集群与单机一致); `1`/`true` 强制线程池, `0`/`false` 强制就地.
 
 ### Changed
 
 - 集群模式流水线 (pipeline) 内的命令改为按到达顺序执行, 与单机一致. 之前集群为每条命令 `spawn` 并发执行, 同一连接 `SET k new` + `GET k` 会读到旧值, 连续 `SET k` 的最终值也可能不是最后一条.
 - `LATENCY HISTORY` 的样本只记录耗时不低于 1ms 的调用 (与 Redis latency-monitor 只记录超阈值事件一致); 计数与直方图仍包含全部调用.
+- 数据 group 的 `snapshot_logs_since_last` 由 50,000 调为 100,000, 减少日常快照频率. 配合 aidb 的快照不再阻塞写路径 (见 aidb CHANGELOG).
 
 ### Performance
 
@@ -48,3 +50,6 @@
 - 集群启用时拒绝 `engine=memory`, 避免 `init_cluster` panic 与绕过 Raft 的内存写入 (`#77`).
 - 修复 `MULTI/EXEC` 跨 slot 部分执行与事务期间客户端命令插队问题, 并对齐 Redis 运行时错误不回滚语义 (`#78`).
 - WATCH 版本改为存储层 meta key (含 DB), 随写入 apply 递增, 支持跨连接冲突检测 (`#79`).
+- 修复脚本内 `TTL` 读不到同一脚本写入的过期时间: `exec_ttl` 用已提交存储取 TTL, 却用未提交事务判断 key 存在, 导致脚本内 `SET ... EX` 之后 `TTL` 返回 `-2`, `EXPIRE` 之后返回 `-1` (同场景 `PTTL` 正常). 改为复用 `exec_pttl` 的事务内 `resolve_expires_at` 计算.
+- 对齐 Redis 的 `TTL` 取整规则: 由 `pttl / 1000` 向下取整改为 `(pttl + 500) / 1000`, 剩余 299992ms 现在返回 `300` 而不是 `299` (脚本内与命令层一致).
+- 修复脚本内普通 `SET` 不清空已有过期时间: 命令层符合 Redis 语义 (普通 `SET` 清除 TTL), 脚本层却保留了原 TTL, 导致 `redis.call('SET', k, v)` 在已有 TTL 的 key 上不清理过期时间. 现在脚本 `exec_set` 与直通路径 (`fast_set`) 都按 `KEEPTTL` 之外的形态清除 TTL, `SET ... KEEPTTL` 仍保留. 该修复会让依赖 AiKv 旧行为掩盖 TTL 泄漏的脚本开始暴露真实语义, 升级前需确认业务脚本已按 Redis 语义编写.

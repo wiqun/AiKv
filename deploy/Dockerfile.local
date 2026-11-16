@@ -1,8 +1,30 @@
 # Multi-stage build: compile aikv with the sibling local AiDb checkout.
 FROM --platform=linux/amd64 rust:1.98-bookworm AS builder
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+
+ENV CARGO_NET_RETRY=10 \
+    CARGO_HTTP_TIMEOUT=600 \
+    CARGO_HTTP_LOW_SPEED_LIMIT=1
+
+RUN if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
+        sed -i -e 's|http://deb.debian.org/debian-security|http://mirrors.aliyun.com/debian-security|' \
+               -e 's|http://deb.debian.org/debian|http://mirrors.aliyun.com/debian|' \
+               /etc/apt/sources.list.d/debian.sources; \
+    fi; \
+    if [ -f /etc/apt/sources.list ]; then \
+        sed -i -e 's|http://deb.debian.org/debian-security|http://mirrors.aliyun.com/debian-security|' \
+               -e 's|http://deb.debian.org/debian|http://mirrors.aliyun.com/debian|' \
+               /etc/apt/sources.list; \
+    fi; \
+    apt-get -o Acquire::https::Proxy="$HTTPS_PROXY" \
+            -o Acquire::http::Proxy="$HTTP_PROXY" \
+            -o Acquire::Retries=5 update \
+    && apt-get -o Acquire::https::Proxy="$HTTPS_PROXY" \
+               -o Acquire::http::Proxy="$HTTP_PROXY" \
+               -o Acquire::Retries=5 install -y --no-install-recommends \
         protobuf-compiler \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -29,8 +51,26 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 FROM --platform=linux/amd64 debian:bookworm-slim AS runtime
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+
+RUN if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
+        sed -i -e 's|http://deb.debian.org/debian-security|http://mirrors.aliyun.com/debian-security|' \
+               -e 's|http://deb.debian.org/debian|http://mirrors.aliyun.com/debian|' \
+               /etc/apt/sources.list.d/debian.sources; \
+    fi; \
+    if [ -f /etc/apt/sources.list ]; then \
+        sed -i -e 's|http://deb.debian.org/debian-security|http://mirrors.aliyun.com/debian-security|' \
+               -e 's|http://deb.debian.org/debian|http://mirrors.aliyun.com/debian|' \
+               /etc/apt/sources.list; \
+    fi; \
+    apt-get -o Acquire::https::Proxy="$HTTPS_PROXY" \
+            -o Acquire::http::Proxy="$HTTP_PROXY" \
+            -o Acquire::Retries=5 update \
+    && apt-get -o Acquire::https::Proxy="$HTTPS_PROXY" \
+               -o Acquire::http::Proxy="$HTTP_PROXY" \
+               -o Acquire::Retries=5 install -y --no-install-recommends \
         ca-certificates \
         curl \
         tini \

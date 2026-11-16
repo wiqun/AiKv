@@ -324,37 +324,46 @@ impl Connection {
             return Ok(true);
         }
 
-        let mut batch = vec![first];
-        while batch.len() < 128 {
-            match self.parse_frame().await {
-                Ok(Some(value)) => {
-                    let is_imm = should_flush_immediately(&value);
-                    let is_blk = is_blocking_command(&value);
-                    batch.push(value);
-                    if is_imm || is_blk {
-                        break;
+        let second = match self.parse_frame().await {
+            Ok(Some(v)) => v,
+            Ok(None) => {
+                self::pipeline::record_batch_len(1);
+                self.process_single_frame(first, buf).await?;
+                return Ok(true);
+            }
+            Err(e) => return Err(e),
+        };
+
+        let mut batch = Vec::with_capacity(8);
+        batch.push(first);
+        let stop = should_flush_immediately(&second) || is_blocking_command(&second);
+        batch.push(second);
+        if !stop {
+            while batch.len() < 128 {
+                match self.parse_frame().await {
+                    Ok(Some(value)) => {
+                        let is_imm = should_flush_immediately(&value);
+                        let is_blk = is_blocking_command(&value);
+                        batch.push(value);
+                        if is_imm || is_blk {
+                            break;
+                        }
                     }
+                    Ok(None) => break,
+                    Err(e) => return Err(e),
                 }
-                Ok(None) => break,
-                Err(e) => return Err(e),
             }
         }
 
-        let batch_len = batch.len();
-        self::pipeline::record_batch_len(batch_len);
-
-        if batch_len == 1 {
-            self.process_single_frame(batch.pop().unwrap(), buf).await?;
-        } else {
-            if let Err(e) = self.process_pipeline_batch(batch).await {
-                let _ = self.flush_responses().await;
-                return Err(e);
-            }
-            self.last_active = Instant::now();
-            if self.quit {
-                self.flush_responses().await?;
-                return Ok(false);
-            }
+        self::pipeline::record_batch_len(batch.len());
+        if let Err(e) = self.process_pipeline_batch(batch).await {
+            let _ = self.flush_responses().await;
+            return Err(e);
+        }
+        self.last_active = Instant::now();
+        if self.quit {
+            self.flush_responses().await?;
+            return Ok(false);
         }
         Ok(true)
     }
@@ -422,7 +431,21 @@ impl Connection {
                 ))
                 .await;
         };
-        let cmd = String::from_utf8_lossy(&cmd_bytes).to_ascii_uppercase();
+        // 命令名在栈上规范化: 内置命令都 <= 32B, 热路径不再分配 String.
+        let mut cmd_buf = [0u8; 32];
+        let cmd = if cmd_bytes.len() <= cmd_buf.len() {
+            for (dst, src) in cmd_buf.iter_mut().zip(cmd_bytes.iter()) {
+                *dst = src.to_ascii_uppercase();
+            }
+            match std::str::from_utf8(&cmd_buf[..cmd_bytes.len()]) {
+                Ok(upper) => std::borrow::Cow::Borrowed(upper),
+                Err(_) => std::borrow::Cow::Owned(
+                    String::from_utf8_lossy(&cmd_bytes).to_ascii_uppercase(),
+                ),
+            }
+        } else {
+            std::borrow::Cow::Owned(String::from_utf8_lossy(&cmd_bytes).to_ascii_uppercase())
+        };
         let args: Result<Vec<Bytes>> = items[1..]
             .iter()
             .map(|v| {
@@ -436,7 +459,7 @@ impl Connection {
             Err(e) => return self.write_error(&e).await,
         };
 
-        self.process_command(&cmd, &args).await
+        self.process_command(cmd.as_ref(), &args).await
     }
 
     fn release_watches(&mut self) {
@@ -580,6 +603,10 @@ impl Connection {
     }
 
     fn broadcast_monitor(&self, cmd: &str, args: &[Bytes]) {
+        // 没有 MONITOR 订阅者时, 构建监听行 (format! + 逐参数 UTF-8 校验) 是纯开销.
+        if self.state.monitor_tx.receiver_count() == 0 {
+            return;
+        }
         let line = format_monitor_line(self.current_db, cmd, args);
         let _ = self.state.monitor_tx.send(line);
     }
@@ -660,10 +687,18 @@ impl Connection {
         self.state.latency_stats.record(cmd, duration_us);
         let threshold = self.state.slow_query_log.threshold_us();
         if duration_us >= threshold {
-            let arg_strings: Vec<String> = args
+            let mut arg_strings: Vec<String> = args
                 .iter()
                 .map(|b| String::from_utf8_lossy(b).into_owned())
                 .collect();
+            let source = arg_strings
+                .first()
+                .and_then(|sha| self.state.router().script_source(sha));
+            crate::server::slowlog::SlowQueryLog::append_evalsha_source(
+                cmd,
+                &mut arg_strings,
+                source,
+            );
             self.state.slow_query_log.record(
                 cmd,
                 &arg_strings,
@@ -784,26 +819,26 @@ pub(super) fn should_flush_immediately(frame: &RespValue) -> bool {
     let Some(cmd) = frame_command_bytes(frame) else {
         return false;
     };
-    matches!(
-        cmd.as_slice(),
-        b"QUIT" | b"MONITOR" | b"EXEC" | b"ATOM.EXEC" | b"SHUTDOWN"
-    )
+    cmd.eq_ignore_ascii_case(b"QUIT")
+        || cmd.eq_ignore_ascii_case(b"MONITOR")
+        || cmd.eq_ignore_ascii_case(b"EXEC")
+        || cmd.eq_ignore_ascii_case(b"ATOM.EXEC")
+        || cmd.eq_ignore_ascii_case(b"SHUTDOWN")
 }
 
 pub(super) fn is_blocking_command(frame: &RespValue) -> bool {
-    let Some(cmd) = frame_command_bytes(frame) else {
-        return false;
-    };
-    let name = std::str::from_utf8(&cmd).unwrap_or("");
-    command::lookup(name)
-        .map(|info| info.flags.contains(&"blocking"))
-        .unwrap_or(false)
+    frame_command_bytes(frame)
+        .and_then(command::lookup_bytes)
+        .is_some_and(|info| info.flags.contains(&"blocking"))
 }
 
-fn frame_command_bytes(frame: &RespValue) -> Option<Vec<u8>> {
+fn frame_command_bytes(frame: &RespValue) -> Option<&[u8]> {
     let RespValue::Array(Some(items)) = frame else {
         return None;
     };
-    let cmd_bytes = items.first().and_then(extract_bulk)?;
-    Some(cmd_bytes.to_ascii_uppercase())
+    match items.first()? {
+        RespValue::BulkString(Some(b)) => Some(b.as_ref()),
+        RespValue::BulkString(None) => Some(&[]),
+        _ => None,
+    }
 }

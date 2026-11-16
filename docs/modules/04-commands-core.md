@@ -26,7 +26,7 @@ description: AiKv 核心 Redis 命令 — String/Hash/List/Set/ZSet/Key/Database
 | [`src/command/router/`](../../src/command/router/) | `CommandRouter` 分发中枢、4096 桶 `KeyLock` 写锁与 metrics 埋点 | `CommandRouter::execute_with_client`, `execute_inner` |
 | [`src/command/registry.rs`](../../src/command/registry.rs) | Redis 命令元数据表 (`COMMAND_TABLE`)、`CommandFlags` 与参数规则 | `CommandRegistry::lookup`, `CommandFlags` |
 | [`src/command/string.rs`](../../src/command/string.rs) | String 系列命令 (GET, SET, MGET, MSET, INCR, INCRBYFLOAT, GETRANGE 等) | `string::dispatch` |
-| [`src/command/hash.rs`](../../src/command/hash.rs) | Hash 系列命令 (HGET, HSET, HDEL, HGETALL, HINCRBY, HEXISTS 等) | `hash::dispatch` |
+| [`src/command/hash/`](../../src/command/hash/) | Hash 系列命令 (HGET, HSET, HDEL, HGETALL, HINCRBY, HEXISTS 等; 热路径在途提前放锁与大 Hash 单批提交) | `HashCommands` (`hset_pipeline` / `hdel_pipeline`) |
 | [`src/command/list.rs`](../../src/command/list.rs) | List 系列命令 (LPUSH, RPUSH, LPOP, RPOP, LRANGE, LLEN, LINDEX 等) | `list::dispatch` |
 | [`src/command/set.rs`](../../src/command/set.rs) | Set 系列命令 (SADD, SREM, SMEMBERS, SISMEMBER, SCARD, SINTER 等) | `set::dispatch` |
 | [`src/command/zset/`](../../src/command/zset/) | Sorted Set 系列命令 (ZADD, ZREM, ZRANGE, ZSCORE, ZCARD, ZINCRBY 等) | `zset::dispatch` |
@@ -40,7 +40,7 @@ description: AiKv 核心 Redis 命令 — String/Hash/List/Set/ZSet/Key/Database
 
 - **`KeyLock` 死锁防护与并发隔离**:
   - `KeyLock` 内部采用 **4096** 个独立分桶互斥锁 (`tokio::sync::Mutex<()>`);
-  - **单 Key 写**: `KeyLock::lock(key)` 加锁 (如 SET NX/XX, INCR, HSET, LPUSH 等);
+  - **单 Key 写**: `KeyLock::lock(key)` 加锁 (如 SET NX/XX, INCR, HSET, LPUSH 等); String RMW, Hash 与 ZSet 写路径先在锁内更新 `InFlightBuffer` 与 `EnqueueChain` 后立即释放 `KeyLock`, 锁外入队批处理落盘/共识;
   - **双 Key 命令**: `KeyLock::lock_two(k1, k2)` 按照 Key 字节序比较升序获取锁 (如 RENAME, COPY, LMOVE, SMOVE);
   - **多 Key 写命令**: `KeyLock::lock_keys_sorted(keys)` 自动去重并按字典序升序排序加锁, 彻底杜绝并发死锁;
   - **事务排他与预检 (`TransactionGate`)**: `MULTI/EXEC` 事务在 EXEC 执行期间获取 `TransactionGate` 独占写锁, 并整笔预检集群 CROSSSLOT, 杜绝事务执行期间与普通命令交叉交织;

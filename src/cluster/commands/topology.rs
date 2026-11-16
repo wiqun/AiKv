@@ -58,7 +58,14 @@ pub(super) fn resolve_group_leader_for_info(
     });
     // 本节点作为该 group leader 且已失去 quorum (探活判定) → 视为无 leader,
     // 驱动 CLUSTER INFO 报 cluster_state:fail (隔离的少数派旧 leader 视角).
-    apply_leader_quorum_gate(leader, mgr.node_id, mgr.group_quorum_ok(group_id))
+    let leader = apply_leader_quorum_gate(leader, mgr.node_id, mgr.group_quorum_ok(group_id));
+    // 远端 leader 节点不可达 (超时 3 秒未收到探活信号) → 视为无可用 leader
+    if let Some(lid) = leader {
+        if lid != mgr.node_id && !mgr.is_peer_online(lid, std::time::Duration::from_secs(3)) {
+            return None;
+        }
+    }
+    leader
 }
 
 /// quorum 门控 (纯函数): 本节点作为 leader 且已失去 quorum → 视为无 leader.

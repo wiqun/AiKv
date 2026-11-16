@@ -196,6 +196,8 @@ async fn build_mgr() -> Arc<ClusterStateManager> {
         paused_write_groups: parking_lot::RwLock::new(HashMap::new()),
         _watcher_shutdown: parking_lot::Mutex::new(None),
         _auto_save_shutdown: parking_lot::Mutex::new(None),
+        peer_last_seen: parking_lot::RwLock::new(HashMap::new()),
+        start_time: std::time::Instant::now(),
         slot_groups: ClusterStateManager::new_slot_groups(),
         has_active_migration: AtomicBool::new(false),
     };
@@ -310,7 +312,7 @@ async fn migration_merge_read_and_del_tombstone_lifecycle() {
             1,
             Request::Put {
                 key: del_key_enc.clone(),
-                value: b"old-on-source".to_vec(),
+                value: bytes::Bytes::from_static(b"old-on-source"),
             },
         )
         .await
@@ -367,7 +369,7 @@ async fn migration_merge_read_and_del_tombstone_lifecycle() {
             2,
             Request::PutConditional {
                 key: del_key_enc.clone(),
-                value: b"old-on-source".to_vec(),
+                value: bytes::Bytes::from_static(b"old-on-source"),
                 migration_epoch: Some(epoch),
             },
         )

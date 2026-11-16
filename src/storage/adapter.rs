@@ -335,7 +335,11 @@ impl KvStorageAdapter {
     }
 
     fn serialize(value: &StoredValue) -> Result<Vec<u8>> {
-        postcard::to_allocvec(value).map_err(|e| Error::Storage(format!("postcard encode: {e}")))
+        let capacity = usize::try_from(value.approximate_heap_bytes())
+            .unwrap_or(0)
+            .saturating_add(96);
+        let out = Vec::with_capacity(capacity);
+        postcard::to_extend(value, out).map_err(|e| Error::Storage(format!("postcard encode: {e}")))
     }
 
     async fn read_watch_version(&self, db: usize, user_key: &[u8]) -> Result<u64> {
@@ -407,7 +411,13 @@ impl KvStorageAdapter {
         let mut ops = vec![AdapterWriteOp::Delete {
             key: encoded.clone(),
         }];
-        Self::push_collection_subkey_deletes(db, key, &encoded, stored.as_ref(), &mut ops);
+        if self
+            .push_collection_subkey_deletes(db, key, &encoded, stored.as_ref(), &mut ops)
+            .await
+            .is_err()
+        {
+            return;
+        }
         if let Ok(Some((mk, mv))) = self.next_watch_meta_put(db, key).await {
             ops.push(AdapterWriteOp::Put { key: mk, value: mv });
         }
@@ -596,8 +606,8 @@ impl KvStorageAdapter {
                 WriteOp::Put(value) => {
                     let encoded = Self::encode(db, &key);
                     touched.push(encoded.clone());
-                    let stored = StoredValue::string((*value).clone());
-                    let bytes = Self::serialize(&stored)?;
+                    let bytes =
+                        crate::storage::string_codec::encode_string_fast(value.as_slice(), None);
                     batch.push(AdapterWriteOp::Put {
                         key: encoded,
                         value: bytes,
@@ -606,7 +616,12 @@ impl KvStorageAdapter {
                 WriteOp::PutStored(stored) => {
                     let encoded = Self::encode(db, &key);
                     touched.push(encoded.clone());
-                    let bytes = Self::serialize(&stored)?;
+                    let bytes = match &stored.value {
+                        ValueType::String(s) => {
+                            crate::storage::string_codec::encode_string_fast(s, stored.expires_at)
+                        }
+                        _ => Self::serialize(&stored)?,
+                    };
                     batch.push(AdapterWriteOp::Put {
                         key: encoded,
                         value: bytes,
@@ -616,13 +631,14 @@ impl KvStorageAdapter {
                     let encoded = Self::encode(db, &key);
                     touched.push(encoded.clone());
                     let stored = self.get_typed(db, &key).await.ok().flatten();
-                    Self::push_collection_subkey_deletes(
+                    self.push_collection_subkey_deletes(
                         db,
                         &key,
                         &encoded,
                         stored.as_ref(),
                         &mut batch,
-                    );
+                    )
+                    .await?;
                     batch.push(AdapterWriteOp::Delete { key: encoded });
                 }
             }
@@ -660,18 +676,26 @@ impl KvStorageAdapter {
                 WriteOp::Put(value) => {
                     let encoded = Self::encode(db, &key);
                     touched.push(encoded.clone());
-                    let stored = StoredValue::string((*value).clone());
                     batch.push(AdapterWriteOp::Put {
                         key: encoded,
-                        value: Self::serialize(&stored)?,
+                        value: crate::storage::string_codec::encode_string_fast(
+                            value.as_slice(),
+                            None,
+                        ),
                     });
                 }
                 WriteOp::PutStored(stored) => {
                     let encoded = Self::encode(db, &key);
                     touched.push(encoded.clone());
+                    let bytes = match &stored.value {
+                        ValueType::String(s) => {
+                            crate::storage::string_codec::encode_string_fast(s, stored.expires_at)
+                        }
+                        _ => Self::serialize(&stored)?,
+                    };
                     batch.push(AdapterWriteOp::Put {
                         key: encoded,
-                        value: Self::serialize(&stored)?,
+                        value: bytes,
                     });
                 }
                 WriteOp::Delete => {
@@ -680,13 +704,13 @@ impl KvStorageAdapter {
                     let stored = crate::storage::script_io::ScriptIo::get_typed(self, db, &key)
                         .ok()
                         .flatten();
-                    Self::push_collection_subkey_deletes(
+                    self.push_collection_subkey_deletes_sync(
                         db,
                         &key,
                         &encoded,
                         stored.as_ref(),
                         &mut batch,
-                    );
+                    )?;
                     batch.push(AdapterWriteOp::Delete { key: encoded });
                 }
             }
@@ -779,67 +803,144 @@ impl KvStorageAdapter {
         self.storage.last_in_range_sync(prefix, end)
     }
 
-    fn push_collection_subkey_deletes(
+    fn append_subkey_range(ranges: &mut Vec<(Vec<u8>, Vec<u8>)>, prefix: Vec<u8>) {
+        if let Some(end) = AiDbEngine::prefix_end(&prefix) {
+            ranges.push((prefix, end));
+        }
+    }
+
+    fn collection_subkey_ranges(
+        db: usize,
+        key: &[u8],
+        encoded: &[u8],
+        stored: Option<&StoredValue>,
+    ) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let Some(stored_val) = stored else {
+            return Vec::new();
+        };
+        let mut ranges = Vec::new();
+        match &stored_val.value {
+            ValueType::CollectionHeader { kind, .. } => match kind {
+                CollectionKind::Hash => {
+                    Self::append_subkey_range(&mut ranges, subkey::hash_subkey_prefix(encoded));
+                }
+                CollectionKind::Set => {
+                    Self::append_subkey_range(&mut ranges, subkey::set_subkey_prefix(encoded));
+                }
+                CollectionKind::ZSet => {
+                    crate::storage::zset_subkey::invalidate_score_bounds_hint(db, key);
+                    Self::append_subkey_range(
+                        &mut ranges,
+                        crate::storage::zset_subkey::member_prefix(encoded),
+                    );
+                    Self::append_subkey_range(
+                        &mut ranges,
+                        crate::storage::zset_subkey::score_prefix(encoded),
+                    );
+                }
+            },
+            _ if crate::storage::zset_subkey::is_zset_header(stored_val).is_some() => {
+                crate::storage::zset_subkey::invalidate_score_bounds_hint(db, key);
+                Self::append_subkey_range(
+                    &mut ranges,
+                    crate::storage::zset_subkey::member_prefix(encoded),
+                );
+                Self::append_subkey_range(
+                    &mut ranges,
+                    crate::storage::zset_subkey::score_prefix(encoded),
+                );
+            }
+            _ => {}
+        }
+        ranges
+    }
+
+    /// Cluster 下 `DeleteRange` 会走 cluster_batcher 的 local fallback, 不会进入 data group
+    /// 的 Raft; 必须把 subkey 逐条 `Delete`, 让 header 与 subkey 在同一 group 状态机生效.
+    #[cfg(feature = "cluster")]
+    fn is_cluster_initialized() -> bool {
+        crate::cluster::state::CLUSTER_STATE_MGR.get().is_some()
+    }
+
+    #[cfg(not(feature = "cluster"))]
+    fn is_cluster_initialized() -> bool {
+        false
+    }
+
+    async fn push_collection_subkey_deletes(
+        &self,
         db: usize,
         key: &[u8],
         encoded: &[u8],
         stored: Option<&StoredValue>,
         ops: &mut Vec<AdapterWriteOp>,
-    ) {
-        let Some(stored_val) = stored else {
-            return;
-        };
-        match &stored_val.value {
-            ValueType::CollectionHeader { kind, .. } => match kind {
-                CollectionKind::Hash => {
-                    let prefix = subkey::hash_subkey_prefix(encoded);
-                    if let Some(end) = AiDbEngine::prefix_end(&prefix) {
-                        ops.push(AdapterWriteOp::DeleteRange { start: prefix, end });
-                    }
-                }
-                CollectionKind::Set => {
-                    let prefix = subkey::set_subkey_prefix(encoded);
-                    if let Some(end) = AiDbEngine::prefix_end(&prefix) {
-                        ops.push(AdapterWriteOp::DeleteRange { start: prefix, end });
-                    }
-                }
-                CollectionKind::ZSet => {
-                    crate::storage::zset_subkey::invalidate_score_bounds_hint(db, key);
-                    let m_prefix = crate::storage::zset_subkey::member_prefix(encoded);
-                    if let Some(end) = AiDbEngine::prefix_end(&m_prefix) {
-                        ops.push(AdapterWriteOp::DeleteRange {
-                            start: m_prefix,
-                            end,
-                        });
-                    }
-                    let s_prefix = crate::storage::zset_subkey::score_prefix(encoded);
-                    if let Some(end) = AiDbEngine::prefix_end(&s_prefix) {
-                        ops.push(AdapterWriteOp::DeleteRange {
-                            start: s_prefix,
-                            end,
-                        });
-                    }
-                }
-            },
-            _ if crate::storage::zset_subkey::is_zset_header(stored_val).is_some() => {
-                crate::storage::zset_subkey::invalidate_score_bounds_hint(db, key);
-                let m_prefix = crate::storage::zset_subkey::member_prefix(encoded);
-                if let Some(end) = AiDbEngine::prefix_end(&m_prefix) {
-                    ops.push(AdapterWriteOp::DeleteRange {
-                        start: m_prefix,
-                        end,
-                    });
-                }
-                let s_prefix = crate::storage::zset_subkey::score_prefix(encoded);
-                if let Some(end) = AiDbEngine::prefix_end(&s_prefix) {
-                    ops.push(AdapterWriteOp::DeleteRange {
-                        start: s_prefix,
-                        end,
-                    });
-                }
-            }
-            _ => {}
+    ) -> Result<()> {
+        let ranges = Self::collection_subkey_ranges(db, key, encoded, stored);
+        if !Self::is_cluster_initialized() {
+            ops.extend(
+                ranges
+                    .into_iter()
+                    .map(|(start, end)| AdapterWriteOp::DeleteRange { start, end }),
+            );
+            return Ok(());
         }
+        for (prefix, _) in ranges {
+            let collected = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let sink = std::sync::Arc::clone(&collected);
+            self.storage
+                .for_each_prefix(
+                    prefix,
+                    Box::new(move |k, _| {
+                        sink.lock().unwrap().push(k);
+                        Ok(())
+                    }),
+                )
+                .await?;
+            let subkeys = std::mem::take(&mut *collected.lock().unwrap());
+            ops.extend(
+                subkeys
+                    .into_iter()
+                    .map(|key| AdapterWriteOp::Delete { key }),
+            );
+        }
+        Ok(())
+    }
+
+    fn push_collection_subkey_deletes_sync(
+        &self,
+        db: usize,
+        key: &[u8],
+        encoded: &[u8],
+        stored: Option<&StoredValue>,
+        ops: &mut Vec<AdapterWriteOp>,
+    ) -> Result<()> {
+        let ranges = Self::collection_subkey_ranges(db, key, encoded, stored);
+        if !Self::is_cluster_initialized() {
+            ops.extend(
+                ranges
+                    .into_iter()
+                    .map(|(start, end)| AdapterWriteOp::DeleteRange { start, end }),
+            );
+            return Ok(());
+        }
+        for (prefix, _) in ranges {
+            let collected = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let sink = std::sync::Arc::clone(&collected);
+            self.storage.for_each_prefix_sync(
+                prefix,
+                Box::new(move |k, _| {
+                    sink.lock().unwrap().push(k);
+                    Ok(())
+                }),
+            )?;
+            let subkeys = std::mem::take(&mut *collected.lock().unwrap());
+            ops.extend(
+                subkeys
+                    .into_iter()
+                    .map(|key| AdapterWriteOp::Delete { key }),
+            );
+        }
+        Ok(())
     }
 }
 
@@ -886,7 +987,8 @@ impl KvStorage for KvStorageAdapter {
         let saw_ttl = stored.as_ref().and_then(|value| value.expires_at).is_some();
         let encoded = Self::encode(db, key);
         let mut ops = Vec::new();
-        Self::push_collection_subkey_deletes(db, key, &encoded, stored.as_ref(), &mut ops);
+        self.push_collection_subkey_deletes(db, key, &encoded, stored.as_ref(), &mut ops)
+            .await?;
         ops.push(AdapterWriteOp::Delete { key: encoded });
         if let Some((mk, mv)) = self.next_watch_meta_put(db, key).await? {
             ops.push(AdapterWriteOp::Put { key: mk, value: mv });

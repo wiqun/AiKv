@@ -84,23 +84,53 @@ fn write_value(
             Ok(())
         }
         Value::String(s) => {
-            out.push('"');
-            for byte in s.as_bytes().as_ref().iter().copied() {
-                match byte {
-                    b'"' => out.push_str("\\\""),
-                    b'\\' => out.push_str("\\\\"),
-                    b'\n' => out.push_str("\\n"),
-                    b'\r' => out.push_str("\\r"),
-                    b'\t' => out.push_str("\\t"),
-                    0x20..=0x7e => out.push(byte as char),
-                    _ => out.push_str(&format!("\\u{byte:04x}")),
-                }
-            }
-            out.push('"');
+            write_json_string(s, out);
             Ok(())
         }
         Value::Table(table) => write_table(lua, table, null_ptr, depth, out),
         _ => Err(mlua::Error::runtime("Cannot serialise value")),
+    }
+}
+
+fn write_json_string(value: &mlua::String, out: &mut String) {
+    let bytes = value.as_bytes();
+    out.push('"');
+    match std::str::from_utf8(bytes.as_ref()) {
+        Ok(text) => {
+            for ch in text.chars() {
+                write_json_char(out, ch);
+            }
+        }
+        Err(_) => {
+            for byte in bytes.as_ref().iter().copied() {
+                write_json_byte(out, byte);
+            }
+        }
+    }
+    out.push('"');
+}
+
+fn write_json_char(out: &mut String, ch: char) {
+    match ch {
+        '"' => out.push_str("\\\""),
+        '\\' => out.push_str("\\\\"),
+        '\n' => out.push_str("\\n"),
+        '\r' => out.push_str("\\r"),
+        '\t' => out.push_str("\\t"),
+        c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
+        c => out.push(c),
+    }
+}
+
+fn write_json_byte(out: &mut String, byte: u8) {
+    match byte {
+        b'"' => out.push_str("\\\""),
+        b'\\' => out.push_str("\\\\"),
+        b'\n' => out.push_str("\\n"),
+        b'\r' => out.push_str("\\r"),
+        b'\t' => out.push_str("\\t"),
+        0x20..=0x7e => out.push(byte as char),
+        _ => out.push_str(&format!("\\u{byte:04x}")),
     }
 }
 
@@ -420,5 +450,45 @@ mod tests {
             res.contains("\"empty\":null"),
             "null should be serialized as null, got {res}"
         );
+    }
+
+    /// ORIGIN-004: 合法 UTF-8 必须原样输出, 不能被按字节转成 Latin-1 转义.
+    #[test]
+    fn test_cjson_encode_preserves_utf8() {
+        let lua = Lua::new();
+        install(&lua).unwrap();
+
+        let script = r#"return cjson.encode({name='中文', emoji='😀'})"#;
+        let res: String = lua.load(script).eval().unwrap();
+        assert!(res.contains("中文"), "got {res}");
+        assert!(res.contains("😀"), "got {res}");
+        assert!(!res.contains("\\u00e4"), "got {res}");
+    }
+
+    /// ORIGIN-004: JSON 特殊字符和控制字符仍需转义.
+    #[test]
+    fn test_cjson_encode_escapes_json_controls() {
+        let lua = Lua::new();
+        install(&lua).unwrap();
+
+        let script = r#"return cjson.encode({s='a"b\\c\n'})"#;
+        let res: String = lua.load(script).eval().unwrap();
+        assert_eq!(res, r#"{"s":"a\"b\\c\n"}"#);
+    }
+
+    /// ORIGIN-004: 非法 UTF-8 保持原有字节转义行为.
+    #[test]
+    fn test_cjson_encode_invalid_utf8_bytes() {
+        let lua = Lua::new();
+        install(&lua).unwrap();
+
+        let table = lua.create_table().unwrap();
+        table
+            .set("bad", lua.create_string([0xff, 0xfe]).unwrap())
+            .unwrap();
+        let cjson: Table = lua.globals().get("cjson").unwrap();
+        let encode: mlua::Function = cjson.get("encode").unwrap();
+        let res: String = encode.call(table).unwrap();
+        assert_eq!(res, r#"{"bad":"\u00ff\u00fe"}"#);
     }
 }

@@ -392,27 +392,36 @@ impl ScriptCommands {
         router::require_min_args("EVAL", args, 2)?;
         let script = String::from_utf8_lossy(&args[0]).into_owned();
         let sha1 = Self::sha1(&script);
-        self.cache.insert(sha1.clone(), script.clone());
-        let read_only = self.cache.is_read_only(&sha1);
+        let entry = self.cache.insert_and_get(sha1.clone(), script);
         let (keys, argv) = parse_keys_argv(args)?;
         let result = self
-            .execute_script(&sha1, &script, &keys, &argv, db, read_only)
+            .execute_script(&sha1, &entry.script, &keys, &argv, db, entry.read_only)
             .await;
         self.record("eval", result.is_ok());
         result
     }
 
+    pub fn script_source(&self, sha: &str) -> Option<String> {
+        self.cache.peek(sha)
+    }
+
     pub async fn evalsha(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_min_args("EVALSHA", args, 2)?;
-        let sha1 = String::from_utf8_lossy(&args[0]).to_string();
-        let script = self
+        let sha1_cow = String::from_utf8_lossy(&args[0]);
+        let entry = self
             .cache
-            .get(&sha1)
+            .get_entry(sha1_cow.as_ref())
             .ok_or_else(|| Error::Command("NOSCRIPT No matching script. Use EVAL.".into()))?;
-        let read_only = self.cache.is_read_only(&sha1);
         let (keys, argv) = parse_keys_argv(args)?;
         let result = self
-            .execute_script(&sha1, &script, &keys, &argv, db, read_only)
+            .execute_script(
+                sha1_cow.as_ref(),
+                &entry.script,
+                &keys,
+                &argv,
+                db,
+                entry.read_only,
+            )
             .await;
         self.record("evalsha", result.is_ok());
         result
@@ -422,10 +431,10 @@ impl ScriptCommands {
         router::require_min_args("EVAL_RO", args, 2)?;
         let script = String::from_utf8_lossy(&args[0]).into_owned();
         let sha1 = Self::sha1(&script);
-        self.cache.insert(sha1.clone(), script.clone());
+        let entry = self.cache.insert_and_get(sha1.clone(), script);
         let (keys, argv) = parse_keys_argv(args)?;
         let result = self
-            .execute_script(&sha1, &script, &keys, &argv, db, true)
+            .execute_script(&sha1, &entry.script, &keys, &argv, db, true)
             .await;
         self.record("eval_ro", result.is_ok());
         result
@@ -433,14 +442,14 @@ impl ScriptCommands {
 
     pub async fn evalsha_ro(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_min_args("EVALSHA_RO", args, 2)?;
-        let sha1 = String::from_utf8_lossy(&args[0]).to_string();
-        let script = self
+        let sha1_cow = String::from_utf8_lossy(&args[0]);
+        let entry = self
             .cache
-            .get(&sha1)
+            .get_entry(sha1_cow.as_ref())
             .ok_or_else(|| Error::Command("NOSCRIPT No matching script. Use EVAL.".into()))?;
         let (keys, argv) = parse_keys_argv(args)?;
         let result = self
-            .execute_script(&sha1, &script, &keys, &argv, db, true)
+            .execute_script(sha1_cow.as_ref(), &entry.script, &keys, &argv, db, true)
             .await;
         self.record("evalsha_ro", result.is_ok());
         result
@@ -498,7 +507,7 @@ impl ScriptCommands {
     async fn execute_script(
         &self,
         sha1: &str,
-        script: &str,
+        script: &Arc<str>,
         keys: &[Bytes],
         argv: &[Bytes],
         db: usize,
@@ -507,16 +516,22 @@ impl ScriptCommands {
         let (seg_id, slot_idx) = SEG_TRACKER.on_start();
         let (_active, alone) = self.active.enter();
         let t_start = Instant::now();
-        let key_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_ref()).collect();
         let should_lock = !keys.is_empty() && !read_only;
-        let _guard = if should_lock {
+        let _guard = if !should_lock {
+            None
+        } else if keys.len() == 1 {
+            Some(
+                self.key_lock
+                    .lock_one_with_timeout(keys[0].as_ref(), DEFAULT_SCRIPT_LOCK_TIMEOUT)
+                    .await?,
+            )
+        } else {
+            let key_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_ref()).collect();
             Some(
                 self.key_lock
                     .lock_keys_sorted_with_timeout(&key_refs, DEFAULT_SCRIPT_LOCK_TIMEOUT)
                     .await?,
             )
-        } else {
-            None
         };
         let t_locked = Instant::now();
 
@@ -528,7 +543,7 @@ impl ScriptCommands {
             timeout: self.script_timeout,
             db,
             sha1: sha1.to_string(),
-            script: script.to_string(),
+            script: Arc::clone(script),
             keys: keys.to_vec(),
             argv: argv.to_vec(),
             local_commit: self.storage.local_script_commit()

@@ -43,6 +43,9 @@ description: AiKv 可观测性架构 — SlowQueryLog 慢查询、LatencyStats �
   - 后台周期性任务用 `collect_export_snapshot()` 读 `ServerMetrics`, 渲染 `/metrics`, 再用 `push_deltas()` 把计数器差值交给 OTLP.
   - `info_catalog::sync_otel_from_server_metrics()` 不再由 refresh 调用, 避免和这套快照重复累加.
   - 指标数据相对于内存真源最多滞后 ~15s (符合云原生监控抓取常规间隔).
+- **EVALSHA 慢日志附带脚本正文**:
+  - 仅当命令是 `EVALSHA` 或 `EVALSHA_RO` 且耗时达到慢日志阈值时, 用参数里的 SHA 从本节点 `ScriptCache` 只读取出正文, 追加到该条 `SLOWLOG` 参数末尾;
+  - SHA 仍留在原位. 缓存没有这份脚本时只保留 SHA. `EVAL` 的第一个参数本身就是正文, 不追加.
 - **Span 允许名单**:
   - 只有命令入口 `kv_command`, 且仅在采样率大于 0 且 OTLP 端点非空时创建;
   - 字段只有命令名, 不含用户 key. 连接打开和关闭是 debug 事件, 不是 span.

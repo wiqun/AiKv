@@ -11,6 +11,8 @@ pub mod cursor;
 pub mod deferred;
 pub(crate) mod direct;
 pub mod dump;
+#[cfg(feature = "cluster")]
+pub mod local_batcher;
 pub mod memory;
 pub mod observation;
 pub mod script_io;

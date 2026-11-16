@@ -47,7 +47,7 @@ impl BatcherPerfSampler {
             let ops_avg = self.total_ops.load(Ordering::Relaxed) / n;
             let wait_avg = self.total_wait_us.load(Ordering::Relaxed) / n;
             let prop_avg = self.total_propose_us.load(Ordering::Relaxed) / n;
-            tracing::info!(
+            tracing::debug!(
                 target: "perf",
                 "[BATCHER_PERF] batches={} avg_ops={} avg_wait_us={} avg_propose_us={}",
                 n, ops_avg, wait_avg, prop_avg
@@ -456,18 +456,10 @@ pub async fn collect_batch_items(
     // 第一轮快速抽取当前通道中的就绪项
     drain_ready_items(rx, &mut items, &mut op_count);
 
-    // 智能微窗口让步: 在最多 100 微秒预算内多次出让执行权,
-    // 允许排队中的并发 worker 完成 Lua 逻辑将批项推入通道,
-    // 无任何 timer 注册开销地将并发单写聚合成大批次 (Issue #83).
+    // 单次让出执行权, 给并发连接一个入队窗口, 避免 100µs 自旋空耗 2 核 CPU.
     if op_count < ADAPTIVE_BATCH_TARGET_OPS {
-        let deadline = Instant::now() + std::time::Duration::from_micros(100);
-        while op_count < ADAPTIVE_BATCH_TARGET_OPS {
-            tokio::task::yield_now().await;
-            drain_ready_items(rx, &mut items, &mut op_count);
-            if Instant::now() >= deadline {
-                break;
-            }
-        }
+        tokio::task::yield_now().await;
+        drain_ready_items(rx, &mut items, &mut op_count);
     }
 
     items
@@ -644,14 +636,14 @@ mod tests {
         match &tb.ops[0] {
             ThinWriteOp::Put { key, value } => {
                 assert_eq!(key, b"m");
-                assert_eq!(value, b"w");
+                assert_eq!(&value[..], b"w".as_slice());
             }
             other => panic!("ops[0] expected Put(m,w), got {other:?}"),
         }
         match &tb.ops[1] {
             ThinWriteOp::Put { key, value } => {
                 assert_eq!(key, b"k");
-                assert_eq!(value, b"v2");
+                assert_eq!(&value[..], b"v2".as_slice());
             }
             other => panic!("ops[1] expected Put(k,v2), got {other:?}"),
         }
@@ -681,7 +673,7 @@ mod tests {
         match &tb.ops[0] {
             ThinWriteOp::Put { key, value } => {
                 assert_eq!(key, b"k");
-                assert_eq!(value, b"v2");
+                assert_eq!(&value[..], b"v2".as_slice());
             }
             other => panic!("expected Put(k,v2), got {other:?}"),
         }
@@ -721,7 +713,7 @@ mod tests {
         let (tb, indices) = plan_reverse_dedup(items);
         assert_eq!(tb.ops.len(), 1);
         match &tb.ops[0] {
-            ThinWriteOp::Put { value, .. } => assert_eq!(value, b"v2"),
+            ThinWriteOp::Put { value, .. } => assert_eq!(&value[..], b"v2".as_slice()),
             other => panic!("expected Put, got {other:?}"),
         }
         assert_eq!(indices, vec![None, Some(0)]);

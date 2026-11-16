@@ -88,7 +88,11 @@ impl CommandRouter {
                 key_lock.clone(),
                 Arc::clone(&in_flight_ctx),
             ),
-            hash: hash::HashCommands::new(storage.clone(), key_lock.clone()),
+            hash: hash::HashCommands::new(
+                storage.clone(),
+                key_lock.clone(),
+                Arc::clone(&in_flight_ctx),
+            ),
             list: list::ListCommands::new(
                 storage.clone(),
                 key_lock.clone(),
@@ -142,7 +146,11 @@ impl CommandRouter {
                 key_lock.clone(),
                 Arc::clone(&in_flight_ctx),
             ),
-            hash: hash::HashCommands::new(storage.clone(), key_lock.clone()),
+            hash: hash::HashCommands::new(
+                storage.clone(),
+                key_lock.clone(),
+                Arc::clone(&in_flight_ctx),
+            ),
             list: list::ListCommands::with_metrics(
                 storage.clone(),
                 key_lock.clone(),
@@ -294,10 +302,15 @@ impl CommandRouter {
                         return Some(Ok(RespValue::Error(reason)));
                     }
                     crate::cluster::router::RouteDecision::ClusterDown(msg) => {
+                        let formatted = if msg.starts_with("CLUSTERDOWN ") || msg == "CLUSTERDOWN" {
+                            msg
+                        } else {
+                            format!("CLUSTERDOWN {msg}")
+                        };
                         if let Some(m) = self.metrics.as_ref() {
-                            m.on_error_stat(&msg);
+                            m.on_error_stat(&formatted);
                         }
-                        return Some(Ok(RespValue::Error(msg)));
+                        return Some(Ok(RespValue::Error(formatted)));
                     }
                     _ => {}
                 }
@@ -426,7 +439,14 @@ impl CommandRouter {
                 }
                 Some(RespValue::Error(reason))
             }
-            crate::cluster::router::RouteDecision::ClusterDown(msg) => Some(RespValue::Error(msg)),
+            crate::cluster::router::RouteDecision::ClusterDown(msg) => {
+                let err = if msg.starts_with("CLUSTERDOWN ") || msg == "CLUSTERDOWN" {
+                    msg
+                } else {
+                    format!("CLUSTERDOWN {msg}")
+                };
+                Some(RespValue::Error(err))
+            }
         }
     }
 
@@ -746,6 +766,11 @@ impl CommandRouter {
             "SETINFO" => Ok(ok()),
             _ => Err(Error::Command("ERR unknown CLIENT subcommand".into())),
         }
+    }
+
+    /// `EVALSHA` 刚执行过的脚本正文. 缓存未命中时返回 `None`.
+    pub fn script_source(&self, sha: &str) -> Option<String> {
+        self.script.script_source(sha)
     }
 }
 
