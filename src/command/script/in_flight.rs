@@ -1,13 +1,25 @@
 //! 事务在途可见性内存缓冲: 解决 Raft 提交异步期 Lua 读旧快照与锁争用问题.
 
 use parking_lot::{Mutex, RwLock};
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::storage::aidb::AiDbEngine;
 use crate::storage::types::StoredValue;
 use crate::storage::WriteOp;
+
+const SHARD_COUNT: usize = 64;
+
+#[inline]
+fn shard_index(key: &[u8]) -> usize {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in key {
+        hash ^= u64::from(b);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    ((hash >> 32) ^ hash) as usize & (SHARD_COUNT - 1)
+}
 
 #[derive(Clone)]
 pub enum InFlightValue {
@@ -19,7 +31,7 @@ pub enum InFlightValue {
 }
 
 type InFlightEntry = (InFlightValue, u64);
-type InFlightMap = Arc<RwLock<HashMap<Vec<u8>, InFlightEntry>>>;
+type InFlightShards = Arc<[RwLock<FxHashMap<Vec<u8>, InFlightEntry>>; SHARD_COUNT]>;
 
 #[derive(Default)]
 struct ReadGate {
@@ -27,12 +39,18 @@ struct ReadGate {
     pending: Vec<(Vec<Vec<u8>>, u64)>,
 }
 
-/// 记录未完成持久化的最新在途数据版本.
-#[derive(Clone, Default)]
+/// 记录未完成持久化的最新在途数据版本 (按 key hash 分为 64 桶以消除全局锁争用).
+#[derive(Clone)]
 pub struct InFlightBuffer {
-    map: InFlightMap,
+    shards: InFlightShards,
     seq_gen: Arc<AtomicU64>,
     gate: Arc<Mutex<ReadGate>>,
+}
+
+impl Default for InFlightBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// 范围读取进行中时, 推迟清除在途条目.
@@ -49,7 +67,7 @@ impl Drop for InFlightReadPin {
 impl InFlightBuffer {
     pub fn new() -> Self {
         Self {
-            map: Arc::new(RwLock::new(HashMap::new())),
+            shards: Arc::new(std::array::from_fn(|_| RwLock::new(FxHashMap::default()))),
             seq_gen: Arc::new(AtomicU64::new(1)),
             gate: Arc::new(Mutex::new(ReadGate::default())),
         }
@@ -81,7 +99,7 @@ impl InFlightBuffer {
     /// Some(Some(v)): 存在在途最新版本; Some(None): 在途已被删除 (Tombstone); None: 无在途变更.
     pub fn get(&self, db: usize, key: &[u8]) -> Option<Option<StoredValue>> {
         let enc_key = AiDbEngine::encode_key(db, key);
-        let map = self.map.read();
+        let map = self.shards[shard_index(&enc_key)].read();
         let (v, _) = map.get(&enc_key)?;
         match v {
             InFlightValue::String(bytes) => Some(Some(StoredValue::string((**bytes).clone()))),
@@ -93,19 +111,21 @@ impl InFlightBuffer {
 
     /// 是否没有任何未落盘 (或尚未清理) 的在途写.
     pub fn is_empty(&self) -> bool {
-        self.map.read().is_empty()
+        self.shards.iter().all(|s| s.read().is_empty())
     }
 
     /// 前缀下字典序最大的在途写入 key.
     pub fn last_key_with_prefix(&self, prefix: &[u8]) -> Option<Vec<u8>> {
-        let map = self.map.read();
         let mut best: Option<Vec<u8>> = None;
-        for (key, (value, _)) in map.iter() {
-            if !key.starts_with(prefix) || matches!(value, InFlightValue::Deleted) {
-                continue;
-            }
-            if best.as_ref().is_none_or(|current| key > current) {
-                best = Some(key.clone());
+        for shard in self.shards.iter() {
+            let map = shard.read();
+            for (key, (value, _)) in map.iter() {
+                if !key.starts_with(prefix) || matches!(value, InFlightValue::Deleted) {
+                    continue;
+                }
+                if best.as_ref().is_none_or(|current| key > current) {
+                    best = Some(key.clone());
+                }
             }
         }
         best
@@ -113,17 +133,19 @@ impl InFlightBuffer {
 
     /// 半开区间 `[start, end)` 内字典序最大的在途写入 key.
     pub fn last_key_in_range(&self, start: &[u8], end: &[u8]) -> Option<Vec<u8>> {
-        let map = self.map.read();
         let mut best: Option<Vec<u8>> = None;
-        for (key, (value, _)) in map.iter() {
-            if key.as_slice() < start
-                || key.as_slice() >= end
-                || matches!(value, InFlightValue::Deleted)
-            {
-                continue;
-            }
-            if best.as_ref().is_none_or(|current| key > current) {
-                best = Some(key.clone());
+        for shard in self.shards.iter() {
+            let map = shard.read();
+            for (key, (value, _)) in map.iter() {
+                if key.as_slice() < start
+                    || key.as_slice() >= end
+                    || matches!(value, InFlightValue::Deleted)
+                {
+                    continue;
+                }
+                if best.as_ref().is_none_or(|current| key > current) {
+                    best = Some(key.clone());
+                }
             }
         }
         best
@@ -131,20 +153,26 @@ impl InFlightBuffer {
 
     /// 前缀下的原始写入. `None` 表示在途删除.
     pub fn prefix_raw_updates(&self, prefix: &[u8]) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
-        let map = self.map.read();
-        map.iter()
-            .filter(|(key, _)| key.starts_with(prefix))
-            .filter_map(|(key, (value, _))| match value {
-                InFlightValue::Deleted => Some((key.clone(), None)),
-                InFlightValue::Raw(bytes) => Some((key.clone(), Some((**bytes).clone()))),
-                InFlightValue::String(_) | InFlightValue::Stored(_) => None,
-            })
-            .collect()
+        let mut out = Vec::new();
+        for shard in self.shards.iter() {
+            let map = shard.read();
+            for (key, (value, _)) in map.iter() {
+                if !key.starts_with(prefix) {
+                    continue;
+                }
+                match value {
+                    InFlightValue::Deleted => out.push((key.clone(), None)),
+                    InFlightValue::Raw(bytes) => out.push((key.clone(), Some((**bytes).clone()))),
+                    InFlightValue::String(_) | InFlightValue::Stored(_) => {}
+                }
+            }
+        }
+        out
     }
 
     /// engine key 上的原始字节. `Some(None)` 表示在途删除.
     pub fn get_raw(&self, engine_key: &[u8]) -> Option<Option<Vec<u8>>> {
-        let map = self.map.read();
+        let map = self.shards[shard_index(engine_key)].read();
         let (value, _) = map.get(engine_key)?;
         match value {
             InFlightValue::Raw(bytes) => Some(Some((**bytes).clone())),
@@ -157,18 +185,36 @@ impl InFlightBuffer {
     /// 返回实际写入缓冲的 engine key, 供提交后按原样删除.
     pub fn insert_batch(&self, db: usize, ops: &[(Vec<u8>, WriteOp)]) -> (u64, Vec<Vec<u8>>) {
         let seq = self.seq_gen.fetch_add(1, Ordering::Relaxed);
-        let mut map = self.map.write();
+        if ops.len() == 1 {
+            let (k, op) = &ops[0];
+            let enc_key = engine_key(db, k, op);
+            let val = to_in_flight_value(op);
+            self.shards[shard_index(&enc_key)]
+                .write()
+                .insert(enc_key.clone(), (val, seq));
+            return (seq, vec![enc_key]);
+        }
+
         let mut encoded_keys = Vec::with_capacity(ops.len());
+        let mut grouped: Vec<(usize, Vec<u8>, InFlightValue)> = Vec::with_capacity(ops.len());
         for (k, op) in ops {
             let enc_key = engine_key(db, k, op);
-            let val = match op {
-                WriteOp::Put(raw) => InFlightValue::String(Arc::clone(raw)),
-                WriteOp::PutStored(stored) => InFlightValue::Stored(Arc::clone(stored)),
-                WriteOp::PutEngine { value } => InFlightValue::Raw(Arc::clone(value)),
-                WriteOp::Delete | WriteOp::DeleteEngine => InFlightValue::Deleted,
-            };
+            let val = to_in_flight_value(op);
             encoded_keys.push(enc_key.clone());
-            map.insert(enc_key, (val, seq));
+            grouped.push((shard_index(&enc_key), enc_key, val));
+        }
+        // 按分片升序加锁，保证同一分片只加锁一次且无交叉锁序。
+        grouped.sort_unstable_by_key(|(idx, _, _)| *idx);
+        let mut i = 0;
+        while i < grouped.len() {
+            let idx = grouped[i].0;
+            let mut map = self.shards[idx].write();
+            while i < grouped.len() && grouped[i].0 == idx {
+                let enc_key = std::mem::take(&mut grouped[i].1);
+                let val = std::mem::replace(&mut grouped[i].2, InFlightValue::Deleted);
+                map.insert(enc_key, (val, seq));
+                i += 1;
+            }
         }
         (seq, encoded_keys)
     }
@@ -176,15 +222,11 @@ impl InFlightBuffer {
     /// 持久化完成后立即移出在途缓冲, 交由底层状态机提供最新数据.
     #[allow(dead_code)]
     pub fn remove_batch(&self, db: usize, ops: &[(Vec<u8>, WriteOp)], seq: u64) {
-        let mut map = self.map.write();
-        for (k, _) in ops {
-            let enc_key = AiDbEngine::encode_key(db, k);
-            if let Some((_, s)) = map.get(&enc_key) {
-                if *s == seq {
-                    map.remove(&enc_key);
-                }
-            }
-        }
+        let keys: Vec<Vec<u8>> = ops
+            .iter()
+            .map(|(k, _)| AiDbEngine::encode_key(db, k))
+            .collect();
+        self.remove_now(&keys, seq);
     }
 
     #[allow(dead_code)]
@@ -207,12 +249,35 @@ impl InFlightBuffer {
     }
 
     fn remove_now(&self, keys: &[Vec<u8>], seq: u64) {
-        let mut map = self.map.write();
-        for key in keys {
+        if keys.len() == 1 {
+            let key = &keys[0];
+            let mut map = self.shards[shard_index(key)].write();
             if let Some((_, stored_seq)) = map.get(key) {
                 if *stored_seq == seq {
                     map.remove(key);
                 }
+            }
+            return;
+        }
+
+        let mut indices: Vec<(usize, usize)> = keys
+            .iter()
+            .enumerate()
+            .map(|(pos, k)| (shard_index(k), pos))
+            .collect();
+        indices.sort_unstable_by_key(|(idx, _)| *idx);
+        let mut i = 0;
+        while i < indices.len() {
+            let idx = indices[i].0;
+            let mut map = self.shards[idx].write();
+            while i < indices.len() && indices[i].0 == idx {
+                let key = &keys[indices[i].1];
+                if let Some((_, stored_seq)) = map.get(key) {
+                    if *stored_seq == seq {
+                        map.remove(key);
+                    }
+                }
+                i += 1;
             }
         }
     }
@@ -220,7 +285,18 @@ impl InFlightBuffer {
     /// 清理所有缓冲.
     #[allow(dead_code)]
     pub fn clear(&self) {
-        self.map.write().clear();
+        for shard in self.shards.iter() {
+            shard.write().clear();
+        }
+    }
+}
+
+fn to_in_flight_value(op: &WriteOp) -> InFlightValue {
+    match op {
+        WriteOp::Put(raw) => InFlightValue::String(Arc::clone(raw)),
+        WriteOp::PutStored(stored) => InFlightValue::Stored(Arc::clone(stored)),
+        WriteOp::PutEngine { value } => InFlightValue::Raw(Arc::clone(value)),
+        WriteOp::Delete | WriteOp::DeleteEngine => InFlightValue::Deleted,
     }
 }
 
@@ -256,6 +332,28 @@ mod tests {
         assert!(buf.is_empty());
         let (seq, keys) = buf.insert_batch(0, &[(b"k".to_vec(), WriteOp::put(b"v".to_vec()))]);
         assert!(!buf.is_empty(), "有未落盘的写");
+        buf.remove_encoded(&keys, seq);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn multi_shard_insert_scan_and_remove_work_consistently() {
+        let buf = InFlightBuffer::new();
+        let ops: Vec<(Vec<u8>, WriteOp)> = (0..128)
+            .map(|i| {
+                (
+                    format!("pref:{i:03}").into_bytes(),
+                    WriteOp::put_engine(vec![i as u8]),
+                )
+            })
+            .collect();
+        let (seq, keys) = buf.insert_batch(0, &ops);
+        assert!(!buf.is_empty());
+        assert_eq!(
+            buf.last_key_with_prefix(b"pref:"),
+            Some(b"pref:127".to_vec())
+        );
+        assert_eq!(buf.prefix_raw_updates(b"pref:").len(), 128);
         buf.remove_encoded(&keys, seq);
         assert!(buf.is_empty());
     }
