@@ -110,14 +110,23 @@ pub async fn hset_pipeline<G>(
     match &mut stored.value {
         ValueType::Hash(ref mut map) => {
             let mut new_fields = 0i64;
+            let mut changed = false;
             for (field, value) in pairs {
                 if let Some(existing) = map.get_mut(*field) {
-                    existing.clear();
-                    existing.extend_from_slice(value);
+                    if existing.as_slice() != *value {
+                        existing.clear();
+                        existing.extend_from_slice(value);
+                        changed = true;
+                    }
                 } else {
                     new_fields += 1;
+                    changed = true;
                     map.insert(field.to_vec(), value.to_vec());
                 }
+            }
+            if !changed {
+                drop(guard);
+                return Ok(0);
             }
             commit_inline_map(ctx, stored, guard).await?;
             Ok(new_fields)
@@ -144,24 +153,34 @@ async fn hset_subkey_header<G>(
     pairs: &[(&[u8], &[u8])],
     guard: G,
 ) -> Result<i64> {
+    type SubkeyPendingMap = HashMap<Vec<u8>, (Option<Vec<u8>>, Vec<u8>)>;
     let encoded_user = AiDbEngine::encode_key(ctx.db, ctx.key);
-    let mut overlay: HashMap<Vec<u8>, Vec<u8>> = HashMap::with_capacity(pairs.len());
+    // 记录 subkey -> (原有值, 最终待写值), 仅写入新增或值发生变化的 field.
+    let mut overlay: SubkeyPendingMap = HashMap::with_capacity(pairs.len());
     let mut new_fields = 0i64;
     for (field, value) in pairs {
         let subkey_key = subkey::encode_hash_field_key(&encoded_user, field);
-        if !overlay.contains_key(&subkey_key) {
-            let existed = read_subkey_in_flight(ctx, &subkey_key).await?.is_some();
-            if !existed {
+        if let Some(entry) = overlay.get_mut(&subkey_key) {
+            entry.1.clear();
+            entry.1.extend_from_slice(value);
+        } else {
+            let prev = read_subkey_in_flight(ctx, &subkey_key).await?;
+            if prev.is_none() {
                 new_fields += 1;
             }
+            overlay.insert(subkey_key, (prev, value.to_vec()));
         }
-        overlay.insert(subkey_key, value.to_vec());
     }
-    let new_count = base_count.saturating_add(new_fields as u32);
     let ops: Vec<(Vec<u8>, WriteOp)> = overlay
         .into_iter()
-        .map(|(k, v)| (k, WriteOp::put_engine(v)))
+        .filter(|(_, (prev, new_val))| prev.as_deref() != Some(new_val.as_slice()))
+        .map(|(k, (_, new_val))| (k, WriteOp::put_engine(new_val)))
         .collect();
+    if ops.is_empty() {
+        drop(guard);
+        return Ok(0);
+    }
+    let new_count = base_count.saturating_add(new_fields as u32);
     commit_header_ops(ctx, ops, new_count, expires_at, new_fields > 0, guard).await?;
     Ok(new_fields)
 }

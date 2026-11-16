@@ -476,3 +476,129 @@ async fn test_hset_enqueue_failure_rolls_back_in_flight() {
         RespValue::Integer(0)
     );
 }
+
+#[tokio::test]
+async fn test_hset_inline_noop_same_value_skips_enqueue() {
+    let (_dir, gated, router) = setup_gated_env();
+    let mut db = 0;
+
+    assert_eq!(
+        router
+            .execute(
+                "HSET",
+                &[Bytes::from("h_noop"), Bytes::from("f1"), Bytes::from("v1")],
+                &mut db,
+            )
+            .await
+            .unwrap(),
+        RespValue::Integer(1)
+    );
+
+    let before = gated.enqueue_calls.load(Ordering::SeqCst);
+    assert_eq!(
+        router
+            .execute(
+                "HSET",
+                &[Bytes::from("h_noop"), Bytes::from("f1"), Bytes::from("v1")],
+                &mut db,
+            )
+            .await
+            .unwrap(),
+        RespValue::Integer(0)
+    );
+    assert_eq!(
+        gated.enqueue_calls.load(Ordering::SeqCst),
+        before,
+        "inline HSET 同值覆盖写应跳过 enqueue_batch"
+    );
+
+    assert_eq!(
+        router
+            .execute(
+                "HSET",
+                &[Bytes::from("h_noop"), Bytes::from("f1"), Bytes::from("v2")],
+                &mut db,
+            )
+            .await
+            .unwrap(),
+        RespValue::Integer(0)
+    );
+    assert_eq!(gated.enqueue_calls.load(Ordering::SeqCst), before + 1);
+    assert_eq!(
+        router
+            .execute("HGET", &[Bytes::from("h_noop"), Bytes::from("f1")], &mut db)
+            .await
+            .unwrap(),
+        RespValue::BulkString(Some(Bytes::from_static(b"v2")))
+    );
+}
+
+#[tokio::test]
+async fn test_hset_subkey_noop_same_value_skips_enqueue() {
+    let (_dir, gated, router) = setup_gated_env();
+    let mut db = 0;
+
+    let mut args = vec![Bytes::from("h_big_noop")];
+    for i in 0..65 {
+        args.push(Bytes::from(format!("f{i:02}")));
+        args.push(Bytes::from(format!("v{i:02}")));
+    }
+    assert_eq!(
+        router.execute("HSET", &args, &mut db).await.unwrap(),
+        RespValue::Integer(65)
+    );
+
+    let before = gated.enqueue_calls.load(Ordering::SeqCst);
+    assert_eq!(
+        router
+            .execute(
+                "HSET",
+                &[
+                    Bytes::from("h_big_noop"),
+                    Bytes::from("f00"),
+                    Bytes::from("v00"),
+                    Bytes::from("f01"),
+                    Bytes::from("v01"),
+                ],
+                &mut db,
+            )
+            .await
+            .unwrap(),
+        RespValue::Integer(0)
+    );
+    assert_eq!(
+        gated.enqueue_calls.load(Ordering::SeqCst),
+        before,
+        "subkey HSET 同值覆盖写应跳过 enqueue_batch"
+    );
+
+    assert_eq!(
+        router
+            .execute(
+                "HSET",
+                &[
+                    Bytes::from("h_big_noop"),
+                    Bytes::from("f00"),
+                    Bytes::from("v00"),
+                    Bytes::from("f01"),
+                    Bytes::from("v01_new"),
+                ],
+                &mut db,
+            )
+            .await
+            .unwrap(),
+        RespValue::Integer(0)
+    );
+    assert_eq!(gated.enqueue_calls.load(Ordering::SeqCst), before + 1);
+    assert_eq!(
+        router
+            .execute(
+                "HGET",
+                &[Bytes::from("h_big_noop"), Bytes::from("f01")],
+                &mut db,
+            )
+            .await
+            .unwrap(),
+        RespValue::BulkString(Some(Bytes::from_static(b"v01_new")))
+    );
+}

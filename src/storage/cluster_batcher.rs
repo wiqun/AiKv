@@ -47,7 +47,7 @@ impl BatcherPerfSampler {
             let ops_avg = self.total_ops.load(Ordering::Relaxed) / n;
             let wait_avg = self.total_wait_us.load(Ordering::Relaxed) / n;
             let prop_avg = self.total_propose_us.load(Ordering::Relaxed) / n;
-            tracing::info!(
+            tracing::debug!(
                 target: "perf",
                 "[BATCHER_PERF] batches={} avg_ops={} avg_wait_us={} avg_propose_us={}",
                 n, ops_avg, wait_avg, prop_avg

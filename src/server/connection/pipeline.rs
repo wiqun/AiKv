@@ -356,7 +356,7 @@ impl ConnBatchSampler {
             let b17_32 = self.b_17_32.load(Ordering::Relaxed);
             let b33_64 = self.b_33_64.load(Ordering::Relaxed);
             let b_gt = self.b_gt_64.load(Ordering::Relaxed);
-            tracing::info!(
+            tracing::debug!(
                 target: "perf",
                 "[CONN_BATCH_PERF] curr_len={} batches={} cmds={} avg_len={:.2} (1: {}, 2-4: {}, 5-16: {}, 17-32: {}, 33-64: {}, >64: {})",
                 len, b, c, avg_len, b1, b2_4, b5_16, b17_32, b33_64, b_gt
@@ -394,7 +394,7 @@ impl PendingBatchTiming {
         let wait_read_ms = t_read_next.duration_since(self.t_flushed).as_secs_f64() * 1000.0;
         let cycle_total_ms = t_read_next.duration_since(self.t_enter).as_secs_f64() * 1000.0;
 
-        tracing::info!(
+        tracing::debug!(
             target: "perf",
             "[PIPELINE_TIMING] cmds={} enq_span_ms={:.2} tail_join_ms={:.2} server_total_ms={:.2} wait_read_ms={:.2} cycle_total_ms={:.2} read_bytes={}",
             self.cmds, enq_span_ms, tail_join_ms, server_total_ms, wait_read_ms, cycle_total_ms, bytes
@@ -415,7 +415,7 @@ impl PendingBatchTiming {
         let wait_read_ms = now.duration_since(self.t_flushed).as_secs_f64() * 1000.0;
         let cycle_total_ms = now.duration_since(self.t_enter).as_secs_f64() * 1000.0;
 
-        tracing::info!(
+        tracing::debug!(
             target: "perf",
             "[PIPELINE_TIMING] cmds={} enq_span_ms={:.2} tail_join_ms={:.2} server_total_ms={:.2} wait_read_ms={:.2} cycle_total_ms={:.2} buffered=true",
             self.cmds, enq_span_ms, tail_join_ms, server_total_ms, wait_read_ms, cycle_total_ms
