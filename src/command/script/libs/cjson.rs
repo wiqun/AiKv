@@ -484,7 +484,7 @@ mod tests {
 
         let table = lua.create_table().unwrap();
         table
-            .set("bad", lua.create_string(&[0xff, 0xfe]).unwrap())
+            .set("bad", lua.create_string([0xff, 0xfe]).unwrap())
             .unwrap();
         let cjson: Table = lua.globals().get("cjson").unwrap();
         let encode: mlua::Function = cjson.get("encode").unwrap();

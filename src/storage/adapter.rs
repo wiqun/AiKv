@@ -857,6 +857,16 @@ impl KvStorageAdapter {
 
     /// Cluster 下 `DeleteRange` 会走 cluster_batcher 的 local fallback, 不会进入 data group
     /// 的 Raft; 必须把 subkey 逐条 `Delete`, 让 header 与 subkey 在同一 group 状态机生效.
+    #[cfg(feature = "cluster")]
+    fn is_cluster_initialized() -> bool {
+        crate::cluster::state::CLUSTER_STATE_MGR.get().is_some()
+    }
+
+    #[cfg(not(feature = "cluster"))]
+    fn is_cluster_initialized() -> bool {
+        false
+    }
+
     async fn push_collection_subkey_deletes(
         &self,
         db: usize,
@@ -866,7 +876,7 @@ impl KvStorageAdapter {
         ops: &mut Vec<AdapterWriteOp>,
     ) -> Result<()> {
         let ranges = Self::collection_subkey_ranges(db, key, encoded, stored);
-        if crate::cluster::state::CLUSTER_STATE_MGR.get().is_none() {
+        if !Self::is_cluster_initialized() {
             ops.extend(
                 ranges
                     .into_iter()
@@ -905,7 +915,7 @@ impl KvStorageAdapter {
         ops: &mut Vec<AdapterWriteOp>,
     ) -> Result<()> {
         let ranges = Self::collection_subkey_ranges(db, key, encoded, stored);
-        if crate::cluster::state::CLUSTER_STATE_MGR.get().is_none() {
+        if !Self::is_cluster_initialized() {
             ops.extend(
                 ranges
                     .into_iter()
