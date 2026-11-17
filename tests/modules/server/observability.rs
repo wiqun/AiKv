@@ -395,11 +395,11 @@ async fn process_resident_memory_bytes_in_registry() {
     harness.push_from(&server_metrics);
 
     assert!(
-        testutil::metric_exists(&harness.exporter, "aikv_process_resident_memory_bytes"),
-        "expected aikv_process_resident_memory_bytes registered"
+        testutil::metric_exists(&harness.exporter, "aikv_rss_bytes"),
+        "expected aikv_rss_bytes registered"
     );
     assert!(
-        testutil::gauge_value(&harness.exporter, "aikv_process_resident_memory_bytes") > 0.0,
+        testutil::gauge_value(&harness.exporter, "aikv_rss_bytes") > 0.0,
         "expected RSS gauge > 0"
     );
 }
