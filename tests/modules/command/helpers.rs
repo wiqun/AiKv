@@ -41,6 +41,7 @@ pub async fn start_ephemeral_server() -> (std::net::SocketAddr, tokio::task::Joi
             idle_timeout: None,
             max_clients: 0,
             script_worker_threads: 2,
+            ..Default::default()
         },
         storage,
         0,

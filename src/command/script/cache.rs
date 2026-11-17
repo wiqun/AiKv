@@ -33,6 +33,7 @@ impl CachedScript {
 }
 
 pub struct ScriptCache {
+    max_scripts: usize,
     inner: RwLock<ScriptCacheInner>,
 }
 
@@ -43,16 +44,20 @@ struct ScriptCacheInner {
 
 impl Default for ScriptCache {
     fn default() -> Self {
+        Self::with_max_scripts(MAX_SCRIPTS)
+    }
+}
+
+impl ScriptCache {
+    pub fn with_max_scripts(max_scripts: usize) -> Self {
         Self {
+            max_scripts: max_scripts.max(1),
             inner: RwLock::new(ScriptCacheInner {
                 map: HashMap::new(),
                 order: VecDeque::new(),
             }),
         }
     }
-}
-
-impl ScriptCache {
     /// 只读取出脚本正文, 不调整淘汰状态. 慢日志在命令返回后调用.
     pub fn peek(&self, sha1: &str) -> Option<String> {
         self.inner
@@ -83,7 +88,7 @@ impl ScriptCache {
             inner.map.insert(sha1, Arc::clone(&entry));
             return entry;
         }
-        if inner.map.len() >= MAX_SCRIPTS {
+        if inner.map.len() >= self.max_scripts {
             Self::evict_one(&mut inner);
         }
         let entry = Arc::new(CachedScript::new(arc_script, read_only));

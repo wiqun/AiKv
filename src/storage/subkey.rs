@@ -23,6 +23,7 @@
 //! 常规 key 不含 `\x01`, 因此 subkey entries 可被 `collect_db_entries` 过滤.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::storage::types::{CollectionKind, StoredValue, ValueType};
 use crate::storage::{AiDbEngine, WriteOp};
@@ -37,6 +38,25 @@ const SUBKEY_LEN_BYTES: usize = 2;
 /// 单集合内联存储上限阈值 (超过后自动拆分为 Subkey 格式存储).
 pub const HASH_MAX_INLINE_FIELDS: usize = 64;
 pub const SET_MAX_INLINE_MEMBERS: usize = 64;
+
+static CONFIGURED_HASH_MAX_INLINE: AtomicUsize = AtomicUsize::new(HASH_MAX_INLINE_FIELDS);
+static CONFIGURED_SET_MAX_INLINE: AtomicUsize = AtomicUsize::new(SET_MAX_INLINE_MEMBERS);
+
+/// 设置进程级 Hash/Set 内联存储阈值 (启动时由配置初始化)
+pub fn set_inline_thresholds(hash_max_inline: usize, set_max_inline: usize) {
+    CONFIGURED_HASH_MAX_INLINE.store(hash_max_inline.max(1), Ordering::Relaxed);
+    CONFIGURED_SET_MAX_INLINE.store(set_max_inline.max(1), Ordering::Relaxed);
+}
+
+#[inline]
+pub fn hash_max_inline_fields() -> usize {
+    CONFIGURED_HASH_MAX_INLINE.load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn set_max_inline_members() -> usize {
+    CONFIGURED_SET_MAX_INLINE.load(Ordering::Relaxed)
+}
 
 // ---- 编码函数 ----
 
@@ -207,7 +227,7 @@ pub fn commit_inline_hash(
     expires_at: Option<u64>,
     persist_subkeys: bool,
 ) -> Vec<(Vec<u8>, WriteOp)> {
-    if persist_subkeys && hash.len() > HASH_MAX_INLINE_FIELDS {
+    if persist_subkeys && hash.len() > hash_max_inline_fields() {
         return replace_hash_ops(db, &key, hash, expires_at);
     }
     let mut stored = StoredValue::new_hash(hash.clone());

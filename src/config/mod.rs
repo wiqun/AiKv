@@ -5,14 +5,16 @@ pub mod engine;
 pub mod env;
 pub mod file;
 pub mod settings;
+pub mod table;
 
 pub use cli::{Cli, CliOverrides};
 pub use engine::EngineKind;
 pub use file::{discover_config_path, discover_config_path_in, load_settings_from_file};
 pub use settings::{
     print_resolved_config, should_export_traces, AnnounceMode, ConfigError, ConfigWarning,
-    EngineSettings, LogLevel, ObservabilitySettings, ResolveResult, ResolvedObservability,
-    ResolvedSettings, ServerSettings, Settings,
+    EngineSettings, ObservabilitySettings, ResolveResult, ResolvedEngineExt, ResolvedObservability,
+    ResolvedScript, ResolvedServerExt, ResolvedSettings, ResolvedSlowlog, ScriptSettings,
+    ServerSettings, Settings, SlowlogSettings,
 };
 
 #[cfg(feature = "cluster")]
@@ -29,17 +31,27 @@ pub fn resolve_from_parts(
     let mut settings = InnerSettings::default();
 
     if let Some(content) = toml_inline {
-        let file_settings: InnerSettings =
+        let mut raw_table: toml::Table =
             toml::from_str(content).map_err(|e| SettingsConfigError::Field {
                 layer: "file",
                 field: "toml",
                 message: e.to_string(),
             })?;
+        table::normalize_byte_sizes(&mut raw_table)?;
+        let file_settings: InnerSettings =
+            toml::Value::Table(raw_table)
+                .try_into()
+                .map_err(|e| SettingsConfigError::Field {
+                    layer: "file",
+                    field: "toml",
+                    message: e.to_string(),
+                })?;
         settings.merge_file(file_settings);
     }
 
     let mut warnings = settings.merge_env(env);
     settings.merge_cli(cli);
+    settings.merge_cli_options(&cli.options)?;
 
     let resolved = settings.into_resolved(&mut warnings)?;
     Ok((resolved, warnings))
@@ -51,12 +63,29 @@ pub fn resolve(cli: &Cli) -> ResolveResult {
     let mut settings = InnerSettings::default();
 
     if let Some(ref path) = config_path {
-        let file_settings = load_settings_from_file(path)?;
+        let content = std::fs::read_to_string(path).map_err(|e| SettingsConfigError::File {
+            path: path.clone(),
+            message: e.to_string(),
+        })?;
+        let mut raw_table: toml::Table =
+            toml::from_str(&content).map_err(|e| SettingsConfigError::File {
+                path: path.clone(),
+                message: e.to_string(),
+            })?;
+        table::normalize_byte_sizes(&mut raw_table)?;
+        let file_settings: InnerSettings =
+            toml::Value::Table(raw_table)
+                .try_into()
+                .map_err(|e| SettingsConfigError::File {
+                    path: path.clone(),
+                    message: e.to_string(),
+                })?;
         settings.merge_file(file_settings);
     }
 
     let mut warnings = settings.merge_env(std::env::vars());
     settings.merge_cli(&cli.overrides);
+    settings.merge_cli_options(&cli.overrides.options)?;
 
     let mut resolved = settings.into_resolved(&mut warnings)?;
     resolved.config_file_used = config_path;
@@ -103,7 +132,7 @@ mod resolve_tests {
         assert!(resolved.observability.otlp_endpoint.is_none());
         assert_eq!(resolved.observability.otel_service_name, "aikv");
         assert!((resolved.observability.otel_sample_ratio - 0.0).abs() < f64::EPSILON);
-        assert_eq!(resolved.observability.log_level, LogLevel::Info);
+        assert_eq!(resolved.observability.log_level, "info");
         assert!(resolved.observability.host_label.is_none());
         assert!(resolved.observability.deployment_env.is_none());
         assert!(resolved.config_file_used.is_none());
@@ -147,7 +176,7 @@ mod resolve_tests {
     #[test]
     fn log_level_and_sample_ratio_defaults() {
         let (resolved, _) = resolve_parts(None, HashMap::new(), CliOverrides::default()).unwrap();
-        assert_eq!(resolved.observability.log_level, LogLevel::Info);
+        assert_eq!(resolved.observability.log_level, "info");
         assert!((resolved.observability.otel_sample_ratio - 0.0).abs() < f64::EPSILON);
         assert!(!should_export_traces(0.0, Some("http://127.0.0.1:4317")));
         assert!(!should_export_traces(0.1, None));
@@ -158,9 +187,12 @@ mod resolve_tests {
     #[test]
     fn log_level_env_then_cli() {
         let mut env = HashMap::new();
-        env.insert("AIKV_LOG_LEVEL".to_string(), "debug".to_string());
+        env.insert(
+            "AIKV_LOG_LEVEL".to_string(),
+            "info,openraft=warn".to_string(),
+        );
         let (resolved, _) = resolve_parts(None, env, CliOverrides::default()).unwrap();
-        assert_eq!(resolved.observability.log_level, LogLevel::Debug);
+        assert_eq!(resolved.observability.log_level, "info,openraft=warn");
 
         let mut env = HashMap::new();
         env.insert("AIKV_LOG_LEVEL".to_string(), "debug".to_string());
@@ -169,15 +201,15 @@ mod resolve_tests {
             ..CliOverrides::default()
         };
         let (resolved, _) = resolve_parts(None, env, cli).unwrap();
-        assert_eq!(resolved.observability.log_level, LogLevel::Error);
+        assert_eq!(resolved.observability.log_level, "error");
 
         let mut env = HashMap::new();
-        env.insert("AIKV_LOG_LEVEL".to_string(), "nope".to_string());
+        env.insert("AIKV_LOG_LEVEL".to_string(), "   ".to_string());
         let (resolved, warnings) = resolve_parts(None, env, CliOverrides::default()).unwrap();
-        assert_eq!(resolved.observability.log_level, LogLevel::Info);
+        assert_eq!(resolved.observability.log_level, "info");
         assert!(warnings.iter().any(|w| matches!(
             w,
-            ConfigWarning::InvalidLogLevel { raw } if raw == "nope"
+            ConfigWarning::InvalidLogLevel { raw } if raw.is_empty()
         )));
 
         let mut env = HashMap::new();
@@ -470,5 +502,123 @@ data_dir = "/var/lib/aikv/data"
             resolved.backup_dir,
             Some(PathBuf::from("/var/lib/aikv/data/backup"))
         );
+    }
+
+    #[test]
+    fn preset_with_aidb_table_override_env_and_cli_options() {
+        let toml = r#"
+[engine]
+kind = "aidb"
+data_dir = "/var/lib/aikv/data"
+aidb_preset = "high-write"
+
+[engine.aidb]
+block_cache_size = "128MiB"
+compaction_threads = 4
+
+[cluster.log_committer]
+max_entries = 1024
+
+[cluster.migration]
+max_batch_size = 500
+"#;
+        let env = HashMap::from([
+            (
+                "AIKV_ENGINE__AIDB__MEMTABLE_SIZE".to_string(),
+                "512MiB".to_string(),
+            ),
+            (
+                "OTEL_EXPORTER_OTLP_HEADERS".to_string(),
+                "organization=default,Authorization=Basic xxx".to_string(),
+            ),
+        ]);
+        let cli = CliOverrides {
+            options: vec!["engine.aidb.compression=lz4".to_string()],
+            ..CliOverrides::default()
+        };
+        let (resolved, _) = resolve_parts(Some(toml), env, cli).unwrap();
+        assert_eq!(resolved.engine_ext.aidb.memtable_size, 512 * 1024 * 1024);
+        assert_eq!(resolved.engine_ext.aidb.block_cache_size, 128 * 1024 * 1024);
+        assert_eq!(resolved.engine_ext.aidb.compaction_threads, 4);
+        assert_eq!(
+            resolved.engine_ext.aidb.compression,
+            aidb::config::CompressionType::Lz4
+        );
+        // 继承自 high-write preset 的未覆盖字段
+        assert_eq!(resolved.engine_ext.aidb.max_write_buffer_number, 4);
+        assert_eq!(
+            resolved
+                .observability
+                .otlp_headers
+                .get("organization")
+                .map(String::as_str),
+            Some("default")
+        );
+        #[cfg(feature = "cluster")]
+        {
+            assert_eq!(resolved.cluster.log_committer.max_entries, 1024);
+            assert_eq!(resolved.cluster.migration.max_batch_size, 500);
+        }
+        let flat = resolved.to_flat_map();
+        assert_eq!(
+            flat.get("engine.aidb.compaction_threads")
+                .map(String::as_str),
+            Some("4")
+        );
+    }
+
+    #[test]
+    fn resolves_tcp_resp3_and_runtime_limits() {
+        let toml_raw = r#"
+[server]
+tcp_nodelay = false
+tcp_keepalive_secs = 30
+resp3_enabled = false
+proto_max_bulk_len = "16MiB"
+pipeline_max_pending_writes = 64
+key_lock_buckets = 1024
+
+[server.script]
+off_worker = "true"
+pool_threshold_us = 2500
+timeout_ms = 2000
+lock_timeout_ms = 5000
+memory_limit_bytes = "32MiB"
+max_idle_vms = 16
+cache_max_scripts = 128
+
+[engine]
+kind = "memory"
+hash_max_inline_fields = 32
+set_max_inline_members = 48
+zset_max_inline_members = 96
+local_batch_max_ops = 256
+"#;
+        let (resolved, _warnings) = resolve_from_parts(
+            Some(toml_raw),
+            std::iter::empty::<(String, String)>(),
+            &CliOverrides::default(),
+        )
+        .unwrap();
+        assert!(!resolved.server_ext.tcp_nodelay);
+        assert_eq!(resolved.server_ext.tcp_keepalive_secs, 30);
+        assert!(!resolved.server_ext.resp3_enabled);
+        assert_eq!(resolved.server_ext.proto_max_bulk_len, 16 * 1024 * 1024);
+        assert_eq!(resolved.server_ext.pipeline_max_pending_writes, 64);
+        assert_eq!(resolved.server_ext.key_lock_buckets, 1024);
+        assert_eq!(resolved.server_ext.script.off_worker, "true");
+        assert_eq!(resolved.server_ext.script.pool_threshold_us, 2500);
+        assert_eq!(resolved.server_ext.script.timeout_ms, 2000);
+        assert_eq!(resolved.server_ext.script.lock_timeout_ms, 5000);
+        assert_eq!(
+            resolved.server_ext.script.memory_limit_bytes,
+            32 * 1024 * 1024
+        );
+        assert_eq!(resolved.server_ext.script.max_idle_vms, 16);
+        assert_eq!(resolved.server_ext.script.cache_max_scripts, 128);
+        assert_eq!(resolved.engine_ext.hash_max_inline_fields, 32);
+        assert_eq!(resolved.engine_ext.set_max_inline_members, 48);
+        assert_eq!(resolved.engine_ext.zset_max_inline_members, 96);
+        assert_eq!(resolved.engine_ext.local_batch_max_ops, 256);
     }
 }

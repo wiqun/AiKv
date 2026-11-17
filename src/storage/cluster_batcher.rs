@@ -2,7 +2,7 @@
 //! 由 `ClusterDataAdapter` 按 group 懒创建.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -19,6 +19,25 @@ use crate::storage::types::BatchWriteHandle;
 
 const SET_BATCH_MAX_OPS: usize = 512;
 const ADAPTIVE_BATCH_TARGET_OPS: usize = 32;
+
+static CONFIGURED_BATCH_MAX_OPS: AtomicUsize = AtomicUsize::new(SET_BATCH_MAX_OPS);
+static CONFIGURED_ADAPTIVE_TARGET_OPS: AtomicUsize = AtomicUsize::new(ADAPTIVE_BATCH_TARGET_OPS);
+
+/// 设置集群写合批器上限 (启动时由配置初始化)
+pub fn set_batcher_limits(max_ops: usize, adaptive_target_ops: usize) {
+    CONFIGURED_BATCH_MAX_OPS.store(max_ops.max(1), Ordering::Relaxed);
+    CONFIGURED_ADAPTIVE_TARGET_OPS.store(adaptive_target_ops.max(1), Ordering::Relaxed);
+}
+
+#[inline]
+fn batch_max_ops() -> usize {
+    CONFIGURED_BATCH_MAX_OPS.load(Ordering::Relaxed)
+}
+
+#[inline]
+fn adaptive_batch_target_ops() -> usize {
+    CONFIGURED_ADAPTIVE_TARGET_OPS.load(Ordering::Relaxed)
+}
 
 struct BatcherPerfSampler {
     batches: AtomicU64,
@@ -449,17 +468,19 @@ pub async fn collect_batch_items(
     rx: &mut mpsc::Receiver<WriteBatchItem>,
     first: WriteBatchItem,
 ) -> Vec<WriteBatchItem> {
-    let mut items = Vec::with_capacity(SET_BATCH_MAX_OPS);
+    let max_ops = batch_max_ops();
+    let adaptive_target = adaptive_batch_target_ops();
+    let mut items = Vec::with_capacity(max_ops);
     let mut op_count = item_op_count(&first);
     items.push(first);
 
     // 第一轮快速抽取当前通道中的就绪项
-    drain_ready_items(rx, &mut items, &mut op_count);
+    drain_ready_items(rx, &mut items, &mut op_count, max_ops);
 
     // 单次让出执行权, 给并发连接一个入队窗口, 避免 100µs 自旋空耗 2 核 CPU.
-    if op_count < ADAPTIVE_BATCH_TARGET_OPS {
+    if op_count < adaptive_target {
         tokio::task::yield_now().await;
-        drain_ready_items(rx, &mut items, &mut op_count);
+        drain_ready_items(rx, &mut items, &mut op_count, max_ops);
     }
 
     items
@@ -469,8 +490,9 @@ fn drain_ready_items(
     rx: &mut mpsc::Receiver<WriteBatchItem>,
     items: &mut Vec<WriteBatchItem>,
     op_count: &mut usize,
+    max_ops: usize,
 ) {
-    while items.len() < SET_BATCH_MAX_OPS && *op_count < SET_BATCH_MAX_OPS {
+    while items.len() < max_ops && *op_count < max_ops {
         match rx.try_recv() {
             Ok(item) => {
                 *op_count += item_op_count(&item);

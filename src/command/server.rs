@@ -59,33 +59,53 @@ impl ServerCommands {
 
     pub async fn config_get(&self, args: &[Bytes]) -> Result<RespValue> {
         router::require_min_args("CONFIG GET", args, 2)?;
-        let param = String::from_utf8_lossy(&args[1]);
-        if param == "*" {
+        let pattern = String::from_utf8_lossy(&args[1]);
+        let keys: Vec<String> = {
             let map = self.shared.config_map.read();
-            let mut pairs = Vec::new();
-            let mut keys: Vec<_> = map.keys().cloned().collect();
-            keys.sort();
-            for k in keys {
-                let v = self.config_value(&k);
-                pairs.push(router::bulk(k.into_bytes()));
-                pairs.push(router::bulk(v.into_bytes()));
-            }
-            return Ok(RespValue::Array(Some(pairs)));
+            let mut matched: Vec<String> = map
+                .keys()
+                .filter(|k| crate::storage::memory::glob_match(pattern.as_bytes(), k.as_bytes()))
+                .cloned()
+                .collect();
+            matched.sort();
+            matched
+        };
+        let mut pairs = Vec::with_capacity(keys.len() * 2);
+        for k in keys {
+            let v = self.config_value(&k);
+            pairs.push(router::bulk(k.into_bytes()));
+            pairs.push(router::bulk(v.into_bytes()));
         }
-        if !self.shared.config_map.read().contains_key(param.as_ref()) {
-            return Ok(RespValue::Array(Some(vec![])));
-        }
-        let value = self.config_value(param.as_ref());
-        Ok(RespValue::Array(Some(vec![
-            router::bulk(param.as_bytes().to_vec()),
-            router::bulk(value.into_bytes()),
-        ])))
+        Ok(RespValue::Array(Some(pairs)))
     }
 
     fn config_value(&self, param: &str) -> String {
         match param {
-            "slowlog-log-slower-than" => self.shared.slow_query_log.threshold_us().to_string(),
-            "slowlog-max-len" => self.shared.slow_query_log.max_entries().to_string(),
+            "slowlog-log-slower-than" | "server.slowlog.log_slower_than_us" => {
+                self.shared.slow_query_log.threshold_us().to_string()
+            }
+            "slowlog-max-len" | "server.slowlog.max_len" => {
+                self.shared.slow_query_log.max_entries().to_string()
+            }
+            "maxclients" | "server.max_clients" => self
+                .shared
+                .runtime_config
+                .max_clients
+                .load(std::sync::atomic::Ordering::Relaxed)
+                .to_string(),
+            "timeout" => (self
+                .shared
+                .runtime_config
+                .idle_timeout_ms
+                .load(std::sync::atomic::Ordering::Relaxed)
+                / 1000)
+                .to_string(),
+            "server.idle_timeout_ms" => self
+                .shared
+                .runtime_config
+                .idle_timeout_ms
+                .load(std::sync::atomic::Ordering::Relaxed)
+                .to_string(),
             other => self
                 .shared
                 .config_map
@@ -112,21 +132,69 @@ impl ServerCommands {
             ));
         }
         match param.as_str() {
-            "slowlog-log-slower-than" => {
+            "slowlog-log-slower-than" | "server.slowlog.log_slower_than_us" => {
                 let threshold: u64 = value
                     .parse()
                     .map_err(|_| Error::Config("Invalid slowlog-log-slower-than value".into()))?;
                 self.shared.slow_query_log.set_threshold_us(threshold);
+                map.insert("slowlog-log-slower-than".into(), value.clone());
+                map.insert("server.slowlog.log_slower_than_us".into(), value);
             }
-            "slowlog-max-len" => {
+            "slowlog-max-len" | "server.slowlog.max_len" => {
                 let max_len: usize = value
                     .parse()
                     .map_err(|_| Error::Config("Invalid slowlog-max-len value".into()))?;
                 self.shared.slow_query_log.set_max_entries(max_len);
+                map.insert("slowlog-max-len".into(), value.clone());
+                map.insert("server.slowlog.max_len".into(), value);
             }
-            _ => {}
+            "maxclients" | "server.max_clients" => {
+                let max: usize = value
+                    .parse()
+                    .map_err(|_| Error::Config("Invalid maxclients value".into()))?;
+                self.shared
+                    .runtime_config
+                    .max_clients
+                    .store(max, std::sync::atomic::Ordering::Relaxed);
+                map.insert("maxclients".into(), value.clone());
+                map.insert("server.max_clients".into(), value);
+            }
+            "timeout" => {
+                let secs: u64 = value
+                    .parse()
+                    .map_err(|_| Error::Config("Invalid timeout value".into()))?;
+                let ms = secs.saturating_mul(1000);
+                self.shared
+                    .runtime_config
+                    .idle_timeout_ms
+                    .store(ms, std::sync::atomic::Ordering::Relaxed);
+                map.insert("timeout".into(), value);
+                map.insert("server.idle_timeout_ms".into(), ms.to_string());
+            }
+            "server.idle_timeout_ms" => {
+                let ms: u64 = value
+                    .parse()
+                    .map_err(|_| Error::Config("Invalid idle_timeout_ms value".into()))?;
+                self.shared
+                    .runtime_config
+                    .idle_timeout_ms
+                    .store(ms, std::sync::atomic::Ordering::Relaxed);
+                map.insert("server.idle_timeout_ms".into(), value);
+                map.insert("timeout".into(), (ms / 1000).to_string());
+            }
+            "loglevel" | "observability.log_level" => {
+                if value.trim().is_empty() {
+                    return Err(Error::Config("Invalid loglevel value".into()));
+                }
+                map.insert("loglevel".into(), value.clone());
+                map.insert("observability.log_level".into(), value);
+            }
+            _ => {
+                return Err(Error::Command(format!(
+                    "ERR CONFIG SET is not supported for read-only parameter '{param}' (restart required)"
+                )));
+            }
         }
-        map.insert(param, value);
         Ok(router::ok())
     }
 

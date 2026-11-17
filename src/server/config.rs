@@ -18,6 +18,38 @@ use crate::storage::{KvStorage, StorageEngineKind, StorageObservation};
 
 pub(crate) type TransactionGate = Arc<tokio::sync::RwLock<()>>;
 
+/// 支持运行期动态热更新的服务端原子配置句柄 (方案 A).
+#[derive(Debug)]
+pub struct RuntimeMutableConfig {
+    pub max_clients: AtomicUsize,
+    pub idle_timeout_ms: AtomicU64,
+    pub read_timeout_ms: AtomicU64,
+}
+
+impl RuntimeMutableConfig {
+    pub fn from_connection_config(cfg: &ConnectionConfig) -> Self {
+        Self {
+            max_clients: AtomicUsize::new(cfg.max_clients),
+            idle_timeout_ms: AtomicU64::new(
+                cfg.idle_timeout.map(|d| d.as_millis() as u64).unwrap_or(0),
+            ),
+            read_timeout_ms: AtomicU64::new(
+                cfg.read_timeout.map(|d| d.as_millis() as u64).unwrap_or(0),
+            ),
+        }
+    }
+
+    pub fn idle_timeout(&self) -> Option<std::time::Duration> {
+        let ms = self.idle_timeout_ms.load(Ordering::Relaxed);
+        (ms > 0).then(|| std::time::Duration::from_millis(ms))
+    }
+
+    pub fn read_timeout(&self) -> Option<std::time::Duration> {
+        let ms = self.read_timeout_ms.load(Ordering::Relaxed);
+        (ms > 0).then(|| std::time::Duration::from_millis(ms))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ConnectionConfig {
     pub read_timeout: Option<std::time::Duration>,
@@ -26,6 +58,15 @@ pub struct ConnectionConfig {
     pub max_clients: usize,
     /// `EVAL` / `EVALSHA` 专用线程数.
     pub script_worker_threads: usize,
+    pub tcp_nodelay: bool,
+    pub tcp_keepalive_secs: u64,
+    pub resp3_enabled: bool,
+    pub proto_max_bulk_len: usize,
+    pub proto_max_buffer_size: usize,
+    pub proto_max_parse_depth: usize,
+    pub pipeline_max_pending_writes: usize,
+    pub key_lock_buckets: usize,
+    pub script: crate::config::ResolvedScript,
 }
 
 impl Default for ConnectionConfig {
@@ -35,6 +76,23 @@ impl Default for ConnectionConfig {
             idle_timeout: Some(std::time::Duration::from_secs(300)),
             max_clients: 10_000,
             script_worker_threads: crate::config::settings::default_script_worker_threads(),
+            tcp_nodelay: true,
+            tcp_keepalive_secs: 0,
+            resp3_enabled: true,
+            proto_max_bulk_len: 512 * 1024 * 1024,
+            proto_max_buffer_size: 64 * 1024 * 1024,
+            proto_max_parse_depth: 128,
+            pipeline_max_pending_writes: 256,
+            key_lock_buckets: 4096,
+            script: crate::config::ResolvedScript {
+                off_worker: "auto".to_string(),
+                pool_threshold_us: 1000,
+                timeout_ms: 5000,
+                lock_timeout_ms: 30_000,
+                memory_limit_bytes: 128 * 1024 * 1024,
+                max_idle_vms: 64,
+                cache_max_scripts: 256,
+            },
         }
     }
 }
@@ -49,6 +107,7 @@ pub struct ClientInfo {
 
 pub struct ServerSharedState {
     pub connection_config: Arc<ConnectionConfig>,
+    pub runtime_config: Arc<RuntimeMutableConfig>,
     pub metrics: Arc<ServerMetrics>,
     pub slow_query_log: Arc<SlowQueryLog>,
     pub latency_stats: Arc<LatencyStats>,
@@ -147,7 +206,13 @@ impl ServerSharedState {
             ("save".into(), "".into()),
             ("maxmemory".into(), "0".into()),
             ("maxmemory-policy".into(), "noeviction".into()),
-            ("timeout".into(), "300".into()),
+            (
+                "timeout".into(),
+                connection_config
+                    .idle_timeout
+                    .map(|d| d.as_secs().to_string())
+                    .unwrap_or_else(|| "0".into()),
+            ),
             (
                 "slowlog-log-slower-than".into(),
                 DEFAULT_SLOWLOG_THRESHOLD_US.to_string(),
@@ -160,7 +225,11 @@ impl ServerSharedState {
                 "maxclients".into(),
                 connection_config.max_clients.to_string(),
             ),
+            ("loglevel".into(), "info".into()),
         ])));
+        let runtime_config = Arc::new(RuntimeMutableConfig::from_connection_config(
+            &connection_config,
+        ));
         let metrics = {
             let m = ServerMetrics::default();
             let point_reads = Arc::new(crate::storage::observation::PointReadCounter::default());
@@ -177,6 +246,7 @@ impl ServerSharedState {
         };
         Arc::new(Self {
             connection_config: Arc::new(connection_config),
+            runtime_config,
             metrics,
             slow_query_log: Arc::new(SlowQueryLog::new()),
             latency_stats: Arc::new(LatencyStats::default()),
@@ -274,13 +344,49 @@ impl ServerSharedState {
     }
 
     pub fn try_register_connection(self: &Arc<Self>) -> bool {
-        let max = self.connection_config.max_clients;
+        let max = self.runtime_config.max_clients.load(Ordering::Relaxed);
         if max > 0 && self.metrics.connected_clients() >= max {
             self.metrics.on_rejected_connection();
             return false;
         }
         self.metrics.on_connect();
         true
+    }
+
+    /// 将解析后的 `ResolvedSettings` 同步到运行态原子句柄、慢日志和 `CONFIG GET` 配置树.
+    pub fn apply_resolved_settings(&self, settings: &crate::config::ResolvedSettings) {
+        self.runtime_config
+            .max_clients
+            .store(settings.max_clients, Ordering::Relaxed);
+        self.runtime_config
+            .idle_timeout_ms
+            .store(settings.server_ext.idle_timeout_ms, Ordering::Relaxed);
+        self.runtime_config
+            .read_timeout_ms
+            .store(settings.server_ext.read_timeout_ms, Ordering::Relaxed);
+        self.slow_query_log
+            .set_threshold_us(settings.server_ext.slowlog.log_slower_than_us);
+        self.slow_query_log
+            .set_max_entries(settings.server_ext.slowlog.max_len);
+
+        let mut map = self.config_map.write();
+        for (k, v) in settings.to_flat_map() {
+            map.insert(k, v);
+        }
+        map.insert("maxclients".into(), settings.max_clients.to_string());
+        map.insert(
+            "timeout".into(),
+            (settings.server_ext.idle_timeout_ms / 1000).to_string(),
+        );
+        map.insert(
+            "slowlog-log-slower-than".into(),
+            settings.server_ext.slowlog.log_slower_than_us.to_string(),
+        );
+        map.insert(
+            "slowlog-max-len".into(),
+            settings.server_ext.slowlog.max_len.to_string(),
+        );
+        map.insert("loglevel".into(), settings.observability.log_level.clone());
     }
 
     pub async fn refresh_runtime_metrics(self: &Arc<Self>) {

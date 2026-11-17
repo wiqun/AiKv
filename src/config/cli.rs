@@ -84,6 +84,13 @@ pub struct CliOverrides {
     #[cfg(feature = "cluster")]
     #[arg(long)]
     pub cluster_data_port_offset: Option<u16>,
+    #[arg(
+        short = 'o',
+        long = "option",
+        value_name = "KEY=VALUE",
+        help = "通用配置覆盖 (可重复, 如 -o engine.aidb.compression=lz4)"
+    )]
+    pub options: Vec<String>,
 }
 
 impl Settings {
@@ -127,6 +134,42 @@ impl Settings {
 
         #[cfg(feature = "cluster")]
         self.merge_cli_cluster(cli);
+    }
+
+    /// 应用 CLI `-o / --option key=value` 覆盖 (支持点分路径与带单位字节字符串).
+    pub fn merge_cli_options(
+        &mut self,
+        options: &[String],
+    ) -> Result<(), super::settings::ConfigError> {
+        if options.is_empty() {
+            return Ok(());
+        }
+        let mut table =
+            toml::Table::try_from(&*self).map_err(|e| super::settings::ConfigError::Field {
+                layer: "cli",
+                field: "option",
+                message: e.to_string(),
+            })?;
+        for item in options {
+            let Some((raw_k, raw_v)) = item.split_once('=') else {
+                return Err(super::settings::ConfigError::Field {
+                    layer: "cli",
+                    field: "option",
+                    message: format!("expected KEY=VALUE, got '{item}'"),
+                });
+            };
+            let val = super::table::parse_scalar_value(raw_v);
+            super::table::set_dotted_path(&mut table, raw_k.trim(), val, "cli")?;
+        }
+        super::table::normalize_byte_sizes(&mut table)?;
+        *self = toml::Value::Table(table)
+            .try_into::<Settings>()
+            .map_err(|e| super::settings::ConfigError::Field {
+                layer: "cli",
+                field: "option",
+                message: e.to_string(),
+            })?;
+        Ok(())
     }
 
     #[cfg(feature = "cluster")]

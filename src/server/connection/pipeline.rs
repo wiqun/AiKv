@@ -148,7 +148,13 @@ impl Connection {
                         handles,
                     });
                     kinds.push(kind);
-                    if pending.len() >= MAX_PENDING_WRITES {
+                    if pending.len()
+                        >= self
+                            .state
+                            .connection_config
+                            .pipeline_max_pending_writes
+                            .max(1)
+                    {
                         self.flush_pending(&mut pending).await?;
                         kinds.clear();
                     }
@@ -178,9 +184,6 @@ impl Connection {
         Ok(())
     }
 }
-
-/// 单条流水线内最多挂起多少条写后强制确认一次, 限制内存与首条响应的等待时间.
-const MAX_PENDING_WRITES: usize = 256;
 
 /// 已执行 (写已入队) 但尚未确认的可延迟命令, 响应暂存到确认之后再输出.
 struct PendingWrite {

@@ -17,6 +17,7 @@ async fn test_connection_metrics() {
             idle_timeout: None,
             max_clients: 0,
             script_worker_threads: 2,
+            ..Default::default()
         },
         storage,
         0,
@@ -298,6 +299,7 @@ async fn test_maxclients_rejection_metrics() {
             idle_timeout: None,
             max_clients: 1,
             script_worker_threads: 2,
+            ..Default::default()
         },
         storage,
         6379,
@@ -421,6 +423,7 @@ async fn test_net_bytes_metrics() {
             idle_timeout: None,
             max_clients: 0,
             script_worker_threads: 2,
+            ..Default::default()
         },
         storage,
         0,

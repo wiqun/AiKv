@@ -23,9 +23,9 @@ use crate::command::router::{self, KeyLock};
 use crate::error::{Error, Result};
 use crate::protocol::RespValue;
 use crate::storage::aidb::AiDbEngine;
-use crate::storage::subkey::{self, HASH_MAX_INLINE_FIELDS, SET_MAX_INLINE_MEMBERS};
+use crate::storage::subkey;
 use crate::storage::types::{CollectionKind, StorageEngineKind, StoredValue, ValueType, WriteOp};
-use crate::storage::zset_subkey::{self, ZSET_MAX_INLINE};
+use crate::storage::zset_subkey;
 use crate::storage::{dump_decode, dump_encode, now_ms, KvStorage, TTL_NO_EXPIRY};
 
 pub const MAX_DUMP_AGGREGATE_BYTES: usize = 32 * 1024 * 1024;
@@ -294,7 +294,7 @@ impl KeyCommands {
         // 大集合自动转 Subkey 格式存储
         if self.storage.engine_kind() != StorageEngineKind::Memory {
             match stored.value {
-                ValueType::Hash(ref map) if map.len() > HASH_MAX_INLINE_FIELDS => {
+                ValueType::Hash(ref map) if map.len() > subkey::hash_max_inline_fields() => {
                     let encoded_user_key = AiDbEngine::encode_key(db, key);
                     let mut ops = Vec::with_capacity(1 + map.len());
                     ops.push((
@@ -319,7 +319,7 @@ impl KeyCommands {
                     self.storage.write_batch(db, ops).await?;
                     return Ok(router::ok());
                 }
-                ValueType::Set(ref set) if set.len() > SET_MAX_INLINE_MEMBERS => {
+                ValueType::Set(ref set) if set.len() > subkey::set_max_inline_members() => {
                     let encoded_user_key = AiDbEngine::encode_key(db, key);
                     let mut ops = Vec::with_capacity(1 + set.len());
                     ops.push((
@@ -345,7 +345,7 @@ impl KeyCommands {
                     self.storage.write_batch(db, ops).await?;
                     return Ok(router::ok());
                 }
-                ValueType::ZSet(ref zset) if zset.len() > ZSET_MAX_INLINE => {
+                ValueType::ZSet(ref zset) if zset.len() > zset_subkey::zset_max_inline() => {
                     let ops = zset_subkey::replace_ops(db, key, zset, stored.expires_at);
                     self.storage.write_batch(db, ops).await?;
                     return Ok(router::ok());

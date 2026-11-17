@@ -1,8 +1,25 @@
-# AiKv 示例
+# AiKv 部署与配置示例
 
-| 示例 | 文件 | 说明 | 运行 |
-|------|------|------|------|
-| 基本 CRUD | `basic.rs` | PING/SET/GET/HSET/INCR/DEL/INFO/QUIT 等常用命令 | `cargo run --example basic` |
-| 集群路由 | `cluster.rs` | CRC16 槽位计算 / hash tag 提取 | `cargo run --features cluster --example cluster` |
+本目录提供开箱即用的单机与 3 节点集群 Docker Compose 演示配置。
 
-`basic` 会连本机 aikv 做一组 CRUD 后退出. `cluster` 只演示槽位计算, 不启动节点.
+## 文件结构
+
+```shell
+examples/
+├── configs/
+│   ├── single.toml                 # 单机完整配置示例
+│   └── cluster.toml                # 集群节点基础配置示例
+├── docker-compose.single.yaml      # 单机容器编排
+├── docker-compose.cluster.yaml     # 3 节点集群容器编排 (通过 -o 覆盖节点差异字段)
+└── README.md
+```
+
+## 快速启动
+
+```bash
+# 单机实例 (端口 6379, 指标 9191)
+docker compose -f docker-compose.single.yaml up -d
+
+# 3 节点集群 (端口 6379~6381, 指标 9191~9193)
+docker compose -f docker-compose.cluster.yaml up -d
+```

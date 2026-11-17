@@ -7,7 +7,7 @@ use crate::command::hash::{format_hash_float, parse_f64_field_bytes, parse_i64_f
 use crate::command::router;
 use crate::command::shared::{commit_ops_in_lock, InFlightContext};
 use crate::error::{Error, Result};
-use crate::storage::subkey::{self, HASH_MAX_INLINE_FIELDS};
+use crate::storage::subkey;
 use crate::storage::{
     AiDbEngine, CollectionKind, KvStorage, StorageEngineKind, StoredValue, ValueType, WriteOp,
 };
@@ -50,7 +50,7 @@ async fn commit_inline_map<G>(
     let is_aidb = ctx.storage.engine_kind() == StorageEngineKind::AiDb;
     if is_aidb {
         if let ValueType::Hash(ref map) = stored.value {
-            if map.len() > HASH_MAX_INLINE_FIELDS {
+            if map.len() > subkey::hash_max_inline_fields() {
                 let ops = subkey::replace_hash_ops(ctx.db, ctx.key, map, stored.expires_at);
                 return commit_ops_in_lock(ctx.storage, ctx.in_flight, ctx.db, ctx.key, ops, guard)
                     .await;

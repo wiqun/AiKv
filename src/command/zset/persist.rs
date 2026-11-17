@@ -98,7 +98,7 @@ pub async fn add_members_pipeline<G>(
     };
     let outcome = apply_zadd_flags(&mut map, pairs, flags)?;
     let ops = if ctx.storage.engine_kind() == StorageEngineKind::AiDb
-        && map.len() > zset_subkey::ZSET_MAX_INLINE
+        && map.len() > zset_subkey::zset_max_inline()
     {
         zset_subkey::replace_ops(ctx.db, ctx.key, &map, expires)
     } else {

@@ -37,6 +37,7 @@ compression = ["aidb/compression"]
 # Async runtime
 tokio       = { version = "1", features = ["full"] }
 tokio-util  = { version = "0.7", features = ["rt"] }
+socket2     = "0.6"
 async-trait = "0.1"
 futures-util = "0.3"
 

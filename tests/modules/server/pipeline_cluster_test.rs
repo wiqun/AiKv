@@ -18,6 +18,7 @@ fn create_test_state() -> Arc<ServerSharedState> {
             idle_timeout: None,
             max_clients: 0,
             script_worker_threads: 2,
+            ..Default::default()
         },
         storage,
         0,

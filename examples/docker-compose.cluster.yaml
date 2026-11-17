@@ -1,0 +1,116 @@
+name: aikv-cluster-example
+
+x-aikv-node: &aikv-node
+  image: ${AIKV_IMAGE:-aikv:dev}
+  restart: unless-stopped
+  stop_grace_period: 30s
+  volumes:
+    - ./configs/cluster.toml:/etc/aikv/aikv.toml:ro
+  networks:
+    - aikv-net
+
+services:
+  aikv-1:
+    <<: *aikv-node
+    container_name: aikv-1
+    command:
+      - "--config"
+      - "/etc/aikv/aikv.toml"
+      - "-o"
+      - "cluster.node_id=1"
+      - "-o"
+      - "cluster.rpc_addr=aikv-1:16379"
+      - "-o"
+      - "cluster.client_addr=127.0.0.1:6379"
+    ports:
+      - "127.0.0.1:6379:6379"
+      - "127.0.0.1:9191:9191"
+      - "127.0.0.1:16379:16379"
+      - "127.0.0.1:26379:26379"
+    volumes:
+      - ./configs/cluster.toml:/etc/aikv/aikv.toml:ro
+      - aikv-1-data:/var/lib/aikv/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9191/health"]
+      interval: 10s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+
+  aikv-2:
+    <<: *aikv-node
+    container_name: aikv-2
+    depends_on:
+      - aikv-1
+    command:
+      - "--config"
+      - "/etc/aikv/aikv.toml"
+      - "-o"
+      - "server.bind=0.0.0.0:6380"
+      - "-o"
+      - "observability.metrics_port=9192"
+      - "-o"
+      - "cluster.node_id=2"
+      - "-o"
+      - "cluster.rpc_addr=aikv-2:16380"
+      - "-o"
+      - "cluster.client_addr=127.0.0.1:6380"
+    environment:
+      AIKV_CLUSTER_PEERS: "aikv-1:16379"
+    ports:
+      - "127.0.0.1:6380:6380"
+      - "127.0.0.1:9192:9192"
+      - "127.0.0.1:16380:16380"
+      - "127.0.0.1:26380:26380"
+    volumes:
+      - ./configs/cluster.toml:/etc/aikv/aikv.toml:ro
+      - aikv-2-data:/var/lib/aikv/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9192/health"]
+      interval: 10s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+
+  aikv-3:
+    <<: *aikv-node
+    container_name: aikv-3
+    depends_on:
+      - aikv-1
+    command:
+      - "--config"
+      - "/etc/aikv/aikv.toml"
+      - "-o"
+      - "server.bind=0.0.0.0:6381"
+      - "-o"
+      - "observability.metrics_port=9193"
+      - "-o"
+      - "cluster.node_id=3"
+      - "-o"
+      - "cluster.rpc_addr=aikv-3:16381"
+      - "-o"
+      - "cluster.client_addr=127.0.0.1:6381"
+    environment:
+      AIKV_CLUSTER_PEERS: "aikv-1:16379"
+    ports:
+      - "127.0.0.1:6381:6381"
+      - "127.0.0.1:9193:9193"
+      - "127.0.0.1:16381:16381"
+      - "127.0.0.1:26381:26381"
+    volumes:
+      - ./configs/cluster.toml:/etc/aikv/aikv.toml:ro
+      - aikv-3-data:/var/lib/aikv/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9193/health"]
+      interval: 10s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+
+volumes:
+  aikv-1-data:
+  aikv-2-data:
+  aikv-3-data:
+
+networks:
+  aikv-net:

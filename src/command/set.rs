@@ -27,7 +27,7 @@ use crate::command::scan_util;
 use crate::error::{Error, Result};
 use crate::protocol::RespValue;
 use crate::storage::memory::glob_match;
-use crate::storage::subkey::{self, SET_MAX_INLINE_MEMBERS};
+use crate::storage::subkey;
 use crate::storage::{AiDbEngine, CollectionKind, KvStorage, StoredValue, ValueType};
 
 pub struct SetCommands {
@@ -54,7 +54,7 @@ impl SetCommands {
                         count += 1;
                     }
                 }
-                if set.len() > SET_MAX_INLINE_MEMBERS {
+                if set.len() > subkey::set_max_inline_members() {
                     self.migrate_set_to_subkey(db, key, &stored.expires_at, set)
                         .await?;
                 } else {

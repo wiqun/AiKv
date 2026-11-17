@@ -26,13 +26,19 @@ pub(super) fn parse_off_worker_override(raw: Option<&str>) -> Option<bool> {
 
 pub(super) struct ScriptRouter {
     forced: Option<bool>,
+    pool_threshold_us: u64,
     costs: RwLock<HashMap<String, AtomicU64>>,
 }
 
 impl ScriptRouter {
     pub(super) fn new(forced: Option<bool>) -> Self {
+        Self::with_config(forced, POOL_THRESHOLD_US)
+    }
+
+    pub(super) fn with_config(forced: Option<bool>, pool_threshold_us: u64) -> Self {
         Self {
             forced,
+            pool_threshold_us: pool_threshold_us.max(1),
             costs: RwLock::new(HashMap::new()),
         }
     }
@@ -51,7 +57,7 @@ impl ScriptRouter {
         self.costs
             .read()
             .get(sha1)
-            .is_some_and(|c| c.load(Ordering::Relaxed) >= POOL_THRESHOLD_US)
+            .is_some_and(|c| c.load(Ordering::Relaxed) >= self.pool_threshold_us)
     }
 
     /// 记录一次执行耗时 (微秒, 与执行位置无关), 更新该脚本的 EWMA (alpha = 1/8).

@@ -131,7 +131,14 @@ impl Connection {
         Self {
             stream,
             remote,
-            parser: RespParser::new(),
+            parser: RespParser::with_connection_limits(
+                state.connection_config.proto_max_bulk_len,
+                state.connection_config.proto_max_buffer_size,
+                state
+                    .connection_config
+                    .proto_max_parse_depth
+                    .min(u8::MAX as usize) as u8,
+            ),
             write_buf: BytesMut::with_capacity(protocol::DEFAULT_WRITE_BUF_CAPACITY),
             state,
             protocol_version: ProtocolVersion::default(),
@@ -156,7 +163,14 @@ impl Connection {
         let mut conn = Self {
             stream,
             remote,
-            parser: RespParser::new(),
+            parser: RespParser::with_connection_limits(
+                state.connection_config.proto_max_bulk_len,
+                state.connection_config.proto_max_buffer_size,
+                state
+                    .connection_config
+                    .proto_max_parse_depth
+                    .min(u8::MAX as usize) as u8,
+            ),
             write_buf: BytesMut::with_capacity(protocol::DEFAULT_WRITE_BUF_CAPACITY),
             state: state.clone(),
             protocol_version: ProtocolVersion::default(),
@@ -217,7 +231,7 @@ impl Connection {
                 break;
             }
 
-            if let Some(idle) = config.idle_timeout {
+            if let Some(idle) = self.state.runtime_config.idle_timeout() {
                 if self.last_active.elapsed() > idle {
                     tracing::debug!(
                         target: "kv.conn.close_reason",
@@ -653,7 +667,14 @@ impl Connection {
             let ver = String::from_utf8_lossy(&args[0]);
             match ver.as_ref() {
                 "2" => self.protocol_version = ProtocolVersion::Resp2,
-                "3" => self.protocol_version = ProtocolVersion::Resp3,
+                "3" => {
+                    if !self.state.connection_config.resp3_enabled {
+                        return self
+                            .write_response(RespValue::Error("ERR RESP3 is disabled".into()))
+                            .await;
+                    }
+                    self.protocol_version = ProtocolVersion::Resp3;
+                }
                 _ => {
                     return self
                         .write_response(RespValue::Error("invalid protocol version".into()))

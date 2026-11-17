@@ -1,0 +1,24 @@
+name: aikv-single-example
+
+services:
+  aikv-single:
+    image: ${AIKV_IMAGE:-aikv:dev}
+    container_name: aikv-single
+    command: ["--config", "/etc/aikv/aikv.toml"]
+    restart: unless-stopped
+    stop_grace_period: 30s
+    ports:
+      - "${AIKV_BIND_IP:-127.0.0.1}:6379:6379"
+      - "${AIKV_BIND_IP:-127.0.0.1}:9191:9191"
+    volumes:
+      - ./configs/single.toml:/etc/aikv/aikv.toml:ro
+      - aikv-single-data:/var/lib/aikv/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9191/health"]
+      interval: 10s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+
+volumes:
+  aikv-single-data:

@@ -84,7 +84,7 @@ impl Connection {
         config: &Arc<crate::server::config::ConnectionConfig>,
         buf: &mut [u8],
     ) -> Result<usize> {
-        if let Some(idle) = config.idle_timeout {
+        if let Some(idle) = self.state.runtime_config.idle_timeout() {
             if self.last_active.elapsed() > idle {
                 return Ok(0);
             }
