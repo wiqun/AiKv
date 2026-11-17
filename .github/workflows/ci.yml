@@ -35,7 +35,7 @@ jobs:
       - name: Check format
         run: cargo fmt --check
 
-      - name: Clippy (default features: compression + cluster + monitoring)
+      - name: "Clippy (default features: compression + cluster + monitoring)"
         run: cargo clippy --all-targets
 
       - name: Run tests (nextest)
