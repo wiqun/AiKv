@@ -46,21 +46,20 @@
 ```bash
 export RUSTFLAGS='-D warnings'
 cargo fmt --check
-cargo clippy --all-targets --features cluster,monitoring
-cargo test --workspace --features cluster,monitoring -- --test-threads=1
+cargo clippy --all-targets
+cargo nextest run --lib --tests
+cargo nextest run --no-default-features --lib storage::aidb_options
+# 若未安装 cargo-nextest, 退回单线程串行: cargo test --workspace -- --test-threads=1
 ```
 
 ### 慢测与压力测试
 ```bash
-cargo test --test server --features cluster -- --ignored --test-threads=1
-cargo test --test commands --features cluster -- --ignored --test-threads=1
-cargo test --test stress_ttl --features cluster -- --ignored --test-threads=1
+cargo test --test core -- --ignored --test-threads=1
+cargo test --test stress_ttl -- --ignored --test-threads=1
 ```
 
-### E2E 黑盒验收测试 (需先部署单机或集群服务)
-```bash
-pytest e2e/function/ -v
-```
+### E2E 黑盒验收测试
+已统一迁移至工作区根目录 `tests/cluster/`（由 `./bench test cluster` 调度）。
 
 ---
 

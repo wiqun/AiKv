@@ -1,21 +1,21 @@
 name: Prepare workspace
 description: >-
-  Setup Rust toolchain and install protoc. Caller MUST `actions/checkout`
-  first so this local composite action can be loaded. aikv 依赖 aidb 走
-  GitHub main branch, CI 消费提交的 lockfile. 本地开发通过
-  ~/.cargo/config.toml 的 [patch."https://github.com/wiqun/AiDb.git"] 覆盖为本地 path (见 README.md
-  §与 AiDb).
+  Setup Rust toolchain, rust-cache, protoc, and cargo-nextest.
+  Caller MUST `actions/checkout` first.
 
 inputs:
   components:
     description: rustup components (e.g. "clippy, rustfmt")
     required: false
     default: ""
-  cache-save-if:
-    description: >-
-      依赖缓存保存条件. 仅 main 保存, PR 分支只读不写, 避免缓存膨胀.
+  tools:
+    description: prebuilt tools for taiki-e/install-action
     required: false
-    default: "false"
+    default: "protoc, cargo-nextest"
+  shared-key:
+    description: Swatinem/rust-cache shared key
+    required: false
+    default: "aikv-ci"
 
 runs:
   using: composite
@@ -23,10 +23,14 @@ runs:
     - uses: actions-rust-lang/setup-rust-toolchain@v1
       with:
         components: ${{ inputs.components }}
-        cache-save-if: ${{ inputs.cache-save-if }}
+        cache: false
 
-    # cluster feature 编译 aidb tonic/prost 需要 protoc (通过预编译二进制免去耗时的 apt-get update)
-    - name: Install protoc
+    - uses: Swatinem/rust-cache@v2
+      with:
+        save-if: ${{ github.event_name == 'pull_request' }}
+        shared-key: ${{ inputs.shared-key }}
+
+    - name: Install tools
       uses: taiki-e/install-action@v2
       with:
-        tool: protoc
+        tool: ${{ inputs.tools }}

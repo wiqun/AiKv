@@ -1,76 +1,44 @@
 name: CI
 
-# 同一分支的新 push 会取消尚未完成的旧 run, 避免 CI 积压
+# 同一分支的新 PR push 会取消尚未完成的旧 run, 避免 CI 积压
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# 主 CI 仅在针对 main 的 PR 与合并到 main 时触发; .md 与 docs/ 由 docs-link-check 单独检查
+# 仅在 PR 合并前触发 (避免合并进 main 后重复跑一次), 并支持手动触发兜底
 on:
-  push:
-    branches: [main]
-    paths-ignore:
-      - '**/*.md'
-      - 'docs/**'
   pull_request:
     branches: [main]
     paths-ignore:
       - '**/*.md'
       - 'docs/**'
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
-  # 把警告当错误, 强制代码质量门禁
   RUSTFLAGS: -D warnings
 
 jobs:
-  test-cluster:
-    name: Cluster & Monitoring Fast Gate
+  fast-gate:
+    name: Format, Clippy & Nextest
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: Prepare workspace (rust + protoc + aidb)
+      - name: Prepare workspace (rust + cache + protoc + nextest)
         uses: ./.github/actions/prepare
         with:
           components: clippy, rustfmt
-          cache-save-if: ${{ github.ref == 'refs/heads/main' }}
+          shared-key: aikv-fast-gate
 
       - name: Check format
         run: cargo fmt --check
 
-      - name: Clippy (cluster & monitoring)
-        run: cargo clippy --all-targets --features cluster,monitoring
+      - name: Clippy (default features: compression + cluster + monitoring)
+        run: cargo clippy --all-targets
 
-      - name: Test (workspace with cluster & monitoring)
-        run: cargo test --workspace --features cluster,monitoring -- --test-threads=1
+      - name: Run tests (nextest)
+        run: cargo nextest run --profile ci --lib --tests
 
-  # compression feature: aidb_options 的 Snap/LZ4 压缩 gate 测试.
-  test-compression:
-    name: Snap/LZ4 Compression Gate
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - name: Prepare workspace (rust + protoc + aidb)
-        uses: ./.github/actions/prepare
-        with:
-          cache-save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      - name: Test compression (Snap/LZ4 gate)
-        run: cargo test --lib storage::aidb_options -- --test-threads=1
-
-  # 验证显式关闭默认 compression 后, 无压缩 fallback 仍可用.
-  test-no-compression:
-    name: Fallback without Compression Gate
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - name: Prepare workspace (rust + protoc + aidb)
-        uses: ./.github/actions/prepare
-        with:
-          cache-save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      - name: Test without compression feature
-        run: cargo test --no-default-features --lib storage::aidb_options -- --test-threads=1
+      - name: Test fallback without compression feature
+        run: cargo nextest run --profile ci --no-default-features --lib storage::aidb_options

@@ -1,3 +1,4 @@
+# 依赖安全门禁: 仅在依赖或合规清单变更时于 PR 触发, 配合每日 cron 定时扫描
 name: Security Audit
 
 concurrency:
@@ -5,19 +6,15 @@ concurrency:
   cancel-in-progress: true
 
 on:
-  push:
-    branches: [main]
-    # 文档变更不影响 lockfile / CVE 面, 交给 docs-link-check; 每日 cron 仍会扫描
-    paths-ignore:
-      - '**/*.md'
-      - 'docs/**'
   pull_request:
     branches: [main]
-    paths-ignore:
-      - '**/*.md'
-      - 'docs/**'
+    paths:
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+      - 'deny.toml'
   schedule:
     - cron: "0 0 * * *"
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -29,13 +26,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-
+        with:
+          cache: false
       - name: Install cargo-audit
         uses: taiki-e/install-action@v2
         with:
-          # 不钉版本: cargo-audit 必须能解析持续演进的 advisory-db (如 CVSS 4.0)
           tool: cargo-audit
-
       - name: Run cargo audit
         run: cargo audit
 
@@ -45,11 +41,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-
+        with:
+          cache: false
       - name: Install cargo-deny
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny
-
       - name: Run cargo deny check
         run: cargo deny check

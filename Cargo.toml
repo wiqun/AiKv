@@ -15,7 +15,6 @@ exclude = [
   ".github/",
   ".cursor/",
   ".claude/",
-  "e2e/",
   "hooks/",
   "install-hooks.sh",
   "clippy.toml",
@@ -28,7 +27,7 @@ name = "aikv"
 path = "src/main.rs"
 
 [features]
-default = ["compression"]
+default = ["compression", "cluster", "monitoring"]
 monitoring = ["dep:tracing-opentelemetry", "dep:opentelemetry-otlp", "dep:opentelemetry", "dep:opentelemetry_sdk", "dep:hyper", "dep:hyper-util", "dep:http-body-util", "aidb/monitoring"]
 cluster = ["aidb/cluster", "dep:openraft", "dep:openraft-rt-tokio"]
 cluster-test-util = ["cluster", "aidb/cluster-test-util"]
