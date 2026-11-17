@@ -12,6 +12,10 @@ inputs:
     description: prebuilt tools for taiki-e/install-action
     required: false
     default: "protoc, cargo-nextest"
+  cache-save-if:
+    description: Swatinem/rust-cache save-if condition
+    required: false
+    default: "false"
   shared-key:
     description: Swatinem/rust-cache shared key
     required: false
@@ -27,7 +31,7 @@ runs:
 
     - uses: Swatinem/rust-cache@v2
       with:
-        save-if: ${{ github.event_name == 'pull_request' }}
+        save-if: ${{ inputs.cache-save-if }}
         shared-key: ${{ inputs.shared-key }}
 
     - name: Install tools

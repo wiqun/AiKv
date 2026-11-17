@@ -29,6 +29,7 @@ jobs:
         uses: ./.github/actions/prepare
         with:
           components: clippy, rustfmt
+          cache-save-if: ${{ github.event_name == 'pull_request' }}
           shared-key: aikv-fast-gate
 
       - name: Check format

@@ -24,6 +24,8 @@ skip = [
   { name = "wit-bindgen" },
   # dashmap 6.x 锁 hashbrown 0.14, indexmap 2.x (经 prost-build) 锁 0.17, 无法合并
   { name = "hashbrown" },
+  # sha1 0.10 依赖 cpufeatures 0.2, openraft -> rand 0.10 -> chacha20 依赖 0.3
+  { name = "cpufeatures" },
 ]
 
 [sources]
