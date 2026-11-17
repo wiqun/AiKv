@@ -138,7 +138,9 @@ impl CommandRouter {
     }
 
     pub fn new_with_shared(storage: Arc<dyn KvStorage>, shared: Arc<ServerSharedState>) -> Self {
-        let key_lock = Arc::new(KeyLock::new(KEY_LOCK_BUCKETS));
+        let key_lock = Arc::new(KeyLock::new(
+            shared.connection_config.key_lock_buckets.max(1),
+        ));
         let in_flight_ctx = Arc::new(crate::command::shared::InFlightContext::new());
         Self {
             string: string::StringCommands::new(
@@ -170,12 +172,13 @@ impl CommandRouter {
                 key_lock.clone(),
                 shared.metrics.clone(),
             ),
-            script: script::ScriptCommands::with_metrics(
+            script: script::ScriptCommands::with_config(
                 storage.clone(),
                 key_lock.clone(),
                 Arc::clone(&in_flight_ctx),
-                shared.metrics.clone(),
+                Some(shared.metrics.clone()),
                 shared.connection_config.script_worker_threads,
+                &shared.connection_config.script,
             ),
             database: database::DatabaseCommands::new(storage.clone()),
             key_cmds: key::KeyCommands::new(storage.clone(), key_lock.clone()),

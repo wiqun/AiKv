@@ -42,8 +42,18 @@ impl Server {
                         return Err(err.into());
                     }
                 };
-                if let Err(err) = stream.set_nodelay(true) {
-                    tracing::warn!(%remote, error = %err, "tcp nodelay failed");
+                if state.connection_config.tcp_nodelay {
+                    if let Err(err) = stream.set_nodelay(true) {
+                        tracing::warn!(%remote, error = %err, "tcp nodelay failed");
+                    }
+                }
+                if state.connection_config.tcp_keepalive_secs > 0 {
+                    let keepalive = socket2::TcpKeepalive::new().with_time(
+                        std::time::Duration::from_secs(state.connection_config.tcp_keepalive_secs),
+                    );
+                    if let Err(err) = socket2::SockRef::from(&stream).set_tcp_keepalive(&keepalive) {
+                        tracing::warn!(%remote, error = %err, "tcp keepalive failed");
+                    }
                 }
                 tracing::debug!(%remote, "kv.accept");
                 let state = Arc::clone(&state);

@@ -43,6 +43,7 @@ async fn test_info_storage_all_whitelist_metrics_rendered() {
             idle_timeout: None,
             max_clients: 0,
             script_worker_threads: 2,
+            ..Default::default()
         },
         storage,
         0,

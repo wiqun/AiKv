@@ -91,6 +91,25 @@ impl ClusterDataAdapter {
         })
     }
 
+    /// 按显式合批参数构建集群数据面适配器
+    pub fn with_batch_config(
+        local: Arc<dyn StorageAdapter>,
+        eager_flush: usize,
+        local_batch_max_ops: usize,
+        batcher_max_ops: usize,
+        batcher_adaptive_target_ops: usize,
+    ) -> Arc<Self> {
+        super::cluster_batcher::set_batcher_limits(batcher_max_ops, batcher_adaptive_target_ops);
+        let local_batcher =
+            LocalWriteBatcher::with_max_ops(Arc::clone(&local), local_batch_max_ops);
+        Arc::new(Self {
+            local,
+            local_batcher,
+            set_batchers: Mutex::new(HashMap::new()),
+            eager_flush,
+        })
+    }
+
     /// 本节点作为迁槽目标时的本地 data group (IMPORTING / MIGRATE RESTORE).
     fn local_migration_target_group(mgr: &ClusterStateManager) -> Option<u64> {
         if let Some(state) = mgr.meta_raft.get_migration_state() {

@@ -1,0 +1,148 @@
+################################# SERVER #######################################
+
+[server]
+# 客户端 RESP 服务监听地址 (多节点示例可通过 CLI `-o server.bind=...` 覆盖)
+# Default: "127.0.0.1:6379"
+bind = "0.0.0.0:6379"
+
+# 最大客户端并发连接数 (0 表示不限制; 支持 CONFIG SET maxclients 热更新)
+# Default: 10000
+max_clients = 10000
+
+# 单次读取超时与客户端空闲超时 (毫秒, 0 表示不超时)
+# Default: 60000 / 300000
+read_timeout_ms = 60000
+idle_timeout_ms = 300000
+
+# TCP_NODELAY / TCP Keepalive (秒, 0 表示禁用) / RESP3 协商开关
+# Default: true / 0 / true
+tcp_nodelay = true
+# tcp_keepalive_secs = 0
+resp3_enabled = true
+
+################################# SLOWLOG ######################################
+
+[server.slowlog]
+# 慢查询记录阈值 (微秒) 与环形队列长度
+# Default: 100000 / 128
+log_slower_than_us = 100000
+max_len = 128
+
+################################# LUA SCRIPT ###################################
+
+[server.script]
+# 脚本执行路由 ("auto" | "true" | "false")、线程池分流阈值 (us) 与超时 (ms)
+# Default: "auto" / 1000 / 5000
+off_worker = "auto"
+pool_threshold_us = 1000
+timeout_ms = 5000
+
+################################# ENGINE #######################################
+
+[engine]
+# 集群模式必须使用持久化 LSM 引擎 "aidb"
+kind = "aidb"
+data_dir = "/var/lib/aikv/data"
+
+# 集群写入由 Raft 共识多数派保障持久性, 通常关闭每条写 fsync
+# Default: false
+sync_wal = false
+
+# AiDb 参数预设基底, 下方 [engine.aidb] 字段将覆盖预设中的同名项
+aidb_preset = "high-write"
+
+################################# AIDB (LSM) ###################################
+
+[engine.aidb]
+# MemTable 触发刷盘阈值 (支持 "256MiB" / "64M" / 字节整数)
+memtable_size = "256MiB"
+
+# SSTable Block Cache 容量 (集群下每个 Data Group 独立创建 DB 实例, 请结合总内存规划)
+block_cache_size = "128MiB"
+
+# 后台 Compaction 并发线程数
+compaction_threads = 2
+
+# 块压缩算法: "none" | "snap" | "lz4"
+compression = "snap"
+
+################################# OBSERVABILITY ################################
+
+[observability]
+# Metrics HTTP 监听地址与端口 (多节点可通过 `-o observability.metrics_port=...` 覆盖)
+metrics_addr = "0.0.0.0"
+metrics_port = 9191
+json_log = true
+log_level = "info"
+
+################################# CLUSTER ######################################
+
+[cluster]
+# 集群节点唯一 ID (必须 >= 1, 各节点不同)
+node_id = 1
+
+# MetaRaft 节点间 gRPC 通信地址 (容器内互访地址)
+rpc_addr = "aikv-1:16379"
+
+# 已有集群引导节点列表: 首节点初始化留空 `[]`; 加入节点填写任一在线节点 `rpc_addr`
+peers = []
+
+# MultiRaft 数据面 gRPC 端口相对 MetaRaft 端口的偏移量 (即 16379 + 10000 = 26379)
+# Default: 10000
+cluster_data_port_offset = 10000
+
+# 对外通告的客户端可达地址 (MOVED/ASK 重定向返回给客户端的地址)
+# client_addr = "127.0.0.1:6379"
+
+# 节点通告模式:
+#   "fixed"   - 固定通告 client_addr
+#   "unknown" - 按连接来源动态推断
+# Default: "unknown"
+announce_mode = "fixed"
+
+# 是否启用 Raft LeaseRead 线性一致性读
+# Default: true
+linearizable_read = true
+
+# Raft 选举超时区间 (ms)、心跳间隔 (ms) 与 RPC 超时 (ms)
+# 约束: raft_rpc_timeout_ms < raft_election_timeout_min 且 raft_heartbeat_interval < raft_election_timeout_min
+# Default: 1000 / 2000 / 300 / 500 / 100
+# raft_election_timeout_min = 1000
+# raft_election_timeout_max = 2000
+# raft_heartbeat_interval = 300
+# raft_rpc_timeout_ms = 500
+# meta_rpc_timeout_ms = 100
+
+# gRPC 单条消息最大字节数与 Raft 单条 Entry 上限 (支持单位如 "64MiB", "8MiB")
+# Default: "64MiB" / "8MiB"
+grpc_max_message_size = "64MiB"
+# max_entry_size = "8MiB"
+
+# MetaRaft / DataRaft 每次 AppendEntries 最大条目数与触发快照的日志条数阈值
+# Default: 100 / 1000 / 256 / 100000
+# meta_max_payload_entries = 100
+# data_max_payload_entries = 1000
+# meta_snapshot_logs_since_last = 256
+# data_snapshot_logs_since_last = 100000
+
+# 数据面写合批限制
+# Default: 512 / 32
+# batcher_max_ops = 512
+# batcher_adaptive_target_ops = 32
+
+[cluster.log_committer]
+# DataRaft WAL 异步组提交配置: 单批最大命令数 / 最大 entry 数 / 最大字节数 / 攒批延迟(微秒)
+# Default: 64 / 512 / "2MiB" / 0
+max_commands = 64
+max_entries = 512
+max_bytes = "2MiB"
+delay_us = 0
+
+[cluster.migration]
+# 在线槽位迁移参数: 每批 key 数 / 进度汇报间隔 / 最大重试 / 重试基准延迟(ms) / 校验采样因子
+# Default: 1000 / 100 / 3 / 1000 / 1.0
+max_batch_size = 1000
+progress_report_interval = 100
+max_retries = 3
+retry_base_delay_ms = 1000
+verify_sample_factor = 1.0

@@ -19,13 +19,19 @@ struct BatchItem {
 /// 单机写合批器. 第一次 enqueue 时启动后台任务; 直接写本地引擎.
 pub struct LocalWriteBatcher {
     local: Arc<dyn StorageAdapter>,
+    max_batch_ops: usize,
     tx: OnceLock<mpsc::Sender<BatchItem>>,
 }
 
 impl LocalWriteBatcher {
     pub fn new(local: Arc<dyn StorageAdapter>) -> Self {
+        Self::with_max_ops(local, MAX_BATCH_OPS)
+    }
+
+    pub fn with_max_ops(local: Arc<dyn StorageAdapter>, max_batch_ops: usize) -> Self {
         Self {
             local,
+            max_batch_ops: max_batch_ops.max(1),
             tx: OnceLock::new(),
         }
     }
@@ -34,7 +40,7 @@ impl LocalWriteBatcher {
         self.tx
             .get_or_init(|| {
                 let (tx, rx) = mpsc::channel(4096);
-                tokio::spawn(run(self.local.clone(), rx));
+                tokio::spawn(run(self.local.clone(), rx, self.max_batch_ops));
                 tx
             })
             .clone()
@@ -68,12 +74,16 @@ impl BatchWriteHandle for LocalWriteHandle {
     }
 }
 
-async fn run(local: Arc<dyn StorageAdapter>, mut rx: mpsc::Receiver<BatchItem>) {
+async fn run(
+    local: Arc<dyn StorageAdapter>,
+    mut rx: mpsc::Receiver<BatchItem>,
+    max_batch_ops: usize,
+) {
     while let Some(first) = rx.recv().await {
         let mut items = vec![first];
         let mut op_count = items[0].ops.len();
 
-        while op_count < MAX_BATCH_OPS {
+        while op_count < max_batch_ops {
             match rx.try_recv() {
                 Ok(item) => {
                     op_count += item.ops.len();
@@ -84,9 +94,9 @@ async fn run(local: Arc<dyn StorageAdapter>, mut rx: mpsc::Receiver<BatchItem>) 
         }
 
         // 让出一次执行权, 给并发连接一个入队窗口, 但不引入定时器延迟.
-        if op_count < MAX_BATCH_OPS {
+        if op_count < max_batch_ops {
             tokio::task::yield_now().await;
-            while op_count < MAX_BATCH_OPS {
+            while op_count < max_batch_ops {
                 match rx.try_recv() {
                     Ok(item) => {
                         op_count += item.ops.len();

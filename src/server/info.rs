@@ -205,7 +205,10 @@ impl<'a> InfoRenderer<'a> {
         append_kv_u64(
             &mut out,
             "maxclients",
-            self.shared.connection_config.max_clients as u64,
+            self.shared
+                .runtime_config
+                .max_clients
+                .load(std::sync::atomic::Ordering::Relaxed) as u64,
         );
         append_kv_u64(&mut out, "client_recent_max_input_buffer", 0);
         append_kv_u64(&mut out, "client_recent_max_output_buffer", 0);

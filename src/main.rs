@@ -23,8 +23,7 @@ use aikv::config::{
 use aikv::server::{ConnectionConfig, Server, ServerSharedState};
 use aikv::storage::ttl_filter::TtlExpireFilter;
 use aikv::storage::{
-    server_db_options_with_preset, AiDbEngine, DbPreset, KvStorage, KvStorageAdapter, MemoryEngine,
-    StorageEngineKind, StorageObservation,
+    AiDbEngine, KvStorage, KvStorageAdapter, MemoryEngine, StorageEngineKind, StorageObservation,
 };
 use clap::Parser;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter, Registry};
@@ -44,8 +43,6 @@ async fn build_storage(
     settings: &ResolvedSettings,
     observation: Arc<StorageObservation>,
 ) -> StorageBuildResult {
-    let preset = DbPreset::parse(&settings.aidb_preset).unwrap_or(DbPreset::Default);
-
     match settings.engine {
         EngineKind::Memory => Ok((
             MemoryEngine::with_observation(16, Some(observation)),
@@ -54,15 +51,19 @@ async fn build_storage(
             None,
         )),
         EngineKind::AiDb => {
+            aikv::storage::subkey::set_inline_thresholds(
+                settings.engine_ext.hash_max_inline_fields,
+                settings.engine_ext.set_max_inline_members,
+            );
+            aikv::storage::zset_subkey::set_zset_max_inline(
+                settings.engine_ext.zset_max_inline_members,
+            );
             let path = settings
                 .data_dir
                 .as_ref()
                 .expect("aidb engine requires data_dir after resolve");
-            let engine = AiDbEngine::open_with_options(
-                path,
-                server_db_options_with_preset(settings.sync_wal, preset),
-            )
-            .map_err(|e| e.to_string())?;
+            let engine = AiDbEngine::open_with_options(path, settings.engine_ext.aidb.clone())
+                .map_err(|e| e.to_string())?;
             engine
                 .db
                 .set_compaction_filter(Some(std::sync::Arc::new(TtlExpireFilter)));
@@ -70,9 +71,12 @@ async fn build_storage(
             let adapter: Arc<dyn aikv::storage::StorageAdapter> = engine;
             #[cfg(feature = "cluster")]
             let adapter: Arc<dyn aikv::storage::StorageAdapter> =
-                aikv::storage::cluster_adapter::ClusterDataAdapter::new(
+                aikv::storage::cluster_adapter::ClusterDataAdapter::with_batch_config(
                     adapter,
                     aikv::storage::cluster_adapter::ClusterDataAdapter::DEFAULT_EAGER_FLUSH,
+                    settings.engine_ext.local_batch_max_ops,
+                    settings.cluster.batcher_max_ops,
+                    settings.cluster.batcher_adaptive_target_ops,
                 );
             Ok((
                 KvStorageAdapter::open(adapter, Some(observation))
@@ -207,7 +211,6 @@ async fn init_cluster(
         LeaderChangeWatcher, LifecycleManager, MetaRaftNode, MultiRaftNode,
         RaftNetworkClientFactory, RaftServiceDispatcher, Router,
     };
-    use aidb::config::MigrationConfig;
 
     let cluster = &settings.cluster;
     let node_id = cluster.node_id.expect("cluster node_id required");
@@ -219,8 +222,7 @@ async fn init_cluster(
         return Err("data_dir required for cluster mode".into());
     };
     let bind_addr = settings.bind;
-    let aidb_preset = DbPreset::parse(&settings.aidb_preset).unwrap_or(DbPreset::Default);
-    let shared_opts = server_db_options_with_preset(settings.sync_wal, aidb_preset);
+    let shared_opts = &settings.engine_ext.aidb;
     let shared_stats = match &cluster_db {
         Some(db) => db.statistics(),
         None => Arc::new(aidb::Statistics::new(shared_opts.max_levels)),
@@ -237,11 +239,12 @@ async fn init_cluster(
     };
 
     // 2. 创建 RaftNetworkClientFactory (MetaRaft 专用, 独立快超时, 注入 shared_stats)
+    let grpc_max_msg = cluster.grpc_max_message_size;
     let net_factory = RaftNetworkClientFactory::new_with_stats(
         node_id,
         0,
         cluster.meta_rpc_timeout_ms,
-        64 * 1024 * 1024,
+        grpc_max_msg,
         Some(shared_stats.clone()),
     );
     let net_factory = Arc::new(parking_lot::RwLock::new(net_factory));
@@ -255,12 +258,12 @@ async fn init_cluster(
         election_timeout_min: cluster.raft_election_timeout_min,
         election_timeout_max: cluster.raft_election_timeout_max,
         heartbeat_interval: cluster.raft_heartbeat_interval,
-        max_payload_entries: 100,
-        snapshot_logs_since_last: 256,
-        max_entry_size: 8 * 1024 * 1024,
+        max_payload_entries: cluster.meta_max_payload_entries,
+        snapshot_logs_since_last: cluster.meta_snapshot_logs_since_last,
+        max_entry_size: cluster.max_entry_size,
         rpc_timeout_ms: cluster.raft_rpc_timeout_ms,
-        grpc_max_message_size: 64 * 1024 * 1024,
-        snapshot_size_threshold: None,
+        grpc_max_message_size: grpc_max_msg,
+        snapshot_size_threshold: cluster.snapshot_size_threshold,
         linearizable_read,
         log_committer_config: None, // MetaRaft 使用同步路径
     };
@@ -312,7 +315,7 @@ async fn init_cluster(
     let dispatcher_for_meta = Arc::clone(&dispatcher);
     tokio::spawn(async move {
         if let Err(e) = meta_raft_clone
-            .start_server_with_dispatcher(rpc_socket, 64 * 1024 * 1024, dispatcher_for_meta)
+            .start_server_with_dispatcher(rpc_socket, grpc_max_msg, dispatcher_for_meta)
             .await
         {
             tracing::error!(error = %e, "meta raft gRPC server failed");
@@ -375,11 +378,10 @@ async fn init_cluster(
 
     // 11. 启动 Lifecycle (数据 Group 自动创建/销毁)
     let mut data_raft_config = raft_config.clone();
-    data_raft_config.snapshot_logs_since_last = 100_000;
-    data_raft_config.max_payload_entries = 1000;
-    data_raft_config.log_committer_config =
-        Some(aidb::cluster::log_committer::LogCommitterConfig::default());
-    let mut data_options = server_db_options_with_preset(settings.sync_wal, aidb_preset);
+    data_raft_config.snapshot_logs_since_last = cluster.data_snapshot_logs_since_last;
+    data_raft_config.max_payload_entries = cluster.data_max_payload_entries;
+    data_raft_config.log_committer_config = Some(cluster.log_committer.clone());
+    let mut data_options = settings.engine_ext.aidb.clone();
     data_options.statistics = Some(shared_stats.clone());
     let lifecycle_cfg = aidb::cluster::multi_raft_node::LifecycleConfig {
         data_dir: data_dir.to_path_buf(),
@@ -394,7 +396,7 @@ async fn init_cluster(
     let data_socket: NetAddr = data_addr.parse()?;
     let mr_for_grpc = Arc::clone(&multi_raft);
     tokio::spawn(async move {
-        if let Err(e) = mr_for_grpc.start(data_socket, 64 * 1024 * 1024).await {
+        if let Err(e) = mr_for_grpc.start(data_socket, grpc_max_msg).await {
             tracing::error!(error = %e, "multi raft gRPC server failed");
         }
     });
@@ -423,7 +425,7 @@ async fn init_cluster(
         router.clone(),
         node_id,
         data_dir.join("slot_migration"),
-        MigrationConfig::default(),
+        cluster.migration.clone(),
     ));
     state_mgr.set_slot_migration_manager(slot_migration);
     state_mgr.data_dir = Some(data_dir.to_path_buf());
@@ -637,9 +639,21 @@ async fn main() {
         };
     let tcp_port = settings.bind.port();
     let connection_config = ConnectionConfig {
+        read_timeout: (settings.server_ext.read_timeout_ms > 0)
+            .then(|| std::time::Duration::from_millis(settings.server_ext.read_timeout_ms)),
+        idle_timeout: (settings.server_ext.idle_timeout_ms > 0)
+            .then(|| std::time::Duration::from_millis(settings.server_ext.idle_timeout_ms)),
         max_clients: settings.max_clients,
         script_worker_threads: settings.script_worker_threads,
-        ..Default::default()
+        tcp_nodelay: settings.server_ext.tcp_nodelay,
+        tcp_keepalive_secs: settings.server_ext.tcp_keepalive_secs,
+        resp3_enabled: settings.server_ext.resp3_enabled,
+        proto_max_bulk_len: settings.server_ext.proto_max_bulk_len,
+        proto_max_buffer_size: settings.server_ext.proto_max_buffer_size,
+        proto_max_parse_depth: settings.server_ext.proto_max_parse_depth,
+        pipeline_max_pending_writes: settings.server_ext.pipeline_max_pending_writes,
+        key_lock_buckets: settings.server_ext.key_lock_buckets,
+        script: settings.server_ext.script.clone(),
     };
     let state = ServerSharedState::new_with_backup_dir(
         connection_config,
@@ -652,6 +666,7 @@ async fn main() {
         settings.observability.metrics_addr.clone(),
         Some(observation),
     );
+    state.apply_resolved_settings(&settings);
 
     // 集群初始化 (等待 init_cluster 完成, 确保 CLUSTER_STATE_MGR 就绪)
     #[cfg(feature = "cluster")]

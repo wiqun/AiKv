@@ -1,0 +1,165 @@
+################################# SERVER #######################################
+
+[server]
+# 客户端 RESP 服务监听地址与端口
+# Default: "127.0.0.1:6379"
+bind = "0.0.0.0:6379"
+
+# 最大客户端并发连接数 (0 表示不限制; 支持 CONFIG SET maxclients 热更新)
+# Default: 10000
+max_clients = 10000
+
+# 单次读取超时 (毫秒, 0 表示不超时)
+# Default: 60000
+read_timeout_ms = 60000
+
+# 客户端空闲超时 (毫秒, 0 表示不超时; 支持 CONFIG SET timeout <secs> 热更新)
+# Default: 300000
+idle_timeout_ms = 300000
+
+# TCP 选项与 RESP3 协商开关:
+#   tcp_nodelay        - 禁用 Nagle 算法以降低小包 RTT (Default: true)
+#   tcp_keepalive_secs - TCP Keepalive 秒数, 0 表示禁用 (Default: 0)
+#   resp3_enabled      - 是否允许 HELLO 3 升级为 RESP3 (Default: true)
+tcp_nodelay = true
+# tcp_keepalive_secs = 0
+resp3_enabled = true
+
+# 逻辑数据库数量 (SELECT 0..N-1)
+# Default: 16
+# databases = 16
+
+# Lua 脚本专用工作线程数 (默认按 CPU 核数 * 4 夹取到 8..=32)
+# script_worker_threads = 8
+
+# RESP 协议流式解析与并发锁配置 (支持字节单位如 "512MiB", "64MiB")
+# Default: 512MiB / 64MiB / 128 / 256 / 4096
+# proto_max_bulk_len = "512MiB"
+# proto_max_buffer_size = "64MiB"
+# proto_max_parse_depth = 128
+# pipeline_max_pending_writes = 256
+# key_lock_buckets = 4096
+
+################################# SLOWLOG ######################################
+
+[server.slowlog]
+# 慢查询记录阈值 (微秒; 0 表示记录全部; 支持 CONFIG SET slowlog-log-slower-than 热更新)
+# Default: 100000 (100ms)
+log_slower_than_us = 100000
+
+# 慢查询环形队列最大保留条数 (支持 CONFIG SET slowlog-max-len 热更新)
+# Default: 128
+max_len = 128
+
+################################# LUA SCRIPT ###################################
+
+[server.script]
+# 脚本执行路由: "auto" (按 EWMA 耗时自动分流) | "true" (全进线程池) | "false" (全就地执行)
+# Default: "auto"
+off_worker = "auto"
+
+# auto 模式下转入专用线程池的执行耗时阈值 (微秒)
+# Default: 1000
+pool_threshold_us = 1000
+
+# 单次脚本执行超时 (毫秒) 与获取 KeyLock 超时 (毫秒)
+# Default: 5000 / 30000
+timeout_ms = 5000
+# lock_timeout_ms = 30000
+
+# 单个 Lua VM 内存上限、空闲 VM 池上限、脚本字节码缓存上限
+# Default: "128MiB" / 64 / 256
+# memory_limit_bytes = "128MiB"
+# max_idle_vms = 64
+# cache_max_scripts = 256
+
+################################# ENGINE #######################################
+
+[engine]
+# 底层存储引擎: "memory" | "aidb"
+# Default: "memory"
+kind = "aidb"
+
+# AiDb 持久化数据目录 (kind = "aidb" 时必填)
+data_dir = "/var/lib/aikv/data"
+
+# 每条写后是否立即 fsync WAL (true=强持久; false=高性能异步刷盘)
+# Default: false
+sync_wal = false
+
+# AiDb 参数预设基底, 下方 [engine.aidb] 字段将在此预设上按字段覆盖:
+#   "default" | "high-write" | "high-read"
+# Default: "default"
+aidb_preset = "high-write"
+
+# BGSAVE / SAVE 备份目录 (默认 "{data_dir}/backup")
+# backup_dir = "/var/lib/aikv/data/backup"
+
+# 复合数据结构转 subkey 扁平存储的成员阈值与单机合批上限
+# Default: 64 / 64 / 64 / 512
+# hash_max_inline_fields = 64
+# set_max_inline_members = 64
+# zset_max_inline_members = 64
+# local_batch_max_ops = 512
+
+################################# AIDB (LSM) ###################################
+
+[engine.aidb]
+# MemTable 触发刷盘的容量上限 (支持 "256MiB" / "64M" / 纯字节数)
+# Default: 64MiB (high-write: 256MiB)
+memtable_size = "256MiB"
+
+# 内存中最大 MemTable 数量 (活跃 + 不可变)
+# Default: 2 (high-write: 4)
+# max_write_buffer_number = 4
+
+# SSTable Block Cache 容量 (LRU 读缓存)
+# Default: 64MiB (high-read: 512MiB)
+block_cache_size = "128MiB"
+
+# 后台 Compaction 线程数 (建议 1~4)
+# Default: 1
+compaction_threads = 2
+
+# SSTable 块压缩算法: "none" | "snap" | "lz4"
+# Default: "snap"
+compression = "snap"
+
+# 其他可透传调优参数 (默认继承自 aidb_preset):
+# block_size = "16KiB"
+# row_cache_size = "32MiB"
+# bloom_false_positive_rate = 0.01
+# max_wal_size = "64MiB"
+# group_commit_batch_us = 0
+# level0_compaction_trigger = 4
+# level0_slowdown_writes_trigger = 8
+# level0_stop_writes_trigger = 16
+# max_bytes_for_level_base = "256MiB"
+# max_bytes_for_level_multiplier = 10
+# subcompaction_min_size = "64MiB"
+
+################################# OBSERVABILITY ################################
+
+[observability]
+# Metrics HTTP 端点监听地址与端口 (/metrics, /health)
+# Default: "127.0.0.1" / 9191
+metrics_addr = "0.0.0.0"
+metrics_port = 9191
+
+# 是否输出 JSON 格式日志 (false 则输出紧凑文本)
+# Default: true
+json_log = true
+
+# 日志过滤级别 / EnvFilter 表达式 (如 "info", "info,openraft=warn")
+# Default: "info"
+log_level = "info"
+
+# OTLP 遥测配置 (可选; 留空则仅暴露 HTTP /metrics)
+# metrics_export_interval_secs = 15
+# otlp_endpoint = "http://127.0.0.1:4317"
+# otel_service_name = "aikv"
+# otel_sample_ratio = 0.0
+# host_label = "aikv-single"
+# deployment_env = "dev"
+# [observability.otlp_headers]
+# organization = "default"

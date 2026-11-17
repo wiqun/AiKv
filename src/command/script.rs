@@ -296,7 +296,9 @@ pub struct ScriptCommands {
     key_lock: Arc<KeyLock>,
     cache: ScriptCache,
     script_timeout: Duration,
+    script_lock_timeout: Duration,
     script_memory_limit: usize,
+    max_idle_vms: usize,
     metrics: Option<Arc<ServerMetrics>>,
     vm_pool: parking_lot::Mutex<Vec<mlua::Lua>>,
     in_flight: Arc<InFlightBuffer>,
@@ -336,7 +338,9 @@ impl ScriptCommands {
             key_lock,
             cache: ScriptCache::default(),
             script_timeout: DEFAULT_SCRIPT_TIMEOUT,
+            script_lock_timeout: DEFAULT_SCRIPT_LOCK_TIMEOUT,
             script_memory_limit: DEFAULT_MEMORY_LIMIT,
+            max_idle_vms: MAX_IDLE_VMS,
             metrics: None,
             vm_pool: parking_lot::Mutex::new(Vec::new()),
             in_flight: Arc::clone(&in_flight_ctx.in_flight),
@@ -359,6 +363,39 @@ impl ScriptCommands {
         commands
     }
 
+    /// 按已解析的脚本配置初始化 Lua 执行引擎
+    pub fn with_config(
+        storage: Arc<dyn KvStorage>,
+        key_lock: Arc<KeyLock>,
+        in_flight_ctx: Arc<crate::command::shared::InFlightContext>,
+        metrics: Option<Arc<ServerMetrics>>,
+        threads: usize,
+        cfg: &crate::config::ResolvedScript,
+    ) -> Self {
+        let forced =
+            route::parse_off_worker_override(Some(cfg.off_worker.as_str())).or_else(|| {
+                route::parse_off_worker_override(
+                    std::env::var("AIKV_SCRIPT_OFF_WORKER").ok().as_deref(),
+                )
+            });
+        Self {
+            storage,
+            key_lock,
+            cache: ScriptCache::with_max_scripts(cfg.cache_max_scripts),
+            script_timeout: Duration::from_millis(cfg.timeout_ms.max(1)),
+            script_lock_timeout: Duration::from_millis(cfg.lock_timeout_ms.max(1)),
+            script_memory_limit: cfg.memory_limit_bytes,
+            max_idle_vms: cfg.max_idle_vms,
+            metrics,
+            vm_pool: parking_lot::Mutex::new(Vec::new()),
+            in_flight: Arc::clone(&in_flight_ctx.in_flight),
+            enqueue_chain: Arc::clone(&in_flight_ctx.enqueue_chain),
+            pool: pool::ScriptWorkerPool::new(threads),
+            router: route::ScriptRouter::with_config(forced, cfg.pool_threshold_us),
+            active: active::ActiveScripts::default(),
+        }
+    }
+
     fn acquire_vm(&self) -> Result<mlua::Lua> {
         if let Some(lua) = self.vm_pool.lock().pop() {
             return Ok(lua);
@@ -371,7 +408,7 @@ impl ScriptCommands {
             return;
         }
         let mut pool = self.vm_pool.lock();
-        if pool.len() < MAX_IDLE_VMS {
+        if pool.len() < self.max_idle_vms {
             pool.push(lua);
         }
     }
@@ -522,14 +559,14 @@ impl ScriptCommands {
         } else if keys.len() == 1 {
             Some(
                 self.key_lock
-                    .lock_one_with_timeout(keys[0].as_ref(), DEFAULT_SCRIPT_LOCK_TIMEOUT)
+                    .lock_one_with_timeout(keys[0].as_ref(), self.script_lock_timeout)
                     .await?,
             )
         } else {
             let key_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_ref()).collect();
             Some(
                 self.key_lock
-                    .lock_keys_sorted_with_timeout(&key_refs, DEFAULT_SCRIPT_LOCK_TIMEOUT)
+                    .lock_keys_sorted_with_timeout(&key_refs, self.script_lock_timeout)
                     .await?,
             )
         };

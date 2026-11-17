@@ -4,6 +4,7 @@
 //! 超过后, 用户 key 只留 `CollectionHeader`, 每个 member 和按 score 排序的索引各写一条 subkey.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use crate::error::Result;
@@ -12,6 +13,18 @@ use crate::storage::types::{CollectionKind, KvStorage, StoredValue, ValueType, W
 
 /// 与 Hash / Set 的 inline 上限一致.
 pub const ZSET_MAX_INLINE: usize = 64;
+
+static CONFIGURED_ZSET_MAX_INLINE: AtomicUsize = AtomicUsize::new(ZSET_MAX_INLINE);
+
+/// 设置进程级 ZSet 内联存储阈值 (启动时由配置初始化)
+pub fn set_zset_max_inline(val: usize) {
+    CONFIGURED_ZSET_MAX_INLINE.store(val.max(1), Ordering::Relaxed);
+}
+
+#[inline]
+pub fn zset_max_inline() -> usize {
+    CONFIGURED_ZSET_MAX_INLINE.load(Ordering::Relaxed)
+}
 
 const MEMBER_TAG: u8 = b'Z';
 const SCORE_TAG: u8 = b'Y';
@@ -186,7 +199,7 @@ pub fn commit_inline(
     expires_at: Option<u64>,
     persist_subkeys: bool,
 ) -> Vec<(Vec<u8>, WriteOp)> {
-    if persist_subkeys && zset.len() > ZSET_MAX_INLINE {
+    if persist_subkeys && zset.len() > zset_max_inline() {
         return replace_ops(db, &key, zset, expires_at);
     }
     let mut stored = StoredValue::new_zset(zset.clone());

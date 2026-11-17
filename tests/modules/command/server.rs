@@ -36,7 +36,7 @@ async fn test_config_get_set() {
     let mut db = 0;
 
     let resp = router
-        .execute("CONFIG", &[b("GET"), b("port")], &mut db)
+        .execute("CONFIG", &[b("GET"), b("maxclients")], &mut db)
         .await
         .unwrap();
     let aikv::protocol::RespValue::Array(Some(items)) = resp else {
@@ -45,13 +45,59 @@ async fn test_config_get_set() {
     assert_eq!(items.len(), 2);
 
     let resp = router
-        .execute("CONFIG", &[b("SET"), b("port"), b("6380")], &mut db)
+        .execute("CONFIG", &[b("SET"), b("maxclients"), b("512")], &mut db)
         .await
         .unwrap();
     assert_eq!(resp, aikv::protocol::RespValue::SimpleString("OK".into()));
 
+    assert_eq!(
+        shared
+            .runtime_config
+            .max_clients
+            .load(std::sync::atomic::Ordering::Relaxed),
+        512
+    );
     let map = shared.config_map.read();
-    assert_eq!(map.get("port").map(String::as_str), Some("6380"));
+    assert_eq!(map.get("maxclients").map(String::as_str), Some("512"));
+}
+
+#[tokio::test]
+async fn test_config_get_glob_and_readonly_set() {
+    let (router, shared) = router_with_shared();
+    let (resolved, _) = aikv::config::resolve_from_parts(
+        None,
+        std::iter::empty::<(String, String)>(),
+        &aikv::config::CliOverrides::default(),
+    )
+    .unwrap();
+    shared.apply_resolved_settings(&resolved);
+
+    let mut db = 0;
+    let resp = router
+        .execute("CONFIG", &[b("GET"), b("engine.aidb.*")], &mut db)
+        .await
+        .unwrap();
+    let aikv::protocol::RespValue::Array(Some(items)) = resp else {
+        panic!("expected array");
+    };
+    assert!(
+        items.len() >= 60,
+        "expected >= 30 pairs for engine.aidb.*, got {}",
+        items.len()
+    );
+
+    let err = router
+        .execute(
+            "CONFIG",
+            &[b("SET"), b("engine.aidb.memtable_size"), b("1024")],
+            &mut db,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("read-only"),
+        "expected read-only error, got: {err}"
+    );
 }
 
 #[tokio::test]

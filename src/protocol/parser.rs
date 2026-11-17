@@ -87,6 +87,21 @@ impl RespParser {
         }
     }
 
+    /// 使用连接级配置 (bulk / buffer / depth) 构造解析器, 其余沿用默认上限
+    pub fn with_connection_limits(
+        max_bulk_len: usize,
+        max_buffer_size: usize,
+        max_parse_depth: u8,
+    ) -> Self {
+        Self::with_limits(
+            max_bulk_len,
+            max_buffer_size,
+            max_parse_depth,
+            DEFAULT_MAX_ARRAY_LEN,
+            DEFAULT_MAX_LINE_LEN,
+        )
+    }
+
     pub fn feed(&mut self, data: &[u8]) {
         self.buffer.extend_from_slice(data);
     }
@@ -778,5 +793,14 @@ mod tests {
         assert!(err.to_string().contains("bulk string too large"));
         assert!(is_fatal_protocol(&err));
         assert_eq!(p.buffer_len(), data.len());
+    }
+
+    #[test]
+    fn connection_limits_rejects_oversized_bulk() {
+        let mut p = RespParser::with_connection_limits(8, 1024, 16);
+        let data = b"$16\r\n0123456789abcdef\r\n";
+        p.feed(data);
+        let err = p.parse().unwrap_err();
+        assert!(err.to_string().contains("bulk string too large"));
     }
 }

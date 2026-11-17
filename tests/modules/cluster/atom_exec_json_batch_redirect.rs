@@ -137,6 +137,7 @@ async fn start_server() -> (SocketAddr, Arc<MemoryEngine>) {
             idle_timeout: None,
             max_clients: 0,
             script_worker_threads: 2,
+            ..Default::default()
         },
         storage.clone(),
         6379,

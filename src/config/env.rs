@@ -130,9 +130,36 @@ impl Settings {
         {
             self.observability.deployment_env = Some(v.to_string());
         }
+        if let Some(v) = nonempty(&map, "OTEL_EXPORTER_OTLP_HEADERS") {
+            let mut headers = self.observability.otlp_headers.clone().unwrap_or_default();
+            for pair in v.split(',') {
+                if let Some((hk, hv)) = pair.split_once('=') {
+                    let hk = hk.trim();
+                    let hv = hv.trim();
+                    if !hk.is_empty() {
+                        headers.insert(hk.to_string(), hv.to_string());
+                    }
+                }
+            }
+            if !headers.is_empty() {
+                self.observability.otlp_headers = Some(headers);
+            }
+        }
+        if let Some(v) = nonempty(&map, "AIKV_SCRIPT_OFF_WORKER") {
+            let script = self.server.script.get_or_insert_with(Default::default);
+            script.off_worker = Some(v.to_string());
+        }
 
         #[cfg(feature = "cluster")]
         self.merge_env_cluster(&map);
+
+        if let Ok(mut table) = toml::Table::try_from(&*self) {
+            super::table::apply_generic_env(&mut table, &map);
+            let _ = super::table::normalize_byte_sizes(&mut table);
+            if let Ok(updated) = toml::Value::Table(table).try_into::<Settings>() {
+                *self = updated;
+            }
+        }
 
         warnings
     }

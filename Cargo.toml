@@ -37,6 +37,7 @@ compression = ["aidb/compression"]
 # Async runtime
 tokio       = { version = "1", features = ["full"] }
 tokio-util  = { version = "0.7", features = ["rt"] }
+socket2     = "0.6"
 async-trait = "0.1"
 futures-util = "0.3"
 
@@ -74,7 +75,7 @@ openraft = { version = "0.10.0-alpha.33", optional = true }
 openraft-rt-tokio = { version = "0.10.0-alpha.33", optional = true }
 
 # AiDb storage engine
-aidb = { git = "https://github.com/wiqun/AiDb.git", rev = "a721a5355c2d260870c8040e84c5b8ec26458b5c" }
+aidb = { git = "https://github.com/wiqun/AiDb.git", rev = "24f76f5713e4f449117619bdd077fec2639d957c" }
 
 # Monitoring (optional)
 # Metrics HTTP server (monitoring feature)
