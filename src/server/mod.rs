@@ -13,8 +13,6 @@ pub mod slowlog;
 pub mod info_catalog;
 #[cfg(feature = "monitoring")]
 pub mod otel;
-#[cfg(feature = "monitoring")]
-pub mod otel_metrics;
 
 pub mod process_metrics;
 

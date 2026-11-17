@@ -409,19 +409,12 @@ impl Connection {
                 timing.report_read_next(n);
             }
             self.state.metrics().on_net_input_bytes(n as u64);
-            tracing::debug!(bytes = n, "kv.read.complete");
         }
         Ok(n)
     }
 
     async fn parse_frame(&mut self) -> Result<Option<RespValue>> {
-        let before = self.parser.buffer_len();
-        let result = self.parser.parse();
-        if let Ok(Some(_)) = &result {
-            let frame_size = before.saturating_sub(self.parser.buffer_len());
-            tracing::debug!(frame_size, "kv.parse.complete");
-        }
-        result
+        self.parser.parse()
     }
 
     async fn process_value(&mut self, value: RespValue) -> Result<()> {
@@ -605,12 +598,33 @@ impl Connection {
                 if let Some(start) = started {
                     self.record_command_observability(cmd, args, start, false);
                 }
-                tracing::error!(
-                  command = cmd,
-                  client_id = self.client_id,
-                  error = %error,
-                  "kv.command.error"
-                );
+                match &error {
+                    Error::Command(_) | Error::Protocol(_) | Error::Config(_) => {
+                        tracing::debug!(
+                            command = cmd,
+                            client_id = self.client_id,
+                            error = %error,
+                            "kv.command.rejected"
+                        );
+                    }
+                    #[cfg(feature = "cluster")]
+                    Error::Cluster(_) => {
+                        tracing::warn!(
+                            command = cmd,
+                            client_id = self.client_id,
+                            error = %error,
+                            "kv.command.cluster_error"
+                        );
+                    }
+                    Error::Storage(_) | Error::Io(_) => {
+                        tracing::error!(
+                            command = cmd,
+                            client_id = self.client_id,
+                            error = %error,
+                            "kv.command.error"
+                        );
+                    }
+                }
                 self.write_error(&error).await
             }
         }

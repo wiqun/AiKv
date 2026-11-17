@@ -20,13 +20,18 @@ use aikv::command::blocking;
 use aikv::config::{
     print_resolved_config, resolve, should_export_traces, Cli, EngineKind, ResolvedSettings,
 };
-use aikv::server::{ConnectionConfig, Server, ServerSharedState};
+use aikv::server::{
+    config::{expand_log_filter, LogReloadCallback},
+    ConnectionConfig, Server, ServerSharedState,
+};
 use aikv::storage::ttl_filter::TtlExpireFilter;
 use aikv::storage::{
     AiDbEngine, KvStorage, KvStorageAdapter, MemoryEngine, StorageEngineKind, StorageObservation,
 };
 use clap::Parser;
-use tracing_subscriber::{fmt, prelude::*, EnvFilter, Registry};
+use tracing_appender::non_blocking::WorkerGuard;
+use tracing_appender::rolling::{RollingFileAppender, Rotation};
+use tracing_subscriber::{fmt, fmt::writer::MakeWriterExt, prelude::*, reload, Registry};
 
 /// Storage 构建结果: (storage, engine_kind, data_dir, 可选的 DB 引用)
 type StorageBuildResult = Result<
@@ -45,7 +50,7 @@ async fn build_storage(
 ) -> StorageBuildResult {
     match settings.engine {
         EngineKind::Memory => Ok((
-            MemoryEngine::with_observation(16, Some(observation)),
+            MemoryEngine::with_observation(settings.server_ext.databases.max(1), Some(observation)),
             StorageEngineKind::Memory,
             None,
             None,
@@ -512,7 +517,41 @@ async fn init_cluster(
     Ok(())
 }
 
-fn init_logging(settings: &ResolvedSettings) {
+fn build_make_writer(
+    obs: &aikv::config::ResolvedObservability,
+) -> (fmt::writer::BoxMakeWriter, Vec<WorkerGuard>) {
+    let mut guards = Vec::new();
+    let (stderr_nb, stderr_guard) = tracing_appender::non_blocking(std::io::stderr());
+    guards.push(stderr_guard);
+
+    if let Some(dir) = obs.log_dir.as_ref() {
+        match RollingFileAppender::builder()
+            .rotation(Rotation::DAILY)
+            .filename_prefix("aikv")
+            .filename_suffix("log")
+            .max_log_files(obs.log_max_files.max(1))
+            .build(dir)
+        {
+            Ok(file_appender) => {
+                let (file_nb, file_guard) = tracing_appender::non_blocking(file_appender);
+                guards.push(file_guard);
+                return (
+                    fmt::writer::BoxMakeWriter::new(stderr_nb.and(file_nb)),
+                    guards,
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "warn: failed to initialize rolling log file in {}: {e}",
+                    dir.display()
+                );
+            }
+        }
+    }
+    (fmt::writer::BoxMakeWriter::new(stderr_nb), guards)
+}
+
+fn init_logging(settings: &ResolvedSettings) -> (Vec<WorkerGuard>, Option<LogReloadCallback>) {
     aidb::observability::set_traces_enabled(should_export_traces(
         settings.observability.otel_sample_ratio,
         settings.observability.otlp_endpoint.as_deref(),
@@ -526,70 +565,71 @@ fn init_logging(settings: &ResolvedSettings) {
     let cluster_node_id: Option<u64> = None;
 
     let log_level = settings.observability.log_level.as_str();
+    let initial_filter = expand_log_filter(log_level)
+        .unwrap_or_else(|_| expand_log_filter("info").expect("default info filter valid"));
+    let (writer, guards) = build_make_writer(&settings.observability);
 
+    let mut layers: Vec<Box<dyn tracing_subscriber::Layer<Registry> + Send + Sync>> = Vec::new();
     #[cfg(feature = "monitoring")]
     if let Some(config) = aikv::server::otel::otel_config_from_settings(
         &settings.observability,
         tcp_port,
         cluster_node_id,
     ) {
-        if aikv::server::otel::init_otel(&config) && aikv::server::otel::tracer_installed() {
-            let tracer = opentelemetry::global::tracer("aikv");
-            let otel_layer = tracing_opentelemetry::layer()
-                .with_tracer(tracer)
-                .with_filter(tracing_subscriber::filter::LevelFilter::TRACE);
-            let base = Registry::default().with(otel_layer);
-            let subscriber = if json_enabled {
-                base.with(
-                    fmt::layer()
-                        .json()
-                        .flatten_event(false)
-                        .with_current_span(true)
-                        .with_span_list(true)
-                        .with_writer(std::io::stderr)
-                        .with_filter(EnvFilter::new(log_level))
+        if aikv::server::otel::init_otel(&config) {
+            if aikv::server::otel::tracer_installed() {
+                let tracer = opentelemetry::global::tracer("aikv");
+                layers.push(
+                    tracing_opentelemetry::layer()
+                        .with_tracer(tracer)
+                        .with_filter(tracing_subscriber::filter::LevelFilter::TRACE)
                         .boxed(),
-                )
-            } else {
-                base.with(
-                    fmt::layer()
-                        .compact()
-                        .with_target(true)
-                        .with_writer(std::io::stderr)
-                        .with_filter(EnvFilter::new(log_level))
-                        .boxed(),
-                )
-            };
-            let _ = subscriber.try_init();
-            return;
+                );
+            }
+            if let Some(lp) = aikv::server::otel::logger_provider() {
+                let otel_log_filter = tracing_subscriber::filter::filter_fn(|meta| {
+                    !aikv::server::otel::is_otel_self_target(meta.target())
+                        && meta.level() <= &tracing::Level::INFO
+                });
+                let bridge =
+                    opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(lp)
+                        .with_filter(otel_log_filter)
+                        .boxed();
+                layers.push(bridge);
+            }
         }
     }
 
-    // 无 OTel 时只初始化 fmt subscriber
-    let subscriber = if json_enabled {
-        Registry::default().with(
-            fmt::layer()
-                .json()
-                .flatten_event(false)
-                .with_current_span(true)
-                .with_span_list(true)
-                .with_writer(std::io::stderr)
-                .with_filter(EnvFilter::new(log_level))
-                .boxed(),
-        )
+    let (reload_layer, reload_handle) = reload::Layer::new(initial_filter);
+    let reload_cb: LogReloadCallback = Arc::new(move |raw: &str| {
+        let next = expand_log_filter(raw)?;
+        reload_handle
+            .reload(next)
+            .map_err(|e| format!("failed to reload log filter: {e}"))
+    });
+    let fmt_layer = if json_enabled {
+        fmt::layer()
+            .json()
+            .flatten_event(true)
+            .with_current_span(true)
+            .with_span_list(false)
+            .with_writer(writer)
+            .with_filter(reload_layer)
+            .boxed()
     } else {
-        Registry::default().with(
-            fmt::layer()
-                .compact()
-                .with_target(true)
-                .with_writer(std::io::stderr)
-                .with_filter(EnvFilter::new(log_level))
-                .boxed(),
-        )
+        fmt::layer()
+            .compact()
+            .with_target(true)
+            .with_writer(writer)
+            .with_filter(reload_layer)
+            .boxed()
     };
-    if let Err(e) = subscriber.try_init() {
+    layers.push(fmt_layer);
+
+    if let Err(e) = Registry::default().with(layers).try_init() {
         eprintln!("warn: tracing subscriber already initialized ({})", e);
     }
+    (guards, Some(reload_cb))
 }
 
 #[tokio::main]
@@ -611,7 +651,7 @@ async fn main() {
             }
         }
     }
-    init_logging(&settings);
+    let (_log_guards, log_reloader) = init_logging(&settings);
     if let Some(path) = settings.config_file_used.as_deref() {
         tracing::info!("config file: {}", path.display());
     } else {
@@ -667,6 +707,9 @@ async fn main() {
         Some(observation),
     );
     state.apply_resolved_settings(&settings);
+    if let Some(cb) = log_reloader {
+        state.set_log_reloader(cb);
+    }
 
     // 集群初始化 (等待 init_cluster 完成, 确保 CLUSTER_STATE_MGR 就绪)
     #[cfg(feature = "cluster")]
@@ -749,7 +792,7 @@ async fn main() {
                 let text = aikv::server::export::render_prometheus(&current);
                 aikv::server::export::publish_metrics_text(text);
                 if otlp_enabled {
-                    let mut sink = aikv::server::export::OtelSink;
+                    let mut sink = aikv::server::export::OtelSink::default();
                     aikv::server::export::push_deltas(&current, &baseline, &mut sink);
                     aikv::server::otel::flush_otel_metrics().await;
                 }
@@ -780,7 +823,7 @@ fn export_spans_enabled_at(level: &str) -> bool {
         .with(
             fmt::layer()
                 .with_writer(std::io::sink)
-                .with_filter(EnvFilter::new(level)),
+                .with_filter(expand_log_filter(level).unwrap()),
         );
     let enabled = tracing::subscriber::with_default(subscriber, || {
         !aidb::observability::optional_span("kv_command").is_disabled()
@@ -796,6 +839,15 @@ mod logging_filter_tests {
     #[test]
     fn error_log_level_still_creates_command_span() {
         assert!(export_spans_enabled_at("error"));
+    }
+
+    #[test]
+    fn default_info_filter_suppresses_openraft_and_tonic() {
+        let filter = super::expand_log_filter("info").unwrap();
+        let text = filter.to_string();
+        assert!(text.contains("openraft=warn"));
+        assert!(text.contains("tonic=warn"));
+        assert!(super::expand_log_filter("   ").is_err());
     }
 
     #[test]

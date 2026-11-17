@@ -265,21 +265,28 @@ fn walk_grep(dir: &std::path::Path, pattern: &str) -> Result<bool, std::io::Erro
 #[cfg(feature = "monitoring")]
 #[tokio::test]
 async fn test_otel_metrics_integration() {
-    use aikv::server::otel_metrics::testutil;
+    use aikv::server::otel::testutil::{self, InMemoryExportHarness};
 
-    let (exporter, otel) = testutil::init_in_memory();
-    let server_metrics = aikv::server::ServerMetrics::default().with_otel(otel);
-    let before = testutil::counter_sum(&exporter, "aikv_connections_total");
+    let mut harness = InMemoryExportHarness::new();
+    let server_metrics = aikv::server::ServerMetrics::default();
 
     server_metrics.on_connect();
     server_metrics.on_command("SET", true);
     server_metrics.on_command("GET", false);
+    server_metrics.on_command_done("SET", true, 250);
 
-    aikv::server::info_catalog::sync_otel_from_server_metrics(&server_metrics);
+    harness.push_from(&server_metrics);
 
-    let after = testutil::counter_sum(&exporter, "aikv_connections_total");
-    assert!(after > before, "connections_total should increase");
-    assert!(testutil::metric_exists(&exporter, "aikv_commands_total"));
+    let after = testutil::gauge_value(&harness.exporter, "aikv_connections_current");
+    assert_eq!(after, 1.0, "connections_current should increase");
+    assert!(testutil::metric_exists(
+        &harness.exporter,
+        "aikv_commands_total"
+    ));
+    assert_eq!(
+        testutil::histogram_count(&harness.exporter, "aikv_command_duration_seconds"),
+        1
+    );
 }
 
 #[cfg(feature = "monitoring")]
@@ -287,11 +294,11 @@ async fn test_otel_metrics_integration() {
 async fn test_maxclients_rejection_metrics() {
     use std::sync::Arc;
 
-    use aikv::server::otel_metrics::testutil;
+    use aikv::server::otel::testutil::{self, InMemoryExportHarness};
     use aikv::server::{ConnectionConfig, ServerSharedState};
     use aikv::storage::{KvStorage, MemoryEngine};
 
-    let (exporter, _otel) = testutil::init_in_memory();
+    let mut harness = InMemoryExportHarness::new();
     let storage: Arc<dyn KvStorage> = MemoryEngine::new(16);
     let state = ServerSharedState::new(
         ConnectionConfig {
@@ -308,10 +315,10 @@ async fn test_maxclients_rejection_metrics() {
     assert!(state.try_register_connection());
     assert!(!state.try_register_connection());
 
-    aikv::server::info_catalog::sync_otel_from_server_metrics(state.metrics());
+    harness.push_from(state.metrics());
 
     assert_eq!(
-        testutil::counter_sum(&exporter, "aikv_rejected_connections_total"),
+        testutil::counter_sum(&harness.exporter, "aikv_connections_rejected_total"),
         1
     );
 }
@@ -321,7 +328,6 @@ async fn test_maxclients_rejection_metrics() {
 async fn test_runtime_metrics_refresh() {
     use std::sync::Arc;
 
-    use aikv::server::otel_metrics::testutil;
     use aikv::server::{ConnectionConfig, ServerSharedState};
     use aikv::storage::{KvStorage, MemoryEngine, StorageEngineKind, StorageObservation};
     use bytes::Bytes;
@@ -330,7 +336,6 @@ async fn test_runtime_metrics_refresh() {
         Bytes::copy_from_slice(s.as_bytes())
     }
 
-    let (exporter, _otel) = testutil::init_in_memory();
     let observation = StorageObservation::new();
     let storage: Arc<dyn KvStorage> =
         MemoryEngine::with_observation(16, Some(Arc::clone(&observation)));
@@ -377,34 +382,25 @@ async fn test_runtime_metrics_refresh() {
         "expected non-zero memory on ServerMetrics"
     );
     assert_eq!(state.metrics().blocked_clients(), 0);
-    let _ = exporter;
 }
 
 #[cfg(all(feature = "monitoring", target_os = "linux"))]
 #[tokio::test]
 async fn process_resident_memory_bytes_in_registry() {
-    use std::sync::Arc;
-
-    use aikv::server::otel_metrics::testutil;
+    use aikv::server::otel::testutil::{self, InMemoryExportHarness};
     use aikv::server::ServerMetrics;
 
-    let (exporter, otel) = testutil::init_in_memory();
-    let server_metrics = ServerMetrics::default().with_otel(Arc::clone(&otel));
-    server_metrics.refresh_process_metrics();
-    server_metrics.refresh_process_metrics();
-    otel.add_process_cpu_delta(0.001, 0.001);
+    let mut harness = InMemoryExportHarness::new();
+    let server_metrics = ServerMetrics::default();
+    harness.push_from(&server_metrics);
 
     assert!(
-        testutil::metric_exists(&exporter, "aikv_process_resident_memory_bytes"),
-        "expected aikv_process_resident_memory_bytes registered"
+        testutil::metric_exists(&harness.exporter, "aikv_rss_bytes"),
+        "expected aikv_rss_bytes registered"
     );
     assert!(
-        testutil::gauge_value(&exporter, "aikv_process_resident_memory_bytes") > 0.0,
+        testutil::gauge_value(&harness.exporter, "aikv_rss_bytes") > 0.0,
         "expected RSS gauge > 0"
-    );
-    assert!(
-        testutil::metric_exists(&exporter, "process.cpu.time"),
-        "expected OTel process.cpu.time counter"
     );
 }
 
@@ -604,14 +600,14 @@ async fn info_metrics_consistency_after_commands() {
 async fn otel_counters_sync_only_on_refresh() {
     use std::sync::Arc;
 
-    use aikv::server::otel_metrics::testutil;
+    use aikv::server::otel::testutil::{self, InMemoryExportHarness};
     use aikv::server::{ConnectionConfig, ServerSharedState};
     use aikv::storage::{KvStorage, MemoryEngine};
     use bytes::Bytes;
 
-    let (exporter, _otel) = testutil::init_in_memory();
-    let pre_cmds = testutil::counter_sum(&exporter, "aikv_commands_total");
-    let pre_hits = testutil::counter_sum(&exporter, "aikv_keyspace_hits_total");
+    let harness = InMemoryExportHarness::new();
+    let pre_cmds = testutil::counter_sum(&harness.exporter, "aikv_commands_total");
+    let pre_hits = testutil::counter_sum(&harness.exporter, "aikv_keyspace_hits_total");
 
     fn b(s: &str) -> Bytes {
         Bytes::copy_from_slice(s.as_bytes())
@@ -629,20 +625,20 @@ async fn otel_counters_sync_only_on_refresh() {
     router.execute("GET", &[b("k")], &mut db).await.unwrap();
 
     assert_eq!(
-        testutil::counter_sum(&exporter, "aikv_commands_total"),
+        testutil::counter_sum(&harness.exporter, "aikv_commands_total"),
         pre_cmds,
-        "OTel commands_total must not change before refresh sync"
+        "OTel commands_total must not change before export push"
     );
     assert_eq!(
-        testutil::counter_sum(&exporter, "aikv_keyspace_hits_total"),
+        testutil::counter_sum(&harness.exporter, "aikv_keyspace_hits_total"),
         pre_hits,
-        "OTel keyspace_hits must not change before refresh sync"
+        "OTel keyspace_hits must not change before export push"
     );
 
     state.refresh_runtime_metrics().await;
 
     assert_eq!(
-        testutil::counter_sum(&exporter, "aikv_commands_total") - pre_cmds,
+        testutil::counter_sum(&harness.exporter, "aikv_commands_total") - pre_cmds,
         0,
         "refresh must not push the old command counter"
     );

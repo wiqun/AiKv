@@ -160,6 +160,11 @@ fn append_process(
         labels: vec![],
         value: metrics.connected_clients() as f64,
     });
+    snapshot.gauges.push(GaugeSample {
+        name: "aikv_blocked_clients".into(),
+        labels: vec![],
+        value: metrics.blocked_clients() as f64,
+    });
     push_counter(
         snapshot,
         "aikv_connections_rejected_total",
@@ -297,6 +302,18 @@ fn append_redirects(
         "aikv_redirects_total",
         vec![("type".into(), "ask".into())],
         metrics.redirect_count(RedirectKind::Ask),
+    );
+    push_counter(
+        snapshot,
+        "aikv_gossip_messages_total",
+        vec![],
+        metrics.cluster_messages_sent(),
+    );
+    push_counter(
+        snapshot,
+        "aikv_failover_total",
+        vec![],
+        metrics.failover_count(),
     );
     for (group, snap) in metrics.propose_rows() {
         snapshot.histograms.push(HistogramSample {
@@ -464,6 +481,25 @@ fn append_engine_counters(
         vec![],
         current.compaction_pending_bytes,
     ));
+    snapshot
+        .gauges
+        .push(gauge("aidb_live_bytes", vec![], current.live_bytes));
+    #[cfg(feature = "cluster")]
+    {
+        for (t_idx, rpc_type) in aidb::statistics::RaftRpcType::ALL.iter().enumerate() {
+            for (d_idx, dir) in aidb::statistics::RaftRpcDirection::ALL.iter().enumerate() {
+                push_counter(
+                    snapshot,
+                    "aidb_raft_rpc_total",
+                    vec![
+                        ("rpc_type".into(), rpc_type.as_str().into()),
+                        ("direction".into(), dir.as_str().into()),
+                    ],
+                    current.raft_rpc[t_idx][d_idx],
+                );
+            }
+        }
+    }
     snapshot.gauges.push(GaugeSample {
         name: "aidb_flush_last_duration_seconds".into(),
         labels: vec![],
@@ -576,26 +612,102 @@ fn labels_inside(labels: &[(String, String)]) -> String {
         .join(",")
 }
 
-/// monitoring 下计数器一次 `add(delta)`. 直方图不循环 `record`.
+/// monitoring 下缓存 instrument 并按增量推送 Counter/Gauge/Histogram.
 #[cfg(feature = "monitoring")]
-pub struct OtelSink;
+pub struct OtelSink {
+    meter: opentelemetry::metrics::Meter,
+    counters: std::collections::HashMap<String, opentelemetry::metrics::Counter<u64>>,
+    gauges: std::collections::HashMap<String, opentelemetry::metrics::Gauge<f64>>,
+    histograms: std::collections::HashMap<String, opentelemetry::metrics::Histogram<f64>>,
+    prev_hist_buckets: std::collections::HashMap<String, Vec<u64>>,
+}
+
+#[cfg(feature = "monitoring")]
+impl Default for OtelSink {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "monitoring")]
+impl OtelSink {
+    pub fn new() -> Self {
+        Self::with_meter(opentelemetry::global::meter("aikv-export"))
+    }
+
+    pub fn with_meter(meter: opentelemetry::metrics::Meter) -> Self {
+        Self {
+            meter,
+            counters: std::collections::HashMap::new(),
+            gauges: std::collections::HashMap::new(),
+            histograms: std::collections::HashMap::new(),
+            prev_hist_buckets: std::collections::HashMap::new(),
+        }
+    }
+
+    fn hist_series_key(name: &str, labels: &[(&str, &str)]) -> String {
+        let mut key = String::from(name);
+        for (k, v) in labels {
+            key.push('|');
+            key.push_str(k);
+            key.push('=');
+            key.push_str(v);
+        }
+        key
+    }
+}
 
 #[cfg(feature = "monitoring")]
 impl ExportSink for OtelSink {
     fn add_counter(&mut self, name: &str, labels: &[(&str, &str)], delta: u64) {
-        let meter = opentelemetry::global::meter("aikv-export");
-        let counter = meter.u64_counter(name.to_string()).build();
+        let counter = self
+            .counters
+            .entry(name.to_string())
+            .or_insert_with(|| self.meter.u64_counter(name.to_string()).build());
         counter.add(delta, &key_values(labels));
     }
 
     fn set_gauge(&mut self, name: &str, labels: &[(&str, &str)], value: f64) {
-        let meter = opentelemetry::global::meter("aikv-export");
-        let gauge = meter.f64_gauge(name.to_string()).build();
+        let gauge = self
+            .gauges
+            .entry(name.to_string())
+            .or_insert_with(|| self.meter.f64_gauge(name.to_string()).build());
         gauge.record(value, &key_values(labels));
     }
 
     fn set_histogram(&mut self, name: &str, labels: &[(&str, &str)], snap: &LatencySnapshot) {
-        let _ = (name, labels, snap.count, snap.sum_us);
+        let series_key = Self::hist_series_key(name, labels);
+        let prev = self
+            .prev_hist_buckets
+            .entry(series_key)
+            .or_insert_with(|| vec![0; snap.buckets.len()]);
+        if prev.len() != snap.buckets.len() {
+            *prev = vec![0; snap.buckets.len()];
+        }
+
+        let kvs = key_values(labels);
+        let hist = self
+            .histograms
+            .entry(name.to_string())
+            .or_insert_with(|| self.meter.f64_histogram(name.to_string()).build());
+        let bounds = &aidb::statistics::COMMAND_DURATION_BOUNDS_US;
+
+        for (idx, &cur) in snap.buckets.iter().enumerate() {
+            let delta = cur.saturating_sub(prev[idx]);
+            prev[idx] = cur;
+            if delta == 0 {
+                continue;
+            }
+            let sample_secs = if idx < bounds.len() {
+                let low = if idx == 0 { 0 } else { bounds[idx - 1] };
+                ((low as f64) + (bounds[idx] as f64)) * 0.5 / 1_000_000.0
+            } else {
+                (*bounds.last().unwrap_or(&10_000_000) as f64 * 1.5) / 1_000_000.0
+            };
+            for _ in 0..delta {
+                hist.record(sample_secs, &kvs);
+            }
+        }
     }
 }
 

@@ -105,6 +105,25 @@ pub struct ClientInfo {
     pub db: usize,
 }
 
+pub type LogReloadCallback = Arc<dyn Fn(&str) -> std::result::Result<(), String> + Send + Sync>;
+
+/// 将单一日志级别扩展为带噪声模块压制的标准 `EnvFilter` 表达式.
+pub fn expand_log_filter(raw: &str) -> std::result::Result<tracing_subscriber::EnvFilter, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("loglevel cannot be empty".to_string());
+    }
+    let expr = if !trimmed.contains(',') && !trimmed.contains('=') {
+        format!(
+            "{trimmed},openraft=warn,tonic=warn,h2=warn,hyper=warn,opentelemetry=warn,reqwest=warn"
+        )
+    } else {
+        trimmed.to_string()
+    };
+    tracing_subscriber::EnvFilter::try_new(&expr)
+        .map_err(|e| format!("Invalid loglevel '{raw}': {e}"))
+}
+
 pub struct ServerSharedState {
     pub connection_config: Arc<ConnectionConfig>,
     pub runtime_config: Arc<RuntimeMutableConfig>,
@@ -131,6 +150,7 @@ pub struct ServerSharedState {
     next_client_id: AtomicUsize,
     pub(crate) transaction_gate: TransactionGate,
     storage_observation: Arc<StorageObservation>,
+    log_reloader: RwLock<Option<LogReloadCallback>>,
 }
 
 impl ServerSharedState {
@@ -235,13 +255,6 @@ impl ServerSharedState {
             let point_reads = Arc::new(crate::storage::observation::PointReadCounter::default());
             storage.set_point_read_counter(Arc::clone(&point_reads));
             m.attach_point_reads(point_reads);
-            #[cfg(feature = "monitoring")]
-            let m = {
-                let otel = super::otel_metrics::OtelMetrics::init_global(
-                    opentelemetry::global::meter("aikv"),
-                );
-                m.with_otel(otel)
-            };
             Arc::new(m)
         };
         Arc::new(Self {
@@ -270,7 +283,22 @@ impl ServerSharedState {
             next_client_id: AtomicUsize::new(1),
             transaction_gate: Arc::new(tokio::sync::RwLock::new(())),
             storage_observation: storage_observation.unwrap_or_default(),
+            log_reloader: RwLock::new(None),
         })
+    }
+
+    /// 挂载运行时 `EnvFilter` 热更新回调 (由 main 初始化 subscriber 后注册).
+    pub fn set_log_reloader(&self, callback: LogReloadCallback) {
+        *self.log_reloader.write() = Some(callback);
+    }
+
+    /// 校验并热更新运行时日志过滤级别.
+    pub fn reload_log_level(&self, raw: &str) -> std::result::Result<(), String> {
+        expand_log_filter(raw)?;
+        if let Some(cb) = self.log_reloader.read().clone() {
+            cb(raw)?;
+        }
+        Ok(())
     }
 
     pub fn record_save_success(&self) {
@@ -404,13 +432,6 @@ impl ServerSharedState {
         }
         let expired = self.storage_observation.drain_expired_keys();
         self.metrics.record_expired_keys(expired);
-        #[cfg(feature = "monitoring")]
-        {
-            if let Some(otel) = self.metrics.otel_handle() {
-                otel.set_rebuild_counters_duration(self.storage.rebuild_counters_duration_us());
-            }
-            // 命令和字节计数只走导出快照. 这里不再把同一批累计值同步进另一套 OTel 计数器.
-        }
     }
 
     pub fn uptime_secs(&self) -> u64 {

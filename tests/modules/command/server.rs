@@ -591,3 +591,30 @@ async fn test_latency_help() {
     };
     assert!(!items.is_empty());
 }
+
+#[tokio::test]
+async fn test_config_set_loglevel_invokes_reloader_and_validates() {
+    use std::sync::{Arc, Mutex};
+
+    let (router, shared) = router_with_shared();
+    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen_clone = Arc::clone(&seen);
+    shared.set_log_reloader(Arc::new(move |raw: &str| {
+        seen_clone.lock().unwrap().push(raw.to_string());
+        Ok(())
+    }));
+
+    let mut db = 0;
+    let resp = router
+        .execute("CONFIG", &[b("SET"), b("loglevel"), b("debug")], &mut db)
+        .await
+        .unwrap();
+    assert_eq!(resp, aikv::protocol::RespValue::SimpleString("OK".into()));
+    assert_eq!(*seen.lock().unwrap(), vec!["debug".to_string()]);
+
+    let err = router
+        .execute("CONFIG", &[b("SET"), b("loglevel"), b("   ")], &mut db)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("empty"));
+}

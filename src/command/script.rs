@@ -115,10 +115,16 @@ impl ScriptPerfSampler {
             let raft_avg = self.total_raft_us.load(Ordering::Relaxed) / n;
             let overall_avg = self.total_overall_us.load(Ordering::Relaxed) / n;
             let hold_avg = self.total_lock_hold_us.load(Ordering::Relaxed) / n;
-            tracing::info!(
+            tracing::debug!(
                 target: "perf",
-                "[SCRIPT_PERF] samples={} avg_lock_us={} avg_lua_us={} avg_prepare_us={} avg_raft_us={} avg_overall_us={} avg_lock_hold_us={}",
-                n, lock_avg, lua_avg, prep_avg, raft_avg, overall_avg, hold_avg
+                samples = n,
+                avg_lock_us = lock_avg,
+                avg_lua_us = lua_avg,
+                avg_prepare_us = prep_avg,
+                avg_raft_us = raft_avg,
+                avg_overall_us = overall_avg,
+                avg_lock_hold_us = hold_avg,
+                "script_perf"
             );
         }
     }
@@ -155,15 +161,15 @@ impl ScriptIoSampler {
         self.write_us.fetch_add(stats.write_us, Ordering::Relaxed);
         let n = self.samples.fetch_add(1, Ordering::Relaxed) + 1;
         if n.is_multiple_of(1000) {
-            tracing::info!(
+            tracing::debug!(
                 target: "perf",
-                "[SCRIPT_IO_PERF] samples={} avg_get_us={} avg_range_us={} avg_prefix_us={} avg_scan_us={} avg_write_us={}",
-                n,
-                self.get_us.load(Ordering::Relaxed) / n,
-                self.range_us.load(Ordering::Relaxed) / n,
-                self.prefix_us.load(Ordering::Relaxed) / n,
-                self.scan_us.load(Ordering::Relaxed) / n,
-                self.write_us.load(Ordering::Relaxed) / n
+                samples = n,
+                avg_get_us = self.get_us.load(Ordering::Relaxed) / n,
+                avg_range_us = self.range_us.load(Ordering::Relaxed) / n,
+                avg_prefix_us = self.prefix_us.load(Ordering::Relaxed) / n,
+                avg_scan_us = self.scan_us.load(Ordering::Relaxed) / n,
+                avg_write_us = self.write_us.load(Ordering::Relaxed) / n,
+                "script_io_perf"
             );
         }
     }

@@ -52,7 +52,6 @@ impl Connection {
         let len = self.write_buf.len();
         self.stream.write_all(&self.write_buf).await?;
         self.state.metrics().on_net_output_bytes(len as u64);
-        tracing::debug!(response_size = len, "kv.write.complete");
         self.write_buf.clear();
         if self.write_buf.capacity() > MAX_WRITE_BUF_RETAIN_CAPACITY {
             self.write_buf = bytes::BytesMut::with_capacity(DEFAULT_WRITE_BUF_CAPACITY);

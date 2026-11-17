@@ -35,14 +35,14 @@ fn blocked_clients_defaults_to_zero() {
 #[cfg(feature = "monitoring")]
 #[test]
 fn sync_stats_gauges_exports_blocked_clients() {
-    use aikv::server::otel_metrics::testutil;
+    use aikv::server::otel::testutil::{self, InMemoryExportHarness};
 
-    let (exporter, otel) = testutil::init_in_memory();
-    let metrics = ServerMetrics::default().with_otel(otel.clone());
+    let mut harness = InMemoryExportHarness::new();
+    let metrics = ServerMetrics::default();
     metrics.on_client_blocked();
-    otel.sync_stats_gauges(&metrics);
+    harness.push_from(&metrics);
     assert_eq!(
-        testutil::gauge_value(&exporter, "aikv_blocked_clients"),
+        testutil::gauge_value(&harness.exporter, "aikv_blocked_clients"),
         1.0
     );
 }
@@ -51,22 +51,22 @@ fn sync_stats_gauges_exports_blocked_clients() {
 #[cfg(feature = "monitoring")]
 #[test]
 fn sync_counters_mirrors_gossip_messages_total() {
-    use aikv::server::otel_metrics::testutil;
+    use aikv::server::otel::testutil::{self, InMemoryExportHarness};
 
-    let (exporter, otel) = testutil::init_in_memory();
-    let metrics = ServerMetrics::default().with_otel(otel.clone());
+    let mut harness = InMemoryExportHarness::new();
+    let metrics = ServerMetrics::default();
     metrics.on_gossip_refresh(3);
-    otel.sync_counters(&metrics);
+    harness.push_from(&metrics);
     assert_eq!(
-        testutil::counter_sum(&exporter, "aikv_gossip_messages_total"),
+        testutil::counter_sum(&harness.exporter, "aikv_gossip_messages_total"),
         1
     );
 
     // 第二次 refresh 产生增量, 累计 2.
     metrics.on_gossip_refresh(5);
-    otel.sync_counters(&metrics);
+    harness.push_from(&metrics);
     assert_eq!(
-        testutil::counter_sum(&exporter, "aikv_gossip_messages_total"),
+        testutil::counter_sum(&harness.exporter, "aikv_gossip_messages_total"),
         2
     );
 }
@@ -75,14 +75,17 @@ fn sync_counters_mirrors_gossip_messages_total() {
 #[cfg(feature = "monitoring")]
 #[test]
 fn sync_counters_mirrors_failover_total() {
-    use aikv::server::otel_metrics::testutil;
+    use aikv::server::otel::testutil::{self, InMemoryExportHarness};
 
-    let (exporter, otel) = testutil::init_in_memory();
-    let metrics = ServerMetrics::default().with_otel(otel.clone());
+    let mut harness = InMemoryExportHarness::new();
+    let metrics = ServerMetrics::default();
     metrics.on_failover();
     metrics.on_failover();
-    otel.sync_counters(&metrics);
-    assert_eq!(testutil::counter_sum(&exporter, "aikv_failover_total"), 2);
+    harness.push_from(&metrics);
+    assert_eq!(
+        testutil::counter_sum(&harness.exporter, "aikv_failover_total"),
+        2
+    );
 }
 
 /// cluster redirect (MOVED/ASK) 镜像到 `aikv_cluster_redirects_total` (T8),
@@ -90,16 +93,16 @@ fn sync_counters_mirrors_failover_total() {
 #[cfg(feature = "monitoring")]
 #[test]
 fn sync_commandstats_mirrors_cluster_redirects_total() {
-    use aikv::server::otel_metrics::testutil;
+    use aikv::server::otel::testutil::{self, InMemoryExportHarness};
 
-    let (exporter, otel) = testutil::init_in_memory();
-    let metrics = ServerMetrics::default().with_otel(otel.clone());
+    let mut harness = InMemoryExportHarness::new();
+    let metrics = ServerMetrics::default();
     metrics.on_cluster_redirect("moved");
     metrics.on_cluster_redirect("moved");
     metrics.on_cluster_redirect("ask");
-    otel.sync_commandstats(&metrics);
+    harness.push_from(&metrics);
     assert_eq!(
-        testutil::counter_sum(&exporter, "aikv_cluster_redirects_total"),
+        testutil::counter_sum(&harness.exporter, "aikv_redirects_total"),
         3
     );
 }
