@@ -154,12 +154,18 @@ json_log = true
 # Default: "info"
 log_level = "info"
 
-# OTLP 遥测配置 (可选; 留空则仅暴露 HTTP /metrics)
+# 可选文件日志轮转目录与保留天数 (不配置则仅输出 stderr)
+# log_dir = "/var/log/aikv"
+# log_max_files = 7
+
+# OTLP 遥测配置 (可选; 留空则仅暴露 HTTP /metrics; OpenObserve gRPC 默认 5081)
 # metrics_export_interval_secs = 15
-# otlp_endpoint = "http://127.0.0.1:4317"
+# otlp_endpoint = "http://127.0.0.1:5081"
 # otel_service_name = "aikv"
 # otel_sample_ratio = 0.0
 # host_label = "aikv-single"
 # deployment_env = "dev"
 # [observability.otlp_headers]
+# Authorization = "Basic <base64(email:password)>"
 # organization = "default"
+# stream-name = "default"

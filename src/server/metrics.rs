@@ -130,20 +130,6 @@ pub struct ServerMetrics {
     redirect_moved: AtomicU64,
     redirect_ask: AtomicU64,
     propose_duration: DashMap<u64, LatencyHistogram>,
-    #[cfg(feature = "monitoring")]
-    process_last_cpu_user_seconds_bits: AtomicU64,
-    #[cfg(feature = "monitoring")]
-    process_last_cpu_sys_seconds_bits: AtomicU64,
-    #[cfg(feature = "monitoring")]
-    process_last_read_bytes: AtomicU64,
-    #[cfg(feature = "monitoring")]
-    process_last_write_bytes: AtomicU64,
-    #[cfg(feature = "monitoring")]
-    process_last_voluntary_ctxt_switches: AtomicU64,
-    #[cfg(feature = "monitoring")]
-    process_last_nonvoluntary_ctxt_switches: AtomicU64,
-    #[cfg(feature = "monitoring")]
-    otel: Option<Arc<super::otel_metrics::OtelMetrics>>,
 }
 
 impl Default for ServerMetrics {
@@ -195,38 +181,11 @@ impl Default for ServerMetrics {
             redirect_moved: AtomicU64::new(0),
             redirect_ask: AtomicU64::new(0),
             propose_duration: DashMap::new(),
-            #[cfg(feature = "monitoring")]
-            process_last_cpu_user_seconds_bits: AtomicU64::new(0),
-            #[cfg(feature = "monitoring")]
-            process_last_cpu_sys_seconds_bits: AtomicU64::new(0),
-            #[cfg(feature = "monitoring")]
-            process_last_read_bytes: AtomicU64::new(0),
-            #[cfg(feature = "monitoring")]
-            process_last_write_bytes: AtomicU64::new(0),
-            #[cfg(feature = "monitoring")]
-            process_last_voluntary_ctxt_switches: AtomicU64::new(0),
-            #[cfg(feature = "monitoring")]
-            process_last_nonvoluntary_ctxt_switches: AtomicU64::new(0),
-            #[cfg(feature = "monitoring")]
-            otel: None,
         }
     }
 }
 
 impl ServerMetrics {
-    /// 关联 OTel 指标实例 (仅在 monitoring feature 下生效).
-    #[cfg(feature = "monitoring")]
-    pub fn with_otel(mut self, otel: Arc<super::otel_metrics::OtelMetrics>) -> Self {
-        self.otel = Some(otel);
-        self
-    }
-
-    /// OTel 镜像句柄 (refresh / info_catalog sync).
-    #[cfg(feature = "monitoring")]
-    pub fn otel_handle(&self) -> Option<&Arc<super::otel_metrics::OtelMetrics>> {
-        self.otel.as_ref()
-    }
-
     pub fn on_connect(&self) {
         self.connections_total.fetch_add(1, Ordering::Relaxed);
         self.connected_clients.fetch_add(1, Ordering::Relaxed);
@@ -569,84 +528,9 @@ impl ServerMetrics {
         self.net_input_bytes.fetch_add(bytes, Ordering::Relaxed);
     }
 
-    /// 刷新进程 RSS / CPU / 磁盘 IO 指标 (仅 monitoring feature).
+    /// 保留的进程指标刷新钩子 (现由 `export::collect_export_snapshot` 直接采集并推送).
     #[cfg(feature = "monitoring")]
-    pub fn refresh_process_metrics(&self) {
-        let Some(ref otel) = self.otel else {
-            return;
-        };
-        if let Some(bytes) = crate::server::process_metrics::read_resident_memory_bytes() {
-            otel.set_process_rss(bytes);
-        }
-        if let Some((user_secs, sys_secs)) =
-            crate::server::process_metrics::read_cpu_user_sys_seconds()
-        {
-            let user_bits = user_secs.to_bits();
-            let sys_bits = sys_secs.to_bits();
-            let prev_user = self
-                .process_last_cpu_user_seconds_bits
-                .swap(user_bits, Ordering::Relaxed);
-            let prev_sys = self
-                .process_last_cpu_sys_seconds_bits
-                .swap(sys_bits, Ordering::Relaxed);
-            if prev_user != 0 && prev_sys != 0 {
-                let prev_user_secs = f64::from_bits(prev_user);
-                let prev_sys_secs = f64::from_bits(prev_sys);
-                let user_delta = if user_secs > prev_user_secs {
-                    user_secs - prev_user_secs
-                } else {
-                    0.0
-                };
-                let sys_delta = if sys_secs > prev_sys_secs {
-                    sys_secs - prev_sys_secs
-                } else {
-                    0.0
-                };
-                if user_delta > 0.0 || sys_delta > 0.0 {
-                    otel.add_process_cpu_delta(user_delta, sys_delta);
-                }
-            }
-        }
-        if let Some((read_bytes, write_bytes)) = crate::server::process_metrics::read_io_bytes() {
-            let prev_read = self
-                .process_last_read_bytes
-                .swap(read_bytes, Ordering::Relaxed);
-            if prev_read > 0 && read_bytes > prev_read {
-                let delta = read_bytes - prev_read;
-                otel.add_process_io(delta, 0);
-            }
-            let prev_write = self
-                .process_last_write_bytes
-                .swap(write_bytes, Ordering::Relaxed);
-            if prev_write > 0 && write_bytes > prev_write {
-                let delta = write_bytes - prev_write;
-                otel.add_process_io(0, delta);
-            }
-        }
-        if let Some((threads, vol, nonvol)) =
-            crate::server::process_metrics::read_process_threads_and_context_switches()
-        {
-            otel.set_process_threads(threads);
-
-            let prev_vol = self
-                .process_last_voluntary_ctxt_switches
-                .load(Ordering::Relaxed);
-            if prev_vol > 0 && vol > prev_vol {
-                otel.add_process_context_switches(vol - prev_vol, 0);
-            }
-            self.process_last_voluntary_ctxt_switches
-                .store(vol, Ordering::Relaxed);
-
-            let prev_nonvol = self
-                .process_last_nonvoluntary_ctxt_switches
-                .load(Ordering::Relaxed);
-            if prev_nonvol > 0 && nonvol > prev_nonvol {
-                otel.add_process_context_switches(0, nonvol - prev_nonvol);
-            }
-            self.process_last_nonvoluntary_ctxt_switches
-                .store(nonvol, Ordering::Relaxed);
-        }
-    }
+    pub fn refresh_process_metrics(&self) {}
 
     /// 记录网络出站字节.
     #[cfg(feature = "monitoring")]
@@ -670,6 +554,13 @@ impl ServerMetrics {
     /// 记录 failover 事件 (仅 cluster feature).
     pub fn on_failover(&self) {
         self.on_command("CLUSTER.failover", true);
+    }
+
+    pub fn failover_count(&self) -> u64 {
+        self.commands_total
+            .get("CLUSTER.FAILOVER")
+            .map(|v| v.ok)
+            .unwrap_or(0)
     }
 
     pub fn on_json_command(&self, _command: &str, _ok: bool) {}
@@ -799,18 +690,6 @@ impl ServerMetrics {
             .commands_total
             .iter()
             .filter(|entry| is_client_command(entry.key()))
-            .map(|entry| (entry.key().clone(), *entry.value()))
-            .collect();
-        out.sort_by(|a, b| a.0.cmp(&b.0));
-        out
-    }
-
-    /// 全部命令统计 (含内部伪命令, 供 OTel sync).
-    #[cfg(feature = "monitoring")]
-    pub(crate) fn all_command_totals(&self) -> Vec<(String, CommandTotals)> {
-        let mut out: Vec<_> = self
-            .commands_total
-            .iter()
             .map(|entry| (entry.key().clone(), *entry.value()))
             .collect();
         out.sort_by(|a, b| a.0.cmp(&b.0));

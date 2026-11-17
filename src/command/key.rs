@@ -276,13 +276,8 @@ impl KeyCommands {
         apply_restore_ttl(&mut stored, ttl_ms, absttl);
 
         let _lock = self.key_lock.lock(key).await;
-        let get_result = self.storage.get_typed(db, key).await;
-        if let Err(e) = &get_result {
-            tracing::error!(key = %String::from_utf8_lossy(key), error = %e, "RESTORE get_typed failed");
-        }
-        if get_result?.is_some() {
+        if self.storage.get_typed(db, key).await?.is_some() {
             if replace {
-                tracing::error!(key = %String::from_utf8_lossy(key), "RESTORE deleting existing key");
                 self.storage.delete(db, key).await?;
             } else {
                 return Err(Error::Command(
@@ -354,11 +349,7 @@ impl KeyCommands {
             }
         }
 
-        let set_result = self.storage.set_typed(db, key, stored).await;
-        if let Err(e) = &set_result {
-            tracing::error!(key = %String::from_utf8_lossy(key), error = %e, "RESTORE set_typed failed");
-        }
-        set_result?;
+        self.storage.set_typed(db, key, stored).await?;
         Ok(router::ok())
     }
 

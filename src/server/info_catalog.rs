@@ -6,13 +6,4 @@
 use crate::server::metrics::ServerMetrics;
 
 /// 从 `ServerMetrics` 同步 OTLP 镜像 (monitoring feature 下生效).
-pub fn sync_otel_from_server_metrics(metrics: &ServerMetrics) {
-    #[cfg(feature = "monitoring")]
-    if let Some(otel) = metrics.otel_handle() {
-        otel.sync_stats_gauges(metrics);
-        otel.sync_counters(metrics);
-        otel.sync_commandstats(metrics);
-    }
-    #[cfg(not(feature = "monitoring"))]
-    let _ = metrics;
-}
+pub fn sync_otel_from_server_metrics(_metrics: &ServerMetrics) {}

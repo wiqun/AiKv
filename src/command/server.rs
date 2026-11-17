@@ -183,9 +183,9 @@ impl ServerCommands {
                 map.insert("timeout".into(), (ms / 1000).to_string());
             }
             "loglevel" | "observability.log_level" => {
-                if value.trim().is_empty() {
-                    return Err(Error::Config("Invalid loglevel value".into()));
-                }
+                self.shared
+                    .reload_log_level(&value)
+                    .map_err(Error::Config)?;
                 map.insert("loglevel".into(), value.clone());
                 map.insert("observability.log_level".into(), value);
             }

@@ -37,21 +37,15 @@ pub(super) fn error_message_for_stats(err: &Error) -> Option<&str> {
 
 #[cfg(feature = "monitoring")]
 pub(super) fn record_command_span_status(result: &Result<RespValue>) {
-    if result.is_ok() {
+    let Err(err) = result else {
+        return;
+    };
+    if !matches!(err, Error::Storage(_) | Error::Io(_)) {
         return;
     }
     let span = tracing::Span::current();
     span.record("otel.status_code", "ERROR");
-    if let Some(err) = result.as_ref().err() {
-        span.record("otel.status_message", tracing::field::display(err));
-        tracing::event!(
-            parent: &span,
-            tracing::Level::ERROR,
-            exception.type = std::any::type_name::<Error>(),
-            exception.message = %err,
-            "command failed"
-        );
-    }
+    span.record("otel.status_message", tracing::field::display(err));
 }
 
 /// 集群模式下在本节点本地执行、不按 `args[0]` 做 slot 路由的命令.
