@@ -26,6 +26,13 @@ skip = [
   { name = "hashbrown" },
   # sha1 0.10 依赖 cpufeatures 0.2, openraft -> rand 0.10 -> chacha20 依赖 0.3
   { name = "cpufeatures" },
+  # prost-build / criterion / opentelemetry 分别依赖不同大版本的 itertools, rand*, syn, r-efi
+  { name = "itertools" },
+  { name = "r-efi" },
+  { name = "rand" },
+  { name = "rand_chacha" },
+  { name = "rand_core" },
+  { name = "syn" },
 ]
 
 [sources]
