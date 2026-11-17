@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 
 #[test]
 fn compatibility_matrix_matches_command_registry() {
-    let doc = include_str!("../docs/compatibility.md");
+    let doc = include_str!("../../../docs/compatibility.md");
     let section = doc
         .split("<!-- command-list:start -->")
         .nth(1)

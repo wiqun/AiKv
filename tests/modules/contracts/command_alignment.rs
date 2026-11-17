@@ -17,7 +17,7 @@ fn names(text: &str) -> BTreeSet<String> {
 
 fn redis_table() -> BTreeMap<String, bool> {
     let mut map = BTreeMap::new();
-    for line in include_str!("fixtures/redis_8_8_3_commands.txt").lines() {
+    for line in include_str!("../../fixtures/redis_8_8_3_commands.txt").lines() {
         let line = line.split('#').next().unwrap_or("").trim();
         if line.is_empty() {
             continue;
@@ -82,12 +82,12 @@ fn command_names_are_classified() {
     let registry_names: BTreeSet<String> = registry.keys().cloned().collect();
     assert_same(
         "redis_unsupported.txt",
-        &names(include_str!("fixtures/redis_unsupported.txt")),
+        &names(include_str!("../../fixtures/redis_unsupported.txt")),
         &redis_names.difference(&registry_names).cloned().collect(),
     );
     assert_same(
         "aikv_extensions.txt",
-        &names(include_str!("fixtures/aikv_extensions.txt")),
+        &names(include_str!("../../fixtures/aikv_extensions.txt")),
         &registry_names.difference(&redis_names).cloned().collect(),
     );
 
@@ -110,13 +110,13 @@ fn command_names_are_classified() {
     }
     assert_same(
         "script_command_gaps.txt",
-        &names(include_str!("fixtures/script_command_gaps.txt")),
+        &names(include_str!("../../fixtures/script_command_gaps.txt")),
         &gaps,
     );
 
-    let script_business = names(include_str!("fixtures/business_script_commands.txt"));
-    let direct = names(include_str!("fixtures/business_direct_commands.txt"));
-    let noise = names(include_str!("fixtures/business_command_noise.txt"));
+    let script_business = names(include_str!("../../fixtures/business_script_commands.txt"));
+    let direct = names(include_str!("../../fixtures/business_direct_commands.txt"));
+    let noise = names(include_str!("../../fixtures/business_command_noise.txt"));
     let script_noise: BTreeSet<String> =
         script_business.difference(&redis_names).cloned().collect();
     assert_same("business_command_noise.txt", &noise, &script_noise);

@@ -1,11 +1,42 @@
+//! 集群路由、命令、集成、迁移与一致性测试统一入口
 //! @component aikv-cluster
-//! CLUSTER 命令单元测试.
+//!
+//! 注: 需通过 `cargo-nextest` 运行 (每用例独立进程), 避免 `CLUSTER_STATE_MGR`
+//! OnceLock 全局状态在不同测试组之间互相污染.
+#![cfg(feature = "cluster")]
+#![recursion_limit = "512"]
+
 #[path = "modules/cluster/mod.rs"]
-#[cfg(feature = "cluster")]
 mod cluster;
 
-#[cfg(feature = "cluster")]
-mod tests {
+#[path = "modules/cluster/routing.rs"]
+mod routing;
+
+#[path = "modules/cluster/creategroup.rs"]
+mod creategroup;
+
+#[path = "modules/cluster/integration.rs"]
+mod integration;
+
+#[path = "modules/cluster/info_golden.rs"]
+mod info_golden;
+
+#[path = "modules/cluster/lazy_expire.rs"]
+mod lazy_expire;
+
+#[path = "modules/cluster/migration_merge_read.rs"]
+mod migration_merge_read;
+
+#[path = "modules/cluster/redirect_metrics.rs"]
+mod redirect_metrics;
+
+#[path = "modules/cluster/scan.rs"]
+mod scan;
+
+#[path = "modules/cluster/atom_exec_json_batch_redirect.rs"]
+mod atom_exec_json_batch_redirect;
+
+mod cluster_commands_unit {
     use aikv::cluster::*;
 
     #[test]
