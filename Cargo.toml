@@ -72,11 +72,11 @@ clap = { version = "4", features = ["derive"] }
 mlua = { version = "0.10", features = ["lua51", "async", "send", "vendored"] }
 
 # Openraft
-openraft = { version = "0.10.0-alpha.33", optional = true }
-openraft-rt-tokio = { version = "0.10.0-alpha.33", optional = true }
+openraft = { version = "0.10.0", optional = true }
+openraft-rt-tokio = { version = "0.10.0", optional = true }
 
 # AiDb storage engine
-aidb = { git = "https://github.com/wiqun/AiDb.git", rev = "46c33f55c23a941adb9371f1e8430b2a2bf70297" }
+aidb = { git = "https://github.com/wiqun/AiDb.git", rev = "54340b1734d43a3f71f53e1e362454e2bdd91494" }
 
 # Monitoring (optional)
 # Metrics HTTP server (monitoring feature)

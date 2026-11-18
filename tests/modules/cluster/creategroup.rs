@@ -57,6 +57,7 @@ async fn setup_cluster_mgr() -> ClusterStateManager {
             snapshot_size_threshold: None,
             linearizable_read: false,
             log_committer_config: None,
+            ..Default::default()
         },
         db,
         net_factory,

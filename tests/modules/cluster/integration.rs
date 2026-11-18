@@ -64,6 +64,7 @@ async fn create_cluster_mgr() -> ClusterStateManager {
             snapshot_size_threshold: None,
             linearizable_read: false,
             log_committer_config: None,
+            ..Default::default()
         },
         db,
         net_factory,
@@ -98,6 +99,7 @@ async fn create_cluster_mgr() -> ClusterStateManager {
             snapshot_size_threshold: None,
             linearizable_read: false,
             log_committer_config: None,
+            ..Default::default()
         },
         data_db,
         data_net_factory,
@@ -326,22 +328,17 @@ fn cluster_failover_force_preserves_topology_and_promotes() {
     *mgr.role.write() = ReplicationRole::Primary;
 }
 
-/// 验证 无参协同式 CLUSTER FAILOVER 明确拒绝并引导使用 FORCE
+/// 验证 Primary 节点调用无参协同式 CLUSTER FAILOVER 返回 You should be a replica
 #[test]
-fn cluster_failover_unsupported_coordinated_mode_returns_error() {
+fn cluster_failover_coordinated_mode_requires_replica() {
     let _guard = FAILOVER_TEST_LOCK.lock();
     ensure_cluster_state();
 
     let res = block_on(aikv::cluster::cluster_failover(""));
-    assert!(
-        res.is_err(),
-        "coordinated failover without RPC must return Err"
-    );
+    assert!(res.is_err(), "failover on primary must return Err");
     let err_msg = res.unwrap_err();
     assert!(
-        err_msg.contains(
-            "ERR Coordinated failover requires cross-node RPC; please use CLUSTER FAILOVER FORCE"
-        ),
+        err_msg.contains("ERR You should be a replica"),
         "unexpected error message: {err_msg}"
     );
 }

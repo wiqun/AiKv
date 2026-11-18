@@ -138,6 +138,8 @@ pub struct ClusterSettings {
     pub client_addr: Option<String>,
     pub announce_mode: Option<String>,
     pub linearizable_read: Option<bool>,
+    pub enable_local_lease_read: Option<bool>,
+    pub enable_pre_vote: Option<bool>,
     pub grpc_max_message_size: Option<u64>,
     pub max_entry_size: Option<u64>,
     pub meta_max_payload_entries: Option<u64>,
@@ -283,6 +285,8 @@ pub struct ResolvedCluster {
     pub client_addr: Option<String>,
     pub announce_mode: AnnounceMode,
     pub linearizable_read: bool,
+    pub enable_local_lease_read: bool,
+    pub enable_pre_vote: bool,
     pub grpc_max_message_size: u64,
     pub max_entry_size: u64,
     pub meta_max_payload_entries: u64,
@@ -314,6 +318,8 @@ impl PartialEq for ResolvedCluster {
             && self.client_addr == other.client_addr
             && self.announce_mode == other.announce_mode
             && self.linearizable_read == other.linearizable_read
+            && self.enable_local_lease_read == other.enable_local_lease_read
+            && self.enable_pre_vote == other.enable_pre_vote
             && self.grpc_max_message_size == other.grpc_max_message_size
             && self.max_entry_size == other.max_entry_size
             && self.meta_max_payload_entries == other.meta_max_payload_entries
@@ -877,6 +883,8 @@ fn resolve_cluster(
         client_addr: cluster.client_addr.clone(),
         announce_mode,
         linearizable_read: cluster.linearizable_read.unwrap_or(true),
+        enable_local_lease_read: cluster.enable_local_lease_read.unwrap_or(true),
+        enable_pre_vote: cluster.enable_pre_vote.unwrap_or(true),
         grpc_max_message_size: cluster.grpc_max_message_size.unwrap_or(64 * 1024 * 1024),
         max_entry_size: cluster.max_entry_size.unwrap_or(8 * 1024 * 1024),
         meta_max_payload_entries: cluster.meta_max_payload_entries.unwrap_or(100),

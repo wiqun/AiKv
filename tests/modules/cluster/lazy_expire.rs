@@ -47,6 +47,7 @@ async fn build_mgr(tmp_name: &str) -> Arc<ClusterStateManager> {
         snapshot_size_threshold: None,
         linearizable_read: false,
         log_committer_config: None,
+        ..Default::default()
     };
     let db = aidb::DB::open(
         std::env::temp_dir().join(tmp_name),

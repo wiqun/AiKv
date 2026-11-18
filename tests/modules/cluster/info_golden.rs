@@ -59,6 +59,7 @@ fn cluster_info_redis88_fields_present() {
                     snapshot_size_threshold: None,
                     linearizable_read: false,
                     log_committer_config: None,
+                    ..Default::default()
                 },
                 db,
                 net_factory,
