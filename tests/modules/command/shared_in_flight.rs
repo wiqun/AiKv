@@ -27,7 +27,7 @@ async fn test_shared_in_flight_context_visibility() {
     assert_eq!(val.as_string().unwrap(), b"value_1");
 
     // 2. 写入 Raw Subkey (如 ZSet member)
-    let member_op = zset_subkey::member_change_ops(0, b"z_key", b"m1", None, Some(10.5));
+    let member_op = zset_subkey::member_change_ops(0, b"z_key", 1, b"m1", None, Some(10.5));
     let (seq2, encoded2) = ctx.in_flight.insert_batch(0, &member_op);
 
     // 验证 get 对 Raw 返回 None，而 get_raw 返回具体字节

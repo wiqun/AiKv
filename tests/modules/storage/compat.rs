@@ -412,10 +412,7 @@ async fn test_scan_collection_header_skips_subkeys() {
 
     // 写入一个 CollectionHeader 大集合
     let header = StoredValue {
-        value: ValueType::CollectionHeader {
-            kind: CollectionKind::Hash,
-            count: 2000,
-        },
+        value: ValueType::collection_header(CollectionKind::Hash, 2000, 1),
         expires_at: None,
     };
     storage.set_typed(0, b"m_big_hash", header).await.unwrap();
@@ -491,10 +488,7 @@ async fn test_scan_does_not_skip_keys_after_collection_header_in_same_batch() {
 
     // 2. 写入 key_2_hash (CollectionHeader, 只有 2 个 subkey)
     let header = StoredValue {
-        value: ValueType::CollectionHeader {
-            kind: CollectionKind::Hash,
-            count: 2,
-        },
+        value: ValueType::collection_header(CollectionKind::Hash, 2, 1),
         expires_at: None,
     };
     storage.set_typed(0, b"key_2_hash", header).await.unwrap();
@@ -527,5 +521,56 @@ async fn test_scan_does_not_skip_keys_after_collection_header_in_same_batch() {
             b"key_4".to_vec()
         ],
         "CollectionHeader 之后的 key_3 和 key_4 绝不能被漏扫"
+    );
+}
+
+#[tokio::test]
+async fn test_scan_type_filter_filters_by_collection_and_scalar() {
+    use aikv::command::CommandRouter;
+    use aikv::protocol::RespValue;
+    use bytes::Bytes;
+
+    let dir = TempDir::new().unwrap();
+    let storage = aidb(&dir);
+    let router = CommandRouter::new(storage);
+    let mut db = 0;
+
+    router
+        .execute("SET", &[Bytes::from("s1"), Bytes::from("v")], &mut db)
+        .await
+        .unwrap();
+    router
+        .execute(
+            "HSET",
+            &[Bytes::from("h1"), Bytes::from("f"), Bytes::from("v")],
+            &mut db,
+        )
+        .await
+        .unwrap();
+    router
+        .execute("RPUSH", &[Bytes::from("l1"), Bytes::from("a")], &mut db)
+        .await
+        .unwrap();
+
+    let resp = router
+        .execute(
+            "SCAN",
+            &[
+                Bytes::from("0"),
+                Bytes::from("TYPE"),
+                Bytes::from("list"),
+                Bytes::from("COUNT"),
+                Bytes::from("100"),
+            ],
+            &mut db,
+        )
+        .await
+        .unwrap();
+    let RespValue::Array(Some(items)) = resp else {
+        panic!("expected array");
+    };
+    assert_eq!(
+        items[1],
+        RespValue::Array(Some(vec![RespValue::BulkString(Some(Bytes::from("l1")))]))
     );
 }

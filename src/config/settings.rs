@@ -96,6 +96,9 @@ pub struct EngineSettings {
     pub hash_max_inline_fields: Option<usize>,
     pub set_max_inline_members: Option<usize>,
     pub zset_max_inline_members: Option<usize>,
+    pub list_max_inline_elements: Option<usize>,
+    pub ttl_compaction_interval_secs: Option<u64>,
+    pub ttl_compaction_min_expired: Option<u64>,
     pub local_batch_max_ops: Option<usize>,
     /// 透传到 `aidb::config::Options` (以 `aidb_preset` 为默认值基底).
     pub aidb: Option<toml::Table>,
@@ -214,6 +217,9 @@ pub struct ResolvedEngineExt {
     pub hash_max_inline_fields: usize,
     pub set_max_inline_members: usize,
     pub zset_max_inline_members: usize,
+    pub list_max_inline_elements: usize,
+    pub ttl_compaction_interval_secs: u64,
+    pub ttl_compaction_min_expired: u64,
     pub local_batch_max_ops: usize,
     pub aidb: aidb::config::Options,
 }
@@ -223,6 +229,9 @@ impl PartialEq for ResolvedEngineExt {
         self.hash_max_inline_fields == other.hash_max_inline_fields
             && self.set_max_inline_members == other.set_max_inline_members
             && self.zset_max_inline_members == other.zset_max_inline_members
+            && self.list_max_inline_elements == other.list_max_inline_elements
+            && self.ttl_compaction_interval_secs == other.ttl_compaction_interval_secs
+            && self.ttl_compaction_min_expired == other.ttl_compaction_min_expired
             && self.local_batch_max_ops == other.local_batch_max_ops
             && self.aidb.memtable_size == other.aidb.memtable_size
             && self.aidb.sync_wal == other.aidb.sync_wal
@@ -744,6 +753,9 @@ fn resolve_engine_ext(
         hash_max_inline_fields: engine.hash_max_inline_fields.unwrap_or(64).max(1),
         set_max_inline_members: engine.set_max_inline_members.unwrap_or(64).max(1),
         zset_max_inline_members: engine.zset_max_inline_members.unwrap_or(64).max(1),
+        list_max_inline_elements: engine.list_max_inline_elements.unwrap_or(64).max(1),
+        ttl_compaction_interval_secs: engine.ttl_compaction_interval_secs.unwrap_or(60),
+        ttl_compaction_min_expired: engine.ttl_compaction_min_expired.unwrap_or(1000).max(1),
         local_batch_max_ops: engine.local_batch_max_ops.unwrap_or(512).max(1),
         aidb: aidb_opts,
     })

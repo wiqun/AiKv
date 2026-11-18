@@ -67,6 +67,7 @@ pub struct HashFieldChange {
 #[derive(Debug, Clone)]
 pub struct HashDelta {
     pub count: u32,
+    pub version: u64,
     pub fields: HashMap<Vec<u8>, HashFieldChange>,
 }
 
@@ -81,6 +82,7 @@ pub struct ZSetMemberChange {
 #[derive(Debug, Clone)]
 pub struct ZSetDelta {
     pub count: u32,
+    pub version: u64,
     pub members: HashMap<Vec<u8>, ZSetMemberChange>,
 }
 
@@ -256,14 +258,15 @@ impl ScriptTransaction {
         self.orig_expires_at
             .lock()
             .insert(key.to_vec(), stored.expires_at);
-        // 透明展开 CollectionHeader -> 完整集合 (仅针对尚未增量化的 Set).
+        // 透明展开 CollectionHeader -> 完整集合 (Set 与 List).
         let expanded = match stored.value {
             ValueType::CollectionHeader {
                 kind: CollectionKind::Set,
+                version,
                 ..
             } => {
                 let encoded = AiDbEngine::encode_key(self.db_index, key);
-                let prefix = subkey::set_subkey_prefix(&encoded);
+                let prefix = subkey::set_subkey_prefix(&encoded, version);
                 let set_h = std::sync::Arc::new(std::sync::Mutex::new(HashSet::new()));
                 let set_c = set_h.clone();
                 storage.raw_subkey_for_each(
@@ -285,6 +288,23 @@ impl ScriptTransaction {
                             .into_inner()
                             .unwrap(),
                     ),
+                    expires_at: stored.expires_at,
+                }
+            }
+            ValueType::CollectionHeader {
+                kind: CollectionKind::List,
+                version,
+                ..
+            } => {
+                let encoded = AiDbEngine::encode_key(self.db_index, key);
+                let list = crate::storage::list_subkey::load_list_full_sync(
+                    storage,
+                    self.db_index,
+                    &encoded,
+                    version,
+                )?;
+                StoredValue {
+                    value: ValueType::List(list),
                     expires_at: stored.expires_at,
                 }
             }
@@ -381,10 +401,11 @@ impl ScriptTransaction {
             ValueType::Hash(map) => Ok(map.clone()),
             ValueType::CollectionHeader {
                 kind: CollectionKind::Hash,
+                version,
                 ..
             } => {
                 let encoded_user_key = AiDbEngine::encode_key(self.db_index, key);
-                let prefix = subkey::hash_subkey_prefix(&encoded_user_key);
+                let prefix = subkey::hash_subkey_prefix(&encoded_user_key, *version);
                 let map_h = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
                 let map_c = map_h.clone();
                 storage.raw_subkey_for_each(
@@ -634,6 +655,18 @@ impl ScriptTransaction {
                             storage.engine_kind() == StorageEngineKind::AiDb,
                         ));
                     }
+                    ExtendedBatchOp::SetList(list)
+                        if storage.engine_kind() == StorageEngineKind::AiDb
+                            && list.len() > crate::storage::list_subkey::list_max_inline() =>
+                    {
+                        let exp = self.resolve_expires_at(storage, &key)?;
+                        batch_ops.extend(crate::storage::list_subkey::replace_list_ops(
+                            self.db_index,
+                            &key,
+                            list,
+                            exp,
+                        ));
+                    }
                     _ => {
                         let exp = self.resolve_expires_at(storage, &key)?;
                         let mut stored = op_to_stored(op)?;
@@ -721,6 +754,19 @@ impl ScriptTransaction {
                         &hash,
                         exp,
                         subkeys,
+                    ));
+                }
+                ExtendedBatchOp::SetList(list)
+                    if storage.engine_kind() == StorageEngineKind::AiDb
+                        && list.len() > crate::storage::list_subkey::list_max_inline() =>
+                {
+                    let exp = self.resolve_expires_at(storage, &key)?;
+                    self.expire_at.remove(&key);
+                    batch_ops.extend(crate::storage::list_subkey::replace_list_ops(
+                        self.db_index,
+                        &key,
+                        &list,
+                        exp,
                     ));
                 }
                 _ => {

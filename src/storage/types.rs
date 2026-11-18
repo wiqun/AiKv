@@ -19,7 +19,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -97,10 +97,13 @@ pub enum ValueType {
     ZSet(BTreeMap<Vec<u8>, f64>),
     /// Subkey 格式的集合元数据.
     /// key 自身存储 `StoredValue { value: CollectionHeader, expires_at }`,
-    /// 每个 field/member 以独立 subkey 存储在引擎中.
+    /// 每个 field/member/element 以带 `version` 的独立 subkey 存储在引擎中.
     CollectionHeader {
         kind: CollectionKind,
         count: u32,
+        version: u64,
+        head: u64,
+        tail: u64,
     },
 }
 
@@ -110,6 +113,51 @@ pub enum CollectionKind {
     Hash = 1,
     Set = 2,
     ZSet = 3,
+    List = 4,
+}
+
+impl ValueType {
+    /// 构造通用集合 header (`Hash` / `Set` / `ZSet`), `head` 与 `tail` 置 0.
+    pub fn collection_header(kind: CollectionKind, count: u32, version: u64) -> Self {
+        Self::CollectionHeader {
+            kind,
+            count,
+            version,
+            head: 0,
+            tail: 0,
+        }
+    }
+
+    /// 构造 `List` 集合 header, 携带双向序列号游标 `[head, tail)`.
+    pub fn list_header(count: u32, version: u64, head: u64, tail: u64) -> Self {
+        Self::CollectionHeader {
+            kind: CollectionKind::List,
+            count,
+            version,
+            head,
+            tail,
+        }
+    }
+}
+
+/// 生成进程内单调递增的集合版本号 (53/48-bit 微秒时间戳 + 16-bit 序列号), 恒大于 0.
+///
+/// 必须在命令/Adapter 层生成后随写入批提交 Raft, 确保集群各副本 apply 得到相同 version.
+pub fn next_collection_version() -> u64 {
+    static SEQ: OnceLock<AtomicU64> = OnceLock::new();
+    let seq = SEQ.get_or_init(|| {
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos() as u64)
+            .unwrap_or(1);
+        AtomicU64::new(seed ^ (std::process::id() as u64))
+    });
+    let us = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros() as u64)
+        .unwrap_or(1);
+    let s = seq.fetch_add(1, Ordering::Relaxed) & 0xffff;
+    ((us << 16) | s).max(1)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -145,6 +193,7 @@ impl StoredValue {
                 CollectionKind::Hash => "hash",
                 CollectionKind::Set => "set",
                 CollectionKind::ZSet => "zset",
+                CollectionKind::List => "list",
             },
         }
     }
@@ -340,6 +389,16 @@ pub trait KvStorage: Send + Sync {
         pattern: &[u8],
         count: usize,
     ) -> Result<ScanResult>;
+    async fn scan_with_type(
+        &self,
+        db: usize,
+        cursor: u64,
+        pattern: &[u8],
+        count: usize,
+        _type_filter: Option<&str>,
+    ) -> Result<ScanResult> {
+        self.scan(db, cursor, pattern, count).await
+    }
     async fn len(&self, db: usize) -> Result<usize>;
     /// 本进程在该逻辑 DB 上登记过的 TTL 写入次数, 不是磁盘上的 TTL 存量.
     async fn expires(&self, db: usize) -> Result<u64> {
@@ -550,6 +609,9 @@ impl BatchWriteHandle for ImmediateWriteHandle {
 }
 
 /// 进程内各逻辑 DB 的 TTL 写入计数. 重启从 0 开始, 不扫库补存量.
+///
+/// 保持内存近似计数, 避免热路径同步持久化引入写放大以及冷启动阻塞全扫;
+/// 可在后台巡检或全库扫描顺带通过 `reconcile_ttl_count` 校准.
 #[derive(Debug, Default)]
 pub struct ExpiresCounters {
     counts: [AtomicU64; DB_COUNT],
@@ -597,6 +659,14 @@ impl ExpiresCounters {
     pub fn reset_db(&self, db: usize) {
         if db < DB_COUNT {
             self.counts[db].store(0, Ordering::Relaxed);
+        }
+    }
+
+    /// 由后台巡检或 `SCAN` 顺带校准逻辑 DB 的过期 key 近似计数.
+    #[inline]
+    pub fn reconcile_ttl_count(&self, db: usize, count: u64) {
+        if db < DB_COUNT {
+            self.counts[db].store(count, Ordering::Relaxed);
         }
     }
 

@@ -63,6 +63,9 @@ async fn build_storage(
             aikv::storage::zset_subkey::set_zset_max_inline(
                 settings.engine_ext.zset_max_inline_members,
             );
+            aikv::storage::list_subkey::set_list_max_inline(
+                settings.engine_ext.list_max_inline_elements,
+            );
             let path = settings
                 .data_dir
                 .as_ref()
@@ -71,7 +74,7 @@ async fn build_storage(
                 .map_err(|e| e.to_string())?;
             engine
                 .db
-                .set_compaction_filter(Some(std::sync::Arc::new(TtlExpireFilter)));
+                .set_compaction_filter(Some(std::sync::Arc::new(TtlExpireFilter::new())));
             let db = engine.db.clone();
             let adapter: Arc<dyn aikv::storage::StorageAdapter> = engine;
             #[cfg(feature = "cluster")]
@@ -394,7 +397,7 @@ async fn init_cluster(
         data_dir: data_dir.to_path_buf(),
         raft_node_config: data_raft_config,
         options: data_options,
-        compaction_filter: Some(std::sync::Arc::new(TtlExpireFilter)),
+        compaction_filter: Some(std::sync::Arc::new(TtlExpireFilter::new())),
         compaction_removal_listener_factory: None,
     };
     let _lifecycle_shutdown = multi_raft.start_lifecycle_with_data(lifecycle_cfg);
@@ -697,6 +700,8 @@ async fn async_main(
                 std::process::exit(1);
             }
         };
+    let ttl_compact_db = _cluster_db.clone();
+    let ttl_compact_obs = observation.clone();
     let tcp_port = settings.bind.port();
     let connection_config = ConnectionConfig {
         read_timeout: (settings.server_ext.read_timeout_ms > 0)
@@ -822,6 +827,12 @@ async fn async_main(
     }
 
     blocking::start_background_eviction();
+    spawn_ttl_compaction_task(
+        ttl_compact_db,
+        ttl_compact_obs,
+        settings.engine_ext.ttl_compaction_interval_secs,
+        settings.engine_ext.ttl_compaction_min_expired,
+    );
 
     if let Err(e) = Server::run(settings.bind, state).await {
         tracing::error!(error = %e, "server exited with error");
@@ -832,6 +843,45 @@ async fn async_main(
 
     #[cfg(feature = "monitoring")]
     aikv::server::otel::shutdown_otel();
+}
+
+fn spawn_ttl_compaction_task(
+    db: Option<Arc<aidb::DB>>,
+    observation: Arc<StorageObservation>,
+    interval_secs: u64,
+    min_expired: u64,
+) {
+    if interval_secs == 0 {
+        return;
+    }
+    let Some(db) = db else {
+        return;
+    };
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            if !observation.should_trigger_ttl_compaction(min_expired) {
+                continue;
+            }
+            #[cfg(feature = "cluster")]
+            if let Some(mgr) = aikv::cluster::state::CLUSTER_STATE_MGR.get() {
+                if let Err(e) = mgr.multi_raft.compact_all_groups().await {
+                    tracing::warn!(error = %e, "background ttl group compaction failed");
+                    continue;
+                }
+                observation.reset_compaction_expired();
+                continue;
+            }
+            let db_clone = Arc::clone(&db);
+            match tokio::task::spawn_blocking(move || db_clone.compact_range(None, None)).await {
+                Ok(Ok(())) => observation.reset_compaction_expired(),
+                Ok(Err(e)) => tracing::warn!(error = %e, "background ttl compact_range failed"),
+                Err(e) => tracing::warn!(error = %e, "background ttl compaction join failed"),
+            }
+        }
+    });
 }
 
 #[cfg(test)]

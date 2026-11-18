@@ -470,6 +470,160 @@ fn ascii_upper(raw: &[u8]) -> String {
     String::from_utf8_lossy(raw).to_ascii_uppercase()
 }
 
+pub(crate) fn bitpos(data: Option<&[u8]>, args: &[Bytes]) -> Result<i64> {
+    if args.len() < 2 || args.len() > 5 {
+        return Err(crate::command::router::wrong_args("BITPOS", ""));
+    }
+    let bit = parse_i64(&args[1], ERR_VALUE)?;
+    if bit != 0 && bit != 1 {
+        return Err(Error::Command(
+            "ERR The bit argument must be 1 or 0.".into(),
+        ));
+    }
+    let bytes = data.unwrap_or(&[]);
+    let mut is_bit = false;
+    let end_given = args.len() >= 4;
+    if args.len() == 5 {
+        let unit = ascii_upper(&args[4]);
+        match unit.as_str() {
+            "BYTE" => is_bit = false,
+            "BIT" => is_bit = true,
+            _ => return Err(Error::Command(ERR_SYNTAX.into())),
+        }
+    }
+
+    if bytes.is_empty() {
+        return Ok(if bit == 1 { -1 } else { 0 });
+    }
+
+    let total_units = if is_bit {
+        (bytes.len() * 8) as i64
+    } else {
+        bytes.len() as i64
+    };
+
+    let mut start = if args.len() >= 3 {
+        parse_i64(&args[2], ERR_VALUE)?
+    } else {
+        0
+    };
+    let mut end = if end_given {
+        parse_i64(&args[3], ERR_VALUE)?
+    } else {
+        total_units - 1
+    };
+
+    if start < 0 {
+        start += total_units;
+    }
+    if end < 0 {
+        end += total_units;
+    }
+    if start < 0 {
+        start = 0;
+    }
+    if end >= total_units {
+        end = total_units - 1;
+    }
+    if start > end || end < 0 {
+        return Ok(-1);
+    }
+
+    if is_bit {
+        let target = bit as u8;
+        for idx in start..=end {
+            if read_bit(bytes, idx as u64) == target {
+                return Ok(idx);
+            }
+        }
+        return Ok(if bit == 0 && !end_given {
+            (bytes.len() * 8) as i64
+        } else {
+            -1
+        });
+    }
+
+    let skip_byte = if bit == 1 { 0x00u8 } else { 0xFFu8 };
+    for (offset, &b) in bytes[start as usize..=end as usize].iter().enumerate() {
+        if b != skip_byte {
+            let bit_in_byte = if bit == 1 {
+                b.leading_zeros() as usize
+            } else {
+                (!b).leading_zeros() as usize
+            };
+            return Ok(((start as usize + offset) * 8 + bit_in_byte) as i64);
+        }
+    }
+
+    Ok(if bit == 0 && !end_given {
+        (bytes.len() * 8) as i64
+    } else {
+        -1
+    })
+}
+
+pub(crate) fn bitop(op: &[u8], inputs: &[Option<&[u8]>]) -> Result<Vec<u8>> {
+    if inputs.is_empty() {
+        return Err(crate::command::router::wrong_args("BITOP", ""));
+    }
+    let op_upper = ascii_upper(op);
+    if op_upper == "NOT" && inputs.len() != 1 {
+        return Err(Error::Command(
+            "ERR BITOP NOT must be called with a single source key.".into(),
+        ));
+    }
+    if !matches!(op_upper.as_str(), "AND" | "OR" | "XOR" | "NOT") {
+        return Err(Error::Command(ERR_SYNTAX.into()));
+    }
+    let max_len = inputs
+        .iter()
+        .map(|i| i.map_or(0, |b| b.len()))
+        .max()
+        .unwrap_or(0);
+    if max_len == 0 {
+        return Ok(Vec::new());
+    }
+    let mut out = vec![0u8; max_len];
+    match op_upper.as_str() {
+        "NOT" => {
+            let src = inputs[0].unwrap_or(&[]);
+            for (i, slot) in out.iter_mut().enumerate() {
+                *slot = !src.get(i).copied().unwrap_or(0);
+            }
+        }
+        "AND" => {
+            let first = inputs[0].unwrap_or(&[]);
+            for (i, slot) in out.iter_mut().enumerate() {
+                *slot = first.get(i).copied().unwrap_or(0);
+            }
+            for src_opt in &inputs[1..] {
+                let src = src_opt.unwrap_or(&[]);
+                for (i, slot) in out.iter_mut().enumerate() {
+                    *slot &= src.get(i).copied().unwrap_or(0);
+                }
+            }
+        }
+        "OR" => {
+            for src_opt in inputs {
+                let src = src_opt.unwrap_or(&[]);
+                for (i, slot) in out.iter_mut().enumerate() {
+                    *slot |= src.get(i).copied().unwrap_or(0);
+                }
+            }
+        }
+        "XOR" => {
+            for src_opt in inputs {
+                let src = src_opt.unwrap_or(&[]);
+                for (i, slot) in out.iter_mut().enumerate() {
+                    *slot ^= src.get(i).copied().unwrap_or(0);
+                }
+            }
+        }
+        _ => unreachable!(),
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -587,5 +741,37 @@ mod tests {
             1
         );
         assert_eq!(bitcount(None, &[b("k"), b("0"), b("-1")]).unwrap(), 0);
+    }
+
+    #[test]
+    fn bitpos_and_bitop_semantics_and_edge_cases() {
+        // BITPOS
+        assert_eq!(bitpos(None, &[b("k"), b("1")]).unwrap(), -1);
+        assert_eq!(bitpos(None, &[b("k"), b("0")]).unwrap(), 0);
+        assert_eq!(bitpos(Some(&[0xFF, 0xFF]), &[b("k"), b("0")]).unwrap(), 16);
+        assert_eq!(
+            bitpos(Some(&[0xFF, 0xFF]), &[b("k"), b("0"), b("0"), b("1")]).unwrap(),
+            -1
+        );
+        assert_eq!(
+            bitpos(Some(&[0x00, 0xFF, 0xF0]), &[b("k"), b("1"), b("0")]).unwrap(),
+            8
+        );
+        assert_eq!(
+            bitpos(
+                Some(&[0x00, 0x0F]),
+                &[b("k"), b("1"), b("8"), b("15"), b("BIT")]
+            )
+            .unwrap(),
+            12
+        );
+
+        // BITOP
+        let res_and = bitop(b"AND", &[Some(&[0x0Fu8, 0xFF][..]), Some(&[0xF0u8][..])]).unwrap();
+        assert_eq!(res_and, vec![0x00, 0x00]);
+        let res_not = bitop(b"NOT", &[Some(&[0x0Fu8][..])]).unwrap();
+        assert_eq!(res_not, vec![0xF0]);
+        let res_empty_not = bitop(b"NOT", &[None]).unwrap();
+        assert!(res_empty_not.is_empty());
     }
 }

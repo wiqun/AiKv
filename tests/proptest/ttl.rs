@@ -43,7 +43,7 @@ fn prop_ttl_filter_integration() {
     let mut runner = proptest::test_runner::TestRunner::default();
     runner
         .run(&strategy, |(expires_at, value_bytes)| {
-            let filter = TtlExpireFilter;
+            let filter = TtlExpireFilter::new();
 
             // Case 1: 合法 StoredValue
             let stored = StoredValue {

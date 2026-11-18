@@ -65,12 +65,15 @@ impl SetCommands {
             ValueType::CollectionHeader {
                 kind: CollectionKind::Set,
                 ref mut count,
+                version,
+                ..
             } => {
                 let encoded_user_key = AiDbEngine::encode_key(db, key);
+                let version = *version;
                 let mut new_members = 0i64;
                 for member in &args[1..] {
                     let subkey_key =
-                        subkey::encode_set_member_key(&encoded_user_key, member.as_ref());
+                        subkey::encode_set_member_key(&encoded_user_key, version, member.as_ref());
                     let existed = self
                         .storage
                         .raw_subkey_get(db, subkey_key.clone())
@@ -117,12 +120,15 @@ impl SetCommands {
             ValueType::CollectionHeader {
                 kind: CollectionKind::Set,
                 ref mut count,
+                version,
+                ..
             } => {
                 let encoded_user_key = AiDbEngine::encode_key(db, key);
+                let version = *version;
                 let mut removed = 0i64;
                 for member in &args[1..] {
                     let subkey_key =
-                        subkey::encode_set_member_key(&encoded_user_key, member.as_ref());
+                        subkey::encode_set_member_key(&encoded_user_key, version, member.as_ref());
                     if self
                         .storage
                         .raw_subkey_delete(db, subkey_key)
@@ -153,10 +159,12 @@ impl SetCommands {
             ValueType::Set(set) => set.contains(args[1].as_ref()),
             ValueType::CollectionHeader {
                 kind: CollectionKind::Set,
+                version,
                 ..
             } => {
                 let encoded_user_key = AiDbEngine::encode_key(db, &args[0]);
-                let subkey_key = subkey::encode_set_member_key(&encoded_user_key, args[1].as_ref());
+                let subkey_key =
+                    subkey::encode_set_member_key(&encoded_user_key, *version, args[1].as_ref());
                 self.storage
                     .raw_subkey_get(db, subkey_key)
                     .await
@@ -230,6 +238,7 @@ impl SetCommands {
                 ValueType::CollectionHeader {
                     kind: CollectionKind::Set,
                     count,
+                    ..
                 } => count as i64,
                 _ => return Err(router::wrongtype()),
             },
@@ -258,10 +267,12 @@ impl SetCommands {
             ValueType::Set(set) => set.iter().cloned().collect(),
             ValueType::CollectionHeader {
                 kind: CollectionKind::Set,
+                version,
                 ..
             } => {
                 let encoded_user_key = AiDbEngine::encode_key(db, key);
-                self.scan_set_subkeys(db, &encoded_user_key, None).await?
+                self.scan_set_subkeys(db, &encoded_user_key, *version, None)
+                    .await?
             }
             _ => return Err(router::wrongtype()),
         };
@@ -283,10 +294,13 @@ impl SetCommands {
             ValueType::CollectionHeader {
                 kind: CollectionKind::Set,
                 ref mut count,
+                version,
+                ..
             } => {
                 let encoded_user_key = AiDbEngine::encode_key(db, key);
+                let version = *version;
                 for m in &picked {
-                    let subkey_key = subkey::encode_set_member_key(&encoded_user_key, m);
+                    let subkey_key = subkey::encode_set_member_key(&encoded_user_key, version, m);
                     let _ = self.storage.raw_subkey_delete(db, subkey_key).await;
                     *count = count.saturating_sub(1);
                 }
@@ -398,10 +412,11 @@ impl SetCommands {
             ValueType::Set(set) => set.contains(&member),
             ValueType::CollectionHeader {
                 kind: CollectionKind::Set,
+                version,
                 ..
             } => {
                 let encoded = AiDbEngine::encode_key(db, source);
-                let subkey_key = subkey::encode_set_member_key(&encoded, &member);
+                let subkey_key = subkey::encode_set_member_key(&encoded, *version, &member);
                 self.storage
                     .raw_subkey_get(db, subkey_key)
                     .await
@@ -431,9 +446,11 @@ impl SetCommands {
             ValueType::CollectionHeader {
                 kind: CollectionKind::Set,
                 ref mut count,
+                version,
+                ..
             } => {
                 let encoded = AiDbEngine::encode_key(db, source);
-                let subkey_key = subkey::encode_set_member_key(&encoded, &member);
+                let subkey_key = subkey::encode_set_member_key(&encoded, *version, &member);
                 self.storage.raw_subkey_delete(db, subkey_key).await?;
                 *count = count.saturating_sub(1);
                 if *count == 0 {
@@ -466,9 +483,11 @@ impl SetCommands {
             ValueType::CollectionHeader {
                 kind: CollectionKind::Set,
                 ref mut count,
+                version,
+                ..
             } => {
                 let encoded = AiDbEngine::encode_key(db, dest);
-                let subkey_key = subkey::encode_set_member_key(&encoded, &member);
+                let subkey_key = subkey::encode_set_member_key(&encoded, *version, &member);
                 self.storage.raw_subkey_set(db, subkey_key, vec![]).await?;
                 *count += 1;
                 self.storage.rewrite_stored(db, dest, dest_stored).await?;
@@ -504,11 +523,12 @@ impl SetCommands {
             }
             ValueType::CollectionHeader {
                 kind: CollectionKind::Set,
+                version,
                 ..
             } => {
                 if let Some(cursor_mgr) = self.storage.cursor_mgr() {
                     let encoded_user_key = AiDbEngine::encode_key(db, &args[0]);
-                    let prefix = subkey::set_subkey_prefix(&encoded_user_key);
+                    let prefix = subkey::set_subkey_prefix(&encoded_user_key, version);
                     let end_prefix = AiDbEngine::prefix_end(&prefix).unwrap_or_default();
 
                     let start_member = cursor_mgr
@@ -519,7 +539,11 @@ impl SetCommands {
                     let current_seek = match start_member {
                         None => prefix.clone(),
                         Some(last_mem) => {
-                            let mut k = subkey::encode_set_member_key(&encoded_user_key, &last_mem);
+                            let mut k = subkey::encode_set_member_key(
+                                &encoded_user_key,
+                                version,
+                                &last_mem,
+                            );
                             k.push(0);
                             k
                         }
@@ -582,7 +606,7 @@ impl SetCommands {
                 } else {
                     let encoded_user_key = AiDbEngine::encode_key(db, &args[0]);
                     let mut m = self
-                        .scan_set_subkeys(db, &encoded_user_key, opts.pattern.as_deref())
+                        .scan_set_subkeys(db, &encoded_user_key, version, opts.pattern.as_deref())
                         .await?;
                     m.sort();
                     let (next_cursor, page) = scan_util::paginate_slice(&m, cursor, opts.count)?;
@@ -655,10 +679,12 @@ impl SetCommands {
             ValueType::Set(set) => Ok(set.into_iter().collect()),
             ValueType::CollectionHeader {
                 kind: CollectionKind::Set,
+                version,
                 ..
             } => {
                 let encoded_user_key = AiDbEngine::encode_key(db, key);
-                self.scan_set_subkeys(db, &encoded_user_key, None).await
+                self.scan_set_subkeys(db, &encoded_user_key, version, None)
+                    .await
             }
             _ => Err(router::wrongtype()),
         }
@@ -673,11 +699,12 @@ impl SetCommands {
             ValueType::Set(set) => Ok(set),
             ValueType::CollectionHeader {
                 kind: CollectionKind::Set,
+                version,
                 ..
             } => {
                 let encoded_user_key = AiDbEngine::encode_key(db, key);
                 Ok(self
-                    .scan_set_subkeys(db, &encoded_user_key, None)
+                    .scan_set_subkeys(db, &encoded_user_key, version, None)
                     .await?
                     .into_iter()
                     .collect())
@@ -706,9 +733,10 @@ impl SetCommands {
         &self,
         db: usize,
         encoded_user_key: &[u8],
+        version: u64,
         pattern: Option<&[u8]>,
     ) -> Result<Vec<Vec<u8>>> {
-        let prefix = subkey::set_subkey_prefix(encoded_user_key);
+        let prefix = subkey::set_subkey_prefix(encoded_user_key, version);
         // member 紧跟在 `{prefix}{member_len:2B}` 之后, 直接在原 key 缓冲上截取, 省去逐 member 再分配.
         let member_offset = prefix.len() + 2;
         let out = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -749,17 +777,15 @@ impl SetCommands {
     ) -> Result<()> {
         let encoded_user_key = AiDbEngine::encode_key(db, key);
         let count = set.len() as u32;
+        let version = crate::storage::types::next_collection_version();
 
         for member in set {
-            let subkey_key = subkey::encode_set_member_key(&encoded_user_key, member);
+            let subkey_key = subkey::encode_set_member_key(&encoded_user_key, version, member);
             self.storage.raw_subkey_set(db, subkey_key, vec![]).await?;
         }
 
         let metadata = StoredValue {
-            value: ValueType::CollectionHeader {
-                kind: CollectionKind::Set,
-                count,
-            },
+            value: ValueType::collection_header(CollectionKind::Set, count, version),
             expires_at: *expires_at,
         };
         self.storage.rewrite_stored(db, key, metadata).await

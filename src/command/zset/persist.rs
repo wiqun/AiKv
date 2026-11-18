@@ -18,8 +18,8 @@ pub async fn member_score(
     let Some(stored) = storage.get_typed(db, key).await? else {
         return Ok(None);
     };
-    if zset_subkey::is_zset_header(&stored).is_some() {
-        return zset_subkey::read_member_score(storage, db, key, member).await;
+    if let Some((_, version)) = zset_subkey::is_zset_header(&stored) {
+        return zset_subkey::read_member_score(storage, db, key, version, member).await;
     }
     Ok(stored.as_zset()?.get(member).copied())
 }
@@ -32,8 +32,10 @@ pub async fn load_map(
     let Some(stored) = storage.get_typed(db, key).await? else {
         return Ok(None);
     };
-    if zset_subkey::is_zset_header(&stored).is_some() {
-        return Ok(Some(zset_subkey::load_members(storage, db, key).await?));
+    if let Some((_, version)) = zset_subkey::is_zset_header(&stored) {
+        return Ok(Some(
+            zset_subkey::load_members(storage, db, key, version).await?,
+        ));
     }
     Ok(Some(stored.as_zset()?.clone()))
 }
@@ -168,12 +170,12 @@ async fn add_to_header<G>(
     flags: ZAddFlags,
     guard: G,
 ) -> Result<ZAddOutcome> {
-    let base = zset_subkey::is_zset_header(stored).unwrap_or(0);
-    let (mut ops, outcome, count) = header_add_ops(ctx, base, pairs, flags).await?;
+    let (base, version) = zset_subkey::is_zset_header(stored).unwrap_or((0, 0));
+    let (mut ops, outcome, count) = header_add_ops(ctx, base, version, pairs, flags).await?;
     if !ops.is_empty() {
         ops.push((
             ctx.key.to_vec(),
-            WriteOp::put_stored(zset_subkey::header(count, stored.expires_at)),
+            WriteOp::put_stored(zset_subkey::header(count, version, stored.expires_at)),
         ));
     }
     commit_ops_in_lock(ctx.storage, ctx.in_flight, ctx.db, ctx.key, ops, guard).await?;
@@ -183,38 +185,41 @@ async fn add_to_header<G>(
 async fn read_member_score_in_flight(
     ctx: &ZAddContext<'_>,
     encoded_user: &[u8],
+    version: u64,
     member: &[u8],
 ) -> Result<Option<f64>> {
-    let member_engine = zset_subkey::member_key(encoded_user, member);
+    let member_engine = zset_subkey::member_key(encoded_user, version, member);
     match ctx.in_flight.in_flight.get_raw(&member_engine) {
         Some(Some(raw)) => Ok(zset_subkey::decode_score(&raw)),
         Some(None) => Ok(None),
-        None => zset_subkey::read_member_score(ctx.storage, ctx.db, ctx.key, member).await,
+        None => zset_subkey::read_member_score(ctx.storage, ctx.db, ctx.key, version, member).await,
     }
 }
 
 async fn header_add_ops(
     ctx: &ZAddContext<'_>,
     count: u32,
+    version: u64,
     pairs: &[(f64, Vec<u8>)],
     flags: ZAddFlags,
 ) -> Result<(Vec<(Vec<u8>, WriteOp)>, ZAddOutcome, u32)> {
     let encoded = AiDbEngine::encode_key(ctx.db, ctx.key);
     if flags.incr {
-        return header_incr_op(ctx, &encoded, count, &pairs[0], flags).await;
+        return header_incr_op(ctx, &encoded, count, version, &pairs[0], flags).await;
     }
-    header_batch_ops(ctx, &encoded, count, pairs, flags).await
+    header_batch_ops(ctx, &encoded, count, version, pairs, flags).await
 }
 
 async fn header_incr_op(
     ctx: &ZAddContext<'_>,
     encoded: &[u8],
     mut count: u32,
+    version: u64,
     pair: &(f64, Vec<u8>),
     flags: ZAddFlags,
 ) -> Result<(Vec<(Vec<u8>, WriteOp)>, ZAddOutcome, u32)> {
     let (incr_score, member) = pair;
-    let old = read_member_score_in_flight(ctx, encoded, member).await?;
+    let old = read_member_score_in_flight(ctx, encoded, version, member).await?;
     if old.is_none() && flags.xx {
         return Ok((Vec::new(), ZAddOutcome::Score(None), count));
     }
@@ -238,7 +243,8 @@ async fn header_incr_op(
     } else {
         count = count.saturating_add(1);
     }
-    let ops = zset_subkey::member_change_ops(ctx.db, ctx.key, member, old, Some(new_score));
+    let ops =
+        zset_subkey::member_change_ops(ctx.db, ctx.key, version, member, old, Some(new_score));
     Ok((ops, ZAddOutcome::Score(Some(new_score)), count))
 }
 
@@ -246,6 +252,7 @@ async fn header_batch_ops(
     ctx: &ZAddContext<'_>,
     encoded: &[u8],
     mut count: u32,
+    version: u64,
     pairs: &[(f64, Vec<u8>)],
     flags: ZAddFlags,
 ) -> Result<(Vec<(Vec<u8>, WriteOp)>, ZAddOutcome, u32)> {
@@ -257,7 +264,7 @@ async fn header_batch_ops(
     for (score, member) in pairs {
         let old = match overlay.get(member) {
             Some(score) => Some(*score),
-            None => read_member_score_in_flight(ctx, encoded, member).await?,
+            None => read_member_score_in_flight(ctx, encoded, version, member).await?,
         };
         match old {
             None => {
@@ -271,6 +278,7 @@ async fn header_batch_ops(
                 ops.extend(zset_subkey::member_change_ops(
                     ctx.db,
                     ctx.key,
+                    version,
                     member,
                     None,
                     Some(*score),
@@ -296,6 +304,7 @@ async fn header_batch_ops(
                 ops.extend(zset_subkey::member_change_ops(
                     ctx.db,
                     ctx.key,
+                    version,
                     member,
                     Some(old_score),
                     Some(*score),
@@ -318,7 +327,7 @@ async fn remove_from_header_pipeline<G>(
     members: &[Vec<u8>],
     guard: G,
 ) -> Result<i64> {
-    let mut count = zset_subkey::is_zset_header(stored).unwrap_or(0);
+    let (mut count, version) = zset_subkey::is_zset_header(stored).unwrap_or((0, 0));
     let mut ops = Vec::new();
     let mut removed = 0i64;
     let mut seen = HashMap::<Vec<u8>, ()>::new();
@@ -327,21 +336,21 @@ async fn remove_from_header_pipeline<G>(
         if seen.insert(member.clone(), ()).is_some() {
             continue;
         }
-        let old = read_member_score_in_flight(ctx, &encoded, member).await?;
+        let old = read_member_score_in_flight(ctx, &encoded, version, member).await?;
         if old.is_none() {
             continue;
         }
         removed += 1;
         count = count.saturating_sub(1);
         ops.extend(zset_subkey::member_change_ops(
-            ctx.db, ctx.key, member, old, None,
+            ctx.db, ctx.key, version, member, old, None,
         ));
     }
     if removed == 0 {
         drop(guard);
         return Ok(0);
     }
-    push_header_or_delete(&mut ops, ctx.key, count, stored.expires_at);
+    push_header_or_delete(&mut ops, ctx.key, count, version, stored.expires_at);
     commit_ops_in_lock(ctx.storage, ctx.in_flight, ctx.db, ctx.key, ops, guard).await?;
     if count == 0 {
         zset_subkey::invalidate_score_bounds_hint(ctx.db, ctx.key);
@@ -353,6 +362,7 @@ fn push_header_or_delete(
     ops: &mut Vec<(Vec<u8>, WriteOp)>,
     key: &[u8],
     count: u32,
+    version: u64,
     expires_at: Option<u64>,
 ) {
     if count == 0 {
@@ -361,7 +371,7 @@ fn push_header_or_delete(
     }
     ops.push((
         key.to_vec(),
-        WriteOp::put_stored(zset_subkey::header(count, expires_at)),
+        WriteOp::put_stored(zset_subkey::header(count, version, expires_at)),
     ));
 }
 
@@ -380,6 +390,7 @@ pub fn header_count(value: &ValueType) -> Option<u32> {
         ValueType::CollectionHeader {
             kind: crate::storage::CollectionKind::ZSet,
             count,
+            ..
         } => Some(*count),
         _ => None,
     }

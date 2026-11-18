@@ -41,7 +41,7 @@ use bytes::Bytes;
 use tracing::Instrument;
 
 use crate::command::{
-    database, hash, json, key, list, persistence, script, server, set, string, zset,
+    database, hash, json, key, list, persistence, script, server, set, sort, string, zset,
 };
 use crate::error::{Error, Result};
 use crate::protocol::{ProtocolVersion, RespValue};
@@ -72,6 +72,7 @@ pub struct CommandRouter {
     script: script::ScriptCommands,
     database: database::DatabaseCommands,
     key_cmds: key::KeyCommands,
+    sort: sort::SortCommands,
     server: Option<server::ServerCommands>,
     persistence: Option<persistence::PersistenceCommands>,
     in_flight_ctx: Arc<crate::command::shared::InFlightContext>,
@@ -113,6 +114,7 @@ impl CommandRouter {
             ),
             database: database::DatabaseCommands::new(storage.clone()),
             key_cmds: key::KeyCommands::new(storage.clone(), key_lock.clone()),
+            sort: sort::SortCommands::new(storage.clone(), key_lock.clone()),
             server: None,
             persistence: None,
             metrics: None,
@@ -182,6 +184,7 @@ impl CommandRouter {
             ),
             database: database::DatabaseCommands::new(storage.clone()),
             key_cmds: key::KeyCommands::new(storage.clone(), key_lock.clone()),
+            sort: sort::SortCommands::new(storage.clone(), key_lock.clone()),
             server: Some(server::ServerCommands::new(storage.clone(), shared.clone())),
             persistence: Some(persistence::PersistenceCommands::new(
                 storage.clone(),
@@ -478,6 +481,10 @@ impl CommandRouter {
             "SETBIT" => self.string.setbit(*db, args).await,
             "GETBIT" => self.string.getbit(*db, args).await,
             "BITCOUNT" => self.string.bitcount(*db, args).await,
+            "BITOP" => self.string.bitop(*db, args).await,
+            "BITPOS" => self.string.bitpos(*db, args).await,
+            "SORT" => self.sort.sort(*db, args).await,
+            "SORT_RO" => self.sort.sort_ro(*db, args).await,
             "BITFIELD" => self.string.bitfield(*db, args).await,
             "BITFIELD_RO" => self.string.bitfield_ro(*db, args).await,
             "APPEND" => self.string.append(*db, args).await,

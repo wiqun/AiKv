@@ -68,6 +68,7 @@ async fn large_zset_splits_and_keeps_score_order() {
         ValueType::CollectionHeader {
             kind: CollectionKind::ZSet,
             count: 65,
+            ..
         } => {}
         other => panic!("expected zset subkey header, got {other:?}"),
     }
@@ -162,6 +163,7 @@ async fn script_zadd_on_large_zset_appends_one_member() {
         ValueType::CollectionHeader {
             kind: CollectionKind::ZSet,
             count: 66,
+            ..
         } => {}
         other => panic!("script write collapsed zset, got {other:?}"),
     }
@@ -253,8 +255,10 @@ async fn script_zrevrangebyscore_limit_0_1_on_large_zset_locates_by_score() {
 }
 
 async fn score_index_members(storage: &dyn KvStorage) -> Vec<Vec<u8>> {
+    let stored = storage.get_typed(0, b"z").await.unwrap().unwrap();
+    let (_, ver) = aikv::storage::zset_subkey::is_zset_header(&stored).unwrap();
     let encoded = AiDbEngine::encode_key(0, b"z");
-    let prefix = aikv::storage::zset_subkey::score_prefix(&encoded);
+    let prefix = aikv::storage::zset_subkey::score_prefix(&encoded, ver);
     let rows = Arc::new(Mutex::new(Vec::new()));
     let rows_c = Arc::clone(&rows);
     let encoded_c = encoded.clone();
@@ -264,7 +268,7 @@ async fn score_index_members(storage: &dyn KvStorage) -> Vec<Vec<u8>> {
             prefix,
             Box::new(move |key, _| {
                 if let Some(member) =
-                    aikv::storage::zset_subkey::member_from_score_key(&encoded_c, &key)
+                    aikv::storage::zset_subkey::member_from_score_key(&encoded_c, ver, &key)
                 {
                     rows_c.lock().unwrap().push(member);
                 }

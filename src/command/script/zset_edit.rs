@@ -203,12 +203,29 @@ impl ScriptTransaction {
         storage: &dyn crate::storage::ScriptIo,
         key: &[u8],
     ) -> Result<BTreeMap<Vec<u8>, f64>> {
+        let Some(version) = self.zset_header_version(storage, key)? else {
+            return Ok(BTreeMap::new());
+        };
         let _pin = self.in_flight.as_ref().map(|buf| buf.pin_reads());
-        let mut loaded = zset_subkey::load_members_sync(storage, self.db_index, key)?;
+        let mut loaded = zset_subkey::load_members_sync(storage, self.db_index, key, version)?;
         if let Some(buffer) = &self.in_flight {
-            overlay_inflight_members(&mut loaded, buffer, self.db_index, key);
+            overlay_inflight_members(&mut loaded, buffer, self.db_index, key, version);
         }
         Ok(loaded)
+    }
+
+    pub(crate) fn zset_header_version(
+        &self,
+        storage: &dyn crate::storage::ScriptIo,
+        key: &[u8],
+    ) -> Result<Option<u64>> {
+        if let Some(delta) = self.zset_deltas.get(key) {
+            return Ok(Some(delta.version));
+        }
+        Ok(self
+            .get_value(storage, key)?
+            .and_then(|s| zset_subkey::is_zset_header(&s))
+            .map(|(_, ver)| ver))
     }
 
     fn ensure_zset_delta(
@@ -220,14 +237,15 @@ impl ScriptTransaction {
             return Ok(());
         }
         let stored = self.get_value(storage, key)?;
-        let count = match stored {
-            Some(stored) => zset_subkey::is_zset_header(&stored).unwrap_or(0),
-            None => 0,
-        };
+        let (count, version) = stored
+            .as_ref()
+            .and_then(zset_subkey::is_zset_header)
+            .unwrap_or((0, 0));
         self.zset_deltas.insert(
             key.to_vec(),
             ZSetDelta {
                 count,
+                version,
                 members: Default::default(),
             },
         );
@@ -240,17 +258,36 @@ impl ScriptTransaction {
         key: &[u8],
         member: &[u8],
     ) -> Result<Option<f64>> {
-        if let Some(change) = self
-            .zset_deltas
-            .get(key)
-            .and_then(|delta| delta.members.get(member))
-        {
-            return Ok(change.after);
+        if let Some(delta) = self.zset_deltas.get(key) {
+            if let Some(change) = delta.members.get(member) {
+                return Ok(change.after);
+            }
+            if let Some(view) = self.zset_views.lock().get(key) {
+                return Ok(view.get(member).copied());
+            }
+            return point_score(
+                self.in_flight.as_ref(),
+                storage,
+                self.db_index,
+                key,
+                delta.version,
+                member,
+            );
         }
         if let Some(view) = self.zset_views.lock().get(key) {
             return Ok(view.get(member).copied());
         }
-        point_score(self.in_flight.as_ref(), storage, self.db_index, key, member)
+        let Some(version) = self.zset_header_version(storage, key)? else {
+            return Ok(None);
+        };
+        point_score(
+            self.in_flight.as_ref(),
+            storage,
+            self.db_index,
+            key,
+            version,
+            member,
+        )
     }
 
     fn current_member_score(
@@ -345,8 +382,9 @@ fn overlay_inflight_members(
     inflight: &InFlightBuffer,
     db: usize,
     user_key: &[u8],
+    version: u64,
 ) {
-    let prefix = zset_subkey::member_prefix(&AiDbEngine::encode_key(db, user_key));
+    let prefix = zset_subkey::member_prefix(&AiDbEngine::encode_key(db, user_key), version);
     let prefix_len = prefix.len();
     for (engine_key, raw) in inflight.prefix_raw_updates(&prefix) {
         let Some(member) = zset_subkey::member_from_encoded(&engine_key, prefix_len) else {
@@ -383,7 +421,7 @@ fn push_delta(
     } else {
         ops.push((
             key.to_vec(),
-            WriteOp::put_stored(zset_subkey::header(delta.count, expires_at)),
+            WriteOp::put_stored(zset_subkey::header(delta.count, delta.version, expires_at)),
         ));
     }
     for (member, change) in &delta.members {
@@ -394,6 +432,7 @@ fn push_delta(
         ops.extend(zset_subkey::member_change_ops(
             db,
             key,
+            delta.version,
             member,
             change.before,
             after,
@@ -406,16 +445,17 @@ fn point_score(
     storage: &dyn crate::storage::ScriptIo,
     db: usize,
     key: &[u8],
+    version: u64,
     member: &[u8],
 ) -> Result<Option<f64>> {
-    let engine = member_key(&AiDbEngine::encode_key(db, key), member);
+    let engine = member_key(&AiDbEngine::encode_key(db, key), version, member);
     let _pin = in_flight.map(|buf| buf.pin_reads());
     if let Some(buffer) = in_flight {
         if let Some(raw) = buffer.get_raw(&engine) {
             return Ok(raw.as_deref().and_then(zset_subkey::decode_score));
         }
     }
-    zset_subkey::read_member_score_sync(storage, db, key, member)
+    zset_subkey::read_member_score_sync(storage, db, key, version, member)
 }
 
 #[cfg(test)]
@@ -454,10 +494,13 @@ mod tests {
                 .unwrap();
         }
 
-        let mut ops = zset_subkey::member_change_ops(0, b"z", b"m00", Some(100.0), None);
-        let added = zset_subkey::member_key(&AiDbEngine::encode_key(0, b"z"), b"m99");
+        let (_, ver) =
+            zset_subkey::is_zset_header(&storage.get_typed(0, b"z").await.unwrap().unwrap())
+                .unwrap();
+        let mut ops = zset_subkey::member_change_ops(0, b"z", ver, b"m00", Some(100.0), None);
+        let added = zset_subkey::member_key(&AiDbEngine::encode_key(0, b"z"), ver, b"m99");
         ops.push((added, WriteOp::put_engine(zset_subkey::encode_score(7.0))));
-        ops.push((b"z".to_vec(), WriteOp::put_stored(header(64, None))));
+        ops.push((b"z".to_vec(), WriteOp::put_stored(header(64, ver, None))));
         let inflight = InFlightBuffer::new();
         inflight.insert_batch(0, &ops);
         let txn = ScriptTransaction::with_in_flight(0, Some(Arc::new(inflight)));
@@ -557,10 +600,13 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let mut ops = zset_subkey::member_change_ops(0, b"kz", b"m0", Some(0.0), None);
-        let added = zset_subkey::member_key(&AiDbEngine::encode_key(0, b"kz"), b"m99");
+        let (_, ver) =
+            zset_subkey::is_zset_header(&storage.get_typed(0, b"kz").await.unwrap().unwrap())
+                .unwrap();
+        let mut ops = zset_subkey::member_change_ops(0, b"kz", ver, b"m0", Some(0.0), None);
+        let added = zset_subkey::member_key(&AiDbEngine::encode_key(0, b"kz"), ver, b"m99");
         ops.push((added, WriteOp::put_engine(zset_subkey::encode_score(99.0))));
-        ops.push((b"kz".to_vec(), WriteOp::put_stored(header(70, None))));
+        ops.push((b"kz".to_vec(), WriteOp::put_stored(header(70, ver, None))));
         let inflight = Arc::new(InFlightBuffer::new());
         inflight.insert_batch(0, &ops);
 

@@ -25,13 +25,16 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::storage::types::{CollectionKind, StoredValue, ValueType};
+use crate::storage::types::{next_collection_version, CollectionKind, StoredValue, ValueType};
 use crate::storage::{AiDbEngine, WriteOp};
 
 /// Subkey 键编码相关常量.
 pub const SUBKEY_SEPARATOR: u8 = 0x01;
 const HASH_TAG: u8 = b'H';
 const SET_TAG: u8 = b'S';
+pub const LIST_TAG: u8 = b'L';
+/// Subkey 中 version 字段的字节数 (u64 big-endian).
+pub const SUBKEY_VERSION_BYTES: usize = 8;
 /// Subkey 中 field/member 长度字段的字节数 (u16).
 const SUBKEY_LEN_BYTES: usize = 2;
 
@@ -62,45 +65,49 @@ pub fn set_max_inline_members() -> usize {
 
 /// 构造 Hash field subkey 的完整 engine key.
 ///
-/// 格式: `{user_key}\x01H{field_len:2B}{field}`
-pub fn encode_hash_field_key(user_key: &[u8], field: &[u8]) -> Vec<u8> {
-    encode_collection_subkey(user_key, HASH_TAG, field)
+/// 格式: `{user_key}\x01H{version:8B_be}{field_len:2B_be}{field}`
+pub fn encode_hash_field_key(user_key: &[u8], version: u64, field: &[u8]) -> Vec<u8> {
+    encode_collection_subkey(user_key, HASH_TAG, version, field)
 }
 
 /// 构造 Set member subkey 的完整 engine key.
 ///
-/// 格式: `{user_key}\x01S{member_len:2B}{member}`
-pub fn encode_set_member_key(user_key: &[u8], member: &[u8]) -> Vec<u8> {
-    encode_collection_subkey(user_key, SET_TAG, member)
+/// 格式: `{user_key}\x01S{version:8B_be}{member_len:2B_be}{member}`
+pub fn encode_set_member_key(user_key: &[u8], version: u64, member: &[u8]) -> Vec<u8> {
+    encode_collection_subkey(user_key, SET_TAG, version, member)
 }
 
 /// 构造 Hash field 的扫描前缀.
 ///
-/// 格式: `{user_key}\x01H`
-pub fn hash_subkey_prefix(user_key: &[u8]) -> Vec<u8> {
-    let mut prefix = Vec::with_capacity(user_key.len() + 2);
-    prefix.extend_from_slice(user_key);
-    prefix.push(SUBKEY_SEPARATOR);
-    prefix.push(HASH_TAG);
-    prefix
+/// 格式: `{user_key}\x01H{version:8B_be}`
+pub fn hash_subkey_prefix(user_key: &[u8], version: u64) -> Vec<u8> {
+    encode_versioned_prefix(user_key, HASH_TAG, version)
 }
 
 /// 构造 Set member 的扫描前缀.
 ///
-/// 格式: `{user_key}\x01S`
-pub fn set_subkey_prefix(user_key: &[u8]) -> Vec<u8> {
-    let mut prefix = Vec::with_capacity(user_key.len() + 2);
+/// 格式: `{user_key}\x01S{version:8B_be}`
+pub fn set_subkey_prefix(user_key: &[u8], version: u64) -> Vec<u8> {
+    encode_versioned_prefix(user_key, SET_TAG, version)
+}
+
+pub(crate) fn encode_versioned_prefix(user_key: &[u8], tag: u8, version: u64) -> Vec<u8> {
+    let mut prefix = Vec::with_capacity(user_key.len() + 2 + SUBKEY_VERSION_BYTES);
     prefix.extend_from_slice(user_key);
     prefix.push(SUBKEY_SEPARATOR);
-    prefix.push(SET_TAG);
+    prefix.push(tag);
+    prefix.extend_from_slice(&version.to_be_bytes());
     prefix
 }
 
-fn encode_collection_subkey(user_key: &[u8], tag: u8, sub: &[u8]) -> Vec<u8> {
-    let mut key = Vec::with_capacity(user_key.len() + 3 + SUBKEY_LEN_BYTES + sub.len());
+fn encode_collection_subkey(user_key: &[u8], tag: u8, version: u64, sub: &[u8]) -> Vec<u8> {
+    let mut key = Vec::with_capacity(
+        user_key.len() + 2 + SUBKEY_VERSION_BYTES + SUBKEY_LEN_BYTES + sub.len(),
+    );
     key.extend_from_slice(user_key);
     key.push(SUBKEY_SEPARATOR);
     key.push(tag);
+    key.extend_from_slice(&version.to_be_bytes());
     let len = (sub.len() as u16).to_be_bytes();
     key.extend_from_slice(&len);
     key.extend_from_slice(sub);
@@ -121,8 +128,8 @@ pub fn decode_subkey_ref(encoded_key: &[u8]) -> Option<(CollectionKind, &[u8])> 
         SET_TAG => CollectionKind::Set,
         _ => return None,
     };
-    // 跳过 tag + 2B 长度前缀
-    let data_start = sep_pos + 4;
+    // 跳过 tag(1B) + version(8B) + len(2B)
+    let data_start = sep_pos + 2 + SUBKEY_VERSION_BYTES + SUBKEY_LEN_BYTES;
     if data_start > encoded_key.len() {
         return None;
     }
@@ -134,9 +141,9 @@ pub fn decode_subkey(encoded_key: &[u8]) -> Option<(CollectionKind, Vec<u8>)> {
     decode_subkey_ref(encoded_key).map(|(kind, slice)| (kind, slice.to_vec()))
 }
 
-/// 判断某个 engine key 是否为 subkey entry (field/member, 非 metadata).
+/// 判断某个 engine key 是否为 subkey entry (field/member/element, 非 metadata).
 ///
-/// 返回 user_key + subkey 标记; 常规 key/meta key 返回 None.
+/// 返回 user_key; 常规 key/meta key 返回 None.
 pub fn extract_user_key_from_subkey(encoded_key: &[u8]) -> Option<Vec<u8>> {
     let sep_pos = encoded_key.iter().position(|&b| b == SUBKEY_SEPARATOR)?;
     if sep_pos + 1 >= encoded_key.len() {
@@ -144,30 +151,32 @@ pub fn extract_user_key_from_subkey(encoded_key: &[u8]) -> Option<Vec<u8>> {
     }
     let tag = encoded_key[sep_pos + 1];
     match tag {
-        HASH_TAG | SET_TAG | b'Z' | b'Y' => Some(encoded_key[..sep_pos].to_vec()),
+        HASH_TAG | SET_TAG | LIST_TAG | b'Z' | b'Y' => Some(encoded_key[..sep_pos].to_vec()),
         _ => None,
     }
 }
 
-/// 严格解析 Subkey 的 parent key 与集合种类 (严格校验 2B 长度或 8B score 索引长度规范).
+/// 严格解析 Subkey 的 parent key, 集合种类与 version.
 ///
-/// 若 key 仅仅是偶然包含 `\x01H/S/Z/Y`, 但后续长度不满足协议规范, 返回 `None`.
-pub fn parse_strict_subkey(encoded_key: &[u8]) -> Option<(Vec<u8>, CollectionKind)> {
+/// 若 key 仅仅是偶然包含 `\x01H/S/Z/Y/L`, 但后续长度不满足协议规范, 返回 `None`.
+pub fn parse_strict_subkey(encoded_key: &[u8]) -> Option<(Vec<u8>, CollectionKind, u64)> {
     let sep_pos = encoded_key.iter().position(|&b| b == SUBKEY_SEPARATOR)?;
-    if sep_pos + 1 >= encoded_key.len() {
+    if sep_pos + 2 + SUBKEY_VERSION_BYTES > encoded_key.len() {
         return None;
     }
     let tag = encoded_key[sep_pos + 1];
+    let ver_start = sep_pos + 2;
+    let ver_end = ver_start + SUBKEY_VERSION_BYTES;
+    let version = u64::from_be_bytes(encoded_key[ver_start..ver_end].try_into().ok()?);
     let parent = encoded_key[..sep_pos].to_vec();
 
     match tag {
         HASH_TAG | SET_TAG | b'Z' => {
-            if encoded_key.len() < sep_pos + 4 {
+            if encoded_key.len() < ver_end + SUBKEY_LEN_BYTES {
                 return None;
             }
-            let len =
-                u16::from_be_bytes([encoded_key[sep_pos + 2], encoded_key[sep_pos + 3]]) as usize;
-            let actual_sub_len = encoded_key.len() - (sep_pos + 4);
+            let len = u16::from_be_bytes([encoded_key[ver_end], encoded_key[ver_end + 1]]) as usize;
+            let actual_sub_len = encoded_key.len() - (ver_end + SUBKEY_LEN_BYTES);
             if actual_sub_len != len {
                 return None;
             }
@@ -176,13 +185,21 @@ pub fn parse_strict_subkey(encoded_key: &[u8]) -> Option<(Vec<u8>, CollectionKin
                 SET_TAG => CollectionKind::Set,
                 _ => CollectionKind::ZSet,
             };
-            Some((parent, kind))
+            Some((parent, kind, version))
         }
         b'Y' => {
-            if encoded_key.len() < sep_pos + 10 {
+            // version(8B) + sortable_score(8B) + member
+            if encoded_key.len() < ver_end + 8 {
                 return None;
             }
-            Some((parent, CollectionKind::ZSet))
+            Some((parent, CollectionKind::ZSet, version))
+        }
+        LIST_TAG => {
+            // version(8B) + index(8B)
+            if encoded_key.len() != ver_end + 8 {
+                return None;
+            }
+            Some((parent, CollectionKind::List, version))
         }
         _ => None,
     }
@@ -201,19 +218,17 @@ pub fn replace_hash_ops(
     expires_at: Option<u64>,
 ) -> Vec<(Vec<u8>, WriteOp)> {
     let encoded = AiDbEngine::encode_key(db, user_key);
+    let version = next_collection_version();
     let mut ops = Vec::with_capacity(1 + hash.len());
     ops.push((
         user_key.to_vec(),
         WriteOp::put_stored(StoredValue {
-            value: ValueType::CollectionHeader {
-                kind: CollectionKind::Hash,
-                count: hash.len() as u32,
-            },
+            value: ValueType::collection_header(CollectionKind::Hash, hash.len() as u32, version),
             expires_at,
         }),
     ));
     for (field, value) in hash {
-        let subkey = encode_hash_field_key(&encoded, field);
+        let subkey = encode_hash_field_key(&encoded, version, field);
         ops.push((subkey, WriteOp::put_engine(value.clone())));
     }
     ops
@@ -244,7 +259,7 @@ mod tests {
     fn test_hash_field_roundtrip() {
         let user_key = b"myhash";
         let field = b"email";
-        let encoded = encode_hash_field_key(user_key, field);
+        let encoded = encode_hash_field_key(user_key, 42, field);
 
         assert!(encoded.starts_with(user_key));
         assert_eq!(encoded[user_key.len()], SUBKEY_SEPARATOR);
@@ -262,7 +277,7 @@ mod tests {
     fn test_set_member_roundtrip() {
         let user_key = b"myset";
         let member = b"alice";
-        let encoded = encode_set_member_key(user_key, member);
+        let encoded = encode_set_member_key(user_key, 7, member);
 
         let decoded = decode_subkey(&encoded).unwrap();
         assert_eq!(decoded.0, CollectionKind::Set);
@@ -276,21 +291,21 @@ mod tests {
         assert!(!is_not_subkey(b"0:mykey\x01H\x00\x05hello"));
     }
 
-    /// 验证 SubKey 前缀构建格式 (\x01H / \x01S)
+    /// 验证 SubKey 前缀构建格式 (\x01H{version} / \x01S{version})
     #[test]
     fn test_subkey_prefixes() {
         let user_key = b"myhash";
-        let h_prefix = hash_subkey_prefix(user_key);
-        let s_prefix = set_subkey_prefix(user_key);
+        let h_prefix = hash_subkey_prefix(user_key, 1);
+        let s_prefix = set_subkey_prefix(user_key, 1);
 
-        assert_eq!(h_prefix, b"myhash\x01H");
-        assert_eq!(s_prefix, b"myhash\x01S");
+        assert_eq!(h_prefix, b"myhash\x01H\x00\x00\x00\x00\x00\x00\x00\x01");
+        assert_eq!(s_prefix, b"myhash\x01S\x00\x00\x00\x00\x00\x00\x00\x01");
     }
 
     /// 验证 从复合 SubKey 中提取原始 UserKey
     #[test]
     fn test_extract_user_key_from_subkey() {
-        let encoded = encode_hash_field_key(b"mykey", b"field1");
+        let encoded = encode_hash_field_key(b"mykey", 9, b"field1");
         let extracted = extract_user_key_from_subkey(&encoded);
         assert_eq!(extracted, Some(b"mykey".to_vec()));
 

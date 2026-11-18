@@ -15,7 +15,7 @@ fn mk_storage(dir: &TempDir) -> (Arc<dyn KvStorage>, Arc<aidb::DB>) {
     let engine = AiDbEngine::open_for_testing(dir.path()).expect("open aidb");
     let db = engine.db.clone();
     // 注入 TTL filter
-    db.set_compaction_filter(Some(Arc::new(TtlExpireFilter)));
+    db.set_compaction_filter(Some(Arc::new(TtlExpireFilter::new())));
     (KvStorageAdapter::new(engine), db)
 }
 
@@ -70,7 +70,7 @@ async fn test_ttl_filter_persistent_cleanup() {
     {
         let engine = AiDbEngine::open_for_testing(&db_path).unwrap();
         let db = engine.db.clone();
-        db.set_compaction_filter(Some(Arc::new(TtlExpireFilter)));
+        db.set_compaction_filter(Some(Arc::new(TtlExpireFilter::new())));
         let storage = KvStorageAdapter::new(engine);
 
         storage
@@ -120,7 +120,7 @@ async fn test_ttl_filter_batch_mixed_expiry() {
 
     let engine = AiDbEngine::open_for_testing(dir.path()).unwrap();
     let db = engine.db.clone();
-    db.set_compaction_filter(Some(Arc::new(TtlExpireFilter)));
+    db.set_compaction_filter(Some(Arc::new(TtlExpireFilter::new())));
     let storage = KvStorageAdapter::new(engine);
 
     let past_ms = now_ms() - 1000;
@@ -172,7 +172,7 @@ async fn test_ttl_filter_ignores_no_expiry() {
 
     let engine = AiDbEngine::open_for_testing(dir.path()).unwrap();
     let db = engine.db.clone();
-    db.set_compaction_filter(Some(Arc::new(TtlExpireFilter)));
+    db.set_compaction_filter(Some(Arc::new(TtlExpireFilter::new())));
     let storage = KvStorageAdapter::new(engine);
 
     // 写入不含 expires_at 的普通 key
@@ -223,7 +223,7 @@ async fn test_ttl_filter_reclaims_orphan_subkeys_when_header_deleted() {
     // 1. 模拟遗留的孤儿 subkeys (Header 根本不存在或已被物理删除)
     for i in 0..5 {
         let field = format!("f{i}").into_bytes();
-        let sk = encode_hash_field_key(&encoded_user_key, &field);
+        let sk = encode_hash_field_key(&encoded_user_key, 1, &field);
         db.put(&sk, b"orphan_val").unwrap();
     }
 
@@ -236,7 +236,7 @@ async fn test_ttl_filter_reclaims_orphan_subkeys_when_header_deleted() {
     db.drain_compactions().unwrap();
 
     // 3. 验证 5 个孤儿 subkey 必须已被 compaction 彻底回收
-    let prefix = hash_subkey_prefix(&encoded_user_key);
+    let prefix = hash_subkey_prefix(&encoded_user_key, 1);
     let end = AiDbEngine::prefix_end(&prefix);
     let iter = db.scan(Some(&prefix), end.as_deref()).unwrap();
     let remaining: Vec<_> = iter.collect();
@@ -264,10 +264,7 @@ async fn test_ttl_filter_reclaims_orphan_subkeys_when_header_expired() {
             0,
             user_key,
             StoredValue {
-                value: ValueType::CollectionHeader {
-                    kind: CollectionKind::Hash,
-                    count: 5,
-                },
+                value: ValueType::collection_header(CollectionKind::Hash, 5, 1),
                 expires_at: Some(past_ms),
             },
         )
@@ -277,7 +274,7 @@ async fn test_ttl_filter_reclaims_orphan_subkeys_when_header_expired() {
     // 写入对应的 subkeys
     for i in 0..5 {
         let field = format!("f{i}").into_bytes();
-        let sk = encode_hash_field_key(&encoded_user_key, &field);
+        let sk = encode_hash_field_key(&encoded_user_key, 1, &field);
         db.put(&sk, b"hash_val").unwrap();
     }
 
@@ -293,7 +290,7 @@ async fn test_ttl_filter_reclaims_orphan_subkeys_when_header_expired() {
     let header_val = db.get(&encoded_user_key).unwrap();
     assert_eq!(header_val, None, "已过期 Header 必须被清理");
 
-    let prefix = hash_subkey_prefix(&encoded_user_key);
+    let prefix = hash_subkey_prefix(&encoded_user_key, 1);
     let end = AiDbEngine::prefix_end(&prefix);
     let iter = db.scan(Some(&prefix), end.as_deref()).unwrap();
     let remaining: Vec<_> = iter.collect();
@@ -316,7 +313,7 @@ async fn test_ttl_filter_reclaims_orphan_subkeys_when_header_type_mismatched() {
     // 1. 写入旧 Hash 的 5 个孤儿 subkey
     for i in 0..5 {
         let field = format!("f{i}").into_bytes();
-        let sk = encode_hash_field_key(&encoded_user_key, &field);
+        let sk = encode_hash_field_key(&encoded_user_key, 1, &field);
         db.put(&sk, b"old_hash_val").unwrap();
     }
 
@@ -336,7 +333,7 @@ async fn test_ttl_filter_reclaims_orphan_subkeys_when_header_type_mismatched() {
     assert_eq!(val, Some(b"new_string_value".to_vec()));
 
     // 5. 验证旧 Hash 的 5 个 subkey 被清理
-    let prefix = hash_subkey_prefix(&encoded_user_key);
+    let prefix = hash_subkey_prefix(&encoded_user_key, 1);
     let end = AiDbEngine::prefix_end(&prefix);
     let iter = db.scan(Some(&prefix), end.as_deref()).unwrap();
     let remaining: Vec<_> = iter.collect();
@@ -362,10 +359,7 @@ async fn test_ttl_filter_preserves_valid_subkeys_and_keys_with_x01() {
             0,
             hash_key,
             StoredValue {
-                value: ValueType::CollectionHeader {
-                    kind: CollectionKind::Hash,
-                    count: 3,
-                },
+                value: ValueType::collection_header(CollectionKind::Hash, 3, 1),
                 expires_at: None,
             },
         )
@@ -373,7 +367,7 @@ async fn test_ttl_filter_preserves_valid_subkeys_and_keys_with_x01() {
         .unwrap();
     for i in 0..3 {
         let field = format!("f{i}").into_bytes();
-        let sk = encode_hash_field_key(&encoded_hash_key, &field);
+        let sk = encode_hash_field_key(&encoded_hash_key, 1, &field);
         db.put(&sk, b"valid_val").unwrap();
     }
 
@@ -393,7 +387,7 @@ async fn test_ttl_filter_preserves_valid_subkeys_and_keys_with_x01() {
     db.drain_compactions().unwrap();
 
     // 4. 验证 Hash subkeys 完好无损 (反向红线)
-    let prefix = hash_subkey_prefix(&encoded_hash_key);
+    let prefix = hash_subkey_prefix(&encoded_hash_key, 1);
     let end = AiDbEngine::prefix_end(&prefix);
     let iter = db.scan(Some(&prefix), end.as_deref()).unwrap();
     let remaining: Vec<_> = iter.collect();
@@ -444,7 +438,7 @@ async fn test_ttl_filter_cluster_mode_orphan_reclaim_and_preservation() {
     let dir = TempDir::new().unwrap();
     let engine = AiDbEngine::open_for_testing(dir.path()).unwrap();
     let db = engine.db.clone();
-    db.set_compaction_filter(Some(Arc::new(TtlExpireFilter)));
+    db.set_compaction_filter(Some(Arc::new(TtlExpireFilter::new())));
 
     let gid = 1u64;
     let gid_bytes = gid.to_be_bytes();
@@ -453,7 +447,7 @@ async fn test_ttl_filter_cluster_mode_orphan_reclaim_and_preservation() {
     // 1. 模拟一个 Header 已经消失的集群孤儿 Hash subkey
     let orphan_user_key = b"cluster_orphan_hash";
     let encoded_orphan_user = AiDbEngine::encode_key(0, orphan_user_key);
-    let orphan_sk = encode_hash_field_key(&encoded_orphan_user, b"f01");
+    let orphan_sk = encode_hash_field_key(&encoded_orphan_user, 1, b"f01");
     let orphan_db_key = [sm_prefix.as_slice(), orphan_sk.as_slice()].concat();
     db.put(&orphan_db_key, b"orphan_payload").unwrap();
 
@@ -462,10 +456,7 @@ async fn test_ttl_filter_cluster_mode_orphan_reclaim_and_preservation() {
     let encoded_valid_user = AiDbEngine::encode_key(0, valid_user_key);
     let valid_header_db_key = [sm_prefix.as_slice(), encoded_valid_user.as_slice()].concat();
     let header_val = StoredValue {
-        value: ValueType::CollectionHeader {
-            kind: CollectionKind::Hash,
-            count: 1,
-        },
+        value: ValueType::collection_header(CollectionKind::Hash, 1, 1),
         expires_at: None,
     };
     db.put(
@@ -474,7 +465,7 @@ async fn test_ttl_filter_cluster_mode_orphan_reclaim_and_preservation() {
     )
     .unwrap();
 
-    let valid_sk = encode_hash_field_key(&encoded_valid_user, b"f01");
+    let valid_sk = encode_hash_field_key(&encoded_valid_user, 1, b"f01");
     let valid_db_key = [sm_prefix.as_slice(), valid_sk.as_slice()].concat();
     db.put(&valid_db_key, b"valid_payload").unwrap();
 

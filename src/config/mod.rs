@@ -592,6 +592,7 @@ kind = "memory"
 hash_max_inline_fields = 32
 set_max_inline_members = 48
 zset_max_inline_members = 96
+list_max_inline_elements = 128
 local_batch_max_ops = 256
 "#;
         let (resolved, _warnings) = resolve_from_parts(
@@ -619,6 +620,7 @@ local_batch_max_ops = 256
         assert_eq!(resolved.engine_ext.hash_max_inline_fields, 32);
         assert_eq!(resolved.engine_ext.set_max_inline_members, 48);
         assert_eq!(resolved.engine_ext.zset_max_inline_members, 96);
+        assert_eq!(resolved.engine_ext.list_max_inline_elements, 128);
         assert_eq!(resolved.engine_ext.local_batch_max_ops, 256);
     }
 

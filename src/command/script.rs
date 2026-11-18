@@ -20,7 +20,7 @@ mod phase_stats;
 mod pool;
 mod route;
 mod sandbox;
-mod transaction;
+pub(crate) mod transaction;
 mod zset_edit;
 
 use std::cell::RefCell;

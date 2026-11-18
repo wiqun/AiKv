@@ -117,6 +117,7 @@ impl KeyCommands {
         let cursor = parse_u64(&args[0])?;
         let mut pattern = Vec::new();
         let mut count = 10usize;
+        let mut type_filter: Option<String> = None;
         let mut i = 1;
         while i < args.len() {
             if eq_ignore_case(&args[i], b"MATCH") {
@@ -131,11 +132,23 @@ impl KeyCommands {
                 }
                 count = parse_i64(&args[i + 1])? as usize;
                 i += 2;
+            } else if eq_ignore_case(&args[i], b"TYPE") {
+                if i + 1 >= args.len() {
+                    return Err(router::wrong_args("SCAN", ""));
+                }
+                let ty = std::str::from_utf8(&args[i + 1])
+                    .map_err(|_| router::wrong_args("SCAN", ""))?
+                    .to_string();
+                type_filter = Some(ty);
+                i += 2;
             } else {
                 return Err(router::wrong_args("SCAN", ""));
             }
         }
-        let result = self.storage.scan(db, cursor, &pattern, count).await?;
+        let result = self
+            .storage
+            .scan_with_type(db, cursor, &pattern, count, type_filter.as_deref())
+            .await?;
         Ok(RespValue::Array(Some(vec![
             RespValue::BulkString(Some(Bytes::from(result.cursor.to_string()))),
             array_of_bulk(result.keys),
@@ -287,49 +300,32 @@ impl KeyCommands {
         }
 
         // 大集合自动转 Subkey 格式存储
+        let is_nonempty_list = matches!(&stored.value, ValueType::List(l) if !l.is_empty());
         if self.storage.engine_kind() != StorageEngineKind::Memory {
             match stored.value {
                 ValueType::Hash(ref map) if map.len() > subkey::hash_max_inline_fields() => {
-                    let encoded_user_key = AiDbEngine::encode_key(db, key);
-                    let mut ops = Vec::with_capacity(1 + map.len());
-                    ops.push((
-                        key.to_vec(),
-                        WriteOp::put_stored(StoredValue {
-                            value: ValueType::CollectionHeader {
-                                kind: CollectionKind::Hash,
-                                count: map.len() as u32,
-                            },
-                            expires_at: stored.expires_at,
-                        }),
-                    ));
-                    for (field, val) in map {
-                        let sk = subkey::encode_hash_field_key(&encoded_user_key, field);
-                        ops.push((
-                            sk,
-                            WriteOp::PutEngine {
-                                value: Arc::new(val.clone()),
-                            },
-                        ));
-                    }
+                    let ops = subkey::replace_hash_ops(db, key, map, stored.expires_at);
                     self.storage.write_batch(db, ops).await?;
                     return Ok(router::ok());
                 }
                 ValueType::Set(ref set) if set.len() > subkey::set_max_inline_members() => {
                     let encoded_user_key = AiDbEngine::encode_key(db, key);
+                    let version = crate::storage::types::next_collection_version();
                     let mut ops = Vec::with_capacity(1 + set.len());
                     ops.push((
                         key.to_vec(),
                         WriteOp::put_stored(StoredValue {
-                            value: ValueType::CollectionHeader {
-                                kind: CollectionKind::Set,
-                                count: set.len() as u32,
-                            },
+                            value: ValueType::collection_header(
+                                CollectionKind::Set,
+                                set.len() as u32,
+                                version,
+                            ),
                             expires_at: stored.expires_at,
                         }),
                     ));
                     let empty_val = Arc::new(Vec::new());
                     for member in set {
-                        let sk = subkey::encode_set_member_key(&encoded_user_key, member);
+                        let sk = subkey::encode_set_member_key(&encoded_user_key, version, member);
                         ops.push((
                             sk,
                             WriteOp::PutEngine {
@@ -345,11 +341,29 @@ impl KeyCommands {
                     self.storage.write_batch(db, ops).await?;
                     return Ok(router::ok());
                 }
+                ValueType::List(ref list)
+                    if list.len() > crate::storage::list_subkey::list_max_inline() =>
+                {
+                    let ops = crate::storage::list_subkey::replace_list_ops(
+                        db,
+                        key,
+                        list,
+                        stored.expires_at,
+                    );
+                    self.storage.write_batch(db, ops).await?;
+                    crate::command::blocking::BlockingRegistry::global()
+                        .notify(key, RespValue::SimpleString("OK".into()));
+                    return Ok(router::ok());
+                }
                 _ => {}
             }
         }
 
         self.storage.set_typed(db, key, stored).await?;
+        if is_nonempty_list {
+            crate::command::blocking::BlockingRegistry::global()
+                .notify(key, RespValue::SimpleString("OK".into()));
+        }
         Ok(router::ok())
     }
 
@@ -486,11 +500,17 @@ pub async fn hydrate_stored_value(
     stored: StoredValue,
 ) -> Result<StoredValue> {
     match stored.value {
-        ValueType::CollectionHeader { kind, count: _ } => {
+        ValueType::CollectionHeader {
+            kind,
+            version,
+            head: _,
+            tail: _,
+            count: _,
+        } => {
             let encoded_user_key = AiDbEngine::encode_key(db, user_key);
             match kind {
                 CollectionKind::Hash => {
-                    let prefix = subkey::hash_subkey_prefix(&encoded_user_key);
+                    let prefix = subkey::hash_subkey_prefix(&encoded_user_key, version);
                     let map = std::collections::HashMap::new();
                     let state = Arc::new(std::sync::Mutex::new((map, 0usize)));
                     let state_c = state.clone();
@@ -526,7 +546,7 @@ pub async fn hydrate_stored_value(
                     })
                 }
                 CollectionKind::Set => {
-                    let prefix = subkey::set_subkey_prefix(&encoded_user_key);
+                    let prefix = subkey::set_subkey_prefix(&encoded_user_key, version);
                     let set = std::collections::HashSet::new();
                     let state = Arc::new(std::sync::Mutex::new((set, 0usize)));
                     let state_c = state.clone();
@@ -562,7 +582,7 @@ pub async fn hydrate_stored_value(
                     })
                 }
                 CollectionKind::ZSet => {
-                    let prefix = zset_subkey::member_prefix(&encoded_user_key);
+                    let prefix = zset_subkey::member_prefix(&encoded_user_key, version);
                     let prefix_len = prefix.len();
                     let map = std::collections::BTreeMap::new();
                     let state = Arc::new(std::sync::Mutex::new((map, 0usize)));
@@ -597,6 +617,25 @@ pub async fn hydrate_stored_value(
                     let (map, _) = Arc::try_unwrap(state).unwrap().into_inner().unwrap();
                     Ok(StoredValue {
                         value: ValueType::ZSet(map),
+                        expires_at: stored.expires_at,
+                    })
+                }
+                CollectionKind::List => {
+                    let list = crate::storage::list_subkey::load_list_full(
+                        storage.as_ref(),
+                        db,
+                        &encoded_user_key,
+                        version,
+                    )
+                    .await?;
+                    let total: usize = list.iter().map(|v| v.len()).sum();
+                    if total > MAX_DUMP_AGGREGATE_BYTES {
+                        return Err(Error::Command(
+                            "ERR DUMP payload exceeds maximum allowed size (32MB)".into(),
+                        ));
+                    }
+                    Ok(StoredValue {
+                        value: ValueType::List(list),
                         expires_at: stored.expires_at,
                     })
                 }

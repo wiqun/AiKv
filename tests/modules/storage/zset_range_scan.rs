@@ -28,10 +28,11 @@ async fn fill(router: &CommandRouter, key: &str, entries: &[(f64, String)]) {
     }
 }
 
-fn index_bounds(key: &str) -> (Vec<u8>, Vec<u8>) {
-    let prefix = score_prefix(&AiDbEngine::encode_key(0, key.as_bytes()));
-    let mut end = prefix.clone();
-    *end.last_mut().unwrap() += 1;
+async fn index_bounds(storage: &Arc<dyn KvStorage>, key: &str) -> (Vec<u8>, Vec<u8>) {
+    let stored = storage.get_typed(0, key.as_bytes()).await.unwrap().unwrap();
+    let (_, ver) = aikv::storage::zset_subkey::is_zset_header(&stored).unwrap();
+    let prefix = score_prefix(&AiDbEngine::encode_key(0, key.as_bytes()), ver);
+    let end = AiDbEngine::prefix_end(&prefix).unwrap();
     (prefix, end)
 }
 
@@ -45,7 +46,7 @@ async fn raw_range_scan_is_bounded_ordered_and_reversible() {
     let (router, storage) = setup(&dir);
     let entries: Vec<(f64, String)> = (0..100).map(|i| (i as f64, format!("m{i:03}"))).collect();
     fill(&router, "z", &entries).await;
-    let (start, end) = index_bounds("z");
+    let (start, end) = index_bounds(&storage, "z").await;
     let plen = start.len();
 
     let head = storage
@@ -80,7 +81,7 @@ async fn test_tombstone_scan_fast_path() {
     let (router, storage) = setup(&dir);
     let entries: Vec<(f64, String)> = (0..5000).map(|i| (i as f64, format!("m{i:04}"))).collect();
     fill(&router, "z", &entries).await;
-    let (start, end) = index_bounds("z");
+    let (start, end) = index_bounds(&storage, "z").await;
     let plen = start.len();
     let io = storage.script_io();
     let res = io

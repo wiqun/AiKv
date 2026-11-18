@@ -57,9 +57,9 @@ use self::set::{
     exec_sadd, exec_scard, exec_sismember, exec_smembers, exec_smismember, exec_srem, exec_sscan,
 };
 use self::string::{
-    exec_append, exec_bitcount, exec_bitfield, exec_decrby, exec_del, exec_exists, exec_get,
-    exec_getbit, exec_getset, exec_incr, exec_incrby, exec_incrbyfloat, exec_set, exec_setbit,
-    exec_strlen,
+    exec_append, exec_bitcount, exec_bitfield, exec_bitop, exec_bitpos, exec_decrby, exec_del,
+    exec_exists, exec_get, exec_getbit, exec_getset, exec_incr, exec_incrby, exec_incrbyfloat,
+    exec_set, exec_setbit, exec_strlen,
 };
 use self::zset::{
     exec_zadd, exec_zcard, exec_zmscore, exec_zrange, exec_zrangebyscore, exec_zrank, exec_zrem,
@@ -261,6 +261,8 @@ pub(crate) const SCRIPT_COMMANDS: &[&str] = &[
     "BITCOUNT",
     "BITFIELD",
     "BITFIELD_RO",
+    "BITOP",
+    "BITPOS",
     "COPY",
     "DECR",
     "DECRBY",
@@ -352,6 +354,8 @@ pub(crate) const SCRIPT_COMMANDS: &[&str] = &[
     "SMEMBERS",
     "SMISMEMBER",
     "SMOVE",
+    "SORT",
+    "SORT_RO",
     "SPOP",
     "SRANDMEMBER",
     "SREM",
@@ -428,6 +432,10 @@ fn dispatch(
         "TIME" => extra::exec_time(args),
         "TYPE" => extra::exec_type(storage, txn, args),
         "BITCOUNT" => exec_bitcount(storage, txn, args),
+        "BITOP" => exec_bitop(storage, txn, args),
+        "BITPOS" => exec_bitpos(storage, txn, args),
+        "SORT" => crate::command::sort::exec_sort_sync(storage, txn, args, false),
+        "SORT_RO" => crate::command::sort::exec_sort_sync(storage, txn, args, true),
         "BITFIELD" => exec_bitfield(storage, txn, args, false),
         "BITFIELD_RO" => exec_bitfield(storage, txn, args, true),
         "SET" => exec_set(storage, txn, args),

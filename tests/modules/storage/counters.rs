@@ -68,7 +68,7 @@ fn ttl_expire_filter_does_not_touch_expires_counters() {
     };
     let bytes = postcard::to_allocvec(&stored).unwrap();
     assert_eq!(
-        TtlExpireFilter.filter(0, b"k", &bytes),
+        TtlExpireFilter::new().filter(0, b"k", &bytes),
         FilterDecision::Remove
     );
     assert_eq!(counters.get(0), 1);

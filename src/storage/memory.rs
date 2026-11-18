@@ -373,6 +373,17 @@ impl KvStorage for MemoryEngine {
         pattern: &[u8],
         count: usize,
     ) -> Result<ScanResult> {
+        self.scan_with_type(db, cursor, pattern, count, None).await
+    }
+
+    async fn scan_with_type(
+        &self,
+        db: usize,
+        cursor: u64,
+        pattern: &[u8],
+        count: usize,
+        type_filter: Option<&str>,
+    ) -> Result<ScanResult> {
         self.check_db(db)?;
         let map = self.databases[db].read();
         let mut valid: Vec<Vec<u8>> = map
@@ -380,6 +391,7 @@ impl KvStorage for MemoryEngine {
             .filter(|(_, v)| !v.is_expired())
             .filter(|(k, _)| !is_watch_meta_user_key(k))
             .filter(|(k, _)| pattern.is_empty() || glob_match(pattern, k))
+            .filter(|(_, v)| type_filter.is_none_or(|t| v.type_name().eq_ignore_ascii_case(t)))
             .map(|(k, _)| k.clone())
             .collect();
         drop(map);

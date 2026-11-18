@@ -9,7 +9,9 @@ use std::sync::Arc;
 
 use crate::error::Result;
 use crate::storage::aidb::AiDbEngine;
-use crate::storage::types::{CollectionKind, KvStorage, StoredValue, ValueType, WriteOp};
+use crate::storage::types::{
+    next_collection_version, CollectionKind, KvStorage, StoredValue, ValueType, WriteOp,
+};
 
 /// 与 Hash / Set 的 inline 上限一致.
 pub const ZSET_MAX_INLINE: usize = 64;
@@ -50,39 +52,43 @@ pub fn sortable_score(score: f64) -> [u8; 8] {
     bits.to_be_bytes()
 }
 
-pub fn member_key(encoded_user: &[u8], member: &[u8]) -> Vec<u8> {
-    let mut key = Vec::with_capacity(encoded_user.len() + 4 + member.len());
+pub fn member_key(encoded_user: &[u8], version: u64, member: &[u8]) -> Vec<u8> {
+    let mut key = Vec::with_capacity(encoded_user.len() + 12 + member.len());
     key.extend_from_slice(encoded_user);
     key.push(0x01);
     key.push(MEMBER_TAG);
+    key.extend_from_slice(&version.to_be_bytes());
     key.extend_from_slice(&(member.len() as u16).to_be_bytes());
     key.extend_from_slice(member);
     key
 }
 
-pub fn score_key(encoded_user: &[u8], score: f64, member: &[u8]) -> Vec<u8> {
-    let mut key = Vec::with_capacity(encoded_user.len() + 10 + member.len());
+pub fn score_key(encoded_user: &[u8], version: u64, score: f64, member: &[u8]) -> Vec<u8> {
+    let mut key = Vec::with_capacity(encoded_user.len() + 18 + member.len());
     key.extend_from_slice(encoded_user);
     key.push(0x01);
     key.push(SCORE_TAG);
+    key.extend_from_slice(&version.to_be_bytes());
     key.extend_from_slice(&sortable_score(score));
     key.extend_from_slice(member);
     key
 }
 
-pub fn member_prefix(encoded_user: &[u8]) -> Vec<u8> {
-    let mut prefix = Vec::with_capacity(encoded_user.len() + 2);
+pub fn member_prefix(encoded_user: &[u8], version: u64) -> Vec<u8> {
+    let mut prefix = Vec::with_capacity(encoded_user.len() + 10);
     prefix.extend_from_slice(encoded_user);
     prefix.push(0x01);
     prefix.push(MEMBER_TAG);
+    prefix.extend_from_slice(&version.to_be_bytes());
     prefix
 }
 
-pub fn score_prefix(encoded_user: &[u8]) -> Vec<u8> {
-    let mut prefix = Vec::with_capacity(encoded_user.len() + 2);
+pub fn score_prefix(encoded_user: &[u8], version: u64) -> Vec<u8> {
+    let mut prefix = Vec::with_capacity(encoded_user.len() + 10);
     prefix.extend_from_slice(encoded_user);
     prefix.push(0x01);
     prefix.push(SCORE_TAG);
+    prefix.extend_from_slice(&version.to_be_bytes());
     prefix
 }
 
@@ -105,35 +111,35 @@ pub fn score_index_entry(prefix: &[u8], full: &[u8]) -> Option<(Vec<u8>, f64)> {
     Some((full[at + 8..].to_vec(), unsort_score(bytes)))
 }
 
-pub fn member_from_score_key(encoded_user: &[u8], full: &[u8]) -> Option<Vec<u8>> {
-    let prefix_len = encoded_user.len() + 2 + 8;
-    if full.len() < prefix_len || !full.starts_with(&score_prefix(encoded_user)) {
+pub fn member_from_score_key(encoded_user: &[u8], version: u64, full: &[u8]) -> Option<Vec<u8>> {
+    let prefix = score_prefix(encoded_user, version);
+    let prefix_len = prefix.len() + 8;
+    if full.len() < prefix_len || !full.starts_with(&prefix) {
         return None;
     }
     Some(full[prefix_len..].to_vec())
 }
 
-pub fn header(count: u32, expires_at: Option<u64>) -> StoredValue {
+pub fn header(count: u32, version: u64, expires_at: Option<u64>) -> StoredValue {
     StoredValue {
-        value: ValueType::CollectionHeader {
-            kind: CollectionKind::ZSet,
-            count,
-        },
+        value: ValueType::collection_header(CollectionKind::ZSet, count, version),
         expires_at,
     }
 }
 
-pub fn is_zset_header(stored: &StoredValue) -> Option<u32> {
+pub fn is_zset_header(stored: &StoredValue) -> Option<(u32, u64)> {
     match stored.value {
         ValueType::CollectionHeader {
             kind: CollectionKind::ZSet,
             count,
-        } => Some(count),
+            version,
+            ..
+        } => Some((count, version)),
         _ => None,
     }
 }
 
-/// 用整份 map 覆盖成 subkey. 调用方负责已经不存在旧的 subkey.
+/// 用整份 map 覆盖成 subkey. 调用方负责已经不存在旧的 subkey (或通过新 version 隔离).
 pub fn replace_ops(
     db: usize,
     user_key: &[u8],
@@ -141,15 +147,16 @@ pub fn replace_ops(
     expires_at: Option<u64>,
 ) -> Vec<(Vec<u8>, WriteOp)> {
     let encoded = AiDbEngine::encode_key(db, user_key);
+    let version = next_collection_version();
     let mut ops = Vec::with_capacity(1 + map.len() * 2);
     ops.push((
         user_key.to_vec(),
-        WriteOp::put_stored(header(map.len() as u32, expires_at)),
+        WriteOp::put_stored(header(map.len() as u32, version, expires_at)),
     ));
     let mut min_k: Option<Vec<u8>> = None;
     let mut max_k: Option<Vec<u8>> = None;
     for (member, score) in map {
-        let sk = score_key(&encoded, *score, member);
+        let sk = score_key(&encoded, version, *score, member);
         if min_k
             .as_ref()
             .is_none_or(|cur| sk.as_slice() < cur.as_slice())
@@ -162,9 +169,9 @@ pub fn replace_ops(
         {
             max_k = Some(sk);
         }
-        push_member_put(&mut ops, &encoded, member, *score);
+        push_member_put(&mut ops, &encoded, version, member, *score);
     }
-    set_score_bounds_hint(&score_prefix(&encoded), min_k, max_k);
+    set_score_bounds_hint(&score_prefix(&encoded, version), min_k, max_k);
     ops
 }
 
@@ -172,6 +179,7 @@ pub fn replace_ops(
 pub fn member_change_ops(
     db: usize,
     user_key: &[u8],
+    version: u64,
     member: &[u8],
     old: Option<f64>,
     new: Option<f64>,
@@ -179,13 +187,13 @@ pub fn member_change_ops(
     let encoded = AiDbEngine::encode_key(db, user_key);
     let mut ops = Vec::with_capacity(2);
     if let Some(score) = old {
-        let key = score_key(&encoded, score, member);
+        let key = score_key(&encoded, version, score, member);
         ops.push((key, WriteOp::DeleteEngine));
     }
     if let Some(score) = new {
-        push_member_put(&mut ops, &encoded, member, score);
+        push_member_put(&mut ops, &encoded, version, member, score);
     } else {
-        let key = member_key(&encoded, member);
+        let key = member_key(&encoded, version, member);
         ops.push((key, WriteOp::DeleteEngine));
     }
     ops
@@ -211,11 +219,12 @@ pub async fn read_member_score(
     storage: &dyn KvStorage,
     db: usize,
     user_key: &[u8],
+    version: u64,
     member: &[u8],
 ) -> Result<Option<f64>> {
     let encoded = AiDbEngine::encode_key(db, user_key);
     let raw = storage
-        .raw_subkey_get(db, member_key(&encoded, member))
+        .raw_subkey_get(db, member_key(&encoded, version, member))
         .await?;
     Ok(raw.as_deref().and_then(decode_score))
 }
@@ -250,11 +259,12 @@ pub async fn load_members(
     storage: &dyn KvStorage,
     db: usize,
     user_key: &[u8],
+    version: u64,
 ) -> Result<BTreeMap<Vec<u8>, f64>> {
     #[cfg(test)]
     count_load_members();
     let encoded = AiDbEngine::encode_key(db, user_key);
-    let prefix = member_prefix(&encoded);
+    let prefix = member_prefix(&encoded, version);
     let prefix_len = prefix.len();
     let mut map = BTreeMap::new();
     let map_ptr = UnsafeSyncMap(&mut map as *mut _);
@@ -282,11 +292,12 @@ pub fn load_members_sync(
     storage: &dyn crate::storage::ScriptIo,
     db: usize,
     user_key: &[u8],
+    version: u64,
 ) -> Result<BTreeMap<Vec<u8>, f64>> {
     #[cfg(test)]
     count_load_members();
     let encoded = AiDbEngine::encode_key(db, user_key);
-    let prefix = member_prefix(&encoded);
+    let prefix = member_prefix(&encoded, version);
     let prefix_len = prefix.len();
     let mut map = BTreeMap::new();
     let map_ptr = UnsafeSyncMap(&mut map as *mut _);
@@ -313,10 +324,11 @@ pub fn read_member_score_sync(
     storage: &dyn crate::storage::ScriptIo,
     db: usize,
     user_key: &[u8],
+    version: u64,
     member: &[u8],
 ) -> Result<Option<f64>> {
     let encoded = AiDbEngine::encode_key(db, user_key);
-    let raw = storage.raw_subkey_get(db, member_key(&encoded, member))?;
+    let raw = storage.raw_subkey_get(db, member_key(&encoded, version, member))?;
     Ok(raw.as_deref().and_then(decode_score))
 }
 
@@ -336,18 +348,19 @@ pub(crate) fn member_from_encoded(enc: &[u8], prefix_len: usize) -> Option<Vec<u
 fn push_member_put(
     ops: &mut Vec<(Vec<u8>, WriteOp)>,
     encoded_user: &[u8],
+    version: u64,
     member: &[u8],
     score: f64,
 ) {
-    let member_engine = member_key(encoded_user, member);
+    let member_engine = member_key(encoded_user, version, member);
     ops.push((
         member_engine,
         WriteOp::PutEngine {
             value: Arc::new(encode_score(score)),
         },
     ));
-    let score_engine = score_key(encoded_user, score, member);
-    widen_score_bounds_hint(&score_prefix(encoded_user), &score_engine);
+    let score_engine = score_key(encoded_user, version, score, member);
+    widen_score_bounds_hint(&score_prefix(encoded_user, version), &score_engine);
     ops.push((score_engine, WriteOp::put_engine(Vec::new())));
 }
 
@@ -456,13 +469,19 @@ pub fn invalidate_score_bounds_hint(db: usize, key: &[u8]) {
     if SCORE_BOUNDS_HINT.read().is_none() {
         return;
     }
-    let prefix = score_prefix(&AiDbEngine::encode_key(db, key));
+    let encoded = AiDbEngine::encode_key(db, key);
+    let mut base_prefix = Vec::with_capacity(encoded.len() + 2);
+    base_prefix.extend_from_slice(&encoded);
+    base_prefix.push(0x01);
+    base_prefix.push(SCORE_TAG);
     let mut guard = SCORE_BOUNDS_HINT.write();
     if let Some(map) = guard.as_mut() {
-        if let Some(entry) = map.get_mut(&prefix) {
-            entry.min_k = None;
-            entry.max_k = None;
-            entry.version = entry.version.wrapping_add(1);
+        for (k, entry) in map.iter_mut() {
+            if k.starts_with(&base_prefix) {
+                entry.min_k = None;
+                entry.max_k = None;
+                entry.version = entry.version.wrapping_add(1);
+            }
         }
     }
 }
