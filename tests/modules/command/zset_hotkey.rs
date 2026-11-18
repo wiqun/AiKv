@@ -269,7 +269,7 @@ async fn test_zadd_hotkey_gate_releases_lock_and_preserves_count() {
     let mut db = 0;
     gated
         .inner
-        .set_typed(0, b"z_hot", zset_subkey::header(0, None))
+        .set_typed(0, b"z_hot", zset_subkey::header(0, 1, None))
         .await
         .unwrap();
 
@@ -315,15 +315,15 @@ async fn test_zadd_hotkey_gate_releases_lock_and_preserves_count() {
     let stored_val = stored.unwrap().expect("header 不应为 deleted");
     assert_eq!(
         zset_subkey::is_zset_header(&stored_val),
-        Some(1),
+        Some((1, 1)),
         "在途 Header 计数值必须为 1"
     );
 
     // 关键红绿灯断言 3:
     // m1 通过 get_raw 能查到在途 10.0，而 m2 查不到 (为 None)
     let encoded = AiDbEngine::encode_key(0, &key);
-    let m1_engine = zset_subkey::member_key(&encoded, b"m1");
-    let m2_engine = zset_subkey::member_key(&encoded, b"m2");
+    let m1_engine = zset_subkey::member_key(&encoded, 1, b"m1");
+    let m2_engine = zset_subkey::member_key(&encoded, 1, b"m2");
 
     let raw_m1 = in_flight.get_raw(&m1_engine);
     assert!(raw_m1.is_some(), "m1 在途应当存在");
@@ -368,7 +368,7 @@ async fn test_zadd_hotkey_same_member_overwrites_score() {
     let mut db = 0;
     gated
         .inner
-        .set_typed(0, b"z_same", zset_subkey::header(0, None))
+        .set_typed(0, b"z_same", zset_subkey::header(0, 1, None))
         .await
         .unwrap();
 
@@ -432,7 +432,7 @@ async fn test_zadd_public_zcard_reads_committed_only() {
     let mut db = 0;
     gated
         .inner
-        .set_typed(0, b"z_iso", zset_subkey::header(0, None))
+        .set_typed(0, b"z_iso", zset_subkey::header(0, 1, None))
         .await
         .unwrap();
 
@@ -478,7 +478,7 @@ async fn test_zadd_enqueue_failure_rolls_back() {
     let mut db = 0;
     gated
         .inner
-        .set_typed(0, b"z_fail", zset_subkey::header(0, None))
+        .set_typed(0, b"z_fail", zset_subkey::header(0, 1, None))
         .await
         .unwrap();
 
@@ -510,7 +510,7 @@ async fn test_zadd_followed_by_zrem_in_flight() {
     // 初始化 zset header
     gated
         .inner
-        .set_typed(0, b"z_cross", zset_subkey::header(0, None))
+        .set_typed(0, b"z_cross", zset_subkey::header(0, 1, None))
         .await
         .unwrap();
 

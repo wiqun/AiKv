@@ -19,7 +19,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -97,10 +97,13 @@ pub enum ValueType {
     ZSet(BTreeMap<Vec<u8>, f64>),
     /// Subkey 格式的集合元数据.
     /// key 自身存储 `StoredValue { value: CollectionHeader, expires_at }`,
-    /// 每个 field/member 以独立 subkey 存储在引擎中.
+    /// 每个 field/member/element 以带 `version` 的独立 subkey 存储在引擎中.
     CollectionHeader {
         kind: CollectionKind,
         count: u32,
+        version: u64,
+        head: u64,
+        tail: u64,
     },
 }
 
@@ -110,6 +113,51 @@ pub enum CollectionKind {
     Hash = 1,
     Set = 2,
     ZSet = 3,
+    List = 4,
+}
+
+impl ValueType {
+    /// 构造通用集合 header (`Hash` / `Set` / `ZSet`), `head` 与 `tail` 置 0.
+    pub fn collection_header(kind: CollectionKind, count: u32, version: u64) -> Self {
+        Self::CollectionHeader {
+            kind,
+            count,
+            version,
+            head: 0,
+            tail: 0,
+        }
+    }
+
+    /// 构造 `List` 集合 header, 携带双向序列号游标 `[head, tail)`.
+    pub fn list_header(count: u32, version: u64, head: u64, tail: u64) -> Self {
+        Self::CollectionHeader {
+            kind: CollectionKind::List,
+            count,
+            version,
+            head,
+            tail,
+        }
+    }
+}
+
+/// 生成进程内单调递增的集合版本号 (53/48-bit 微秒时间戳 + 16-bit 序列号), 恒大于 0.
+///
+/// 必须在命令/Adapter 层生成后随写入批提交 Raft, 确保集群各副本 apply 得到相同 version.
+pub fn next_collection_version() -> u64 {
+    static SEQ: OnceLock<AtomicU64> = OnceLock::new();
+    let seq = SEQ.get_or_init(|| {
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos() as u64)
+            .unwrap_or(1);
+        AtomicU64::new(seed ^ (std::process::id() as u64))
+    });
+    let us = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros() as u64)
+        .unwrap_or(1);
+    let s = seq.fetch_add(1, Ordering::Relaxed) & 0xffff;
+    ((us << 16) | s).max(1)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -145,6 +193,7 @@ impl StoredValue {
                 CollectionKind::Hash => "hash",
                 CollectionKind::Set => "set",
                 CollectionKind::ZSet => "zset",
+                CollectionKind::List => "list",
             },
         }
     }

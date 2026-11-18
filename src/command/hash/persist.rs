@@ -70,6 +70,7 @@ async fn commit_header_ops<G>(
     ctx: &HashWriteContext<'_>,
     mut ops: Vec<(Vec<u8>, WriteOp)>,
     new_count: u32,
+    version: u64,
     expires_at: Option<u64>,
     update_header: bool,
     guard: G,
@@ -80,10 +81,7 @@ async fn commit_header_ops<G>(
         ops.push((
             ctx.key.to_vec(),
             WriteOp::put_stored(StoredValue {
-                value: ValueType::CollectionHeader {
-                    kind: CollectionKind::Hash,
-                    count: new_count,
-                },
+                value: ValueType::collection_header(CollectionKind::Hash, new_count, version),
                 expires_at,
             }),
         ));
@@ -134,10 +132,13 @@ pub async fn hset_pipeline<G>(
         ValueType::CollectionHeader {
             kind: CollectionKind::Hash,
             count,
+            version,
+            ..
         } => {
             let base_count = *count;
+            let version = *version;
             let expires_at = stored.expires_at;
-            hset_subkey_header(ctx, base_count, expires_at, pairs, guard).await
+            hset_subkey_header(ctx, base_count, version, expires_at, pairs, guard).await
         }
         _ => {
             drop(guard);
@@ -149,6 +150,7 @@ pub async fn hset_pipeline<G>(
 async fn hset_subkey_header<G>(
     ctx: &HashWriteContext<'_>,
     base_count: u32,
+    version: u64,
     expires_at: Option<u64>,
     pairs: &[(&[u8], &[u8])],
     guard: G,
@@ -159,7 +161,7 @@ async fn hset_subkey_header<G>(
     let mut overlay: SubkeyPendingMap = HashMap::with_capacity(pairs.len());
     let mut new_fields = 0i64;
     for (field, value) in pairs {
-        let subkey_key = subkey::encode_hash_field_key(&encoded_user, field);
+        let subkey_key = subkey::encode_hash_field_key(&encoded_user, version, field);
         if let Some(entry) = overlay.get_mut(&subkey_key) {
             entry.1.clear();
             entry.1.extend_from_slice(value);
@@ -181,7 +183,16 @@ async fn hset_subkey_header<G>(
         return Ok(0);
     }
     let new_count = base_count.saturating_add(new_fields as u32);
-    commit_header_ops(ctx, ops, new_count, expires_at, new_fields > 0, guard).await?;
+    commit_header_ops(
+        ctx,
+        ops,
+        new_count,
+        version,
+        expires_at,
+        new_fields > 0,
+        guard,
+    )
+    .await?;
     Ok(new_fields)
 }
 
@@ -218,10 +229,13 @@ pub async fn hdel_pipeline<G>(
         ValueType::CollectionHeader {
             kind: CollectionKind::Hash,
             count,
+            version,
+            ..
         } => {
             let base_count = *count;
+            let version = *version;
             let expires_at = stored.expires_at;
-            hdel_subkey_header(ctx, base_count, expires_at, fields, guard).await
+            hdel_subkey_header(ctx, base_count, version, expires_at, fields, guard).await
         }
         _ => {
             drop(guard);
@@ -233,6 +247,7 @@ pub async fn hdel_pipeline<G>(
 async fn hdel_subkey_header<G>(
     ctx: &HashWriteContext<'_>,
     base_count: u32,
+    version: u64,
     expires_at: Option<u64>,
     fields: &[&[u8]],
     guard: G,
@@ -242,7 +257,7 @@ async fn hdel_subkey_header<G>(
     let mut ops = Vec::with_capacity(fields.len() + 1);
     let mut removed = 0i64;
     for field in fields {
-        let subkey_key = subkey::encode_hash_field_key(&encoded_user, field);
+        let subkey_key = subkey::encode_hash_field_key(&encoded_user, version, field);
         if !seen.insert(subkey_key.clone()) {
             continue;
         }
@@ -256,7 +271,7 @@ async fn hdel_subkey_header<G>(
         return Ok(0);
     }
     let new_count = base_count.saturating_sub(removed as u32);
-    commit_header_ops(ctx, ops, new_count, expires_at, true, guard).await?;
+    commit_header_ops(ctx, ops, new_count, version, expires_at, true, guard).await?;
     Ok(removed)
 }
 
@@ -283,17 +298,20 @@ pub async fn hsetnx_pipeline<G>(
         ValueType::CollectionHeader {
             kind: CollectionKind::Hash,
             count,
+            version,
+            ..
         } => {
             let base_count = *count;
+            let version = *version;
             let expires_at = stored.expires_at;
             let encoded_user = AiDbEngine::encode_key(ctx.db, ctx.key);
-            let subkey_key = subkey::encode_hash_field_key(&encoded_user, field);
+            let subkey_key = subkey::encode_hash_field_key(&encoded_user, version, field);
             if read_subkey_in_flight(ctx, &subkey_key).await?.is_some() {
                 drop(guard);
                 return Ok(0);
             }
             let ops = vec![(subkey_key, WriteOp::put_engine(value.to_vec()))];
-            commit_header_ops(ctx, ops, base_count + 1, expires_at, true, guard).await?;
+            commit_header_ops(ctx, ops, base_count + 1, version, expires_at, true, guard).await?;
             Ok(1)
         }
         _ => {
@@ -332,11 +350,14 @@ pub async fn hincrby_pipeline<G>(
         ValueType::CollectionHeader {
             kind: CollectionKind::Hash,
             count,
+            version,
+            ..
         } => {
             let base_count = *count;
+            let version = *version;
             let expires_at = stored.expires_at;
             let encoded_user = AiDbEngine::encode_key(ctx.db, ctx.key);
-            let subkey_key = subkey::encode_hash_field_key(&encoded_user, field);
+            let subkey_key = subkey::encode_hash_field_key(&encoded_user, version, field);
             let current = read_subkey_in_flight(ctx, &subkey_key).await?;
             let existed = current.is_some();
             let new_val = match current {
@@ -354,7 +375,7 @@ pub async fn hincrby_pipeline<G>(
                 WriteOp::put_engine(new_val.to_string().into_bytes()),
             )];
             let new_count = base_count + u32::from(!existed);
-            commit_header_ops(ctx, ops, new_count, expires_at, !existed, guard).await?;
+            commit_header_ops(ctx, ops, new_count, version, expires_at, !existed, guard).await?;
             Ok(new_val)
         }
         _ => {
@@ -394,11 +415,14 @@ pub async fn hincrbyfloat_pipeline<G>(
         ValueType::CollectionHeader {
             kind: CollectionKind::Hash,
             count,
+            version,
+            ..
         } => {
             let base_count = *count;
+            let version = *version;
             let expires_at = stored.expires_at;
             let encoded_user = AiDbEngine::encode_key(ctx.db, ctx.key);
-            let subkey_key = subkey::encode_hash_field_key(&encoded_user, field);
+            let subkey_key = subkey::encode_hash_field_key(&encoded_user, version, field);
             let current_raw = read_subkey_in_flight(ctx, &subkey_key).await?;
             let existed = current_raw.is_some();
             let current = match current_raw {
@@ -414,7 +438,7 @@ pub async fn hincrbyfloat_pipeline<G>(
             let bytes = format_hash_float(new_val).into_bytes();
             let ops = vec![(subkey_key, WriteOp::put_engine(bytes.clone()))];
             let new_count = base_count + u32::from(!existed);
-            commit_header_ops(ctx, ops, new_count, expires_at, !existed, guard).await?;
+            commit_header_ops(ctx, ops, new_count, version, expires_at, !existed, guard).await?;
             Ok(bytes)
         }
         _ => {

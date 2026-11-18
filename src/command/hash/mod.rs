@@ -94,10 +94,11 @@ impl HashCommands {
             },
             ValueType::CollectionHeader {
                 kind: CollectionKind::Hash,
+                version,
                 ..
             } => {
                 let encoded_user_key = AiDbEngine::encode_key(db, key_bytes);
-                let subkey_key = subkey::encode_hash_field_key(&encoded_user_key, field);
+                let subkey_key = subkey::encode_hash_field_key(&encoded_user_key, *version, field);
                 let raw = self
                     .storage
                     .raw_subkey_get(db, subkey_key)
@@ -136,10 +137,12 @@ impl HashCommands {
             ValueType::Hash(map) => map.contains_key(args[1].as_ref()),
             ValueType::CollectionHeader {
                 kind: CollectionKind::Hash,
+                version,
                 ..
             } => {
                 let encoded_user_key = AiDbEngine::encode_key(db, &args[0]);
-                let subkey_key = subkey::encode_hash_field_key(&encoded_user_key, args[1].as_ref());
+                let subkey_key =
+                    subkey::encode_hash_field_key(&encoded_user_key, *version, args[1].as_ref());
                 self.storage
                     .raw_subkey_get(db, subkey_key)
                     .await
@@ -160,6 +163,7 @@ impl HashCommands {
                 ValueType::CollectionHeader {
                     kind: CollectionKind::Hash,
                     count,
+                    ..
                 } => count as i64,
                 _ => return Err(router::wrongtype()),
             },
@@ -212,13 +216,18 @@ impl HashCommands {
                 }
                 ValueType::CollectionHeader {
                     kind: CollectionKind::Hash,
+                    version,
                     ..
                 } => {
                     let encoded_user_key = AiDbEngine::encode_key(db, &args[0]);
                     let subkey_keys: Vec<Vec<u8>> = args[1..]
                         .iter()
                         .map(|field| {
-                            subkey::encode_hash_field_key(&encoded_user_key, field.as_ref())
+                            subkey::encode_hash_field_key(
+                                &encoded_user_key,
+                                *version,
+                                field.as_ref(),
+                            )
                         })
                         .collect();
                     let values = self.storage.raw_subkey_mget(db, subkey_keys).await?;
@@ -274,8 +283,12 @@ impl HashCommands {
             }
             ValueType::CollectionHeader {
                 kind: CollectionKind::Hash,
+                version,
                 ..
-            } => self.hscan_subkeys(db, &args[0], cursor, &opts).await,
+            } => {
+                self.hscan_subkeys(db, &args[0], version, cursor, &opts)
+                    .await
+            }
             _ => Err(router::wrongtype()),
         }
     }
@@ -284,13 +297,14 @@ impl HashCommands {
         &self,
         db: usize,
         key: &[u8],
+        version: u64,
         cursor: u64,
         opts: &scan_util::ScanOptions,
     ) -> Result<RespValue> {
         let Some(cursor_mgr) = self.storage.cursor_mgr() else {
             let encoded_user_key = AiDbEngine::encode_key(db, key);
             let mut p = self
-                .scan_hash_subkeys(db, &encoded_user_key, opts.pattern.as_deref())
+                .scan_hash_subkeys(db, &encoded_user_key, version, opts.pattern.as_deref())
                 .await?;
             p.sort_by(|a, b| a.0.cmp(&b.0));
             let (next_cursor, page) = scan_util::paginate_slice(&p, cursor, opts.count)?;
@@ -298,7 +312,7 @@ impl HashCommands {
         };
 
         let encoded_user_key = AiDbEngine::encode_key(db, key);
-        let prefix = subkey::hash_subkey_prefix(&encoded_user_key);
+        let prefix = subkey::hash_subkey_prefix(&encoded_user_key, version);
         let end_prefix = AiDbEngine::prefix_end(&prefix).unwrap_or_default();
 
         let start_field = cursor_mgr
@@ -309,7 +323,7 @@ impl HashCommands {
         let mut seek_pos = match start_field {
             None => prefix.clone(),
             Some(last_field) => {
-                let mut k = subkey::encode_hash_field_key(&encoded_user_key, &last_field);
+                let mut k = subkey::encode_hash_field_key(&encoded_user_key, version, &last_field);
                 k.push(0);
                 k
             }
@@ -416,9 +430,11 @@ impl HashCommands {
             ValueType::CollectionHeader {
                 kind: CollectionKind::Hash,
                 count,
+                version,
+                ..
             } => {
                 let encoded_user_key = AiDbEngine::encode_key(db, key);
-                self.load_hash_subkeys_bounded(db, &encoded_user_key, count)
+                self.load_hash_subkeys_bounded(db, &encoded_user_key, version, count)
                     .await
             }
             _ => Err(router::wrongtype()),
@@ -432,12 +448,15 @@ impl HashCommands {
         &self,
         db: usize,
         encoded_user_key: &[u8],
+        version: u64,
         count: u32,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         const COUNT_SLACK: usize = 8;
-        let prefix = subkey::hash_subkey_prefix(encoded_user_key);
+        let prefix = subkey::hash_subkey_prefix(encoded_user_key, version);
         let Some(end) = AiDbEngine::prefix_end(&prefix) else {
-            return self.scan_hash_subkeys(db, encoded_user_key, None).await;
+            return self
+                .scan_hash_subkeys(db, encoded_user_key, version, None)
+                .await;
         };
         let limit = (count as usize).saturating_add(COUNT_SLACK);
         let mut raw = self
@@ -445,7 +464,9 @@ impl HashCommands {
             .raw_range_scan(prefix.clone(), end, limit, false)
             .await?;
         if raw.len() >= limit {
-            return self.scan_hash_subkeys(db, encoded_user_key, None).await;
+            return self
+                .scan_hash_subkeys(db, encoded_user_key, version, None)
+                .await;
         }
         let field_offset = prefix.len() + 2;
         let mut out = Vec::with_capacity(raw.len());
@@ -464,9 +485,10 @@ impl HashCommands {
         &self,
         db: usize,
         encoded_user_key: &[u8],
+        version: u64,
         pattern: Option<&[u8]>,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        let prefix = subkey::hash_subkey_prefix(encoded_user_key);
+        let prefix = subkey::hash_subkey_prefix(encoded_user_key, version);
         // field 紧跟在 `{prefix}{field_len:2B}` 之后, 直接在原 key 缓冲上截取, 省去逐 field 再分配.
         let field_offset = prefix.len() + 2;
         let out = Arc::new(std::sync::Mutex::new(Vec::new()));

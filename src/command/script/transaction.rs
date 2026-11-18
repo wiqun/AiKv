@@ -67,6 +67,7 @@ pub struct HashFieldChange {
 #[derive(Debug, Clone)]
 pub struct HashDelta {
     pub count: u32,
+    pub version: u64,
     pub fields: HashMap<Vec<u8>, HashFieldChange>,
 }
 
@@ -81,6 +82,7 @@ pub struct ZSetMemberChange {
 #[derive(Debug, Clone)]
 pub struct ZSetDelta {
     pub count: u32,
+    pub version: u64,
     pub members: HashMap<Vec<u8>, ZSetMemberChange>,
 }
 
@@ -260,10 +262,11 @@ impl ScriptTransaction {
         let expanded = match stored.value {
             ValueType::CollectionHeader {
                 kind: CollectionKind::Set,
+                version,
                 ..
             } => {
                 let encoded = AiDbEngine::encode_key(self.db_index, key);
-                let prefix = subkey::set_subkey_prefix(&encoded);
+                let prefix = subkey::set_subkey_prefix(&encoded, version);
                 let set_h = std::sync::Arc::new(std::sync::Mutex::new(HashSet::new()));
                 let set_c = set_h.clone();
                 storage.raw_subkey_for_each(
@@ -381,10 +384,11 @@ impl ScriptTransaction {
             ValueType::Hash(map) => Ok(map.clone()),
             ValueType::CollectionHeader {
                 kind: CollectionKind::Hash,
+                version,
                 ..
             } => {
                 let encoded_user_key = AiDbEngine::encode_key(self.db_index, key);
-                let prefix = subkey::hash_subkey_prefix(&encoded_user_key);
+                let prefix = subkey::hash_subkey_prefix(&encoded_user_key, *version);
                 let map_h = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
                 let map_c = map_h.clone();
                 storage.raw_subkey_for_each(

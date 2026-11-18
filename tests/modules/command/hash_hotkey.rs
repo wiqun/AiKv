@@ -368,15 +368,17 @@ async fn test_hset_large_subkey_migration_and_update_single_batch() {
         .get(0, &key)
         .unwrap()
         .unwrap();
-    assert_eq!(
-        stored.value,
+    let version = match stored.value {
         ValueType::CollectionHeader {
             kind: CollectionKind::Hash,
-            count: 66
-        }
-    );
+            count: 66,
+            version,
+            ..
+        } => version,
+        other => panic!("expected CollectionHeader(Hash, 66), got {other:?}"),
+    };
     let encoded = AiDbEngine::encode_key(0, &key);
-    let f65_key = subkey::encode_hash_field_key(&encoded, b"f65");
+    let f65_key = subkey::encode_hash_field_key(&encoded, version, b"f65");
     assert_eq!(
         router.in_flight_context().in_flight.get_raw(&f65_key),
         Some(Some(b"v65".to_vec()))

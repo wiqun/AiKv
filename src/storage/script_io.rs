@@ -165,11 +165,11 @@ mod tests {
         .unwrap();
         let adapter = crate::storage::KvStorageAdapter::new(engine);
         let io = adapter.script_io();
-        let header = crate::storage::zset_subkey::header(1, None);
+        let header = crate::storage::zset_subkey::header(1, 1, None);
         io.write_batch(0, vec![(b"z".to_vec(), WriteOp::put_stored(header))])
             .unwrap();
         let encoded = crate::storage::AiDbEngine::encode_key(0, b"z");
-        let score_key = crate::storage::zset_subkey::score_key(&encoded, 1.0, b"m");
+        let score_key = crate::storage::zset_subkey::score_key(&encoded, 1, 1.0, b"m");
         io.write_batch(
             0,
             vec![(
@@ -180,7 +180,7 @@ mod tests {
         .unwrap();
         io.write_batch(0, vec![(b"z".to_vec(), WriteOp::Delete)])
             .unwrap();
-        assert!(io.raw_subkey_get(0, score_key).unwrap().is_none());
+        assert!(io.get_typed(0, b"z").unwrap().is_none());
     }
 
     #[test]

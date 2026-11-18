@@ -418,13 +418,7 @@ impl KvStorageAdapter {
         let mut ops = vec![AdapterWriteOp::Delete {
             key: encoded.clone(),
         }];
-        if self
-            .push_collection_subkey_deletes(db, key, &encoded, stored.as_ref(), &mut ops)
-            .await
-            .is_err()
-        {
-            return;
-        }
+        self.on_collection_header_removed(db, key, stored.as_ref());
         if let Ok(Some((mk, mv))) = self.next_watch_meta_put(db, key).await {
             ops.push(AdapterWriteOp::Put { key: mk, value: mv });
         }
@@ -638,14 +632,7 @@ impl KvStorageAdapter {
                     let encoded = Self::encode(db, &key);
                     touched.push(encoded.clone());
                     let stored = self.get_typed(db, &key).await.ok().flatten();
-                    self.push_collection_subkey_deletes(
-                        db,
-                        &key,
-                        &encoded,
-                        stored.as_ref(),
-                        &mut batch,
-                    )
-                    .await?;
+                    self.on_collection_header_removed(db, &key, stored.as_ref());
                     batch.push(AdapterWriteOp::Delete { key: encoded });
                 }
             }
@@ -711,13 +698,7 @@ impl KvStorageAdapter {
                     let stored = crate::storage::script_io::ScriptIo::get_typed(self, db, &key)
                         .ok()
                         .flatten();
-                    self.push_collection_subkey_deletes_sync(
-                        db,
-                        &key,
-                        &encoded,
-                        stored.as_ref(),
-                        &mut batch,
-                    )?;
+                    self.on_collection_header_removed(db, &key, stored.as_ref());
                     batch.push(AdapterWriteOp::Delete { key: encoded });
                 }
             }
@@ -810,144 +791,20 @@ impl KvStorageAdapter {
         self.storage.last_in_range_sync(prefix, end)
     }
 
-    fn append_subkey_range(ranges: &mut Vec<(Vec<u8>, Vec<u8>)>, prefix: Vec<u8>) {
-        if let Some(end) = AiDbEngine::prefix_end(&prefix) {
-            ranges.push((prefix, end));
-        }
-    }
-
-    fn collection_subkey_ranges(
-        db: usize,
-        key: &[u8],
-        encoded: &[u8],
-        stored: Option<&StoredValue>,
-    ) -> Vec<(Vec<u8>, Vec<u8>)> {
+    /// 集合删除/覆盖改为 O(1) 删除 header (旧 version 的孤儿 subkey 由 `TtlExpireFilter` 懒回收),
+    /// 这里仅失效 ZSet score bounds hint 并记录逻辑孤儿元素数.
+    fn on_collection_header_removed(&self, db: usize, key: &[u8], stored: Option<&StoredValue>) {
         let Some(stored_val) = stored else {
-            return Vec::new();
+            return;
         };
-        let mut ranges = Vec::new();
-        match &stored_val.value {
-            ValueType::CollectionHeader { kind, .. } => match kind {
-                CollectionKind::Hash => {
-                    Self::append_subkey_range(&mut ranges, subkey::hash_subkey_prefix(encoded));
-                }
-                CollectionKind::Set => {
-                    Self::append_subkey_range(&mut ranges, subkey::set_subkey_prefix(encoded));
-                }
-                CollectionKind::ZSet => {
-                    crate::storage::zset_subkey::invalidate_score_bounds_hint(db, key);
-                    Self::append_subkey_range(
-                        &mut ranges,
-                        crate::storage::zset_subkey::member_prefix(encoded),
-                    );
-                    Self::append_subkey_range(
-                        &mut ranges,
-                        crate::storage::zset_subkey::score_prefix(encoded),
-                    );
-                }
-            },
-            _ if crate::storage::zset_subkey::is_zset_header(stored_val).is_some() => {
+        if let ValueType::CollectionHeader { kind, count, .. } = &stored_val.value {
+            if *kind == CollectionKind::ZSet {
                 crate::storage::zset_subkey::invalidate_score_bounds_hint(db, key);
-                Self::append_subkey_range(
-                    &mut ranges,
-                    crate::storage::zset_subkey::member_prefix(encoded),
-                );
-                Self::append_subkey_range(
-                    &mut ranges,
-                    crate::storage::zset_subkey::score_prefix(encoded),
-                );
             }
-            _ => {}
+            if let Some(obs) = &self.observation {
+                obs.record_orphan_subkeys(u64::from(*count));
+            }
         }
-        ranges
-    }
-
-    /// Cluster 下 `DeleteRange` 会走 cluster_batcher 的 local fallback, 不会进入 data group
-    /// 的 Raft; 必须把 subkey 逐条 `Delete`, 让 header 与 subkey 在同一 group 状态机生效.
-    #[cfg(feature = "cluster")]
-    fn is_cluster_initialized() -> bool {
-        crate::cluster::state::CLUSTER_STATE_MGR.get().is_some()
-    }
-
-    #[cfg(not(feature = "cluster"))]
-    fn is_cluster_initialized() -> bool {
-        false
-    }
-
-    async fn push_collection_subkey_deletes(
-        &self,
-        db: usize,
-        key: &[u8],
-        encoded: &[u8],
-        stored: Option<&StoredValue>,
-        ops: &mut Vec<AdapterWriteOp>,
-    ) -> Result<()> {
-        let ranges = Self::collection_subkey_ranges(db, key, encoded, stored);
-        if !Self::is_cluster_initialized() {
-            ops.extend(
-                ranges
-                    .into_iter()
-                    .map(|(start, end)| AdapterWriteOp::DeleteRange { start, end }),
-            );
-            return Ok(());
-        }
-        for (prefix, _) in ranges {
-            let collected = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-            let sink = std::sync::Arc::clone(&collected);
-            self.storage
-                .for_each_prefix(
-                    prefix,
-                    Box::new(move |k, _| {
-                        sink.lock().unwrap().push(k);
-                        Ok(())
-                    }),
-                )
-                .await?;
-            let subkeys = std::mem::take(&mut *collected.lock().unwrap());
-            ops.extend(
-                subkeys
-                    .into_iter()
-                    .map(|key| AdapterWriteOp::Delete { key }),
-            );
-        }
-        Ok(())
-    }
-
-    fn push_collection_subkey_deletes_sync(
-        &self,
-        db: usize,
-        key: &[u8],
-        encoded: &[u8],
-        stored: Option<&StoredValue>,
-        ops: &mut Vec<AdapterWriteOp>,
-    ) -> Result<()> {
-        let ranges = Self::collection_subkey_ranges(db, key, encoded, stored);
-        if !Self::is_cluster_initialized() {
-            ops.extend(
-                ranges
-                    .into_iter()
-                    .map(|(start, end)| AdapterWriteOp::DeleteRange { start, end }),
-            );
-            return Ok(());
-        }
-        for (prefix, _) in ranges {
-            let collected = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-            let sink = std::sync::Arc::clone(&collected);
-            self.storage.for_each_prefix_sync(
-                prefix,
-                Box::new(move |k, _| {
-                    sink.lock().unwrap().push(k);
-                    Ok(())
-                }),
-            )?;
-            let subkeys = std::mem::take(&mut *collected.lock().unwrap());
-            ops.extend(
-                subkeys
-                    .into_iter()
-                    .map(|key| AdapterWriteOp::Delete { key }),
-            );
-        }
-        Ok(())
     }
 }
 
@@ -994,8 +851,7 @@ impl KvStorage for KvStorageAdapter {
         let saw_ttl = stored.as_ref().and_then(|value| value.expires_at).is_some();
         let encoded = Self::encode(db, key);
         let mut ops = Vec::new();
-        self.push_collection_subkey_deletes(db, key, &encoded, stored.as_ref(), &mut ops)
-            .await?;
+        self.on_collection_header_removed(db, key, stored.as_ref());
         ops.push(AdapterWriteOp::Delete { key: encoded });
         if let Some((mk, mv)) = self.next_watch_meta_put(db, key).await? {
             ops.push(AdapterWriteOp::Put { key: mk, value: mv });

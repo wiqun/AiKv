@@ -232,7 +232,7 @@ fn fast_zcard(
                 return pcall_error_table(lua, &msg).map(Some);
             }
         };
-        if let Some(count) = stored
+        if let Some((count, _)) = stored
             .as_ref()
             .and_then(crate::storage::zset_subkey::is_zset_header)
         {

@@ -295,7 +295,7 @@ async fn test_aidb_write_batch_delete_range_atomic() {
 }
 
 #[tokio::test]
-async fn test_aidb_cascade_delete_hash_subkeys() {
+async fn test_aidb_o1_delete_hash_isolates_old_version_subkeys() {
     use aikv::storage::adapter::StorageAdapter;
     use aikv::storage::subkey::{encode_hash_field_key, hash_subkey_prefix};
     use aikv::storage::types::{CollectionKind, StoredValue, ValueType};
@@ -307,56 +307,55 @@ async fn test_aidb_cascade_delete_hash_subkeys() {
     let user_key = b"my_hash";
     let encoded_user_key = AiDbEngine::encode_key(0, user_key);
 
-    // 1. 写入 Header
+    // 1. 写入 version=1 Header 与 10 个 subkeys
     storage
         .set_typed(
             0,
             user_key,
             StoredValue {
-                value: ValueType::CollectionHeader {
-                    kind: CollectionKind::Hash,
-                    count: 10,
-                },
+                value: ValueType::collection_header(CollectionKind::Hash, 10, 1),
                 expires_at: None,
             },
         )
         .await
         .unwrap();
 
-    // 2. 写入 10 个 subkeys
     for i in 0..10 {
         let field = format!("f{i:02}").into_bytes();
-        let subkey = encode_hash_field_key(&encoded_user_key, &field);
+        let subkey = encode_hash_field_key(&encoded_user_key, 1, &field);
         engine
             .set(subkey, format!("v{i:02}").into_bytes())
             .await
             .unwrap();
     }
 
-    // 确认底层确实能查到 subkey
-    let first_subkey = encode_hash_field_key(&encoded_user_key, b"f00");
-    assert!(engine.get(first_subkey.clone()).await.unwrap().is_some());
-
-    // 3. 执行 delete
-    let deleted = storage.delete(0, user_key).await.unwrap();
-    assert!(deleted);
-
-    // 4. 验证 Header 已经被删除
+    // 2. O(1) delete 删除 Header
+    assert!(storage.delete(0, user_key).await.unwrap());
     assert!(storage.get_typed(0, user_key).await.unwrap().is_none());
 
-    // 5. 关键验证点: 底层所有的 subkeys 必须已被级联清除!
-    let prefix = hash_subkey_prefix(&encoded_user_key);
-    let subkeys = engine.scan_prefix(&prefix).await.unwrap();
-    assert_eq!(
-        subkeys.len(),
-        0,
-        "Hash subkeys 必须被级联删除, 但仍然残留了 {} 条",
-        subkeys.len()
-    );
+    // 3. 同名重建 version=2 Header 时, 只见 version=2 前缀, 与旧 version=1 完全隔离
+    storage
+        .set_typed(
+            0,
+            user_key,
+            StoredValue {
+                value: ValueType::collection_header(CollectionKind::Hash, 1, 2),
+                expires_at: None,
+            },
+        )
+        .await
+        .unwrap();
+    let new_sk = encode_hash_field_key(&encoded_user_key, 2, b"new_f");
+    engine.set(new_sk, b"new_v".to_vec()).await.unwrap();
+    let subkeys_v2 = engine
+        .scan_prefix(&hash_subkey_prefix(&encoded_user_key, 2))
+        .await
+        .unwrap();
+    assert_eq!(subkeys_v2.len(), 1);
 }
 
 #[tokio::test]
-async fn test_aidb_cascade_delete_set_subkeys() {
+async fn test_aidb_o1_delete_set_isolates_old_version_subkeys() {
     use aikv::storage::adapter::StorageAdapter;
     use aikv::storage::subkey::{encode_set_member_key, set_subkey_prefix};
     use aikv::storage::types::{CollectionKind, StoredValue, ValueType};
@@ -368,51 +367,37 @@ async fn test_aidb_cascade_delete_set_subkeys() {
     let user_key = b"my_set";
     let encoded_user_key = AiDbEngine::encode_key(0, user_key);
 
-    // 1. 写入 Set Header
     storage
         .set_typed(
             0,
             user_key,
             StoredValue {
-                value: ValueType::CollectionHeader {
-                    kind: CollectionKind::Set,
-                    count: 10,
-                },
+                value: ValueType::collection_header(CollectionKind::Set, 10, 1),
                 expires_at: None,
             },
         )
         .await
         .unwrap();
 
-    // 2. 写入 10 个 subkeys
     for i in 0..10 {
         let member = format!("m{i:02}").into_bytes();
-        let subkey = encode_set_member_key(&encoded_user_key, &member);
+        let subkey = encode_set_member_key(&encoded_user_key, 1, &member);
         engine.set(subkey, Vec::new()).await.unwrap();
     }
 
-    // 3. 执行 delete
-    let deleted = storage.delete(0, user_key).await.unwrap();
-    assert!(deleted);
-
-    // 4. 验证 Header 已删除
+    assert!(storage.delete(0, user_key).await.unwrap());
     assert!(storage.get_typed(0, user_key).await.unwrap().is_none());
-
-    // 5. 验证底层 Set subkeys 全部被级联清除!
-    let prefix = set_subkey_prefix(&encoded_user_key);
-    let subkeys = engine.scan_prefix(&prefix).await.unwrap();
-    assert_eq!(
-        subkeys.len(),
-        0,
-        "Set subkeys 必须被级联删除, 但仍然残留了 {} 条",
-        subkeys.len()
-    );
+    assert!(engine
+        .scan_prefix(&set_subkey_prefix(&encoded_user_key, 2))
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
-async fn test_aidb_lazy_expire_cascade_delete_subkeys() {
+async fn test_aidb_lazy_expire_deletes_collection_header() {
     use aikv::storage::adapter::StorageAdapter;
-    use aikv::storage::subkey::{encode_hash_field_key, hash_subkey_prefix};
+    use aikv::storage::subkey::encode_hash_field_key;
     use aikv::storage::types::{CollectionKind, StoredValue, ValueType};
 
     let dir = TempDir::new().unwrap();
@@ -422,16 +407,12 @@ async fn test_aidb_lazy_expire_cascade_delete_subkeys() {
     let user_key = b"expired_hash";
     let encoded_user_key = AiDbEngine::encode_key(0, user_key);
 
-    // 写入一个已过期的 Header (expires_at 为过去的时间戳 1000)
     storage
         .set_typed(
             0,
             user_key,
             StoredValue {
-                value: ValueType::CollectionHeader {
-                    kind: CollectionKind::Hash,
-                    count: 10,
-                },
+                value: ValueType::collection_header(CollectionKind::Hash, 10, 1),
                 expires_at: Some(1000),
             },
         )
@@ -440,46 +421,33 @@ async fn test_aidb_lazy_expire_cascade_delete_subkeys() {
 
     for i in 0..10 {
         let field = format!("f{i:02}").into_bytes();
-        let subkey = encode_hash_field_key(&encoded_user_key, &field);
+        let subkey = encode_hash_field_key(&encoded_user_key, 1, &field);
         engine
             .set(subkey, format!("v{i:02}").into_bytes())
             .await
             .unwrap();
     }
 
-    // 读触发惰性过期
     let val = storage.get_typed(0, user_key).await.unwrap();
     assert!(val.is_none());
-
-    // 验证底层 Subkey 是否已被惰性级联清理
-    let prefix = hash_subkey_prefix(&encoded_user_key);
-    let subkeys = engine.scan_prefix(&prefix).await.unwrap();
-    assert_eq!(
-        subkeys.len(),
-        0,
-        "惰性过期必须级联删除 subkeys, 但仍然残留了 {} 条",
-        subkeys.len()
-    );
 }
 
 #[tokio::test]
-async fn test_aidb_cascade_delete_does_not_harm_other_keys_with_x01() {
+async fn test_aidb_delete_collection_does_not_harm_other_keys_with_x01() {
     use aikv::storage::adapter::StorageAdapter;
-    use aikv::storage::subkey::{encode_hash_field_key, hash_subkey_prefix};
+    use aikv::storage::subkey::encode_hash_field_key;
     use aikv::storage::types::{CollectionKind, StoredValue, ValueType};
 
     let dir = TempDir::new().unwrap();
     let engine = AiDbEngine::open_for_testing(dir.path()).expect("open aidb");
     let storage = KvStorageAdapter::new(engine.clone());
 
-    // 1. 写入一个用户自己命名的包含 \x01 的独立 key
     let special_key = b"tenant\x01profile";
     storage
         .set(0, special_key, b"important_data")
         .await
         .unwrap();
 
-    // 2. 写入一个名字叫 "tenant" 的复合 Hash (其 subkey 前缀为 "tenant\x01H")
     let hash_key = b"tenant";
     let encoded_hash_key = AiDbEngine::encode_key(0, hash_key);
     storage
@@ -487,10 +455,7 @@ async fn test_aidb_cascade_delete_does_not_harm_other_keys_with_x01() {
             0,
             hash_key,
             StoredValue {
-                value: ValueType::CollectionHeader {
-                    kind: CollectionKind::Hash,
-                    count: 5,
-                },
+                value: ValueType::collection_header(CollectionKind::Hash, 5, 1),
                 expires_at: None,
             },
         )
@@ -499,20 +464,13 @@ async fn test_aidb_cascade_delete_does_not_harm_other_keys_with_x01() {
 
     for i in 0..5 {
         let field = format!("f{i}").into_bytes();
-        let subkey = encode_hash_field_key(&encoded_hash_key, &field);
+        let subkey = encode_hash_field_key(&encoded_hash_key, 1, &field);
         engine.set(subkey, b"hash_val".to_vec()).await.unwrap();
     }
 
-    // 3. 执行删除复合 Hash
-    let deleted = storage.delete(0, hash_key).await.unwrap();
-    assert!(deleted);
-
-    // 4. 验证 Hash 及其 subkeys 全部被清理
+    assert!(storage.delete(0, hash_key).await.unwrap());
     assert!(storage.get_typed(0, hash_key).await.unwrap().is_none());
-    let prefix = hash_subkey_prefix(&encoded_hash_key);
-    assert_eq!(engine.scan_prefix(&prefix).await.unwrap().len(), 0);
 
-    // 5. 反向红线断言: 包含 \x01 的独立用户 key 绝对未受任何波及!
     let special_val = storage.get(0, special_key).await.unwrap();
     assert_eq!(
         special_val,
@@ -545,10 +503,7 @@ async fn test_aidb_dump_restore_large_hash_subkeys() {
             0,
             user_key,
             StoredValue {
-                value: ValueType::CollectionHeader {
-                    kind: CollectionKind::Hash,
-                    count: 80,
-                },
+                value: ValueType::collection_header(CollectionKind::Hash, 80, 1),
                 expires_at: None,
             },
         )
@@ -558,7 +513,7 @@ async fn test_aidb_dump_restore_large_hash_subkeys() {
     for i in 0..80 {
         let field = format!("field_{i:03}").into_bytes();
         let val = format!("val_{i:03}").into_bytes();
-        let subkey = encode_hash_field_key(&encoded_user_key, &field);
+        let subkey = encode_hash_field_key(&encoded_user_key, 1, &field);
         engine.set(subkey, val).await.unwrap();
     }
 
@@ -588,20 +543,26 @@ async fn test_aidb_dump_restore_large_hash_subkeys() {
 
     // 4. 验证新 key 在底层是否自动转为 Subkey 存储 (CollectionHeader { kind: Hash, count: 80 })
     let restored_meta = storage.get_typed(0, new_key).await.unwrap().unwrap();
-    match restored_meta.value {
-        ValueType::CollectionHeader { kind, count } => {
+    let restored_version = match restored_meta.value {
+        ValueType::CollectionHeader {
+            kind,
+            count,
+            version,
+            ..
+        } => {
             assert_eq!(kind, CollectionKind::Hash);
             assert_eq!(count, 80);
+            version
         }
         ValueType::Hash(_) => {
             panic!("RESTORE 大 Hash 不得以内联形式存储, 必须自动拆分为 Subkey 格式");
         }
         other => panic!("unexpected restored value type: {:?}", other),
-    }
+    };
 
     // 5. 验证新 key 底层的 80 个 subkey 全部完整存在且正确
     let encoded_new_key = AiDbEngine::encode_key(0, new_key);
-    let prefix = hash_subkey_prefix(&encoded_new_key);
+    let prefix = hash_subkey_prefix(&encoded_new_key, restored_version);
     let subkeys = engine.scan_prefix(&prefix).await.unwrap();
     assert_eq!(subkeys.len(), 80, "底层应存在 80 个 hash subkeys");
 }
@@ -629,10 +590,7 @@ async fn test_aidb_dump_restore_large_set_subkeys() {
             0,
             user_key,
             StoredValue {
-                value: ValueType::CollectionHeader {
-                    kind: CollectionKind::Set,
-                    count: 80,
-                },
+                value: ValueType::collection_header(CollectionKind::Set, 80, 1),
                 expires_at: None,
             },
         )
@@ -641,7 +599,7 @@ async fn test_aidb_dump_restore_large_set_subkeys() {
 
     for i in 0..80 {
         let member = format!("mem_{i:03}").into_bytes();
-        let subkey = encode_set_member_key(&encoded_user_key, &member);
+        let subkey = encode_set_member_key(&encoded_user_key, 1, &member);
         engine.set(subkey, vec![]).await.unwrap();
     }
 
@@ -668,19 +626,25 @@ async fn test_aidb_dump_restore_large_set_subkeys() {
         .expect("restore should succeed");
 
     let restored_meta = storage.get_typed(0, new_key).await.unwrap().unwrap();
-    match restored_meta.value {
-        ValueType::CollectionHeader { kind, count } => {
+    let restored_version = match restored_meta.value {
+        ValueType::CollectionHeader {
+            kind,
+            count,
+            version,
+            ..
+        } => {
             assert_eq!(kind, CollectionKind::Set);
             assert_eq!(count, 80);
+            version
         }
         ValueType::Set(_) => {
             panic!("RESTORE 大 Set 不得以内联形式存储, 必须自动拆分为 Subkey 格式");
         }
         other => panic!("unexpected restored value type: {:?}", other),
-    }
+    };
 
     let encoded_new_key = AiDbEngine::encode_key(0, new_key);
-    let prefix = set_subkey_prefix(&encoded_new_key);
+    let prefix = set_subkey_prefix(&encoded_new_key, restored_version);
     let subkeys = engine.scan_prefix(&prefix).await.unwrap();
     assert_eq!(subkeys.len(), 80, "底层应存在 80 个 set subkeys");
 }
@@ -733,23 +697,29 @@ async fn test_aidb_dump_restore_large_zset_subkeys() {
         .expect("restore should succeed");
 
     let restored_meta = storage.get_typed(0, new_key).await.unwrap().unwrap();
-    match restored_meta.value {
-        ValueType::CollectionHeader { kind, count } => {
+    let restored_version = match restored_meta.value {
+        ValueType::CollectionHeader {
+            kind,
+            count,
+            version,
+            ..
+        } => {
             assert_eq!(kind, CollectionKind::ZSet);
             assert_eq!(count, 80);
+            version
         }
         ValueType::ZSet(_) => {
             panic!("RESTORE 大 ZSet 不得以内联形式存储, 必须自动拆分为 Subkey 格式");
         }
         other => panic!("unexpected restored value type: {:?}", other),
-    }
+    };
 
     let encoded_new_key = AiDbEngine::encode_key(0, new_key);
-    let member_prefix = zset_subkey::member_prefix(&encoded_new_key);
+    let member_prefix = zset_subkey::member_prefix(&encoded_new_key, restored_version);
     let members = engine.scan_prefix(&member_prefix).await.unwrap();
     assert_eq!(members.len(), 80, "底层应存在 80 个 zset member subkeys");
 
-    let score_prefix = zset_subkey::score_prefix(&encoded_new_key);
+    let score_prefix = zset_subkey::score_prefix(&encoded_new_key, restored_version);
     let scores = engine.scan_prefix(&score_prefix).await.unwrap();
     assert_eq!(
         scores.len(),
@@ -781,10 +751,7 @@ async fn test_aidb_dump_exceed_32mb_aborts_without_deleting_source() {
             0,
             user_key,
             StoredValue {
-                value: ValueType::CollectionHeader {
-                    kind: CollectionKind::Hash,
-                    count: 33,
-                },
+                value: ValueType::collection_header(CollectionKind::Hash, 33, 1),
                 expires_at: None,
             },
         )
@@ -794,7 +761,7 @@ async fn test_aidb_dump_exceed_32mb_aborts_without_deleting_source() {
     let chunk = vec![b'x'; 1024 * 1024 + 10]; // 1MB+
     for i in 0..33 {
         let field = format!("f_{i:03}").into_bytes();
-        let sk = encode_hash_field_key(&encoded_user_key, &field);
+        let sk = encode_hash_field_key(&encoded_user_key, 1, &field);
         engine.set(sk, chunk.clone()).await.unwrap();
     }
 

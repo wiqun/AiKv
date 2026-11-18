@@ -412,10 +412,7 @@ async fn test_scan_collection_header_skips_subkeys() {
 
     // 写入一个 CollectionHeader 大集合
     let header = StoredValue {
-        value: ValueType::CollectionHeader {
-            kind: CollectionKind::Hash,
-            count: 2000,
-        },
+        value: ValueType::collection_header(CollectionKind::Hash, 2000, 1),
         expires_at: None,
     };
     storage.set_typed(0, b"m_big_hash", header).await.unwrap();
@@ -491,10 +488,7 @@ async fn test_scan_does_not_skip_keys_after_collection_header_in_same_batch() {
 
     // 2. 写入 key_2_hash (CollectionHeader, 只有 2 个 subkey)
     let header = StoredValue {
-        value: ValueType::CollectionHeader {
-            kind: CollectionKind::Hash,
-            count: 2,
-        },
+        value: ValueType::collection_header(CollectionKind::Hash, 2, 1),
         expires_at: None,
     };
     storage.set_typed(0, b"key_2_hash", header).await.unwrap();

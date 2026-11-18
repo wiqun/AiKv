@@ -45,14 +45,35 @@ impl ScriptTransaction {
         key: &[u8],
         field: &[u8],
     ) -> Result<Option<Vec<u8>>> {
-        if let Some(change) = self
-            .hash_deltas
-            .get(key)
-            .and_then(|delta| delta.fields.get(field))
-        {
-            return Ok(change.after.clone());
+        if let Some(delta) = self.hash_deltas.get(key) {
+            if let Some(change) = delta.fields.get(field) {
+                return Ok(change.after.clone());
+            }
+            return point_field(
+                self.in_flight.as_ref(),
+                storage,
+                self.db_index,
+                key,
+                delta.version,
+                field,
+            );
         }
-        point_field(self.in_flight.as_ref(), storage, self.db_index, key, field)
+        let version = match self.get_value(storage, key)?.map(|s| s.value) {
+            Some(ValueType::CollectionHeader {
+                kind: CollectionKind::Hash,
+                version,
+                ..
+            }) => version,
+            _ => return Ok(None),
+        };
+        point_field(
+            self.in_flight.as_ref(),
+            storage,
+            self.db_index,
+            key,
+            version,
+            field,
+        )
     }
 
     pub(crate) fn subkey_hget(
@@ -83,8 +104,20 @@ impl ScriptTransaction {
         storage: &dyn crate::storage::ScriptIo,
         key: &[u8],
     ) -> Result<RespValue> {
+        let version = if let Some(delta) = self.hash_deltas.get(key) {
+            delta.version
+        } else if let Some(ValueType::CollectionHeader {
+            kind: CollectionKind::Hash,
+            version,
+            ..
+        }) = self.get_value(storage, key)?.map(|s| s.value)
+        {
+            version
+        } else {
+            return Ok(RespValue::Array(Some(Vec::new())));
+        };
         let encoded = AiDbEngine::encode_key(self.db_index, key);
-        let prefix = subkey::hash_subkey_prefix(&encoded);
+        let prefix = subkey::hash_subkey_prefix(&encoded, version);
         let map_m = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
         let map_c = map_m.clone();
         storage.raw_subkey_for_each(
@@ -136,6 +169,7 @@ impl ScriptTransaction {
             Some(ValueType::CollectionHeader {
                 kind: CollectionKind::Hash,
                 count,
+                ..
             }) => *count,
             _ => 0,
         })
@@ -323,17 +357,20 @@ impl ScriptTransaction {
             return Ok(());
         }
         let stored = self.get_value(storage, key)?;
-        let count = match stored.as_ref().map(|s| &s.value) {
+        let (count, version) = match stored.as_ref().map(|s| &s.value) {
             Some(ValueType::CollectionHeader {
                 kind: CollectionKind::Hash,
                 count,
-            }) => *count,
-            _ => 0,
+                version,
+                ..
+            }) => (*count, *version),
+            _ => (0, 0),
         };
         self.hash_deltas.insert(
             key.to_vec(),
             HashDelta {
                 count,
+                version,
                 fields: HashMap::new(),
             },
         );
@@ -381,10 +418,11 @@ fn point_field(
     storage: &dyn crate::storage::ScriptIo,
     db: usize,
     key: &[u8],
+    version: u64,
     field: &[u8],
 ) -> Result<Option<Vec<u8>>> {
     let enc_user_key = AiDbEngine::encode_key(db, key);
-    let subkey_key = subkey::encode_hash_field_key(&enc_user_key, field);
+    let subkey_key = subkey::encode_hash_field_key(&enc_user_key, version, field);
     if let Some(buf) = in_flight {
         if let Some(res) = buf.get_raw(&subkey_key) {
             return Ok(res);
@@ -406,10 +444,11 @@ fn push_hash_delta(
         ops.push((
             key.to_vec(),
             WriteOp::put_stored(StoredValue {
-                value: ValueType::CollectionHeader {
-                    kind: CollectionKind::Hash,
-                    count: delta.count,
-                },
+                value: ValueType::collection_header(
+                    CollectionKind::Hash,
+                    delta.count,
+                    delta.version,
+                ),
                 expires_at,
             }),
         ));
@@ -419,7 +458,7 @@ fn push_hash_delta(
         if change.before == change.after {
             continue;
         }
-        let subkey_key = subkey::encode_hash_field_key(&enc_user_key, field);
+        let subkey_key = subkey::encode_hash_field_key(&enc_user_key, delta.version, field);
         if delta.count == 0 {
             ops.push((subkey_key, WriteOp::DeleteEngine));
         } else {
@@ -450,10 +489,7 @@ mod tests {
         }
         fn get_typed(&self, _db: usize, _key: &[u8]) -> Result<Option<StoredValue>> {
             Ok(Some(StoredValue {
-                value: ValueType::CollectionHeader {
-                    kind: CollectionKind::Hash,
-                    count: self.header_count,
-                },
+                value: ValueType::collection_header(CollectionKind::Hash, self.header_count, 1),
                 expires_at: None,
             }))
         }
@@ -505,7 +541,7 @@ mod tests {
     fn test_hash_delta_materializes_for_with_hash() {
         let key = b"my_manifest";
         let enc_user_key = AiDbEngine::encode_key(0, key);
-        let field1_key = subkey::encode_hash_field_key(&enc_user_key, b"f1");
+        let field1_key = subkey::encode_hash_field_key(&enc_user_key, 1, b"f1");
 
         let mut subkeys = HashMap::new();
         subkeys.insert(field1_key, b"val1".to_vec());
@@ -535,7 +571,7 @@ mod tests {
     fn test_hash_delta_empty_count_reports_key_not_exists() {
         let key = b"my_manifest";
         let enc_user_key = AiDbEngine::encode_key(0, key);
-        let field1_key = subkey::encode_hash_field_key(&enc_user_key, b"f1");
+        let field1_key = subkey::encode_hash_field_key(&enc_user_key, 1, b"f1");
 
         let mut subkeys = HashMap::new();
         subkeys.insert(field1_key, b"val1".to_vec());
@@ -610,7 +646,7 @@ mod tests {
     fn test_subkey_hash_point_access_never_scans_all() {
         let key = b"my_manifest";
         let enc_user_key = AiDbEngine::encode_key(0, key);
-        let field1_key = subkey::encode_hash_field_key(&enc_user_key, b"f1");
+        let field1_key = subkey::encode_hash_field_key(&enc_user_key, 1, b"f1");
 
         let mut subkeys = HashMap::new();
         subkeys.insert(field1_key, b"val1".to_vec());

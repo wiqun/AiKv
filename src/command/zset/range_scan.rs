@@ -150,9 +150,9 @@ impl IndexPlan {
     }
 }
 
-fn score_index_bounds(db: usize, key: &[u8]) -> (Vec<u8>, Vec<u8>) {
-    let prefix = score_prefix(&AiDbEngine::encode_key(db, key));
-    let end = AiDbEngine::prefix_end(&prefix).expect("score prefix ends with a tag byte");
+fn score_index_bounds(db: usize, key: &[u8], version: u64) -> (Vec<u8>, Vec<u8>) {
+    let prefix = score_prefix(&AiDbEngine::encode_key(db, key), version);
+    let end = AiDbEngine::prefix_end(&prefix).expect("score prefix ends with version bytes");
     (prefix, end)
 }
 
@@ -166,10 +166,10 @@ pub(crate) async fn by_score(
     let Some(stored) = storage.get_typed(db, key).await? else {
         return Ok(None);
     };
-    if is_zset_header(&stored).is_none() {
+    let Some((_, version)) = is_zset_header(&stored) else {
         return Ok(None);
-    }
-    let (prefix, _) = score_index_bounds(db, key);
+    };
+    let (prefix, _) = score_index_bounds(db, key, version);
     let Some((start, end)) = score_scan_bounds(&prefix, &window.min, &window.max) else {
         return Ok(Some(Vec::new()));
     };
@@ -200,13 +200,13 @@ pub(crate) async fn by_index(
     let Some(stored) = storage.get_typed(db, key).await? else {
         return Ok(None);
     };
-    let Some(len) = is_zset_header(&stored) else {
+    let Some((len, version)) = is_zset_header(&stored) else {
         return Ok(None);
     };
     let Some(plan) = IndexPlan::new(len as usize, start, stop, reverse) else {
         return Ok(Some(Vec::new()));
     };
-    let (prefix, end) = score_index_bounds(db, key);
+    let (prefix, end) = score_index_bounds(db, key, version);
     let pairs = match storage
         .raw_range_scan(prefix.clone(), end, plan.fetch, !plan.from_head)
         .await
@@ -241,10 +241,10 @@ mod tests {
         let encoded = AiDbEngine::encode_key(0, b"z");
         let mut keys: Vec<Vec<u8>> = zset
             .iter()
-            .map(|(member, score)| score_key(&encoded, *score, member.as_bytes()))
+            .map(|(member, score)| score_key(&encoded, 1, *score, member.as_bytes()))
             .collect();
         keys.sort();
-        (score_prefix(&encoded), keys)
+        (score_prefix(&encoded, 1), keys)
     }
 
     fn simulate_scan(
@@ -352,7 +352,7 @@ mod tests {
 
     #[test]
     fn nan_bound_yields_empty_range() {
-        let prefix = score_prefix(&AiDbEngine::encode_key(0, b"z"));
+        let prefix = score_prefix(&AiDbEngine::encode_key(0, b"z"), 1);
         assert!(score_scan_bounds(&prefix, &bound(f64::NAN, true), &bound(1.0, true)).is_none());
         assert!(score_scan_bounds(&prefix, &bound(0.0, true), &bound(f64::NAN, true)).is_none());
     }

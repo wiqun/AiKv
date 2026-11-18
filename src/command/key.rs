@@ -290,46 +290,28 @@ impl KeyCommands {
         if self.storage.engine_kind() != StorageEngineKind::Memory {
             match stored.value {
                 ValueType::Hash(ref map) if map.len() > subkey::hash_max_inline_fields() => {
-                    let encoded_user_key = AiDbEngine::encode_key(db, key);
-                    let mut ops = Vec::with_capacity(1 + map.len());
-                    ops.push((
-                        key.to_vec(),
-                        WriteOp::put_stored(StoredValue {
-                            value: ValueType::CollectionHeader {
-                                kind: CollectionKind::Hash,
-                                count: map.len() as u32,
-                            },
-                            expires_at: stored.expires_at,
-                        }),
-                    ));
-                    for (field, val) in map {
-                        let sk = subkey::encode_hash_field_key(&encoded_user_key, field);
-                        ops.push((
-                            sk,
-                            WriteOp::PutEngine {
-                                value: Arc::new(val.clone()),
-                            },
-                        ));
-                    }
+                    let ops = subkey::replace_hash_ops(db, key, map, stored.expires_at);
                     self.storage.write_batch(db, ops).await?;
                     return Ok(router::ok());
                 }
                 ValueType::Set(ref set) if set.len() > subkey::set_max_inline_members() => {
                     let encoded_user_key = AiDbEngine::encode_key(db, key);
+                    let version = crate::storage::types::next_collection_version();
                     let mut ops = Vec::with_capacity(1 + set.len());
                     ops.push((
                         key.to_vec(),
                         WriteOp::put_stored(StoredValue {
-                            value: ValueType::CollectionHeader {
-                                kind: CollectionKind::Set,
-                                count: set.len() as u32,
-                            },
+                            value: ValueType::collection_header(
+                                CollectionKind::Set,
+                                set.len() as u32,
+                                version,
+                            ),
                             expires_at: stored.expires_at,
                         }),
                     ));
                     let empty_val = Arc::new(Vec::new());
                     for member in set {
-                        let sk = subkey::encode_set_member_key(&encoded_user_key, member);
+                        let sk = subkey::encode_set_member_key(&encoded_user_key, version, member);
                         ops.push((
                             sk,
                             WriteOp::PutEngine {
@@ -486,11 +468,17 @@ pub async fn hydrate_stored_value(
     stored: StoredValue,
 ) -> Result<StoredValue> {
     match stored.value {
-        ValueType::CollectionHeader { kind, count: _ } => {
+        ValueType::CollectionHeader {
+            kind,
+            version,
+            head: _,
+            tail: _,
+            count: _,
+        } => {
             let encoded_user_key = AiDbEngine::encode_key(db, user_key);
             match kind {
                 CollectionKind::Hash => {
-                    let prefix = subkey::hash_subkey_prefix(&encoded_user_key);
+                    let prefix = subkey::hash_subkey_prefix(&encoded_user_key, version);
                     let map = std::collections::HashMap::new();
                     let state = Arc::new(std::sync::Mutex::new((map, 0usize)));
                     let state_c = state.clone();
@@ -526,7 +514,7 @@ pub async fn hydrate_stored_value(
                     })
                 }
                 CollectionKind::Set => {
-                    let prefix = subkey::set_subkey_prefix(&encoded_user_key);
+                    let prefix = subkey::set_subkey_prefix(&encoded_user_key, version);
                     let set = std::collections::HashSet::new();
                     let state = Arc::new(std::sync::Mutex::new((set, 0usize)));
                     let state_c = state.clone();
@@ -562,7 +550,7 @@ pub async fn hydrate_stored_value(
                     })
                 }
                 CollectionKind::ZSet => {
-                    let prefix = zset_subkey::member_prefix(&encoded_user_key);
+                    let prefix = zset_subkey::member_prefix(&encoded_user_key, version);
                     let prefix_len = prefix.len();
                     let map = std::collections::BTreeMap::new();
                     let state = Arc::new(std::sync::Mutex::new((map, 0usize)));
@@ -600,6 +588,10 @@ pub async fn hydrate_stored_value(
                         expires_at: stored.expires_at,
                     })
                 }
+                CollectionKind::List => Ok(StoredValue {
+                    value: ValueType::List(std::collections::VecDeque::new()),
+                    expires_at: stored.expires_at,
+                }),
             }
         }
         _ => {

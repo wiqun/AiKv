@@ -14,8 +14,12 @@ use crate::error::Result;
 use crate::storage::zset_subkey::{self, is_zset_header, score_index_entry, score_prefix};
 use crate::storage::{AiDbEngine, ScriptIo};
 
-/// 本脚本没改过且已是 header 形式时返回成员数.
-fn header_len(storage: &dyn ScriptIo, txn: &ScriptTransaction, key: &[u8]) -> Result<Option<u32>> {
+/// 本脚本没改过且已是 header 形式时返回 `(成员数, version)`.
+fn header_len(
+    storage: &dyn ScriptIo,
+    txn: &ScriptTransaction,
+    key: &[u8],
+) -> Result<Option<(u32, u64)>> {
     if txn.zset_delta_count(key).is_some() {
         return Ok(None);
     }
@@ -198,10 +202,10 @@ pub(super) fn by_score(
     key: &[u8],
     window: &ScoreWindow,
 ) -> Result<Option<ScoredMembers>> {
-    if header_len(storage, txn, key)?.is_none() {
+    let Some((_, version)) = header_len(storage, txn, key)? else {
         return Ok(None);
-    }
-    let prefix = score_prefix(&AiDbEngine::encode_key(txn.db_index, key));
+    };
+    let prefix = score_prefix(&AiDbEngine::encode_key(txn.db_index, key), version);
     let Some(bounds) = score_scan_bounds(&prefix, &window.min, &window.max) else {
         return Ok(Some(Vec::new()));
     };
@@ -227,13 +231,13 @@ pub(super) fn by_index(
     stop: i64,
     reverse: bool,
 ) -> Result<Option<ScoredMembers>> {
-    let Some(len) = header_len(storage, txn, key)? else {
+    let Some((len, version)) = header_len(storage, txn, key)? else {
         return Ok(None);
     };
     let Some(plan) = IndexPlan::new(len as usize, start, stop, reverse) else {
         return Ok(Some(Vec::new()));
     };
-    let prefix = score_prefix(&AiDbEngine::encode_key(txn.db_index, key));
+    let prefix = score_prefix(&AiDbEngine::encode_key(txn.db_index, key), version);
     let end = AiDbEngine::prefix_end(&prefix).expect("score prefix ends with a tag byte");
     let bounds = (prefix.clone(), end);
     let Some(keys) = merged_keys(storage, txn, &prefix, bounds, plan.fetch, !plan.from_head) else {
@@ -290,11 +294,12 @@ mod tests {
     }
 
     /// 一个脚本还没落盘的写: 删 m000, 把 m001 改成高分, 新增 m999, header 数量不变.
-    fn in_flight_edits() -> Arc<InFlightBuffer> {
-        let mut ops = zset_subkey::member_change_ops(0, KEY, b"m000", Some(score_of(0)), None);
+    fn in_flight_edits(ver: u64) -> Arc<InFlightBuffer> {
+        let mut ops = zset_subkey::member_change_ops(0, KEY, ver, b"m000", Some(score_of(0)), None);
         ops.extend(zset_subkey::member_change_ops(
             0,
             KEY,
+            ver,
             b"m001",
             Some(score_of(1)),
             Some(1000.0),
@@ -302,11 +307,15 @@ mod tests {
         ops.extend(zset_subkey::member_change_ops(
             0,
             KEY,
+            ver,
             b"m999",
             None,
             Some(20.0),
         ));
-        ops.push((KEY.to_vec(), WriteOp::put_stored(header(N as u32, None))));
+        ops.push((
+            KEY.to_vec(),
+            WriteOp::put_stored(header(N as u32, ver, None)),
+        ));
         let buffer = InFlightBuffer::new();
         buffer.insert_batch(0, &ops);
         Arc::new(buffer)
@@ -425,7 +434,9 @@ mod tests {
     async fn scan_applies_in_flight_deletes_puts_and_score_changes() {
         let dir = TempDir::new().unwrap();
         let storage = seeded(&dir).await;
-        check_equivalence(Some(in_flight_edits()), &storage, true);
+        let io = storage.script_io();
+        let (_, ver) = is_zset_header(&io.get_typed(0, KEY).unwrap().unwrap()).unwrap();
+        check_equivalence(Some(in_flight_edits(ver)), &storage, true);
     }
 
     #[tokio::test]
@@ -590,12 +601,14 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let storage = seeded(&dir).await;
         let io = storage.script_io();
+        let (_, ver) = is_zset_header(&io.get_typed(0, KEY).unwrap().unwrap()).unwrap();
         let encoded = AiDbEngine::encode_key(0, KEY);
         let inflight = Arc::new(InFlightBuffer::new());
         let mut ops = Vec::new();
         ops.extend(zset_subkey::member_change_ops(
             0,
             KEY,
+            ver,
             b"inflight_low",
             None,
             Some(-10.0),
@@ -710,7 +723,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let zmix_prefix = zset_subkey::score_prefix(&AiDbEngine::encode_key(0, b"zmix"));
+        let zmix_prefix = zset_subkey::score_prefix(&AiDbEngine::encode_key(0, b"zmix"), 1);
         let (min_h, max_h, _) = zset_subkey::get_score_bounds_hint(&zmix_prefix);
         assert_eq!(
             (min_h, max_h),
@@ -762,7 +775,7 @@ mod tests {
         let storage: Arc<dyn KvStorage> = KvStorageAdapter::new(engine);
         let router = CommandRouter::new(storage);
         let mut db = 0;
-        let prefix = zset_subkey::score_prefix(&AiDbEngine::encode_key(0, b"empty_probe"));
+        let prefix = zset_subkey::score_prefix(&AiDbEngine::encode_key(0, b"empty_probe"), 1);
         zset_subkey::clear_score_bounds_hint();
 
         // 1. 在空 key 上执行覆盖底部的范围扫描 (如 0 到 100)

@@ -7,6 +7,7 @@ use std::sync::Arc;
 #[derive(Debug, Default)]
 pub struct StorageObservation {
     expired_keys: AtomicU64,
+    orphan_subkeys_deleted: AtomicU64,
 }
 
 impl StorageObservation {
@@ -20,6 +21,19 @@ impl StorageObservation {
 
     pub fn drain_expired_keys(&self) -> u64 {
         self.expired_keys.swap(0, Ordering::Relaxed)
+    }
+
+    /// 累加因 O(1) 删除/覆盖集合 header 而产生的逻辑孤儿 subkey 估算数.
+    pub fn record_orphan_subkeys(&self, count: u64) {
+        if count > 0 {
+            self.orphan_subkeys_deleted
+                .fetch_add(count, Ordering::Relaxed);
+        }
+    }
+
+    /// 取出并清零本周期累计的孤儿 subkey 估算数 (用于过期/孤儿压实触发评估).
+    pub fn drain_orphan_subkeys(&self) -> u64 {
+        self.orphan_subkeys_deleted.swap(0, Ordering::Relaxed)
     }
 }
 

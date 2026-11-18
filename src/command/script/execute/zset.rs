@@ -366,7 +366,10 @@ fn resolve_top_with_delta(
     let delta_max = delta
         .members
         .iter()
-        .filter_map(|(m, c)| c.after.map(|s| zset_subkey::score_key(encoded, s, m)))
+        .filter_map(|(m, c)| {
+            c.after
+                .map(|s| zset_subkey::score_key(encoded, delta.version, s, m))
+        })
         .max();
     match (base_top, delta_max) {
         (Some(bt), Some(dm)) if dm >= bt => Some(Some(dm)),
@@ -394,11 +397,11 @@ fn revrange_top(
     if txn.zset_delta_count(key) == Some(0) {
         return Ok(Some(RespValue::Array(Some(Vec::new()))));
     }
-    if !txn.uses_subkey_zset(storage, key)? {
+    let Some(version) = txn.zset_header_version(storage, key)? else {
         return Ok(None);
-    }
+    };
     let encoded = AiDbEngine::encode_key(txn.db_index, key);
-    let prefix = score_prefix(&encoded);
+    let prefix = score_prefix(&encoded, version);
     let cached_top = txn.zset_base_top.lock().get(key).cloned();
     let base_top = if let Some(cached) = cached_top {
         cached
@@ -472,15 +475,11 @@ fn revrangebyscore_top(
         return Ok(None);
     }
     let stored = txn.get_value(storage, key)?;
-    if stored
-        .as_ref()
-        .and_then(zset_subkey::is_zset_header)
-        .is_none()
-    {
+    let Some((_, version)) = stored.as_ref().and_then(zset_subkey::is_zset_header) else {
         return Ok(None);
-    }
+    };
     let encoded = AiDbEngine::encode_key(txn.db_index, key);
-    let prefix = score_prefix(&encoded);
+    let prefix = score_prefix(&encoded, version);
     let Some((start, end)) = score_range_bounds(&prefix, min, max) else {
         return Ok(Some(RespValue::Array(Some(Vec::new()))));
     };
@@ -603,7 +602,7 @@ pub(super) fn exec_zcard(
         return Ok(router::integer(count as i64));
     }
     let stored = txn.get_value(storage, &args[0])?;
-    if let Some(count) = stored
+    if let Some((count, _)) = stored
         .as_ref()
         .and_then(crate::storage::zset_subkey::is_zset_header)
     {

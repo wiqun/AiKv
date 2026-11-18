@@ -18,7 +18,7 @@ fn test_concurrent_write_with_ttl_filter() {
     let dir = TempDir::new().unwrap();
     let engine = AiDbEngine::open_for_testing(dir.path()).expect("open");
     let db = engine.db.clone();
-    db.set_compaction_filter(Some(Arc::new(TtlExpireFilter)));
+    db.set_compaction_filter(Some(Arc::new(TtlExpireFilter::new())));
 
     let stop = Arc::new(AtomicBool::new(false));
     let write_count = Arc::new(AtomicUsize::new(0));

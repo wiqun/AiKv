@@ -71,7 +71,7 @@ async fn build_storage(
                 .map_err(|e| e.to_string())?;
             engine
                 .db
-                .set_compaction_filter(Some(std::sync::Arc::new(TtlExpireFilter)));
+                .set_compaction_filter(Some(std::sync::Arc::new(TtlExpireFilter::new())));
             let db = engine.db.clone();
             let adapter: Arc<dyn aikv::storage::StorageAdapter> = engine;
             #[cfg(feature = "cluster")]
@@ -394,7 +394,7 @@ async fn init_cluster(
         data_dir: data_dir.to_path_buf(),
         raft_node_config: data_raft_config,
         options: data_options,
-        compaction_filter: Some(std::sync::Arc::new(TtlExpireFilter)),
+        compaction_filter: Some(std::sync::Arc::new(TtlExpireFilter::new())),
         compaction_removal_listener_factory: None,
     };
     let _lifecycle_shutdown = multi_raft.start_lifecycle_with_data(lifecycle_cfg);
