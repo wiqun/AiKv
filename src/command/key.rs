@@ -327,6 +327,18 @@ impl KeyCommands {
                     self.storage.write_batch(db, ops).await?;
                     return Ok(router::ok());
                 }
+                ValueType::List(ref list)
+                    if list.len() > crate::storage::list_subkey::list_max_inline() =>
+                {
+                    let ops = crate::storage::list_subkey::replace_list_ops(
+                        db,
+                        key,
+                        list,
+                        stored.expires_at,
+                    );
+                    self.storage.write_batch(db, ops).await?;
+                    return Ok(router::ok());
+                }
                 _ => {}
             }
         }
@@ -588,10 +600,25 @@ pub async fn hydrate_stored_value(
                         expires_at: stored.expires_at,
                     })
                 }
-                CollectionKind::List => Ok(StoredValue {
-                    value: ValueType::List(std::collections::VecDeque::new()),
-                    expires_at: stored.expires_at,
-                }),
+                CollectionKind::List => {
+                    let list = crate::storage::list_subkey::load_list_full(
+                        storage.as_ref(),
+                        db,
+                        &encoded_user_key,
+                        version,
+                    )
+                    .await?;
+                    let total: usize = list.iter().map(|v| v.len()).sum();
+                    if total > MAX_DUMP_AGGREGATE_BYTES {
+                        return Err(Error::Command(
+                            "ERR DUMP payload exceeds maximum allowed size (32MB)".into(),
+                        ));
+                    }
+                    Ok(StoredValue {
+                        value: ValueType::List(list),
+                        expires_at: stored.expires_at,
+                    })
+                }
             }
         }
         _ => {

@@ -11,6 +11,7 @@ pub mod cursor;
 pub mod deferred;
 pub(crate) mod direct;
 pub mod dump;
+pub mod list_subkey;
 #[cfg(feature = "cluster")]
 pub mod local_batcher;
 pub mod memory;

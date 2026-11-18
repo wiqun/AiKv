@@ -63,6 +63,9 @@ async fn build_storage(
             aikv::storage::zset_subkey::set_zset_max_inline(
                 settings.engine_ext.zset_max_inline_members,
             );
+            aikv::storage::list_subkey::set_list_max_inline(
+                settings.engine_ext.list_max_inline_elements,
+            );
             let path = settings
                 .data_dir
                 .as_ref()

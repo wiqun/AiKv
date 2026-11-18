@@ -36,7 +36,10 @@ use crate::error::{Error, Result};
 use crate::protocol::RespValue;
 use crate::server::config::TransactionGate;
 use crate::server::ServerMetrics;
-use crate::storage::{KvStorage, StoredValue, ValueType};
+use crate::storage::{
+    list_subkey, AiDbEngine, CollectionKind, KvStorage, StorageEngineKind, StoredValue, ValueType,
+    WriteOp,
+};
 
 pub struct ListCommands {
     storage: Arc<dyn KvStorage>,
@@ -125,31 +128,167 @@ impl ListCommands {
         create: bool,
     ) -> Result<RespValue> {
         let _lock = self.key_lock.lock(key).await;
-        let mut stored = if create {
+        let stored = if create {
             self.load_or_create_list(db, key).await?
         } else {
             match self.storage.get_typed(db, key).await? {
                 None => return Ok(router::integer(0)),
                 Some(stored) => match stored.value {
-                    ValueType::List(_) => stored,
+                    ValueType::List(_)
+                    | ValueType::CollectionHeader {
+                        kind: CollectionKind::List,
+                        ..
+                    } => stored,
                     _ => return Err(router::wrongtype()),
                 },
             }
         };
-        let list = stored.as_list_mut()?;
-        if front {
-            for el in elements {
-                list.push_front(el.to_vec());
-            }
-        } else {
-            for el in elements {
-                list.push_back(el.to_vec());
-            }
-        }
-        let len = list.len() as i64;
-        self.storage.rewrite_stored(db, key, stored).await?;
+        let len = self
+            .push_into_stored(db, key, stored, elements, front)
+            .await?;
         BlockingRegistry::global().notify(key, RespValue::SimpleString("OK".into()));
-        Ok(router::integer(len))
+        Ok(router::integer(len as i64))
+    }
+
+    async fn push_into_stored(
+        &self,
+        db: usize,
+        key: &[u8],
+        mut stored: StoredValue,
+        elements: &[Bytes],
+        front: bool,
+    ) -> Result<usize> {
+        match &mut stored.value {
+            ValueType::List(ref mut list) => {
+                if front {
+                    for el in elements {
+                        list.push_front(el.to_vec());
+                    }
+                } else {
+                    for el in elements {
+                        list.push_back(el.to_vec());
+                    }
+                }
+                let len = list.len();
+                if self.storage.engine_kind() == StorageEngineKind::AiDb
+                    && len > list_subkey::list_max_inline()
+                {
+                    let ops = list_subkey::replace_list_ops(db, key, list, stored.expires_at);
+                    self.storage.write_batch(db, ops).await?;
+                } else {
+                    self.storage.rewrite_stored(db, key, stored).await?;
+                }
+                Ok(len)
+            }
+            ValueType::CollectionHeader {
+                kind: CollectionKind::List,
+                ref mut count,
+                version,
+                ref mut head,
+                ref mut tail,
+            } => {
+                let encoded = AiDbEngine::encode_key(db, key);
+                let version = *version;
+                let mut ops = Vec::with_capacity(1 + elements.len());
+                if front {
+                    for el in elements {
+                        *head -= 1;
+                        *count = count.saturating_add(1);
+                        let sk = list_subkey::encode_list_element_key(&encoded, version, *head);
+                        ops.push((sk, WriteOp::put_engine(el.to_vec())));
+                    }
+                } else {
+                    for el in elements {
+                        let idx = *tail;
+                        *tail += 1;
+                        *count = count.saturating_add(1);
+                        let sk = list_subkey::encode_list_element_key(&encoded, version, idx);
+                        ops.push((sk, WriteOp::put_engine(el.to_vec())));
+                    }
+                }
+                let len = *count as usize;
+                ops.push((key.to_vec(), WriteOp::put_stored(stored)));
+                self.storage.write_batch(db, ops).await?;
+                Ok(len)
+            }
+            _ => Err(router::wrongtype()),
+        }
+    }
+
+    async fn pop_from_stored(
+        &self,
+        db: usize,
+        key: &[u8],
+        mut stored: StoredValue,
+        n: usize,
+        front: bool,
+    ) -> Result<Vec<Vec<u8>>> {
+        match &mut stored.value {
+            ValueType::List(ref mut list) => {
+                let take_n = n.min(list.len());
+                let mut popped = Vec::with_capacity(take_n);
+                for _ in 0..take_n {
+                    let v = if front {
+                        list.pop_front()
+                    } else {
+                        list.pop_back()
+                    };
+                    popped.push(v.expect("len checked"));
+                }
+                if list.is_empty() {
+                    self.storage.delete(db, key).await?;
+                } else {
+                    self.storage.rewrite_stored(db, key, stored).await?;
+                }
+                Ok(popped)
+            }
+            ValueType::CollectionHeader {
+                kind: CollectionKind::List,
+                ref mut count,
+                version,
+                ref mut head,
+                ref mut tail,
+            } => {
+                let take_n = n.min(*count as usize);
+                if take_n == 0 {
+                    return Ok(Vec::new());
+                }
+                let encoded = AiDbEngine::encode_key(db, key);
+                let version = *version;
+                let mut subkeys = Vec::with_capacity(take_n);
+                for i in 0..take_n {
+                    let idx = if front {
+                        *head + i as u64
+                    } else {
+                        *tail - 1 - i as u64
+                    };
+                    subkeys.push(list_subkey::encode_list_element_key(&encoded, version, idx));
+                }
+                let raw_vals = self.storage.raw_subkey_mget(db, subkeys.clone()).await?;
+                let mut popped = Vec::with_capacity(take_n);
+                let mut ops = Vec::with_capacity(take_n + 1);
+                for (sk, raw) in subkeys.into_iter().zip(raw_vals) {
+                    if let Some(v) = raw {
+                        popped.push(v.to_vec());
+                    }
+                    ops.push((sk, WriteOp::DeleteEngine));
+                }
+                if front {
+                    *head += take_n as u64;
+                } else {
+                    *tail -= take_n as u64;
+                }
+                *count = count.saturating_sub(take_n as u32);
+                if *count == 0 {
+                    ops.push((key.to_vec(), WriteOp::Delete));
+                } else {
+                    ops.push((key.to_vec(), WriteOp::put_stored(stored)));
+                }
+                self.storage.write_batch(db, ops).await?;
+                Ok(popped)
+            }
+            _ => Err(router::wrongtype()),
+        }
     }
 
     pub async fn lpop(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
@@ -184,11 +323,11 @@ impl ListCommands {
         front: bool,
     ) -> Result<RespValue> {
         let _lock = self.key_lock.lock(key).await;
-        let Some(mut stored) = self.storage.get_typed(db, key).await? else {
+        let Some(stored) = self.storage.get_typed(db, key).await? else {
             return Ok(router::nil_bulk());
         };
-        let list = stored.as_list_mut()?;
-        if list.is_empty() {
+        let list_len = Self::stored_list_len(&stored)?;
+        if list_len == 0 {
             return Ok(router::nil_bulk());
         }
         let is_count_given = count.is_some();
@@ -196,20 +335,11 @@ impl ListCommands {
         if limit == 0 {
             return Ok(RespValue::Array(Some(vec![])));
         }
-        let n = (limit as usize).min(list.len());
-        let mut popped = Vec::with_capacity(n);
-        for _ in 0..n {
-            let v = if front {
-                list.pop_front()
-            } else {
-                list.pop_back()
-            };
-            popped.push(v.expect("len checked"));
-        }
-        if list.is_empty() {
-            self.storage.delete(db, key).await?;
-        } else {
-            self.storage.rewrite_stored(db, key, stored).await?;
+        let popped = self
+            .pop_from_stored(db, key, stored, limit as usize, front)
+            .await?;
+        if popped.is_empty() {
+            return Ok(router::nil_bulk());
         }
         if !is_count_given {
             return Ok(router::bulk(popped.into_iter().next().unwrap()));
@@ -217,44 +347,109 @@ impl ListCommands {
         Ok(array_of_bulk(popped))
     }
 
+    fn stored_list_len(stored: &StoredValue) -> Result<usize> {
+        match &stored.value {
+            ValueType::List(list) => Ok(list.len()),
+            ValueType::CollectionHeader {
+                kind: CollectionKind::List,
+                count,
+                ..
+            } => Ok(*count as usize),
+            _ => Err(router::wrongtype()),
+        }
+    }
+
     pub async fn llen(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_args("LLEN", args, 1)?;
-        let list = self.load_list(db, &args[0]).await?;
-        Ok(router::integer(list.map(|l| l.len() as i64).unwrap_or(0)))
+        let Some(stored) = self.storage.get_typed(db, &args[0]).await? else {
+            return Ok(router::integer(0));
+        };
+        let len = Self::stored_list_len(&stored)?;
+        Ok(router::integer(len as i64))
     }
 
     pub async fn lrange(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_args("LRANGE", args, 3)?;
         let start = parse_i64(&args[1])?;
         let stop = parse_i64(&args[2])?;
-        let list = self.load_list(db, &args[0]).await?;
-        let Some(list) = list else {
+        let Some(stored) = self.storage.get_typed(db, &args[0]).await? else {
             return Ok(RespValue::Array(Some(vec![])));
         };
-        let (start_idx, stop_idx) = normalize_range(list.len(), start, stop);
-        if start_idx > stop_idx {
-            return Ok(RespValue::Array(Some(vec![])));
+        match stored.value {
+            ValueType::List(list) => {
+                let (start_idx, stop_idx) = normalize_range(list.len(), start, stop);
+                if start_idx > stop_idx {
+                    return Ok(RespValue::Array(Some(vec![])));
+                }
+                let items: Vec<Vec<u8>> = list
+                    .iter()
+                    .skip(start_idx)
+                    .take(stop_idx - start_idx + 1)
+                    .cloned()
+                    .collect();
+                Ok(array_of_bulk(items))
+            }
+            ValueType::CollectionHeader {
+                kind: CollectionKind::List,
+                count,
+                version,
+                head,
+                ..
+            } => {
+                let (start_idx, stop_idx) = normalize_range(count as usize, start, stop);
+                if start_idx > stop_idx {
+                    return Ok(RespValue::Array(Some(vec![])));
+                }
+                let encoded = AiDbEngine::encode_key(db, &args[0]);
+                let items = list_subkey::load_list_range(
+                    self.storage.as_ref(),
+                    db,
+                    &encoded,
+                    version,
+                    head,
+                    start_idx,
+                    stop_idx,
+                )
+                .await?;
+                Ok(array_of_bulk(items))
+            }
+            _ => Err(router::wrongtype()),
         }
-        let items: Vec<Vec<u8>> = list
-            .iter()
-            .skip(start_idx)
-            .take(stop_idx - start_idx + 1)
-            .cloned()
-            .collect();
-        Ok(array_of_bulk(items))
     }
 
     pub async fn lindex(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         router::require_args("LINDEX", args, 2)?;
         let index = parse_i64(&args[1])?;
-        let list = self.load_list(db, &args[0]).await?;
-        let Some(list) = list else {
+        let Some(stored) = self.storage.get_typed(db, &args[0]).await? else {
             return Ok(router::nil_bulk());
         };
-        let idx = normalize_index(list.len(), index);
-        match list.get(idx) {
-            None => Ok(router::nil_bulk()),
-            Some(v) => Ok(router::bulk(v.clone())),
+        match stored.value {
+            ValueType::List(list) => {
+                let idx = normalize_index(list.len(), index);
+                match list.get(idx) {
+                    None => Ok(router::nil_bulk()),
+                    Some(v) => Ok(router::bulk(v.clone())),
+                }
+            }
+            ValueType::CollectionHeader {
+                kind: CollectionKind::List,
+                count,
+                version,
+                head,
+                ..
+            } => {
+                let idx = normalize_index(count as usize, index);
+                if idx >= count as usize {
+                    return Ok(router::nil_bulk());
+                }
+                let encoded = AiDbEngine::encode_key(db, &args[0]);
+                let sk = list_subkey::encode_list_element_key(&encoded, version, head + idx as u64);
+                match self.storage.raw_subkey_get(db, sk).await? {
+                    None => Ok(router::nil_bulk()),
+                    Some(v) => Ok(router::bulk(v)),
+                }
+            }
+            _ => Err(router::wrongtype()),
         }
     }
 
@@ -265,14 +460,37 @@ impl ListCommands {
         let Some(mut stored) = self.storage.get_typed(db, &args[0]).await? else {
             return Err(Error::Command("ERR no such key".into()));
         };
-        let list = stored.as_list_mut()?;
-        let idx = normalize_index(list.len(), index);
-        let Some(slot) = list.get_mut(idx) else {
-            return Err(Error::Command("ERR index out of range".into()));
-        };
-        *slot = args[2].to_vec();
-        self.storage.rewrite_stored(db, &args[0], stored).await?;
-        Ok(router::ok())
+        match &mut stored.value {
+            ValueType::List(ref mut list) => {
+                let idx = normalize_index(list.len(), index);
+                let Some(slot) = list.get_mut(idx) else {
+                    return Err(Error::Command("ERR index out of range".into()));
+                };
+                *slot = args[2].to_vec();
+                self.storage.rewrite_stored(db, &args[0], stored).await?;
+                Ok(router::ok())
+            }
+            ValueType::CollectionHeader {
+                kind: CollectionKind::List,
+                count,
+                version,
+                head,
+                ..
+            } => {
+                let idx = normalize_index(*count as usize, index);
+                if idx >= *count as usize {
+                    return Err(Error::Command("ERR index out of range".into()));
+                }
+                let encoded = AiDbEngine::encode_key(db, &args[0]);
+                let sk =
+                    list_subkey::encode_list_element_key(&encoded, *version, *head + idx as u64);
+                self.storage
+                    .raw_subkey_set(db, sk, args[2].to_vec())
+                    .await?;
+                Ok(router::ok())
+            }
+            _ => Err(router::wrongtype()),
+        }
     }
 
     pub async fn lrem(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
@@ -280,24 +498,22 @@ impl ListCommands {
         let count = parse_i64(&args[1])?;
         let element = args[2].as_ref();
         let _lock = self.key_lock.lock(&args[0]).await;
-        let Some(mut stored) = self.storage.get_typed(db, &args[0]).await? else {
+        let Some(stored) = self.storage.get_typed(db, &args[0]).await? else {
             return Ok(router::integer(0));
         };
-        let list = stored.as_list_mut()?;
+        let expires_at = stored.expires_at;
+        let mut list = self.materialize_list(db, &args[0], stored).await?;
         let removed = if count == 0 {
             let before = list.len();
             list.retain(|v| v.as_slice() != element);
             before - list.len()
         } else if count > 0 {
-            remove_direction(list, element, count as usize, true)
+            remove_direction(&mut list, element, count as usize, true)
         } else {
-            remove_direction(list, element, (-count) as usize, false)
+            remove_direction(&mut list, element, (-count) as usize, false)
         };
-        if list.is_empty() {
-            self.storage.delete(db, &args[0]).await?;
-        } else {
-            self.storage.rewrite_stored(db, &args[0], stored).await?;
-        }
+        self.write_materialized_list(db, &args[0], list, expires_at)
+            .await?;
         Ok(router::integer(removed as i64))
     }
 
@@ -316,17 +532,19 @@ impl ListCommands {
         };
 
         let _lock = self.key_lock.lock(key).await;
-        let Some(mut stored) = self.storage.get_typed(db, key).await? else {
+        let Some(stored) = self.storage.get_typed(db, key).await? else {
             return Ok(router::integer(0));
         };
-        let list = stored.as_list_mut()?;
+        let expires_at = stored.expires_at;
+        let mut list = self.materialize_list(db, key, stored).await?;
         let Some(idx) = list.iter().position(|v| v.as_slice() == pivot) else {
             return Ok(router::integer(-1));
         };
         let insert_at = if before { idx } else { idx + 1 };
         list.insert(insert_at, element);
         let len = list.len() as i64;
-        self.storage.rewrite_stored(db, key, stored).await?;
+        self.write_materialized_list(db, key, list, expires_at)
+            .await?;
         Ok(router::integer(len))
     }
 
@@ -340,56 +558,29 @@ impl ListCommands {
         let (_lock_a, _lock_b) = self.key_lock.lock_two(source, destination).await;
         let same_key = source == destination;
 
-        let Some(mut src_stored) = self.storage.get_typed(db, source).await? else {
+        let Some(src_stored) = self.storage.get_typed(db, source).await? else {
             return Ok(router::nil_bulk());
         };
-        let src_list = src_stored.as_list_mut()?;
-        if src_list.is_empty() {
+        if Self::stored_list_len(&src_stored)? == 0 {
             return Ok(router::nil_bulk());
         }
 
         if !same_key {
             if let Some(dest_stored) = self.storage.get_typed(db, destination).await? {
-                if !matches!(dest_stored.value, ValueType::List(_)) {
-                    return Err(router::wrongtype());
-                }
+                Self::stored_list_len(&dest_stored)?;
             }
         }
 
-        let element = if from_left {
-            src_list.pop_front().expect("non-empty")
-        } else {
-            src_list.pop_back().expect("non-empty")
+        let popped = self
+            .pop_from_stored(db, source, src_stored, 1, from_left)
+            .await?;
+        let Some(element) = popped.into_iter().next() else {
+            return Ok(router::nil_bulk());
         };
 
-        if same_key {
-            if to_left {
-                src_list.push_front(element.clone());
-            } else {
-                src_list.push_back(element.clone());
-            }
-            self.storage.rewrite_stored(db, source, src_stored).await?;
-            return Ok(router::bulk(element));
-        }
-
-        if src_list.is_empty() {
-            self.storage.delete(db, source).await?;
-        } else {
-            self.storage.rewrite_stored(db, source, src_stored).await?;
-        }
-
-        let mut dest_stored = match self.storage.get_typed(db, destination).await? {
-            None => StoredValue::new_list(VecDeque::new()),
-            Some(stored) => stored,
-        };
-        let dest_list = dest_stored.as_list_mut()?;
-        if to_left {
-            dest_list.push_front(element.clone());
-        } else {
-            dest_list.push_back(element.clone());
-        }
-        self.storage
-            .rewrite_stored(db, destination, dest_stored)
+        let elem_bytes = Bytes::from(element.clone());
+        let dest_stored = self.load_or_create_list(db, destination).await?;
+        self.push_into_stored(db, destination, dest_stored, &[elem_bytes], to_left)
             .await?;
         Ok(router::bulk(element))
     }
@@ -400,15 +591,14 @@ impl ListCommands {
         let element = args[1].as_ref();
         let opts = parse_lpos_options(&args[2..])?;
 
-        let Some(stored) = self.storage.get_typed(db, key).await? else {
+        let Some(list) = self.load_list(db, key).await? else {
             return if opts.count.is_some() {
                 Ok(RespValue::Array(Some(vec![])))
             } else {
                 Ok(router::nil_bulk())
             };
         };
-        let list = stored.as_list()?;
-        find_lpos(list, element, &opts)
+        find_lpos(&list, element, &opts)
     }
 
     pub async fn ltrim(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
@@ -419,39 +609,172 @@ impl ListCommands {
         let Some(mut stored) = self.storage.get_typed(db, &args[0]).await? else {
             return Ok(router::ok());
         };
-        let list = stored.as_list_mut()?;
-        let (start_idx, stop_idx) = normalize_range(list.len(), start, stop);
-        if start_idx > stop_idx {
-            self.storage.delete(db, &args[0]).await?;
-            return Ok(router::ok());
+        match &mut stored.value {
+            ValueType::List(ref mut list) => {
+                let (start_idx, stop_idx) = normalize_range(list.len(), start, stop);
+                if start_idx > stop_idx {
+                    self.storage.delete(db, &args[0]).await?;
+                    return Ok(router::ok());
+                }
+                let trimmed: VecDeque<Vec<u8>> = list
+                    .iter()
+                    .skip(start_idx)
+                    .take(stop_idx - start_idx + 1)
+                    .cloned()
+                    .collect();
+                *list = trimmed;
+                if list.is_empty() {
+                    self.storage.delete(db, &args[0]).await?;
+                } else {
+                    self.storage.rewrite_stored(db, &args[0], stored).await?;
+                }
+                Ok(router::ok())
+            }
+            ValueType::CollectionHeader {
+                kind: CollectionKind::List,
+                count,
+                version,
+                head,
+                tail,
+            } => {
+                let len = *count as usize;
+                let (start_idx, stop_idx) = normalize_range(len, start, stop);
+                if start_idx > stop_idx {
+                    self.storage.delete(db, &args[0]).await?;
+                    return Ok(router::ok());
+                }
+                let new_len = stop_idx - start_idx + 1;
+                if new_len == len {
+                    return Ok(router::ok());
+                }
+                let encoded = AiDbEngine::encode_key(db, &args[0]);
+                if new_len <= list_subkey::list_max_inline() {
+                    let kept = list_subkey::load_list_range(
+                        self.storage.as_ref(),
+                        db,
+                        &encoded,
+                        *version,
+                        *head,
+                        start_idx,
+                        stop_idx,
+                    )
+                    .await?;
+                    let mut new_stored = StoredValue::new_list(kept.into());
+                    new_stored.expires_at = stored.expires_at;
+                    self.storage
+                        .rewrite_stored(db, &args[0], new_stored)
+                        .await?;
+                    return Ok(router::ok());
+                }
+                let removed_count = len - new_len;
+                if removed_count > new_len {
+                    // 保留部分更小: 用新 version 重写保留元素, 旧 version 交由 compaction 回收
+                    let kept = list_subkey::load_list_range(
+                        self.storage.as_ref(),
+                        db,
+                        &encoded,
+                        *version,
+                        *head,
+                        start_idx,
+                        stop_idx,
+                    )
+                    .await?;
+                    let ops = list_subkey::replace_list_ops(
+                        db,
+                        &args[0],
+                        &kept.into(),
+                        stored.expires_at,
+                    );
+                    self.storage.write_batch(db, ops).await?;
+                } else {
+                    let mut ops = Vec::with_capacity(removed_count + 1);
+                    for i in 0..start_idx {
+                        let sk = list_subkey::encode_list_element_key(
+                            &encoded,
+                            *version,
+                            *head + i as u64,
+                        );
+                        ops.push((sk, WriteOp::DeleteEngine));
+                    }
+                    for i in (stop_idx + 1)..len {
+                        let sk = list_subkey::encode_list_element_key(
+                            &encoded,
+                            *version,
+                            *head + i as u64,
+                        );
+                        ops.push((sk, WriteOp::DeleteEngine));
+                    }
+                    *head += start_idx as u64;
+                    *tail = *head + new_len as u64;
+                    *count = new_len as u32;
+                    ops.push((args[0].to_vec(), WriteOp::put_stored(stored)));
+                    self.storage.write_batch(db, ops).await?;
+                }
+                Ok(router::ok())
+            }
+            _ => Err(router::wrongtype()),
         }
-        let trimmed: VecDeque<Vec<u8>> = list
-            .iter()
-            .skip(start_idx)
-            .take(stop_idx - start_idx + 1)
-            .cloned()
-            .collect();
-        *list = trimmed;
+    }
+
+    async fn materialize_list(
+        &self,
+        db: usize,
+        key: &[u8],
+        stored: StoredValue,
+    ) -> Result<VecDeque<Vec<u8>>> {
+        match stored.value {
+            ValueType::List(list) => Ok(list),
+            ValueType::CollectionHeader {
+                kind: CollectionKind::List,
+                version,
+                ..
+            } => {
+                let encoded = AiDbEngine::encode_key(db, key);
+                list_subkey::load_list_full(self.storage.as_ref(), db, &encoded, version).await
+            }
+            _ => Err(router::wrongtype()),
+        }
+    }
+
+    async fn write_materialized_list(
+        &self,
+        db: usize,
+        key: &[u8],
+        list: VecDeque<Vec<u8>>,
+        expires_at: Option<u64>,
+    ) -> Result<()> {
         if list.is_empty() {
-            self.storage.delete(db, &args[0]).await?;
-        } else {
-            self.storage.rewrite_stored(db, &args[0], stored).await?;
+            let _ = self.storage.delete(db, key).await?;
+            return Ok(());
         }
-        Ok(router::ok())
+        if self.storage.engine_kind() == StorageEngineKind::AiDb
+            && list.len() > list_subkey::list_max_inline()
+        {
+            let ops = list_subkey::replace_list_ops(db, key, &list, expires_at);
+            self.storage.write_batch(db, ops).await
+        } else {
+            let mut stored = StoredValue::new_list(list);
+            stored.expires_at = expires_at;
+            self.storage.rewrite_stored(db, key, stored).await
+        }
     }
 
     async fn load_list(&self, db: usize, key: &[u8]) -> Result<Option<VecDeque<Vec<u8>>>> {
         let Some(stored) = self.storage.get_typed(db, key).await? else {
             return Ok(None);
         };
-        Ok(Some(stored.as_list()?.clone()))
+        Ok(Some(self.materialize_list(db, key, stored).await?))
     }
 
     async fn load_or_create_list(&self, db: usize, key: &[u8]) -> Result<StoredValue> {
         match self.storage.get_typed(db, key).await? {
             None => Ok(StoredValue::new_list(VecDeque::new())),
             Some(stored) => match stored.value {
-                ValueType::List(_) => Ok(stored),
+                ValueType::List(_)
+                | ValueType::CollectionHeader {
+                    kind: CollectionKind::List,
+                    ..
+                } => Ok(stored),
                 _ => Err(router::wrongtype()),
             },
         }
@@ -480,30 +803,22 @@ impl ListCommands {
         left: bool,
     ) -> Result<Option<RespValue>> {
         for &key in keys {
-            let Some(mut stored) = self.storage.get_typed(db, key).await? else {
+            let Some(stored) = self.storage.get_typed(db, key).await? else {
                 continue;
             };
-            let list = match stored.as_list_mut() {
-                Ok(l) => l,
-                Err(_) => continue,
+            let Ok(list_len) = Self::stored_list_len(&stored) else {
+                continue;
             };
-            if list.is_empty() {
+            if list_len == 0 {
                 continue;
             }
-            let element = if left {
-                list.pop_front().expect("non-empty")
-            } else {
-                list.pop_back().expect("non-empty")
-            };
-            if list.is_empty() {
-                self.storage.delete(db, key).await?;
-            } else {
-                self.storage.rewrite_stored(db, key, stored).await?;
+            let popped = self.pop_from_stored(db, key, stored, 1, left).await?;
+            if let Some(el) = popped.into_iter().next() {
+                return Ok(Some(RespValue::Array(Some(vec![
+                    RespValue::BulkString(Some(key.clone())),
+                    RespValue::BulkString(Some(bytes::Bytes::from(el))),
+                ]))));
             }
-            return Ok(Some(RespValue::Array(Some(vec![
-                RespValue::BulkString(Some(key.clone())),
-                RespValue::BulkString(Some(bytes::Bytes::from(element))),
-            ]))));
         }
         Ok(None)
     }
@@ -995,5 +1310,139 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res, router::nil_bulk());
+    }
+
+    #[tokio::test]
+    async fn list_upgrades_to_subkey_past_inline_threshold() {
+        use crate::storage::{AiDbEngine, CollectionKind, KvStorageAdapter};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let engine = AiDbEngine::open_for_testing(dir.path()).unwrap();
+        let storage = KvStorageAdapter::new(engine);
+        let commands = ListCommands::new(
+            storage.clone(),
+            Arc::new(KeyLock::new(256)),
+            Arc::new(tokio::sync::RwLock::new(())),
+        );
+        let key = Bytes::from_static(b"big_list");
+        let inline_cap = crate::storage::list_subkey::list_max_inline();
+        let total = inline_cap + 5;
+
+        let mut push_args = vec![key.clone()];
+        for i in 0..total {
+            push_args.push(Bytes::from(format!("e{i:02}")));
+        }
+        let len = commands.rpush(0, &push_args).await.unwrap();
+        assert_eq!(len, router::integer(total as i64));
+
+        // 应升级为 CollectionHeader { kind: List }
+        let stored = storage.get_typed(0, &key).await.unwrap().unwrap();
+        assert!(matches!(
+            stored.value,
+            ValueType::CollectionHeader {
+                kind: CollectionKind::List,
+                count,
+                ..
+            } if count as usize == total
+        ));
+
+        // LLEN / LINDEX / LRANGE / LSET / LINSERT / LREM / LPOS / LTRIM / LPOP / RPOP
+        assert_eq!(
+            commands.llen(0, std::slice::from_ref(&key)).await.unwrap(),
+            router::integer(total as i64)
+        );
+        assert_eq!(
+            commands
+                .lindex(0, &[key.clone(), Bytes::from_static(b"0")])
+                .await
+                .unwrap(),
+            router::bulk(b"e00".to_vec())
+        );
+        assert_eq!(
+            commands
+                .lindex(0, &[key.clone(), Bytes::from_static(b"-1")])
+                .await
+                .unwrap(),
+            router::bulk(format!("e{:02}", total - 1).into_bytes())
+        );
+        commands
+            .lset(
+                0,
+                &[
+                    key.clone(),
+                    Bytes::from_static(b"1"),
+                    Bytes::from_static(b"mid"),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            commands
+                .lrange(
+                    0,
+                    &[
+                        key.clone(),
+                        Bytes::from_static(b"0"),
+                        Bytes::from_static(b"2"),
+                    ]
+                )
+                .await
+                .unwrap(),
+            array_of_bulk(vec![b"e00".to_vec(), b"mid".to_vec(), b"e02".to_vec()])
+        );
+        commands
+            .linsert(
+                0,
+                &[
+                    key.clone(),
+                    Bytes::from_static(b"BEFORE"),
+                    Bytes::from_static(b"mid"),
+                    Bytes::from_static(b"ins"),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            commands
+                .lpos(0, &[key.clone(), Bytes::from_static(b"ins")])
+                .await
+                .unwrap(),
+            router::integer(1)
+        );
+        assert_eq!(
+            commands
+                .lrem(
+                    0,
+                    &[
+                        key.clone(),
+                        Bytes::from_static(b"1"),
+                        Bytes::from_static(b"ins")
+                    ]
+                )
+                .await
+                .unwrap(),
+            router::integer(1)
+        );
+        commands
+            .ltrim(
+                0,
+                &[
+                    key.clone(),
+                    Bytes::from_static(b"0"),
+                    Bytes::from_static(b"1"),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            commands.lpop(0, std::slice::from_ref(&key)).await.unwrap(),
+            router::bulk(b"e00".to_vec())
+        );
+        assert_eq!(
+            commands.rpop(0, std::slice::from_ref(&key)).await.unwrap(),
+            router::bulk(b"mid".to_vec())
+        );
+        // 弹空后 header 必须被删除
+        assert!(storage.get_typed(0, &key).await.unwrap().is_none());
     }
 }
