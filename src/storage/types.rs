@@ -461,6 +461,24 @@ pub trait KvStorage: Send + Sync {
         Err(Error::Storage("raw subkey access not supported".into()))
     }
 
+    /// 批量读取 subkey 原始字节. 默认回退循环调用 `raw_subkey_get`.
+    async fn raw_subkey_mget(
+        &self,
+        db: usize,
+        encoded_keys: Vec<Vec<u8>>,
+    ) -> Result<Vec<Option<bytes::Bytes>>> {
+        let mut out = Vec::with_capacity(encoded_keys.len());
+        for k in encoded_keys {
+            out.push(
+                self.raw_subkey_get(db, k)
+                    .await
+                    .unwrap_or_default()
+                    .map(bytes::Bytes::from),
+            );
+        }
+        Ok(out)
+    }
+
     /// 绕过 StoredValue 序列化, 直接写入 subkey 的原始字节.
     async fn raw_subkey_set(
         &self,

@@ -34,9 +34,9 @@ use crate::storage::memory::{glob_literal_prefix, glob_match};
 use crate::storage::observation::{PointReadCounter, StorageObservation};
 use crate::storage::subkey;
 use crate::storage::types::{
-    is_wrongtype, now_ms, BatchWriteHandle, CollectionKind, ExpiresCounters, ImmediateWriteHandle,
-    KeyspaceStats, KvStorage, RawPairVisitor, ScanResult, StorageEngineKind, StoredValue,
-    ValueType, WriteOp, DB_COUNT, TTL_NO_EXPIRY, WRONGTYPE,
+    now_ms, BatchWriteHandle, CollectionKind, ExpiresCounters, ImmediateWriteHandle, KeyspaceStats,
+    KvStorage, RawPairVisitor, ScanResult, StorageEngineKind, StoredValue, ValueType, WriteOp,
+    DB_COUNT, TTL_NO_EXPIRY, WRONGTYPE,
 };
 use crate::storage::watch_registry::WatchRegistry;
 use crate::storage::watch_version::{
@@ -99,6 +99,13 @@ pub trait StorageAdapter: Send + Sync {
     }
     async fn get_bytes(&self, key: Vec<u8>) -> Result<Option<bytes::Bytes>> {
         self.get(key).await.map(|opt| opt.map(bytes::Bytes::from))
+    }
+    async fn mget_bytes(&self, keys: &[Vec<u8>]) -> Result<Vec<Option<bytes::Bytes>>> {
+        let mut out = Vec::with_capacity(keys.len());
+        for key in keys {
+            out.push(self.get_bytes(key.clone()).await?);
+        }
+        Ok(out)
     }
     fn write_batch_sync(&self, batch: Vec<AdapterWriteOp>) -> Result<()> {
         let _ = batch;
@@ -1005,13 +1012,54 @@ impl KvStorage for KvStorageAdapter {
     }
 
     async fn mget(&self, db: usize, keys: &[Vec<u8>]) -> Result<Vec<Option<Vec<u8>>>> {
+        self.check_db(db)?;
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let encoded_keys: Vec<Vec<u8>> = keys.iter().map(|k| Self::encode(db, k)).collect();
+        let raw_values = self.storage.mget_bytes(&encoded_keys).await?;
         let mut out = Vec::with_capacity(keys.len());
-        for key in keys {
-            match self.get_bytes(db, key).await {
-                Ok(Some(bytes)) => out.push(Some(bytes.to_vec())),
-                Ok(None) => out.push(None),
-                Err(e) if is_wrongtype(&e) => out.push(None),
-                Err(e) => return Err(e),
+        let now = now_ms();
+        for (idx, raw_opt) in raw_values.into_iter().enumerate() {
+            let Some(raw) = raw_opt else {
+                if let Some(counter) = self.point_reads.get() {
+                    counter.note(false);
+                }
+                out.push(None);
+                continue;
+            };
+            match crate::storage::string_codec::decode_string_fast(&raw) {
+                crate::storage::string_codec::FastStringDecode::Valid(range, expires_at) => {
+                    if let Some(exp) = expires_at {
+                        if now >= exp {
+                            if let Some(obs) = &self.observation {
+                                obs.record_expired_key();
+                            }
+                            self.try_lazy_expire_delete(db, &keys[idx]).await;
+                            if let Some(counter) = self.point_reads.get() {
+                                counter.note(false);
+                            }
+                            out.push(None);
+                            continue;
+                        }
+                    }
+                    if let Some(counter) = self.point_reads.get() {
+                        counter.note(true);
+                    }
+                    out.push(Some(raw[range].to_vec()));
+                }
+                crate::storage::string_codec::FastStringDecode::WrongType => {
+                    out.push(None);
+                }
+                crate::storage::string_codec::FastStringDecode::Fallback => {
+                    match self.get_typed(db, &keys[idx]).await? {
+                        Some(s) => match s.value {
+                            ValueType::String(v) => out.push(Some(v)),
+                            _ => out.push(None),
+                        },
+                        None => out.push(None),
+                    }
+                }
             }
         }
         Ok(out)
@@ -1493,6 +1541,15 @@ impl KvStorage for KvStorageAdapter {
     async fn raw_subkey_get(&self, db: usize, encoded_key: Vec<u8>) -> Result<Option<Vec<u8>>> {
         self.check_db(db)?;
         self.storage.get(encoded_key).await
+    }
+
+    async fn raw_subkey_mget(
+        &self,
+        db: usize,
+        encoded_keys: Vec<Vec<u8>>,
+    ) -> Result<Vec<Option<bytes::Bytes>>> {
+        self.check_db(db)?;
+        self.storage.mget_bytes(&encoded_keys).await
     }
 
     async fn raw_subkey_set(&self, db: usize, encoded_key: Vec<u8>, value: Vec<u8>) -> Result<()> {

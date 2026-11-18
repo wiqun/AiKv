@@ -206,6 +206,21 @@ impl StorageAdapter for AiDbEngine {
             .map_err(|e| Error::Storage(e.to_string()))
     }
 
+    async fn mget_bytes(&self, keys: &[Vec<u8>]) -> Result<Vec<Option<bytes::Bytes>>> {
+        let owned = keys.to_vec();
+        self.blocking(move |db| {
+            let refs: Vec<&[u8]> = owned.iter().map(|k| k.as_slice()).collect();
+            let vals = db
+                .multi_get(&refs)
+                .map_err(|e| Error::Storage(e.to_string()))?;
+            Ok(vals
+                .into_iter()
+                .map(|opt| opt.map(bytes::Bytes::from))
+                .collect())
+        })
+        .await
+    }
+
     async fn write_batch(&self, batch: Vec<AdapterWriteOp>) -> Result<()> {
         self.write_batch_sync(batch)
     }
