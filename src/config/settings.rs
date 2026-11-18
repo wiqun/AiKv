@@ -65,6 +65,24 @@ pub struct ServerSettings {
     pub resp3_enabled: Option<bool>,
     pub slowlog: Option<SlowlogSettings>,
     pub script: Option<ScriptSettings>,
+    pub max_blocking_threads: Option<usize>,
+    pub requirepass: Option<String>,
+    pub rename_command: Option<BTreeMap<String, String>>,
+    pub client_output_buffer_limit: Option<ClientOutputBufferLimitsSettings>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutputBufferClassSettings {
+    pub hard_limit_bytes: Option<u64>,
+    pub soft_limit_bytes: Option<u64>,
+    pub soft_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClientOutputBufferLimitsSettings {
+    pub normal: Option<OutputBufferClassSettings>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -170,6 +188,22 @@ pub struct ResolvedServerExt {
     pub resp3_enabled: bool,
     pub slowlog: ResolvedSlowlog,
     pub script: ResolvedScript,
+    pub max_blocking_threads: usize,
+    pub requirepass: Option<String>,
+    pub rename_command: BTreeMap<String, String>,
+    pub client_output_buffer_limit: ResolvedClientOutputBufferLimits,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ResolvedOutputBufferLimit {
+    pub hard_limit_bytes: u64,
+    pub soft_limit_bytes: u64,
+    pub soft_seconds: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ResolvedClientOutputBufferLimits {
+    pub normal: ResolvedOutputBufferLimit,
 }
 
 /// 最终态引擎扩展配置 (包含完整的 `aidb::config::Options`).
@@ -347,6 +381,7 @@ impl Serialize for AnnounceMode {
 
 const DEFAULT_BIND: &str = "127.0.0.1:6379";
 const DEFAULT_MAX_CLIENTS: usize = 10000;
+const DEFAULT_MAX_BLOCKING_THREADS: usize = 512;
 const SCRIPT_WORKER_THREADS_FALLBACK: usize = 8;
 
 /// 未配置 `script_worker_threads` 时的线程数: 兼顾 I/O 等待, 机器并行度*4 夹到 8..=32, 探测失败为 8.
@@ -442,7 +477,16 @@ impl Settings {
             Some(n) => n,
         };
 
-        let server_ext = resolve_server_ext(&self.server);
+        if matches!(self.server.max_blocking_threads, Some(0)) {
+            return Err(ConfigError::Field {
+                layer: "server",
+                field: "max_blocking_threads",
+                message: "must be >= 1".to_string(),
+            });
+        }
+
+        let rename_command = resolve_rename_commands(self.server.rename_command.as_ref())?;
+        let server_ext = resolve_server_ext(&self.server, rename_command);
 
         let engine = self.engine.kind.unwrap_or(EngineKind::Memory);
         if engine == EngineKind::Memory {
@@ -516,7 +560,80 @@ impl Settings {
     }
 }
 
-fn resolve_server_ext(server: &ServerSettings) -> ResolvedServerExt {
+fn is_builtin_command(upper: &str) -> bool {
+    crate::command::lookup(upper).is_some()
+        || matches!(
+            upper,
+            "AUTH"
+                | "PING"
+                | "ECHO"
+                | "HELLO"
+                | "QUIT"
+                | "MONITOR"
+                | "MULTI"
+                | "EXEC"
+                | "DISCARD"
+                | "WATCH"
+                | "UNWATCH"
+                | "ATOM.MULTI"
+                | "ATOM.EXEC"
+                | "ATOM.DISCARD"
+                | "ATOM.WATCH"
+                | "ATOM.UNWATCH"
+                | "ASKING"
+                | "READONLY"
+                | "READWRITE"
+        )
+}
+
+fn resolve_rename_commands(
+    raw: Option<&BTreeMap<String, String>>,
+) -> Result<BTreeMap<String, String>, ConfigError> {
+    let Some(map) = raw else {
+        return Ok(BTreeMap::new());
+    };
+    let mut normalized = BTreeMap::new();
+    for (orig, target) in map {
+        let orig_up = orig.trim().to_ascii_uppercase();
+        if orig_up.is_empty() {
+            return Err(ConfigError::Field {
+                layer: "server",
+                field: "rename_command",
+                message: "original command name cannot be empty".to_string(),
+            });
+        }
+        let target_up = target.trim().to_ascii_uppercase();
+        if let Some(prev) = normalized.insert(orig_up.clone(), target_up) {
+            let _ = prev;
+        }
+    }
+    let mut seen_targets = std::collections::HashSet::new();
+    for (orig, target) in &normalized {
+        if target.is_empty() {
+            continue;
+        }
+        if !seen_targets.insert(target.clone()) {
+            return Err(ConfigError::Field {
+                layer: "server",
+                field: "rename_command",
+                message: format!("duplicate target command name '{target}'"),
+            });
+        }
+        if is_builtin_command(target) && target != orig && !normalized.contains_key(target) {
+            return Err(ConfigError::Field {
+                layer: "server",
+                field: "rename_command",
+                message: format!("target '{target}' conflicts with existing built-in command"),
+            });
+        }
+    }
+    Ok(normalized)
+}
+
+fn resolve_server_ext(
+    server: &ServerSettings,
+    rename_command: BTreeMap<String, String>,
+) -> ResolvedServerExt {
     let slowlog = server.slowlog.as_ref();
     let script = server.script.as_ref();
     ResolvedServerExt {
@@ -549,6 +666,28 @@ fn resolve_server_ext(server: &ServerSettings) -> ResolvedServerExt {
                 .unwrap_or(128 * 1024 * 1024),
             max_idle_vms: script.and_then(|s| s.max_idle_vms).unwrap_or(64),
             cache_max_scripts: script.and_then(|s| s.cache_max_scripts).unwrap_or(256),
+        },
+        max_blocking_threads: server
+            .max_blocking_threads
+            .unwrap_or(DEFAULT_MAX_BLOCKING_THREADS),
+        requirepass: server
+            .requirepass
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(ToOwned::to_owned),
+        rename_command,
+        client_output_buffer_limit: ResolvedClientOutputBufferLimits {
+            normal: {
+                let n = server
+                    .client_output_buffer_limit
+                    .as_ref()
+                    .and_then(|c| c.normal.as_ref());
+                ResolvedOutputBufferLimit {
+                    hard_limit_bytes: n.and_then(|v| v.hard_limit_bytes).unwrap_or(0),
+                    soft_limit_bytes: n.and_then(|v| v.soft_limit_bytes).unwrap_or(0),
+                    soft_seconds: n.and_then(|v| v.soft_seconds).unwrap_or(0),
+                }
+            },
         },
     }
 }

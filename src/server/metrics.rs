@@ -130,6 +130,7 @@ pub struct ServerMetrics {
     redirect_moved: AtomicU64,
     redirect_ask: AtomicU64,
     propose_duration: DashMap<u64, LatencyHistogram>,
+    client_output_buffer_limit_disconnections: AtomicU64,
 }
 
 impl Default for ServerMetrics {
@@ -181,6 +182,7 @@ impl Default for ServerMetrics {
             redirect_moved: AtomicU64::new(0),
             redirect_ask: AtomicU64::new(0),
             propose_duration: DashMap::new(),
+            client_output_buffer_limit_disconnections: AtomicU64::new(0),
         }
     }
 }
@@ -193,6 +195,16 @@ impl ServerMetrics {
 
     pub fn on_disconnect(&self) {
         self.connected_clients.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    pub fn on_output_buffer_limit_disconnection(&self) {
+        self.client_output_buffer_limit_disconnections
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn output_buffer_limit_disconnections(&self) -> u64 {
+        self.client_output_buffer_limit_disconnections
+            .load(Ordering::Relaxed)
     }
 
     /// 客户端进入阻塞命令等待 (BLPOP 等).

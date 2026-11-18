@@ -24,6 +24,10 @@ pub struct RuntimeMutableConfig {
     pub max_clients: AtomicUsize,
     pub idle_timeout_ms: AtomicU64,
     pub read_timeout_ms: AtomicU64,
+    pub requirepass: RwLock<Option<String>>,
+    pub output_buffer_normal_hard_bytes: AtomicU64,
+    pub output_buffer_normal_soft_bytes: AtomicU64,
+    pub output_buffer_normal_soft_secs: AtomicU64,
 }
 
 impl RuntimeMutableConfig {
@@ -36,6 +40,10 @@ impl RuntimeMutableConfig {
             read_timeout_ms: AtomicU64::new(
                 cfg.read_timeout.map(|d| d.as_millis() as u64).unwrap_or(0),
             ),
+            requirepass: RwLock::new(None),
+            output_buffer_normal_hard_bytes: AtomicU64::new(0),
+            output_buffer_normal_soft_bytes: AtomicU64::new(0),
+            output_buffer_normal_soft_secs: AtomicU64::new(0),
         }
     }
 
@@ -151,6 +159,57 @@ pub struct ServerSharedState {
     pub(crate) transaction_gate: TransactionGate,
     storage_observation: Arc<StorageObservation>,
     log_reloader: RwLock<Option<LogReloadCallback>>,
+    rename_table: RwLock<CommandRenameTable>,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct CommandRenameTable {
+    alias_to_canonical: HashMap<String, String>,
+    canonical_to_alias: HashMap<String, String>,
+    disabled: std::collections::HashSet<String>,
+}
+
+impl CommandRenameTable {
+    pub fn from_map(map: &std::collections::BTreeMap<String, String>) -> Self {
+        let mut table = Self::default();
+        for (orig, target) in map {
+            if target.is_empty() {
+                table.disabled.insert(orig.clone());
+            } else {
+                table
+                    .alias_to_canonical
+                    .insert(target.clone(), orig.clone());
+                table
+                    .canonical_to_alias
+                    .insert(orig.clone(), target.clone());
+            }
+        }
+        table
+    }
+
+    pub fn resolve<'a>(&self, cmd_upper: &'a str) -> Option<std::borrow::Cow<'a, str>> {
+        if let Some(canonical) = self.alias_to_canonical.get(cmd_upper) {
+            return Some(std::borrow::Cow::Owned(canonical.clone()));
+        }
+        if self.disabled.contains(cmd_upper) || self.canonical_to_alias.contains_key(cmd_upper) {
+            return None;
+        }
+        Some(std::borrow::Cow::Borrowed(cmd_upper))
+    }
+
+    pub fn display_name(&self, canonical_upper: &str) -> Option<String> {
+        if self.disabled.contains(canonical_upper) {
+            return None;
+        }
+        if let Some(alias) = self.canonical_to_alias.get(canonical_upper) {
+            return Some(alias.clone());
+        }
+        Some(canonical_upper.to_string())
+    }
+
+    pub fn disabled_count(&self) -> usize {
+        self.disabled.len()
+    }
 }
 
 impl ServerSharedState {
@@ -284,6 +343,7 @@ impl ServerSharedState {
             transaction_gate: Arc::new(tokio::sync::RwLock::new(())),
             storage_observation: storage_observation.unwrap_or_default(),
             log_reloader: RwLock::new(None),
+            rename_table: RwLock::new(CommandRenameTable::default()),
         })
     }
 
@@ -392,6 +452,15 @@ impl ServerSharedState {
         self.runtime_config
             .read_timeout_ms
             .store(settings.server_ext.read_timeout_ms, Ordering::Relaxed);
+        *self.runtime_config.requirepass.write() = settings.server_ext.requirepass.clone();
+        *self.rename_table.write() =
+            CommandRenameTable::from_map(&settings.server_ext.rename_command);
+        let ob = &settings.server_ext.client_output_buffer_limit.normal;
+        self.set_normal_output_buffer_limit(
+            ob.hard_limit_bytes,
+            ob.soft_limit_bytes,
+            ob.soft_seconds,
+        );
         self.slow_query_log
             .set_threshold_us(settings.server_ext.slowlog.log_slower_than_us);
         self.slow_query_log
@@ -415,6 +484,89 @@ impl ServerSharedState {
             settings.server_ext.slowlog.max_len.to_string(),
         );
         map.insert("loglevel".into(), settings.observability.log_level.clone());
+        let pw = settings.server_ext.requirepass.clone().unwrap_or_default();
+        map.insert("requirepass".into(), pw.clone());
+        map.insert("server.requirepass".into(), pw);
+        let ob = &settings.server_ext.client_output_buffer_limit.normal;
+        map.insert(
+            "client-output-buffer-limit".into(),
+            format!(
+                "normal {} {} {}",
+                ob.hard_limit_bytes, ob.soft_limit_bytes, ob.soft_seconds
+            ),
+        );
+    }
+
+    pub fn requires_auth(&self) -> bool {
+        self.runtime_config.requirepass.read().is_some()
+    }
+
+    pub fn requirepass_value(&self) -> String {
+        self.runtime_config
+            .requirepass
+            .read()
+            .clone()
+            .unwrap_or_default()
+    }
+
+    pub fn set_requirepass(&self, raw: &str) {
+        let next = (!raw.is_empty()).then(|| raw.to_string());
+        *self.runtime_config.requirepass.write() = next;
+    }
+
+    pub fn verify_auth(&self, username: Option<&str>, password: &str) -> Result<(), &'static str> {
+        let guard = self.runtime_config.requirepass.read();
+        let Some(expected) = guard.as_deref() else {
+            return Err("ERR Client sent AUTH, but no password is set");
+        };
+        if let Some(user) = username {
+            if user != "default" {
+                return Err("WRONGPASS invalid username-password pair or user is disabled.");
+            }
+        }
+        if password == expected {
+            Ok(())
+        } else {
+            Err("WRONGPASS invalid username-password pair or user is disabled.")
+        }
+    }
+
+    pub fn resolve_command<'a>(&self, cmd_upper: &'a str) -> Option<std::borrow::Cow<'a, str>> {
+        self.rename_table.read().resolve(cmd_upper)
+    }
+
+    pub fn display_command_name(&self, canonical_upper: &str) -> Option<String> {
+        self.rename_table.read().display_name(canonical_upper)
+    }
+
+    pub fn disabled_command_count(&self) -> usize {
+        self.rename_table.read().disabled_count()
+    }
+
+    pub fn normal_output_buffer_limit(&self) -> (u64, u64, u64) {
+        (
+            self.runtime_config
+                .output_buffer_normal_hard_bytes
+                .load(Ordering::Relaxed),
+            self.runtime_config
+                .output_buffer_normal_soft_bytes
+                .load(Ordering::Relaxed),
+            self.runtime_config
+                .output_buffer_normal_soft_secs
+                .load(Ordering::Relaxed),
+        )
+    }
+
+    pub fn set_normal_output_buffer_limit(&self, hard: u64, soft: u64, secs: u64) {
+        self.runtime_config
+            .output_buffer_normal_hard_bytes
+            .store(hard, Ordering::Relaxed);
+        self.runtime_config
+            .output_buffer_normal_soft_bytes
+            .store(soft, Ordering::Relaxed);
+        self.runtime_config
+            .output_buffer_normal_soft_secs
+            .store(secs, Ordering::Relaxed);
     }
 
     pub async fn refresh_runtime_metrics(self: &Arc<Self>) {

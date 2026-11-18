@@ -632,8 +632,7 @@ fn init_logging(settings: &ResolvedSettings) -> (Vec<WorkerGuard>, Option<LogRel
     (guards, Some(reload_cb))
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
     let cli = Cli::parse();
     let (settings, warnings) = match resolve(&cli) {
         Ok(v) => v,
@@ -651,6 +650,25 @@ async fn main() {
             }
         }
     }
+
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .max_blocking_threads(settings.server_ext.max_blocking_threads)
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("failed to build tokio runtime: {e}");
+            std::process::exit(1);
+        }
+    };
+    rt.block_on(async_main(settings, warnings));
+}
+
+async fn async_main(
+    settings: aikv::config::ResolvedSettings,
+    warnings: Vec<aikv::config::ConfigWarning>,
+) {
     let (_log_guards, log_reloader) = init_logging(&settings);
     if let Some(path) = settings.config_file_used.as_deref() {
         tracing::info!("config file: {}", path.display());

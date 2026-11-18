@@ -46,6 +46,16 @@ pub struct ScriptTransaction {
     pub(crate) zset_base_top: Mutex<HashMap<Vec<u8>, Option<Vec<u8>>>>,
 }
 
+impl ScriptTransaction {
+    /// 判断本次脚本执行是否已产生任何待提交写操作.
+    pub(crate) fn has_writes(&self) -> bool {
+        !self.write_buffer.is_empty()
+            || !self.expire_at.is_empty()
+            || !self.zset_deltas.is_empty()
+            || !self.hash_deltas.is_empty()
+    }
+}
+
 /// 一次脚本里某个大 Hash field 的变化.
 #[derive(Debug, Clone)]
 pub struct HashFieldChange {

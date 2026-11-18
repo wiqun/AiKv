@@ -57,6 +57,7 @@ struct ScriptExecutionContext {
     txn: RefCell<ScriptTransaction>,
     declared: Arc<DeclaredKeys>,
     read_only: bool,
+    active: Arc<active::ActiveScripts>,
 }
 
 struct ScriptArgs<'a> {
@@ -311,7 +312,7 @@ pub struct ScriptCommands {
     enqueue_chain: Arc<enqueue_chain::EnqueueChain>,
     pool: pool::ScriptWorkerPool,
     router: route::ScriptRouter,
-    active: active::ActiveScripts,
+    active: Arc<active::ActiveScripts>,
 }
 
 impl ScriptCommands {
@@ -353,7 +354,7 @@ impl ScriptCommands {
             enqueue_chain: Arc::clone(&in_flight_ctx.enqueue_chain),
             pool: pool::ScriptWorkerPool::new(threads),
             router: route::ScriptRouter::from_env(),
-            active: active::ActiveScripts::default(),
+            active: Arc::new(active::ActiveScripts::default()),
         }
     }
 
@@ -398,7 +399,7 @@ impl ScriptCommands {
             enqueue_chain: Arc::clone(&in_flight_ctx.enqueue_chain),
             pool: pool::ScriptWorkerPool::new(threads),
             router: route::ScriptRouter::with_config(forced, cfg.pool_threshold_us),
-            active: active::ActiveScripts::default(),
+            active: Arc::new(active::ActiveScripts::default()),
         }
     }
 
@@ -542,9 +543,18 @@ impl ScriptCommands {
     }
 
     fn script_kill(&self) -> Result<RespValue> {
-        Err(Error::Command(
-            "NOTBUSY No scripts in execution right now.".into(),
-        ))
+        if self.active.running_count() == 0 {
+            return Err(Error::Command(
+                "NOTBUSY No scripts in execution right now.".into(),
+            ));
+        }
+        if self.active.is_dirty() {
+            return Err(Error::Command(
+                "UNKILLABLE Sorry the script already executed write commands against the dataset. You can either wait the script termination or kill the server in a hard way using the SHUTDOWN NOSAVE command.".into(),
+            ));
+        }
+        self.active.request_kill();
+        Ok(RespValue::SimpleString("OK".into()))
     }
 
     async fn execute_script(
@@ -596,6 +606,7 @@ impl ScriptCommands {
             seg_id,
             slot_idx,
             read_only,
+            active: Arc::clone(&self.active),
         };
         let use_pool = self.router.use_pool(sha1);
         let drive = self.drive_script(job, use_pool).await?;
@@ -719,9 +730,10 @@ impl ScriptCommands {
         args: &ScriptArgs<'_>,
         txn: ScriptTransaction,
         declared: Arc<DeclaredKeys>,
+        active: Arc<active::ActiveScripts>,
     ) -> Result<(LuaValue, ScriptTransaction)> {
         let t_setup = Instant::now();
-        let func = prepare_lua_call(lua, timeout, args, txn, declared)?;
+        let func = prepare_lua_call(lua, timeout, args, txn, declared, active)?;
         let t_call = Instant::now();
         let eval_result: mlua::Result<LuaValue> = func.call(());
         let t_back = Instant::now();
@@ -749,11 +761,18 @@ fn prepare_lua_call(
     args: &ScriptArgs<'_>,
     txn: ScriptTransaction,
     declared: Arc<DeclaredKeys>,
+    active: Arc<active::ActiveScripts>,
 ) -> Result<mlua::Function> {
     let started = Instant::now();
+    let hook_active = Arc::clone(&active);
     lua.set_hook(
         HookTriggers::new().every_nth_instruction(10_000),
         move |_lua, _debug| {
+            if hook_active.is_kill_requested() {
+                return Err(mlua::Error::RuntimeError(
+                    "Script killed by user with SCRIPT KILL.".to_string(),
+                ));
+            }
             if started.elapsed() >= timeout {
                 return Err(mlua::Error::RuntimeError("Script timed out".to_string()));
             }
@@ -779,6 +798,7 @@ fn prepare_lua_call(
         txn: RefCell::new(txn),
         declared,
         read_only: args.read_only,
+        active,
     });
     Ok(func)
 }
@@ -799,13 +819,17 @@ fn lua_redis_entry(
     throw_error: bool,
 ) -> Result<mlua::Function> {
     lua.create_function(move |lua, args: MultiValue| {
-        let (declared, read_only) = {
+        let (declared, read_only, active) = {
             let ctx = lua
                 .app_data_ref::<ScriptExecutionContext>()
                 .ok_or_else(|| {
                     mlua::Error::RuntimeError("ERR missing script execution context".into())
                 })?;
-            (Arc::clone(&ctx.declared), ctx.read_only)
+            (
+                Arc::clone(&ctx.declared),
+                ctx.read_only,
+                Arc::clone(&ctx.active),
+            )
         };
         let ctx = lua
             .app_data_mut::<ScriptExecutionContext>()
@@ -813,7 +837,7 @@ fn lua_redis_entry(
                 mlua::Error::RuntimeError("ERR missing script execution context".into())
             })?;
         let mut txn = ctx.txn.borrow_mut();
-        redis_call(
+        let res = redis_call(
             lua,
             storage.script_io(),
             &mut txn,
@@ -821,7 +845,11 @@ fn lua_redis_entry(
             args,
             throw_error,
             read_only,
-        )
+        );
+        if txn.has_writes() {
+            active.mark_dirty();
+        }
+        res
     })
     .map_err(|e| Error::Command(format!("ERR {e}")))
 }

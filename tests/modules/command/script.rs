@@ -1356,3 +1356,89 @@ async fn test_eval_ro_and_evalsha_ro() {
         .unwrap();
     assert_eq!(eval_resp, RespValue::BulkString(Some(b("hello"))));
 }
+
+#[tokio::test]
+async fn test_script_kill_notbusy_when_idle() {
+    let r = router();
+    let mut db = 0;
+    let err = r
+        .execute("SCRIPT", &[b("KILL")], &mut db)
+        .await
+        .unwrap_err();
+    assert_err_contains(err, "NOTBUSY");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_script_kill_interrupts_readonly_loop_and_recovers() {
+    let r = Arc::new(router());
+    let r_eval = Arc::clone(&r);
+    let eval_task = tokio::spawn(async move {
+        let mut db = 0;
+        r_eval
+            .execute("EVAL", &[b("while true do end"), b("0")], &mut db)
+            .await
+    });
+
+    // 等待脚本进入运行态并调用 SCRIPT KILL
+    let mut killed = false;
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let mut db = 0;
+        if let Ok(RespValue::SimpleString(s)) = r.execute("SCRIPT", &[b("KILL")], &mut db).await {
+            assert_eq!(s, "OK");
+            killed = true;
+            break;
+        }
+    }
+    assert!(
+        killed,
+        "expected SCRIPT KILL to succeed while readonly loop runs"
+    );
+
+    let eval_err = eval_task.await.unwrap().unwrap_err();
+    assert_err_contains(eval_err, "killed");
+
+    // 确认状态已复位, 后续脚本正常执行
+    let mut db = 0;
+    let next_resp = r
+        .execute("EVAL", &[b("return 42"), b("0")], &mut db)
+        .await
+        .unwrap();
+    assert_int(next_resp, 42);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_script_kill_returns_unkillable_after_write() {
+    let r = Arc::new(router());
+    let r_eval = Arc::clone(&r);
+    let eval_task = tokio::spawn(async move {
+        let mut db = 0;
+        r_eval
+            .execute(
+                "EVAL",
+                &[
+                    b("redis.call('SET', KEYS[1], 'v'); while true do end"),
+                    b("1"),
+                    b("k_unkillable"),
+                ],
+                &mut db,
+            )
+            .await
+    });
+
+    let mut saw_unkillable = false;
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let mut db = 0;
+        if let Err(err) = r.execute("SCRIPT", &[b("KILL")], &mut db).await {
+            let msg = err.to_string();
+            if msg.contains("UNKILLABLE") {
+                saw_unkillable = true;
+                break;
+            }
+        }
+    }
+    assert!(saw_unkillable, "expected UNKILLABLE after write command");
+    // 等待超时结束或 abort，避免后台任务泄漏
+    eval_task.abort();
+}

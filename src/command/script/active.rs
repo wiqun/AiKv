@@ -3,11 +3,13 @@
 //! 计数覆盖整个 `execute_script` (含等 key 锁与提交完成), 所以 "独占" 意味着没有别的脚本持有
 //! 或等待 key 锁, 也没有别的脚本的异步提交还没完成.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[derive(Default)]
 pub(super) struct ActiveScripts {
     running: AtomicUsize,
+    kill_requested: AtomicBool,
+    dirty: AtomicBool,
 }
 
 pub(super) struct ActiveGuard<'a> {
@@ -20,11 +22,34 @@ impl ActiveScripts {
         let before = self.running.fetch_add(1, Ordering::AcqRel);
         (ActiveGuard { owner: self }, before == 0)
     }
+
+    pub(super) fn running_count(&self) -> usize {
+        self.running.load(Ordering::Acquire)
+    }
+
+    pub(super) fn mark_dirty(&self) {
+        self.dirty.store(true, Ordering::Release);
+    }
+
+    pub(super) fn is_dirty(&self) -> bool {
+        self.dirty.load(Ordering::Acquire)
+    }
+
+    pub(super) fn request_kill(&self) {
+        self.kill_requested.store(true, Ordering::Release);
+    }
+
+    pub(super) fn is_kill_requested(&self) -> bool {
+        self.kill_requested.load(Ordering::Acquire)
+    }
 }
 
 impl Drop for ActiveGuard<'_> {
     fn drop(&mut self) {
-        self.owner.running.fetch_sub(1, Ordering::AcqRel);
+        if self.owner.running.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.owner.kill_requested.store(false, Ordering::Release);
+            self.owner.dirty.store(false, Ordering::Release);
+        }
     }
 }
 
