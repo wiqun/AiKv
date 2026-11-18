@@ -76,7 +76,7 @@ openraft = { version = "0.10.0", optional = true }
 openraft-rt-tokio = { version = "0.10.0", optional = true }
 
 # AiDb storage engine
-aidb = { git = "https://github.com/wiqun/AiDb.git", rev = "7eabc2569c603206fa583120ad020856039d6402" }
+aidb = { git = "https://github.com/wiqun/AiDb.git", rev = "44a94fd1b23a56c9bf5b080b1f86341ff6afd2d4" }
 
 # Monitoring (optional)
 # Metrics HTTP server (monitoring feature)

@@ -609,6 +609,9 @@ impl BatchWriteHandle for ImmediateWriteHandle {
 }
 
 /// 进程内各逻辑 DB 的 TTL 写入计数. 重启从 0 开始, 不扫库补存量.
+///
+/// 保持内存近似计数, 避免热路径同步持久化引入写放大以及冷启动阻塞全扫;
+/// 可在后台巡检或全库扫描顺带通过 `reconcile_ttl_count` 校准.
 #[derive(Debug, Default)]
 pub struct ExpiresCounters {
     counts: [AtomicU64; DB_COUNT],
@@ -656,6 +659,14 @@ impl ExpiresCounters {
     pub fn reset_db(&self, db: usize) {
         if db < DB_COUNT {
             self.counts[db].store(0, Ordering::Relaxed);
+        }
+    }
+
+    /// 由后台巡检或 `SCAN` 顺带校准逻辑 DB 的过期 key 近似计数.
+    #[inline]
+    pub fn reconcile_ttl_count(&self, db: usize, count: u64) {
+        if db < DB_COUNT {
+            self.counts[db].store(count, Ordering::Relaxed);
         }
     }
 

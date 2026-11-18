@@ -700,6 +700,8 @@ async fn async_main(
                 std::process::exit(1);
             }
         };
+    let ttl_compact_db = _cluster_db.clone();
+    let ttl_compact_obs = observation.clone();
     let tcp_port = settings.bind.port();
     let connection_config = ConnectionConfig {
         read_timeout: (settings.server_ext.read_timeout_ms > 0)
@@ -825,6 +827,12 @@ async fn async_main(
     }
 
     blocking::start_background_eviction();
+    spawn_ttl_compaction_task(
+        ttl_compact_db,
+        ttl_compact_obs,
+        settings.engine_ext.ttl_compaction_interval_secs,
+        settings.engine_ext.ttl_compaction_min_expired,
+    );
 
     if let Err(e) = Server::run(settings.bind, state).await {
         tracing::error!(error = %e, "server exited with error");
@@ -835,6 +843,45 @@ async fn async_main(
 
     #[cfg(feature = "monitoring")]
     aikv::server::otel::shutdown_otel();
+}
+
+fn spawn_ttl_compaction_task(
+    db: Option<Arc<aidb::DB>>,
+    observation: Arc<StorageObservation>,
+    interval_secs: u64,
+    min_expired: u64,
+) {
+    if interval_secs == 0 {
+        return;
+    }
+    let Some(db) = db else {
+        return;
+    };
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            if !observation.should_trigger_ttl_compaction(min_expired) {
+                continue;
+            }
+            #[cfg(feature = "cluster")]
+            if let Some(mgr) = aikv::cluster::state::CLUSTER_STATE_MGR.get() {
+                if let Err(e) = mgr.multi_raft.compact_all_groups().await {
+                    tracing::warn!(error = %e, "background ttl group compaction failed");
+                    continue;
+                }
+                observation.reset_compaction_expired();
+                continue;
+            }
+            let db_clone = Arc::clone(&db);
+            match tokio::task::spawn_blocking(move || db_clone.compact_range(None, None)).await {
+                Ok(Ok(())) => observation.reset_compaction_expired(),
+                Ok(Err(e)) => tracing::warn!(error = %e, "background ttl compact_range failed"),
+                Err(e) => tracing::warn!(error = %e, "background ttl compaction join failed"),
+            }
+        }
+    });
 }
 
 #[cfg(test)]

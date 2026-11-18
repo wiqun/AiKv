@@ -1,4 +1,4 @@
-# AiKv 注册表有、Redis 8.8.3 顶层命令没有的名字.
+# AiKv 注册表有, Redis 8.8.3 顶层命令没有的名字.
 ATOM.DISCARD
 ATOM.EXEC
 ATOM.MULTI
