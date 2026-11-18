@@ -781,6 +781,68 @@ impl StorageAdapter for ClusterDataAdapter {
         }
     }
 
+    async fn mget_bytes(&self, keys: &[Vec<u8>]) -> Result<Vec<Option<bytes::Bytes>>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut out: Vec<Option<bytes::Bytes>> = vec![None; keys.len()];
+        let mut grouped: std::collections::HashMap<
+            u64,
+            (Arc<ClusterStateManager>, Vec<(usize, Vec<u8>)>),
+        > = std::collections::HashMap::new();
+        let mut local_indices: Vec<(usize, Vec<u8>)> = Vec::new();
+
+        for (idx, key) in keys.iter().enumerate() {
+            match Self::route_read(key)? {
+                Some((mgr, ReadRoute::Single(gid))) => {
+                    grouped
+                        .entry(gid)
+                        .or_insert_with(|| (mgr, Vec::new()))
+                        .1
+                        .push((idx, key.clone()));
+                }
+                Some((
+                    mgr,
+                    ReadRoute::Merge {
+                        target_group,
+                        source_group,
+                        epoch,
+                    },
+                )) => {
+                    out[idx] = Self::merge_read(&mgr, target_group, source_group, epoch, key)
+                        .await?
+                        .map(bytes::Bytes::from);
+                }
+                None if Self::should_use_local_engine(key) => {
+                    local_indices.push((idx, key.clone()));
+                }
+                None => return Err(Self::data_group_not_ready_err()),
+            }
+        }
+
+        if !local_indices.is_empty() {
+            let local_keys: Vec<Vec<u8>> = local_indices.iter().map(|(_, k)| k.clone()).collect();
+            let vals = self.local.mget_bytes(&local_keys).await?;
+            for ((idx, _), v) in local_indices.into_iter().zip(vals) {
+                out[idx] = v;
+            }
+        }
+
+        for (gid, (mgr, entries)) in grouped {
+            let group_keys: Vec<Vec<u8>> = entries.iter().map(|(_, k)| k.clone()).collect();
+            let vals = mgr
+                .multi_raft
+                .multi_get_local(gid, &group_keys)
+                .await
+                .map_err(Self::map_err)?;
+            for ((idx, _), v) in entries.into_iter().zip(vals) {
+                out[idx] = v.map(bytes::Bytes::from);
+            }
+        }
+
+        Ok(out)
+    }
+
     async fn set(&self, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
         match Self::route_write(&key)? {
             Some((mgr, WriteRoute::Migration { gid, epoch, .. })) => {

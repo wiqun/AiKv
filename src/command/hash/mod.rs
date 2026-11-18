@@ -215,16 +215,16 @@ impl HashCommands {
                     ..
                 } => {
                     let encoded_user_key = AiDbEngine::encode_key(db, &args[0]);
-                    for field in &args[1..] {
-                        let subkey_key =
-                            subkey::encode_hash_field_key(&encoded_user_key, field.as_ref());
-                        let raw = self
-                            .storage
-                            .raw_subkey_get(db, subkey_key)
-                            .await
-                            .unwrap_or_default();
+                    let subkey_keys: Vec<Vec<u8>> = args[1..]
+                        .iter()
+                        .map(|field| {
+                            subkey::encode_hash_field_key(&encoded_user_key, field.as_ref())
+                        })
+                        .collect();
+                    let values = self.storage.raw_subkey_mget(db, subkey_keys).await?;
+                    for raw in values {
                         match raw {
-                            Some(v) => items.push(router::bulk(v)),
+                            Some(v) => items.push(router::bulk(v.to_vec())),
                             None => items.push(router::nil_bulk()),
                         }
                     }
