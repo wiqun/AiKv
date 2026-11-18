@@ -6,7 +6,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, Notify};
 
 use crate::protocol::RespValue;
 use crate::server::ServerMetrics;
@@ -25,9 +25,14 @@ pub enum BlockingCmd {
     Bzpopmax,
 }
 
+enum WaiterSignal {
+    Oneshot(oneshot::Sender<RespValue>),
+    Notify(Arc<Notify>),
+}
+
 /// 挂起的阻塞请求
 pub struct PendingRequest {
-    pub sender: oneshot::Sender<RespValue>,
+    signal: WaiterSignal,
     /// 过期时间 (被 evict_expired 读取)
     pub deadline: Instant,
 }
@@ -55,11 +60,20 @@ impl BlockingRegistry {
     pub fn register(&self, key: Vec<u8>, timeout: Duration) -> oneshot::Receiver<RespValue> {
         let (tx, rx) = oneshot::channel();
         let pending = PendingRequest {
-            sender: tx,
+            signal: WaiterSignal::Oneshot(tx),
             deadline: Instant::now() + timeout,
         };
         self.waiters.entry(key).or_default().push(pending);
         rx
+    }
+
+    /// 注册共享 `Notify` 事件唤醒 (用于 `BLPOP` / `BRPOP` 多 key 等待).
+    pub fn register_notify(&self, key: Vec<u8>, notify: Arc<Notify>, timeout: Duration) {
+        let pending = PendingRequest {
+            signal: WaiterSignal::Notify(notify),
+            deadline: Instant::now() + timeout,
+        };
+        self.waiters.entry(key).or_default().push(pending);
     }
 
     /// 通知等待某个 key 的所有阻塞请求
@@ -70,7 +84,14 @@ impl BlockingRegistry {
         };
         let pending = std::mem::take(&mut *entry);
         for req in pending {
-            let _ = req.sender.send(response.clone());
+            match req.signal {
+                WaiterSignal::Oneshot(tx) => {
+                    let _ = tx.send(response.clone());
+                }
+                WaiterSignal::Notify(n) => {
+                    n.notify_one();
+                }
+            }
         }
     }
 

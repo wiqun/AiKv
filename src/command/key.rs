@@ -287,6 +287,7 @@ impl KeyCommands {
         }
 
         // 大集合自动转 Subkey 格式存储
+        let is_nonempty_list = matches!(&stored.value, ValueType::List(l) if !l.is_empty());
         if self.storage.engine_kind() != StorageEngineKind::Memory {
             match stored.value {
                 ValueType::Hash(ref map) if map.len() > subkey::hash_max_inline_fields() => {
@@ -337,6 +338,8 @@ impl KeyCommands {
                         stored.expires_at,
                     );
                     self.storage.write_batch(db, ops).await?;
+                    crate::command::blocking::BlockingRegistry::global()
+                        .notify(key, RespValue::SimpleString("OK".into()));
                     return Ok(router::ok());
                 }
                 _ => {}
@@ -344,6 +347,10 @@ impl KeyCommands {
         }
 
         self.storage.set_typed(db, key, stored).await?;
+        if is_nonempty_list {
+            crate::command::blocking::BlockingRegistry::global()
+                .notify(key, RespValue::SimpleString("OK".into()));
+        }
         Ok(router::ok())
     }
 

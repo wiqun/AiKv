@@ -28,7 +28,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, Notify};
 
 use crate::command::blocking::{self, BlockedClientGuard, BlockingRegistry};
 use crate::command::router::{self, KeyLock};
@@ -545,6 +545,7 @@ impl ListCommands {
         let len = list.len() as i64;
         self.write_materialized_list(db, key, list, expires_at)
             .await?;
+        BlockingRegistry::global().notify(key, RespValue::SimpleString("OK".into()));
         Ok(router::integer(len))
     }
 
@@ -582,6 +583,7 @@ impl ListCommands {
         let dest_stored = self.load_or_create_list(db, destination).await?;
         self.push_into_stored(db, destination, dest_stored, &[elem_bytes], to_left)
             .await?;
+        BlockingRegistry::global().notify(destination, RespValue::SimpleString("OK".into()));
         Ok(router::bulk(element))
     }
 
@@ -853,40 +855,45 @@ impl ListCommands {
 
         let registry = BlockingRegistry::global();
         let deadline = Instant::now() + dur;
-        let mut receivers = match self
+        let mut notify = match self
             .prepare_blocking_pop(db, keys, left, dur, registry)
             .await?
         {
             Ok(response) => return Ok(response),
-            Err(receivers) => receivers,
+            Err(notify) => notify,
         };
         let _blocked = BlockedClientGuard::enter(&self.metrics);
 
         while infinite || Instant::now() < deadline {
-            let mut notified = false;
-            for rx in &mut receivers {
-                match rx.try_recv() {
-                    Ok(_) | Err(oneshot::error::TryRecvError::Closed) => {
-                        notified = true;
-                        break;
-                    }
-                    Err(oneshot::error::TryRecvError::Empty) => {}
-                }
+            let remaining = if infinite {
+                Duration::from_secs(60 * 60 * 24 * 365)
+            } else {
+                deadline.saturating_duration_since(Instant::now())
+            };
+            if remaining.is_zero() {
+                break;
             }
-            if notified {
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                if remaining.is_zero() {
-                    break;
-                }
-                match self
-                    .prepare_blocking_pop(db, keys, left, remaining, registry)
-                    .await?
-                {
-                    Ok(response) => return Ok(response),
-                    Err(next) => receivers = next,
-                }
+            if tokio::time::timeout(remaining, notify.notified())
+                .await
+                .is_err()
+            {
+                break;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            let next_remaining = if infinite {
+                Duration::from_secs(60 * 60 * 24 * 365)
+            } else {
+                deadline.saturating_duration_since(Instant::now())
+            };
+            if next_remaining.is_zero() {
+                break;
+            }
+            match self
+                .prepare_blocking_pop(db, keys, left, next_remaining, registry)
+                .await?
+            {
+                Ok(response) => return Ok(response),
+                Err(next_notify) => notify = next_notify,
+            }
         }
 
         Ok(blocking::nil_blocking_response())
@@ -899,20 +906,20 @@ impl ListCommands {
         left: bool,
         timeout: Duration,
         registry: &BlockingRegistry,
-    ) -> Result<std::result::Result<RespValue, Vec<oneshot::Receiver<RespValue>>>> {
+    ) -> Result<std::result::Result<RespValue, Arc<Notify>>> {
         let gate = Arc::clone(&self.transaction_gate);
         let _guard = gate.read_owned().await;
         if let Some(response) = self.try_pop_any(db, keys, left).await? {
             return Ok(Ok(response));
         }
-        let receivers = keys
-            .iter()
-            .map(|key| registry.register(key.to_vec(), timeout))
-            .collect();
+        let notify = Arc::new(Notify::new());
+        for key in keys {
+            registry.register_notify(key.to_vec(), Arc::clone(&notify), timeout);
+        }
         if let Some(response) = self.try_pop_any(db, keys, left).await? {
             return Ok(Ok(response));
         }
-        Ok(Err(receivers))
+        Ok(Err(notify))
     }
 
     /// BLMOVE with blocking when source is empty
@@ -1444,5 +1451,133 @@ mod tests {
         );
         // 弹空后 header 必须被删除
         assert!(storage.get_typed(0, &key).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn blpop_wakes_immediately_on_lmove_and_linsert() {
+        let commands = Arc::new(ListCommands::new(
+            MemoryEngine::new(1),
+            Arc::new(KeyLock::new(4096)),
+            Arc::new(tokio::sync::RwLock::new(())),
+        ));
+
+        // 1. LMOVE 唤醒目标 key 上的 BLPOP
+        let src = Bytes::from_static(b"blpop_lmove_src");
+        let dst = Bytes::from_static(b"blpop_lmove_dst");
+        commands
+            .rpush(0, &[src.clone(), Bytes::from_static(b"v1")])
+            .await
+            .unwrap();
+
+        let cmd1 = Arc::clone(&commands);
+        let dst1 = dst.clone();
+        let handle =
+            tokio::spawn(async move { cmd1.blpop(0, &[dst1, Bytes::from_static(b"0.3")]).await });
+        wait_for_waiter(&dst).await;
+
+        let t0 = Instant::now();
+        commands
+            .lmove(
+                0,
+                &[
+                    src,
+                    dst.clone(),
+                    Bytes::from_static(b"LEFT"),
+                    Bytes::from_static(b"RIGHT"),
+                ],
+            )
+            .await
+            .unwrap();
+        let res = handle.await.unwrap().unwrap();
+        assert_eq!(res, array_of_bulk(vec![dst.to_vec(), b"v1".to_vec()]));
+        assert!(
+            t0.elapsed() < Duration::from_millis(50),
+            "LMOVE should wake BLPOP immediately"
+        );
+
+        // 2. LINSERT 唤醒等待者
+        let ins_key = Bytes::from_static(b"blpop_linsert_k");
+        commands
+            .rpush(0, &[ins_key.clone(), Bytes::from_static(b"pivot")])
+            .await
+            .unwrap();
+        // 先弹空后再测试? LINSERT 需要有 pivot，这里测试并发时: 插入元素后立刻通知
+        let _ = commands.lpop(0, std::slice::from_ref(&ins_key)).await;
+        // 通过两个并发: 先让一个 BLPOP 等在 k 上, 不好与 LINSERT 并发(LINSERT 需非空);
+        // 改为: 预先注册 waiter 在 ins_key 上验证 linsert 触发了 notify
+        let notify_rx =
+            BlockingRegistry::global().register(ins_key.to_vec(), Duration::from_secs(1));
+        commands
+            .rpush(0, &[ins_key.clone(), Bytes::from_static(b"pivot")])
+            .await
+            .unwrap();
+        // 清掉 rpush 的 notify, 重新注册验证 linsert 自身也会 notify
+        drop(notify_rx);
+        let rx_after =
+            BlockingRegistry::global().register(ins_key.to_vec(), Duration::from_secs(1));
+        commands
+            .linsert(
+                0,
+                &[
+                    ins_key,
+                    Bytes::from_static(b"BEFORE"),
+                    Bytes::from_static(b"pivot"),
+                    Bytes::from_static(b"new_el"),
+                ],
+            )
+            .await
+            .unwrap();
+        let woke = tokio::time::timeout(Duration::from_millis(50), rx_after).await;
+        assert!(woke.is_ok(), "LINSERT must notify BlockingRegistry waiters");
+    }
+
+    #[tokio::test]
+    async fn blpop_multi_waiter_spurious_wakeup_continues_waiting() {
+        let commands = Arc::new(ListCommands::new(
+            MemoryEngine::new(1),
+            Arc::new(KeyLock::new(4096)),
+            Arc::new(tokio::sync::RwLock::new(())),
+        ));
+        let key = Bytes::from_static(b"blpop_multi_waiter");
+
+        let c1 = Arc::clone(&commands);
+        let k1 = key.clone();
+        let h1 = tokio::spawn(async move { c1.blpop(0, &[k1, Bytes::from_static(b"1")]).await });
+
+        let c2 = Arc::clone(&commands);
+        let k2 = key.clone();
+        let h2 = tokio::spawn(async move { c2.blpop(0, &[k2, Bytes::from_static(b"1")]).await });
+
+        wait_for_waiter(&key).await;
+        // 第一次仅 push 1 个元素
+        commands
+            .rpush(0, &[key.clone(), Bytes::from_static(b"first")])
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(
+            h1.is_finished() ^ h2.is_finished(),
+            "only one waiter should pop the single element"
+        );
+
+        // 第二次 push 第 2 个元素, 另一个继续等待的 waiter 必须也能正常收到
+        commands
+            .rpush(0, &[key.clone(), Bytes::from_static(b"second")])
+            .await
+            .unwrap();
+
+        let r1 = tokio::time::timeout(Duration::from_millis(200), h1)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let r2 = tokio::time::timeout(Duration::from_millis(200), h2)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(r1 != blocking::nil_blocking_response());
+        assert!(r2 != blocking::nil_blocking_response());
     }
 }

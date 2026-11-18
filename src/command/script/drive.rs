@@ -139,18 +139,45 @@ fn failed_drive(lua: mlua::Lua, err: Error, t_entered: Instant) -> ScriptDrive {
     }
 }
 
+fn collect_written_list_keys(batch_ops: &[(Vec<u8>, WriteOp)]) -> Vec<Vec<u8>> {
+    use crate::storage::{CollectionKind, ValueType};
+    let mut keys = Vec::new();
+    for (k, op) in batch_ops {
+        if let WriteOp::PutStored(stored) = op {
+            let is_nonempty_list = match &stored.value {
+                ValueType::List(l) => !l.is_empty(),
+                ValueType::CollectionHeader {
+                    kind: CollectionKind::List,
+                    count,
+                    ..
+                } => *count > 0,
+                _ => false,
+            };
+            if is_nonempty_list {
+                keys.push(k.clone());
+            }
+        }
+    }
+    keys
+}
+
 fn commit_local_batch(job: &ScriptJob, batch_ops: Vec<(Vec<u8>, WriteOp)>) -> Result<()> {
     if batch_ops.is_empty() {
         SEG_TRACKER.on_enqueued(job.slot_idx);
         SEG_TRACKER.on_committed(job.seg_id, job.slot_idx);
         return Ok(());
     }
+    let notify_keys = collect_written_list_keys(&batch_ops);
     let (seq, encoded) = job.in_flight.insert_batch(job.db, &batch_ops);
     if let Err(err) = job.storage.script_io().write_batch(job.db, batch_ops) {
         rollback_inserted(&job.in_flight, Some((seq, encoded)));
         return Err(err);
     }
     job.in_flight.remove_encoded(&encoded, seq);
+    for k in notify_keys {
+        crate::command::blocking::BlockingRegistry::global()
+            .notify(&k, crate::protocol::RespValue::SimpleString("OK".into()));
+    }
     SEG_TRACKER.on_enqueued(job.slot_idx);
     SEG_TRACKER.on_committed(job.seg_id, job.slot_idx);
     Ok(())
