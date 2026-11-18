@@ -109,6 +109,8 @@ pub struct Connection {
     current_db: usize,
     synced_client_db: usize,
     quit: bool,
+    authenticated: bool,
+    soft_limit_since: Option<Instant>,
     mode: ConnectionMode,
     monitor_rx: Option<broadcast::Receiver<String>>,
     #[cfg(feature = "cluster")]
@@ -128,6 +130,7 @@ impl Connection {
     ) -> Self {
         let client_id = state.alloc_client_id();
         state.register_client(client_id, remote);
+        let authenticated = !state.requires_auth();
         Self {
             stream,
             remote,
@@ -148,6 +151,8 @@ impl Connection {
             current_db: 0,
             synced_client_db: 0,
             quit: false,
+            authenticated,
+            soft_limit_since: None,
             mode: ConnectionMode::Normal,
             monitor_rx: None,
             #[cfg(feature = "cluster")]
@@ -160,6 +165,7 @@ impl Connection {
     pub async fn handle(stream: TcpStream, remote: SocketAddr, state: Arc<ServerSharedState>) {
         let client_id = state.alloc_client_id();
         state.register_client(client_id, remote);
+        let authenticated = !state.requires_auth();
         let mut conn = Self {
             stream,
             remote,
@@ -180,6 +186,8 @@ impl Connection {
             current_db: 0,
             synced_client_db: 0,
             quit: false,
+            authenticated,
+            soft_limit_since: None,
             mode: ConnectionMode::Normal,
             monitor_rx: None,
             #[cfg(feature = "cluster")]
@@ -308,16 +316,22 @@ impl Connection {
 
             loop {
                 match self.process_next_batch(&mut buf).await {
-                    Ok(true) => continue,
-                    Ok(false) => break,
+                    Ok(true) if !self.quit => continue,
+                    Ok(_) => break,
                     Err(e) if is_fatal_protocol(&e) => {
                         let _ = self.flush_responses().await;
                         return Err(e);
                     }
                     Err(e) => {
                         self.write_error(&e).await?;
+                        if self.quit {
+                            break;
+                        }
                     }
                 }
+            }
+            if self.quit {
+                break;
             }
             self.flush_responses().await?;
         }
@@ -478,8 +492,24 @@ impl Connection {
     }
 
     async fn process_command(&mut self, cmd: &str, args: &[Bytes]) -> Result<()> {
+        let Some(resolved) = self.state.resolve_command(cmd) else {
+            return self
+                .write_response(RespValue::Error(format!("ERR unknown command '{cmd}'")))
+                .await;
+        };
+        let cmd = resolved.as_ref();
+
         if cmd != "MONITOR" && self.mode != ConnectionMode::Monitor {
             self.broadcast_monitor(cmd, args);
+        }
+
+        if self.state.requires_auth()
+            && !self.authenticated
+            && !matches!(cmd, "AUTH" | "QUIT" | "HELLO")
+        {
+            return self
+                .write_response(RespValue::Error("NOAUTH Authentication required.".into()))
+                .await;
         }
 
         match cmd {
@@ -488,7 +518,7 @@ impl Connection {
             "DISCARD" | "ATOM.DISCARD" => self.cmd_atom_discard().await,
             "WATCH" | "ATOM.WATCH" => self.cmd_atom_watch(args).await,
             "UNWATCH" | "ATOM.UNWATCH" => self.cmd_atom_unwatch().await,
-            "PING" | "ECHO" | "HELLO" | "QUIT" | "MONITOR" => {
+            "AUTH" | "PING" | "ECHO" | "HELLO" | "QUIT" | "MONITOR" => {
                 let gate = Arc::clone(&self.state.transaction_gate);
                 let _guard = gate.read_owned().await;
                 self.process_inline_command(cmd, args).await
@@ -512,12 +542,38 @@ impl Connection {
 
     async fn process_inline_command(&mut self, cmd: &str, args: &[Bytes]) -> Result<()> {
         match cmd {
+            "AUTH" => self.cmd_auth(args).await,
             "PING" => self.cmd_ping(args).await,
             "ECHO" => self.cmd_echo(args).await,
             "HELLO" => self.cmd_hello(args).await,
             "QUIT" => self.cmd_quit().await,
             "MONITOR" => self.cmd_monitor().await,
             _ => unreachable!("non-inline command"),
+        }
+    }
+
+    async fn cmd_auth(&mut self, args: &[Bytes]) -> Result<()> {
+        let (username, password) = match args {
+            [pass] => (None, String::from_utf8_lossy(pass)),
+            [user, pass] => (
+                Some(String::from_utf8_lossy(user)),
+                String::from_utf8_lossy(pass),
+            ),
+            _ => {
+                return self
+                    .write_response(RespValue::Error(
+                        "ERR wrong number of arguments for 'auth' command".into(),
+                    ))
+                    .await;
+            }
+        };
+        match self.state.verify_auth(username.as_deref(), &password) {
+            Ok(()) => {
+                self.authenticated = true;
+                self.write_response(RespValue::SimpleString("OK".into()))
+                    .await
+            }
+            Err(msg) => self.write_response(RespValue::Error(msg.into())).await,
         }
     }
 
@@ -669,25 +725,19 @@ impl Connection {
     }
 
     async fn cmd_hello(&mut self, args: &[Bytes]) -> Result<()> {
-        if args.len() > 1 {
-            return self
-                .write_response(RespValue::Error(
-                    "ERR wrong number of arguments for 'hello' command".into(),
-                ))
-                .await;
-        }
-
-        if args.len() == 1 {
-            let ver = String::from_utf8_lossy(&args[0]);
+        let mut idx = 0usize;
+        let mut next_proto = None;
+        if let Some(first) = args.first() {
+            let ver = String::from_utf8_lossy(first);
             match ver.as_ref() {
-                "2" => self.protocol_version = ProtocolVersion::Resp2,
+                "2" => next_proto = Some(ProtocolVersion::Resp2),
                 "3" => {
                     if !self.state.connection_config.resp3_enabled {
                         return self
                             .write_response(RespValue::Error("ERR RESP3 is disabled".into()))
                             .await;
                     }
-                    self.protocol_version = ProtocolVersion::Resp3;
+                    next_proto = Some(ProtocolVersion::Resp3);
                 }
                 _ => {
                     return self
@@ -695,6 +745,44 @@ impl Connection {
                         .await;
                 }
             }
+            idx = 1;
+        }
+
+        let mut did_auth = false;
+        while idx < args.len() {
+            let opt = String::from_utf8_lossy(&args[idx]).to_ascii_uppercase();
+            match opt.as_str() {
+                "AUTH" if idx + 2 < args.len() => {
+                    let user = String::from_utf8_lossy(&args[idx + 1]);
+                    let pass = String::from_utf8_lossy(&args[idx + 2]);
+                    if let Err(msg) = self.state.verify_auth(Some(&user), &pass) {
+                        return self.write_response(RespValue::Error(msg.into())).await;
+                    }
+                    self.authenticated = true;
+                    did_auth = true;
+                    idx += 3;
+                }
+                "SETNAME" if idx + 1 < args.len() => {
+                    let name = String::from_utf8_lossy(&args[idx + 1]).into_owned();
+                    self.state.set_client_name(self.client_id, Some(name));
+                    idx += 2;
+                }
+                _ => {
+                    return self
+                        .write_response(RespValue::Error("ERR Syntax error in HELLO option".into()))
+                        .await;
+                }
+            }
+        }
+
+        if self.state.requires_auth() && !self.authenticated && !did_auth {
+            return self
+                .write_response(RespValue::Error("NOAUTH Authentication required.".into()))
+                .await;
+        }
+
+        if let Some(proto) = next_proto {
+            self.protocol_version = proto;
             self.protocol_negotiated = true;
         }
 

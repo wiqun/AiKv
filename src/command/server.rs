@@ -106,6 +106,11 @@ impl ServerCommands {
                 .idle_timeout_ms
                 .load(std::sync::atomic::Ordering::Relaxed)
                 .to_string(),
+            "requirepass" | "server.requirepass" => self.shared.requirepass_value(),
+            "client-output-buffer-limit" => {
+                let (h, s, t) = self.shared.normal_output_buffer_limit();
+                format!("normal {h} {s} {t}")
+            }
             other => self
                 .shared
                 .config_map
@@ -189,6 +194,34 @@ impl ServerCommands {
                 map.insert("loglevel".into(), value.clone());
                 map.insert("observability.log_level".into(), value);
             }
+            "requirepass" | "server.requirepass" => {
+                self.shared.set_requirepass(&value);
+                map.insert("requirepass".into(), value.clone());
+                map.insert("server.requirepass".into(), value);
+            }
+            "client-output-buffer-limit" => {
+                let parts: Vec<&str> = value.split_whitespace().collect();
+                if parts.len() != 4 || !parts[0].eq_ignore_ascii_case("normal") {
+                    return Err(Error::Config(
+                        "Invalid client-output-buffer-limit (expected: normal <hard> <soft> <secs>)"
+                            .into(),
+                    ));
+                }
+                let hard: u64 = parts[1]
+                    .parse()
+                    .map_err(|_| Error::Config("Invalid hard limit".into()))?;
+                let soft: u64 = parts[2]
+                    .parse()
+                    .map_err(|_| Error::Config("Invalid soft limit".into()))?;
+                let secs: u64 = parts[3]
+                    .parse()
+                    .map_err(|_| Error::Config("Invalid soft seconds".into()))?;
+                self.shared.set_normal_output_buffer_limit(hard, soft, secs);
+                map.insert(
+                    "client-output-buffer-limit".into(),
+                    format!("normal {hard} {soft} {secs}"),
+                );
+            }
             _ => {
                 return Err(Error::Command(format!(
                     "ERR CONFIG SET is not supported for read-only parameter '{param}' (restart required)"
@@ -250,13 +283,22 @@ impl ServerCommands {
         if args.is_empty() {
             let items: Vec<RespValue> = registry::all_commands()
                 .iter()
-                .map(command_info_to_resp)
+                .filter_map(|info| {
+                    let display = self
+                        .shared
+                        .display_command_name(&info.name.to_ascii_uppercase())?;
+                    Some(command_info_to_resp_with_name(info, &display))
+                })
                 .collect();
             return Ok(RespValue::Array(Some(items)));
         }
         let sub = String::from_utf8_lossy(&args[0]).to_ascii_uppercase();
         match sub.as_str() {
-            "COUNT" => Ok(router::integer(registry::command_count() as i64)),
+            "COUNT" => {
+                let total =
+                    registry::command_count().saturating_sub(self.shared.disabled_command_count());
+                Ok(router::integer(total as i64))
+            }
             "INFO" => {
                 if args.len() == 1 {
                     return Ok(RespValue::Array(Some(vec![])));
@@ -264,9 +306,18 @@ impl ServerCommands {
                 let items: Vec<RespValue> = args[1..]
                     .iter()
                     .map(|b| {
-                        let name = String::from_utf8_lossy(b);
-                        match registry::lookup(name.as_ref()) {
-                            Some(info) => command_info_to_resp(&info),
+                        let raw = String::from_utf8_lossy(b).to_ascii_uppercase();
+                        let Some(canonical) = self.shared.resolve_command(&raw) else {
+                            return RespValue::Null;
+                        };
+                        match registry::lookup(canonical.as_ref()) {
+                            Some(info) => {
+                                let display = self
+                                    .shared
+                                    .display_command_name(&info.name.to_ascii_uppercase())
+                                    .unwrap_or_else(|| info.name.to_string());
+                                command_info_to_resp_with_name(&info, &display)
+                            }
                             None => RespValue::Null,
                         }
                     })
@@ -447,14 +498,14 @@ fn slowlog_entry_to_resp(entry: &SlowQueryEntry) -> RespValue {
     ]))
 }
 
-fn command_info_to_resp(info: &registry::CommandInfo) -> RespValue {
+fn command_info_to_resp_with_name(info: &registry::CommandInfo, name: &str) -> RespValue {
     let flags: Vec<RespValue> = info
         .flags
         .iter()
         .map(|f| router::bulk(f.as_bytes().to_vec()))
         .collect();
     RespValue::Array(Some(vec![
-        router::bulk(info.name.as_bytes().to_vec()),
+        router::bulk(name.as_bytes().to_vec()),
         router::integer(info.arity),
         RespValue::Array(Some(flags)),
         router::integer(info.first_key),

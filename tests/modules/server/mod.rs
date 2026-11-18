@@ -6,5 +6,6 @@ mod listen;
 mod observability;
 #[cfg(feature = "cluster")]
 mod pipeline_cluster_test;
+mod security_qos;
 mod storage_info_test;
 mod tcp;

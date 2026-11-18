@@ -394,7 +394,11 @@ impl<'a> InfoRenderer<'a> {
         append_kv_u64(&mut out, "io_threaded_total_prefetch_batches", 0);
         append_kv_u64(&mut out, "io_threaded_total_prefetch_entries", 0);
         append_kv_u64(&mut out, "client_query_buffer_limit_disconnections", 0);
-        append_kv_u64(&mut out, "client_output_buffer_limit_disconnections", 0);
+        append_kv_u64(
+            &mut out,
+            "client_output_buffer_limit_disconnections",
+            m.output_buffer_limit_disconnections(),
+        );
         append_kv_u64(&mut out, "reply_buffer_shrinks", 0);
         append_kv_u64(&mut out, "reply_buffer_expands", 0);
         append_kv_u64(&mut out, "eventloop_cycles", 0);

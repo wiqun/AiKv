@@ -621,4 +621,20 @@ local_batch_max_ops = 256
         assert_eq!(resolved.engine_ext.zset_max_inline_members, 96);
         assert_eq!(resolved.engine_ext.local_batch_max_ops, 256);
     }
+
+    #[test]
+    fn max_blocking_threads_defaults_to_512_and_rejects_zero() {
+        let (resolved, _) = resolve_parts(None, HashMap::new(), CliOverrides::default()).unwrap();
+        assert_eq!(resolved.server_ext.max_blocking_threads, 512);
+
+        let toml = "[server]\nmax_blocking_threads = 64\n";
+        let (resolved, _) =
+            resolve_parts(Some(toml), HashMap::new(), CliOverrides::default()).unwrap();
+        assert_eq!(resolved.server_ext.max_blocking_threads, 64);
+
+        let err_toml = "[server]\nmax_blocking_threads = 0\n";
+        let err =
+            resolve_parts(Some(err_toml), HashMap::new(), CliOverrides::default()).unwrap_err();
+        assert!(err.to_string().contains("max_blocking_threads"));
+    }
 }

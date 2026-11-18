@@ -38,6 +38,38 @@ impl Connection {
         } else {
             value.encode_into(&mut self.write_buf);
         }
+        self.check_output_buffer_limit();
+    }
+
+    fn check_output_buffer_limit(&mut self) {
+        let len = self.write_buf.len() as u64;
+        let (hard, soft, soft_secs) = self.state.normal_output_buffer_limit();
+        let hit_hard = hard > 0 && len >= hard;
+        let hit_soft = if soft > 0 && len >= soft {
+            let since = self
+                .soft_limit_since
+                .get_or_insert_with(std::time::Instant::now);
+            since.elapsed().as_secs() >= soft_secs
+        } else {
+            self.soft_limit_since = None;
+            false
+        };
+        if hit_hard || hit_soft {
+            tracing::warn!(
+                client_id = self.client_id,
+                remote = %self.remote,
+                buf_bytes = len,
+                hard_limit = hard,
+                soft_limit = soft,
+                "closing connection due to client-output-buffer-limit"
+            );
+            self.state.metrics.on_output_buffer_limit_disconnection();
+            self.state
+                .metrics
+                .note_connection_close("output_buffer_limit");
+            self.write_buf.clear();
+            self.quit = true;
+        }
     }
 
     pub(super) async fn write_response(&mut self, value: RespValue) -> Result<()> {
@@ -47,12 +79,14 @@ impl Connection {
 
     pub(super) async fn flush_responses(&mut self) -> Result<()> {
         if self.write_buf.is_empty() {
+            self.soft_limit_since = None;
             return Ok(());
         }
         let len = self.write_buf.len();
         self.stream.write_all(&self.write_buf).await?;
         self.state.metrics().on_net_output_bytes(len as u64);
         self.write_buf.clear();
+        self.soft_limit_since = None;
         if self.write_buf.capacity() > MAX_WRITE_BUF_RETAIN_CAPACITY {
             self.write_buf = bytes::BytesMut::with_capacity(DEFAULT_WRITE_BUF_CAPACITY);
         }

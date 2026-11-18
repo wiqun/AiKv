@@ -48,6 +48,7 @@ pub(super) struct ScriptJob {
     pub(super) seg_id: usize,
     pub(super) slot_idx: usize,
     pub(super) read_only: bool,
+    pub(super) active: Arc<super::active::ActiveScripts>,
 }
 
 impl ScriptJob {
@@ -107,7 +108,14 @@ fn prepare_script(lua: &mlua::Lua, job: &ScriptJob) -> Result<PreparedScript> {
         argv: &job.argv,
         read_only: job.read_only,
     };
-    let (value, txn) = ScriptCommands::eval_lua_func(lua, job.timeout, &args, txn, declared)?;
+    let (value, txn) = ScriptCommands::eval_lua_func(
+        lua,
+        job.timeout,
+        &args,
+        txn,
+        declared,
+        Arc::clone(&job.active),
+    )?;
     let t_lua_done = Instant::now();
     let batch_ops = txn.prepare_batch_ops_owned(job.storage.script_io())?;
     Ok((value, t_lua_done, Instant::now(), batch_ops))

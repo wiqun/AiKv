@@ -26,9 +26,13 @@ impl Connection {
 
         let mut parsed = Vec::with_capacity(batch.len());
         for frame in &batch {
-            let Some((cmd, args)) = parse_command_parts(frame) else {
+            let Some((raw_cmd, args)) = parse_command_parts(frame) else {
                 return self.process_sequential_batch(batch).await;
             };
+            let Some(resolved) = self.state.resolve_command(&raw_cmd) else {
+                return self.process_sequential_batch(batch).await;
+            };
+            let cmd = resolved.into_owned();
             if !is_safe_concurrent_command(&cmd) {
                 return self.process_sequential_batch(batch).await;
             }
@@ -94,6 +98,12 @@ impl Connection {
         let mut kinds: Vec<DeferKind> = Vec::new();
 
         for (cmd, args) in commands {
+            if self.state.requires_auth() && !self.authenticated {
+                self.flush_pending(&mut pending).await?;
+                kinds.clear();
+                self.queue_response(&RespValue::Error("NOAUTH Authentication required.".into()));
+                continue;
+            }
             let track = super::should_track_observability(&cmd);
             let started = track.then(Instant::now);
 
@@ -117,6 +127,9 @@ impl Connection {
             if needs_barrier(&kinds, kind) || key_conflict {
                 self.flush_pending(&mut pending).await?;
                 kinds.clear();
+                if self.quit {
+                    break;
+                }
             }
 
             let mut db = self.current_db;
@@ -295,7 +308,7 @@ fn is_safe_concurrent_command(cmd: &str) -> bool {
     match cmd {
         "MULTI" | "ATOM.MULTI" | "EXEC" | "ATOM.EXEC" | "DISCARD" | "ATOM.DISCARD" | "WATCH"
         | "ATOM.WATCH" | "UNWATCH" | "ATOM.UNWATCH" => false,
-        "PING" | "ECHO" | "HELLO" | "QUIT" | "MONITOR" | "SHUTDOWN" => false,
+        "AUTH" | "PING" | "ECHO" | "HELLO" | "QUIT" | "MONITOR" | "SHUTDOWN" => false,
         "SELECT" | "ASKING" | "READONLY" | "READWRITE" => false,
         _ => !crate::command::lookup(cmd)
             .map(|info| info.flags.contains(&"blocking"))
