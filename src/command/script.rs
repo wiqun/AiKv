@@ -33,7 +33,6 @@ use mlua::{HookTriggers, MultiValue, Value as LuaValue, VmState};
 use sha1::{Digest, Sha1};
 
 use self::cache::ScriptCache;
-use self::convert::lua_to_resp;
 use self::execute::{redis_call, DeclaredKeys, SCRIPT_COMMANDS};
 
 pub fn script_commands() -> &'static [&'static str] {
@@ -648,7 +647,7 @@ impl ScriptCommands {
                 unlocked.duration_since(t_locked).as_micros() as u64,
             );
         }
-        lua_to_resp(body.value)
+        Ok(body.resp)
     }
 
     async fn drive_script(
@@ -1087,4 +1086,38 @@ fn install_redis_api(lua: &mlua::Lua, storage: Arc<dyn KvStorage>) -> Result<()>
         .set("redis", redis)
         .map_err(|e| Error::Command(format!("ERR {e}")))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::memory::MemoryEngine;
+
+    #[tokio::test]
+    async fn eval_returning_lua_table_or_string_when_vm_dropped_must_not_panic() {
+        let storage: Arc<dyn KvStorage> = MemoryEngine::new(16);
+        let key_lock = Arc::new(KeyLock::new(16));
+        let in_flight_ctx = Arc::new(crate::command::shared::InFlightContext::default());
+        let mut cmds = ScriptCommands::with_worker_threads(storage, key_lock, in_flight_ctx, 1);
+        // Force release_vm to drop the Lua VM immediately (simulating pool overflow under load)
+        cmds.max_idle_vms = 0;
+
+        let res = cmds
+            .eval(
+                0,
+                &[
+                    Bytes::from_static(b"return {'hello', redis.call('PING')}"),
+                    Bytes::from_static(b"0"),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            res,
+            RespValue::Array(Some(vec![
+                router::bulk(b"hello".to_vec()),
+                router::bulk(b"PONG".to_vec()),
+            ]))
+        );
+    }
 }

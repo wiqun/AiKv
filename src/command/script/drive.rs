@@ -4,24 +4,25 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use mlua::Value as LuaValue;
 
+use super::convert::lua_to_resp;
 use super::execute::DeclaredKeys;
 use super::in_flight::InFlightBuffer;
 use super::transaction::ScriptTransaction;
 use super::{ScriptArgs, ScriptCommands, SEG_TRACKER};
 use crate::error::{Error, Result};
+use crate::protocol::RespValue;
 use crate::storage::{KvStorage, WriteOp};
 
 pub(super) struct ScriptBody {
-    pub(super) value: LuaValue,
+    pub(super) resp: RespValue,
     pub(super) pending: Option<Vec<(Vec<u8>, WriteOp)>>,
     pub(super) t_lua_done: Instant,
     pub(super) t_prep_done: Instant,
     pub(super) t_local_done: Instant,
 }
 
-type PreparedScript = (LuaValue, Instant, Instant, Vec<(Vec<u8>, WriteOp)>);
+type PreparedScript = (RespValue, Instant, Instant, Vec<(Vec<u8>, WriteOp)>);
 
 pub(super) struct ScriptDrive {
     pub(super) lua: mlua::Lua,
@@ -63,7 +64,7 @@ fn drive_script_body(job: ScriptJob) -> ScriptDrive {
     super::call_stats::begin_script_call_sample();
     super::phase_stats::begin_eval_span();
     let prepared = prepare_script(&job.lua, &job);
-    let (value, t_lua_done, t_prep_done, batch_ops) = match prepared {
+    let (resp, t_lua_done, t_prep_done, batch_ops) = match prepared {
         Ok(parts) => parts,
         Err(err) => return failed_drive(job.lua, err, t_entered),
     };
@@ -83,7 +84,7 @@ fn drive_script_body(job: ScriptJob) -> ScriptDrive {
     ScriptDrive {
         lua: job.lua,
         result: Ok(ScriptBody {
-            value,
+            resp,
             pending,
             t_lua_done,
             t_prep_done,
@@ -116,9 +117,10 @@ fn prepare_script(lua: &mlua::Lua, job: &ScriptJob) -> Result<PreparedScript> {
         declared,
         Arc::clone(&job.active),
     )?;
+    let resp = lua_to_resp(value)?;
     let t_lua_done = Instant::now();
     let batch_ops = txn.prepare_batch_ops_owned(job.storage.script_io())?;
-    Ok((value, t_lua_done, Instant::now(), batch_ops))
+    Ok((resp, t_lua_done, Instant::now(), batch_ops))
 }
 
 fn failed_drive(lua: mlua::Lua, err: Error, t_entered: Instant) -> ScriptDrive {
