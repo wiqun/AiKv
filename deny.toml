@@ -1,5 +1,10 @@
 [advisories]
-ignore = []
+ignore = [
+  # openraft 0.10.0 -> display-more 0.2.6 间接依赖 (chrono-tz / chrono-tz-build 等), 上游暂无安全升级版本
+  "RUSTSEC-2026-0543",
+  "RUSTSEC-2026-0555",
+  "RUSTSEC-2026-0559",
+]
 
 [licenses]
 allow = [
