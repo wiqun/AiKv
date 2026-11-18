@@ -69,6 +69,7 @@ async fn route_decision_all_branches() {
         snapshot_size_threshold: None,
         linearizable_read: false,
         log_committer_config: None,
+        ..Default::default()
     };
     let db = aidb::DB::open(
         std::env::temp_dir().join("raft_test"),

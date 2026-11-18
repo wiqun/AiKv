@@ -187,80 +187,94 @@ pub async fn cluster_failover(mode: &str) -> Result<String, String> {
             "ERR TAKEOVER is not supported in Raft cluster mode (Raft requires majority consensus; use FORCE instead)".to_string(),
         ),
         "FORCE" => {
-            // Read role into local before any .await (parking_lot lock held across await is risky).
-            let is_primary = matches!(
-                *mgr.role.read(),
-                crate::cluster::state::ReplicationRole::Primary
-            );
-            if is_primary {
-                return Err("ERR You should be a replica".to_string());
-            }
-            let meta = mgr.meta_raft.get_cluster_meta();
-            let mut target_gids = Vec::new();
-            for (gid, group) in &meta.groups {
-                if group.replicas.iter().any(|r| r.node_id == mgr.node_id) {
-                    target_gids.push(*gid);
-                }
-            }
-            if target_gids.is_empty() {
-                return Err("ERR Node not found in any group".to_string());
-            }
-
-            // 触发每个目标 group 强行发起选举 (pre_vote = false)
+            let target_gids = collect_replica_group_ids(mgr)?;
             for &gid in &target_gids {
                 mgr.multi_raft
                     .elect_group_leader(gid, false)
                     .await
                     .map_err(|e| format!("ERR {e}"))?;
             }
-
-            // 等待本节点确认真正当选为 Leader (超时 3s)
-            const ELECT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(3000);
-            const ELECT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
-            let start = tokio::time::Instant::now();
-            let mut all_elected = false;
-            while start.elapsed() < ELECT_TIMEOUT {
-                let mut current_all = true;
-                for &gid in &target_gids {
-                    match mgr.multi_raft.is_group_leader(gid).await {
-                        Ok(true) => {}
-                        _ => {
-                            current_all = false;
-                            break;
-                        }
-                    }
-                }
-                if current_all {
-                    all_elected = true;
-                    break;
-                }
-                tokio::time::sleep(ELECT_POLL_INTERVAL).await;
-            }
-
-            if !all_elected {
-                return Err("ERR Failover election timed out, remaining as replica".to_string());
-            }
-
-            // 确认当选后切换本地角色与缓存 (保留原共识组成员列表, 严禁单节点改写)
-            *mgr.role.write() = crate::cluster::state::ReplicationRole::Primary;
-            {
-                let mut leaders = mgr.local_group_leaders.write();
-                for &gid in &target_gids {
-                    leaders.insert(gid, true);
-                }
-            }
-            crate::storage::zset_subkey::clear_score_bounds_hint();
-            if let Some(m) = &mgr.metrics {
-                m.on_failover();
-            }
-            Ok("OK".to_string())
+            wait_and_promote_failover(mgr, &target_gids).await
         }
-        "" => Err(
-            "ERR Coordinated failover requires cross-node RPC; please use CLUSTER FAILOVER FORCE"
-                .to_string(),
-        ),
+        "" => {
+            let target_gids = collect_replica_group_ids(mgr)?;
+            for &gid in &target_gids {
+                mgr.multi_raft
+                    .transfer_group_leader(gid, mgr.node_id)
+                    .await
+                    .map_err(|e| format!("ERR {e}"))?;
+            }
+            wait_and_promote_failover(mgr, &target_gids).await
+        }
         _ => Err("ERR Unknown FAILOVER mode".to_string()),
     }
+}
+
+fn collect_replica_group_ids(
+    mgr: &crate::cluster::state::ClusterStateManager,
+) -> Result<Vec<u64>, String> {
+    let is_primary = matches!(
+        *mgr.role.read(),
+        crate::cluster::state::ReplicationRole::Primary
+    );
+    if is_primary {
+        return Err("ERR You should be a replica".to_string());
+    }
+    let meta = mgr.meta_raft.get_cluster_meta();
+    let mut target_gids = Vec::new();
+    for (gid, group) in &meta.groups {
+        if group.replicas.iter().any(|r| r.node_id == mgr.node_id) {
+            target_gids.push(*gid);
+        }
+    }
+    if target_gids.is_empty() {
+        return Err("ERR Node not found in any group".to_string());
+    }
+    Ok(target_gids)
+}
+
+async fn wait_and_promote_failover(
+    mgr: &crate::cluster::state::ClusterStateManager,
+    target_gids: &[u64],
+) -> Result<String, String> {
+    const ELECT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(3000);
+    const ELECT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+    let start = tokio::time::Instant::now();
+    let mut all_elected = false;
+    while start.elapsed() < ELECT_TIMEOUT {
+        let mut current_all = true;
+        for &gid in target_gids {
+            match mgr.multi_raft.is_group_leader(gid).await {
+                Ok(true) => {}
+                _ => {
+                    current_all = false;
+                    break;
+                }
+            }
+        }
+        if current_all {
+            all_elected = true;
+            break;
+        }
+        tokio::time::sleep(ELECT_POLL_INTERVAL).await;
+    }
+
+    if !all_elected {
+        return Err("ERR Failover election timed out, remaining as replica".to_string());
+    }
+
+    *mgr.role.write() = crate::cluster::state::ReplicationRole::Primary;
+    {
+        let mut leaders = mgr.local_group_leaders.write();
+        for &gid in target_gids {
+            leaders.insert(gid, true);
+        }
+    }
+    crate::storage::zset_subkey::clear_score_bounds_hint();
+    if let Some(m) = &mgr.metrics {
+        m.on_failover();
+    }
+    Ok("OK".to_string())
 }
 
 // ---------------------------------------------------------------------------

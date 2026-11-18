@@ -87,6 +87,7 @@ fn ensure_remote_slot0_cluster_state() {
                     snapshot_size_threshold: None,
                     linearizable_read: false,
                     log_committer_config: None,
+                    ..Default::default()
                 },
                 db,
                 net_factory,

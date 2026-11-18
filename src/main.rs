@@ -270,6 +270,8 @@ async fn init_cluster(
         grpc_max_message_size: grpc_max_msg,
         snapshot_size_threshold: cluster.snapshot_size_threshold,
         linearizable_read,
+        enable_local_lease_read: cluster.enable_local_lease_read,
+        enable_pre_vote: cluster.enable_pre_vote,
         log_committer_config: None, // MetaRaft 使用同步路径
     };
     let factory = net_factory.read().clone(); // drop read lock before .await
