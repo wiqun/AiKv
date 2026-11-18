@@ -338,6 +338,41 @@ impl StringCommands {
         Ok(router::integer(n))
     }
 
+    pub async fn bitpos(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
+        if args.len() < 2 || args.len() > 5 {
+            return Err(router::wrong_args("BITPOS", ""));
+        }
+        let data = self.storage.get(db, &args[0]).await?;
+        let pos = crate::command::bitfield::bitpos(data.as_deref(), args)?;
+        Ok(router::integer(pos))
+    }
+
+    pub async fn bitop(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
+        router::require_min_args("BITOP", args, 3)?;
+        let op = &args[0];
+        let dest = &args[1];
+        let src_keys = &args[2..];
+        let mut lock_keys: Vec<&[u8]> = Vec::with_capacity(1 + src_keys.len());
+        lock_keys.push(dest.as_ref());
+        for k in src_keys {
+            lock_keys.push(k.as_ref());
+        }
+        let _locks = self.key_lock.lock_keys_sorted(&lock_keys).await;
+        let mut bufs: Vec<Option<Vec<u8>>> = Vec::with_capacity(src_keys.len());
+        for k in src_keys {
+            bufs.push(self.storage.get(db, k).await?);
+        }
+        let refs: Vec<Option<&[u8]>> = bufs.iter().map(|b| b.as_deref()).collect();
+        let result = crate::command::bitfield::bitop(op, &refs)?;
+        let len = result.len() as i64;
+        if result.is_empty() {
+            let _ = self.storage.delete(db, dest).await?;
+        } else {
+            self.storage.set(db, dest, &result).await?;
+        }
+        Ok(router::integer(len))
+    }
+
     pub async fn bitfield(&self, db: usize, args: &[Bytes]) -> Result<RespValue> {
         self.run_bitfield(db, args, false).await
     }

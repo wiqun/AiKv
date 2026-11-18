@@ -256,6 +256,44 @@ pub(super) fn exec_bitcount(
     Ok(router::integer(n))
 }
 
+pub(super) fn exec_bitpos(
+    storage: &dyn ScriptIo,
+    txn: &ScriptTransaction,
+    args: &[Bytes],
+) -> Result<RespValue> {
+    if args.len() < 2 || args.len() > 5 {
+        return Err(wrong_count("BITPOS"));
+    }
+    let data = txn.get(storage, &args[0])?;
+    let pos = crate::command::bitfield::bitpos(data.as_deref(), args)?;
+    Ok(router::integer(pos))
+}
+
+pub(super) fn exec_bitop(
+    storage: &dyn ScriptIo,
+    txn: &mut ScriptTransaction,
+    args: &[Bytes],
+) -> Result<RespValue> {
+    if args.len() < 3 {
+        return Err(wrong_count("BITOP"));
+    }
+    let op = &args[0];
+    let dest = &args[1];
+    let mut bufs: Vec<Option<Vec<u8>>> = Vec::with_capacity(args.len() - 2);
+    for k in &args[2..] {
+        bufs.push(txn.get(storage, k)?);
+    }
+    let refs: Vec<Option<&[u8]>> = bufs.iter().map(|b| b.as_deref()).collect();
+    let result = crate::command::bitfield::bitop(op, &refs)?;
+    let len = result.len() as i64;
+    if result.is_empty() {
+        txn.delete(dest.to_vec());
+    } else {
+        txn.set_string(dest.to_vec(), result);
+    }
+    Ok(router::integer(len))
+}
+
 pub(super) fn exec_bitfield(
     storage: &dyn ScriptIo,
     txn: &mut ScriptTransaction,

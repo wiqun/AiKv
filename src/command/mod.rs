@@ -18,6 +18,7 @@ mod script;
 mod server;
 mod set;
 pub mod shared;
+mod sort;
 mod string;
 mod zset;
 

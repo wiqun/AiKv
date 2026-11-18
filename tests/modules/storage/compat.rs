@@ -523,3 +523,54 @@ async fn test_scan_does_not_skip_keys_after_collection_header_in_same_batch() {
         "CollectionHeader 之后的 key_3 和 key_4 绝不能被漏扫"
     );
 }
+
+#[tokio::test]
+async fn test_scan_type_filter_filters_by_collection_and_scalar() {
+    use aikv::command::CommandRouter;
+    use aikv::protocol::RespValue;
+    use bytes::Bytes;
+
+    let dir = TempDir::new().unwrap();
+    let storage = aidb(&dir);
+    let router = CommandRouter::new(storage);
+    let mut db = 0;
+
+    router
+        .execute("SET", &[Bytes::from("s1"), Bytes::from("v")], &mut db)
+        .await
+        .unwrap();
+    router
+        .execute(
+            "HSET",
+            &[Bytes::from("h1"), Bytes::from("f"), Bytes::from("v")],
+            &mut db,
+        )
+        .await
+        .unwrap();
+    router
+        .execute("RPUSH", &[Bytes::from("l1"), Bytes::from("a")], &mut db)
+        .await
+        .unwrap();
+
+    let resp = router
+        .execute(
+            "SCAN",
+            &[
+                Bytes::from("0"),
+                Bytes::from("TYPE"),
+                Bytes::from("list"),
+                Bytes::from("COUNT"),
+                Bytes::from("100"),
+            ],
+            &mut db,
+        )
+        .await
+        .unwrap();
+    let RespValue::Array(Some(items)) = resp else {
+        panic!("expected array");
+    };
+    assert_eq!(
+        items[1],
+        RespValue::Array(Some(vec![RespValue::BulkString(Some(Bytes::from("l1")))]))
+    );
+}

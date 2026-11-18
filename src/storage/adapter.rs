@@ -955,6 +955,17 @@ impl KvStorage for KvStorageAdapter {
         pattern: &[u8],
         count: usize,
     ) -> Result<ScanResult> {
+        self.scan_with_type(db, cursor, pattern, count, None).await
+    }
+
+    async fn scan_with_type(
+        &self,
+        db: usize,
+        cursor: u64,
+        pattern: &[u8],
+        count: usize,
+        type_filter: Option<&str>,
+    ) -> Result<ScanResult> {
         self.check_db(db)?;
         let count = if count == 0 { 10 } else { count };
         // 单次扫描最多从底层读取的原始记录条数 (预算防御, 杜绝 Subkey 空转长尾)
@@ -1033,7 +1044,9 @@ impl KvStorage for KvStorageAdapter {
                     continue;
                 }
 
-                if pattern.is_empty() || glob_match(pattern, &user_key) {
+                let type_matches =
+                    type_filter.is_none_or(|t| stored.type_name().eq_ignore_ascii_case(t));
+                if type_matches && (pattern.is_empty() || glob_match(pattern, &user_key)) {
                     collected.push(user_key.clone());
                 }
                 last_seen_user_key = Some(user_key);

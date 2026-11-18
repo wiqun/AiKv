@@ -117,6 +117,7 @@ impl KeyCommands {
         let cursor = parse_u64(&args[0])?;
         let mut pattern = Vec::new();
         let mut count = 10usize;
+        let mut type_filter: Option<String> = None;
         let mut i = 1;
         while i < args.len() {
             if eq_ignore_case(&args[i], b"MATCH") {
@@ -131,11 +132,23 @@ impl KeyCommands {
                 }
                 count = parse_i64(&args[i + 1])? as usize;
                 i += 2;
+            } else if eq_ignore_case(&args[i], b"TYPE") {
+                if i + 1 >= args.len() {
+                    return Err(router::wrong_args("SCAN", ""));
+                }
+                let ty = std::str::from_utf8(&args[i + 1])
+                    .map_err(|_| router::wrong_args("SCAN", ""))?
+                    .to_string();
+                type_filter = Some(ty);
+                i += 2;
             } else {
                 return Err(router::wrong_args("SCAN", ""));
             }
         }
-        let result = self.storage.scan(db, cursor, &pattern, count).await?;
+        let result = self
+            .storage
+            .scan_with_type(db, cursor, &pattern, count, type_filter.as_deref())
+            .await?;
         Ok(RespValue::Array(Some(vec![
             RespValue::BulkString(Some(Bytes::from(result.cursor.to_string()))),
             array_of_bulk(result.keys),

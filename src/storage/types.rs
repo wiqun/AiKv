@@ -389,6 +389,16 @@ pub trait KvStorage: Send + Sync {
         pattern: &[u8],
         count: usize,
     ) -> Result<ScanResult>;
+    async fn scan_with_type(
+        &self,
+        db: usize,
+        cursor: u64,
+        pattern: &[u8],
+        count: usize,
+        _type_filter: Option<&str>,
+    ) -> Result<ScanResult> {
+        self.scan(db, cursor, pattern, count).await
+    }
     async fn len(&self, db: usize) -> Result<usize>;
     /// 本进程在该逻辑 DB 上登记过的 TTL 写入次数, 不是磁盘上的 TTL 存量.
     async fn expires(&self, db: usize) -> Result<u64> {
