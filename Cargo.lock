@@ -14,7 +14,7 @@ dependencies = [
 [[package]]
 name = "aidb"
 version = "1.0.0"
-source = "git+https://github.com/wiqun/AiDb.git?rev=3ba5c39f2a9914238ef62f0ebfe3c06575af110d#3ba5c39f2a9914238ef62f0ebfe3c06575af110d"
+source = "git+https://github.com/wiqun/AiDb.git?rev=51ffaf70a3b6dbd3f094aa0207eb9ea1f77517ab#51ffaf70a3b6dbd3f094aa0207eb9ea1f77517ab"
 dependencies = [
  "async-trait",
  "bytes",
